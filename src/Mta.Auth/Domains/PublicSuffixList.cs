@@ -138,14 +138,15 @@ public sealed class PublicSuffixList
     /// Returns the organizational domain: the public suffix plus one more label (for example <c>example.co.uk</c>
     /// for <c>mail.eu.example.co.uk</c>). When the name is itself a public suffix (or has no more labels than its
     /// suffix) the normalised name itself is returned, so the result is never shorter than the input's registrable part.
-    /// Unusable input (empty, bad labels) is returned lower-cased with any trailing dot removed.
+    /// Unusable input (empty, bad labels) is returned lower-cased with one trailing dot removed.
     /// </summary>
     public string GetOrganizationalDomain(string domain)
     {
         string[]? labels = SplitLabels(domain);
         if (labels is null)
         {
-            return (domain ?? string.Empty).Trim().TrimEnd('.').ToLowerInvariant();
+            string raw = (domain ?? string.Empty).Trim();
+            return (raw.EndsWith('.') ? raw[..^1] : raw).ToLowerInvariant();
         }
 
         int suffixLabels = CountSuffixLabels(labels);
