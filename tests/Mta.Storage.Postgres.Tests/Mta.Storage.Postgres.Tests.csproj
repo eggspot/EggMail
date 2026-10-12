@@ -7,8 +7,11 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="Npgsql" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Mta.Storage.Postgres\Mta.Storage.Postgres.csproj" />
+    <ProjectReference Include="..\..\src\Mta.Storage.Sqlite\Mta.Storage.Sqlite.csproj" />
+    <ProjectReference Include="..\Mta.Storage.Tests\Mta.Storage.Tests.csproj" />
   </ItemGroup>
 </Project>
