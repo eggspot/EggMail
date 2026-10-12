@@ -1,9 +1,7 @@
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net;
-using System.Net.Sockets;
 using Mta.Auth.Dmarc;
-using Mta.Auth.Spf;
 using Mta.Core;
 
 namespace Mta.Auth.Reports;

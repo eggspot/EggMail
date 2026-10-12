@@ -227,6 +227,22 @@ public class SpfMacroTests
     }
 
     [Fact]
+    public void Domain_spec_expands_straight_to_a_domain_name()
+    {
+        Assert.True(SpfMacroString.TryParseDomainSpec("%{ir}.%{v}._spf.%{d2}", out var macro, out _));
+        Assert.True(macro.TryExpandDomain(Rfc(), 4096, out string? domain));
+        Assert.Equal("3.2.0.192.in-addr._spf.example.com", domain);
+        Assert.True(SpfMacroString.TryParseDomainSpec("%{s}.example.com", out var withAt, out _));
+        Assert.True(withAt.TryExpandDomain(Rfc(), 4096, out string? withAtDomain));
+        Assert.Equal("strong-bad@email.example.com.example.com", withAtDomain);
+        Assert.False(macro.TryExpandDomain(Rfc(), 10, out _));
+        Assert.True(SpfMacroString.TryParseDomainSpec("%{l}%{l}.example.com", out var empty, out _));
+        var emptyLocal = new SpfMacroContext("@example.com", "x.example.com", IPAddress.Loopback, "h");
+        Assert.True(empty.TryExpandDomain(emptyLocal, 4096, out string? pm));
+        Assert.Equal("postmasterpostmaster.example.com", pm);
+    }
+
+    [Fact]
     public void Expanded_domain_is_lower_cased_and_loses_one_trailing_dot()
     {
         Assert.True(SpfDomainName.TryNormalizeExpanded("Mail.Example.COM.", out string? domain));

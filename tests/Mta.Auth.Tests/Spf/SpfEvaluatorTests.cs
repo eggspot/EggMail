@@ -1,4 +1,3 @@
-using System.Net;
 using Mta.Auth.Spf;
 using Mta.Dns;
 using static Mta.Auth.Tests.TestZone;
