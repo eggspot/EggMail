@@ -28,6 +28,10 @@ The four former "decided by default" items are **OWNER-DECIDED**, and a later ow
 
 Note on the license: the Unlicense / CC0 public-domain dedication is the only more-permissive alternative to MIT (weaker legal footing in some jurisdictions, and no patent grant either); say so if the owner wants it. MIT itself also has no express patent grant, unlike Apache-2.0.
 
+## Blockers only the owner can clear
+
+- **GitHub Actions is disabled for `eggspot/EggMail` by the organization** (`gh api repos/eggspot/EggMail/actions/permissions` returns `enabled: false`; enabling it from the repository returns `409 Conflict: GitHub Actions is disabled on this repository by the organization`). Until an organization owner allows Actions: CI cannot run, so pull requests are verified by the full local `dotnet test` run instead; and the release workflow ([release.md](release.md)) cannot publish the image to `ghcr.io/eggspot/eggmail`.
+
 ## Questions awaiting the owner
 
 1. **`History:Mode=Full` as the default on the default (SQLite) backend.** The owner made SQLite the default backend and kept `History:Mode=Full` as the default on both backends. The quick start therefore writes events and content into `history.db` by default (more writes, a larger file, more retention-delete work than `StatsOnly`), which may conflict with the lightness expected of the single-container quick start and with SQLite performance. This is **unmeasured**; it is flagged here and not changed. Options if it proves a problem: keep `Full`, or choose `StatsOnly` as the single default for both backends (lighter, no personal data stored by default, but no message search or resend out of the box).
