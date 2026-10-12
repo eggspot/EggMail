@@ -44,9 +44,9 @@ public class UnitTests
     [Fact]
     public void Job_lock_keys_are_stable_and_distinct()
     {
-        Assert.Equal(AdvisoryLocks.Job("retention.metadata"), AdvisoryLocks.Job("retention.metadata"));
-        Assert.NotEqual(AdvisoryLocks.Job("retention.metadata"), AdvisoryLocks.Job("retention.content"));
-        Assert.NotEqual(AdvisoryLocks.Migrate, AdvisoryLocks.PartitionDdl);
+        Assert.Equal(AdvisoryLockKeys.Job("retention.metadata"), AdvisoryLockKeys.Job("retention.metadata"));
+        Assert.NotEqual(AdvisoryLockKeys.Job("retention.metadata"), AdvisoryLockKeys.Job("retention.content"));
+        Assert.NotEqual(AdvisoryLockKeys.Migrate, AdvisoryLockKeys.PartitionDdl);
     }
 
     [Fact]

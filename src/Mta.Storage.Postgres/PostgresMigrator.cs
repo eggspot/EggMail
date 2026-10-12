@@ -5,7 +5,7 @@ using Npgsql;
 namespace Mta.Storage.Postgres;
 
 /// <summary>Advisory lock keys. One number space per database; the prefix spells "EGML" so they are recognisable in <c>pg_locks</c>.</summary>
-internal static class AdvisoryLocks
+internal static class AdvisoryLockKeys
 {
     private const long Prefix = 0x4547_4D4C_0000_0000L;
 
@@ -58,7 +58,7 @@ public static class PostgresMigrator
         sb.AppendLine("-- Run as the schema owner role.");
         sb.AppendLine("DO $eggmail_migrate$");
         sb.AppendLine("BEGIN");
-        sb.Append("  PERFORM pg_advisory_xact_lock(").Append(AdvisoryLocks.Migrate).AppendLine(");");
+        sb.Append("  PERFORM pg_advisory_xact_lock(").Append(AdvisoryLockKeys.Migrate).AppendLine(");");
         sb.AppendLine("  CREATE TABLE IF NOT EXISTS eggmail_schema_version (version integer PRIMARY KEY, description text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now());");
         foreach (var step in Steps.Value)
         {

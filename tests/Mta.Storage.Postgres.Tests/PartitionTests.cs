@@ -64,7 +64,7 @@ public class PartitionTests : PgTestBase
     {
         var old = await AcceptAsync(Msg(received: Start));
         Clock.Advance(TimeSpan.FromDays(10));
-        var recent = await AcceptAsync(Msg(received: Clock.UtcNow));
+        await AcceptAsync(Msg(received: Clock.UtcNow));
         Assert.Contains(Name("message_index", Start), await PartitionNamesAsync("message_index"));
 
         // Metadata retention is 30 days and content retention 7 days by default: the 10 days old content goes first.
@@ -83,7 +83,6 @@ public class PartitionTests : PgTestBase
         Assert.True(reports.Single(r => r.Job == "retention.metadata").RowsAffected >= 3, "index + recipient + event rows of the old message");
         Assert.Equal(0, await ScalarAsync<long>("SELECT count(*) FROM pg_class WHERE relname = $1", Name("message_index", Start)));
         Assert.Null(await Storage.History.GetAsync(TenantA, old.MessageId, CancellationToken.None));
-        _ = recent;
     }
 
     [Fact]
@@ -126,16 +125,15 @@ public class PartitionTests : PgTestBase
         Assert.Equal(1, await ScalarAsync<long>("SELECT count(*) FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid WHERE c.relname = $1 AND i.inhdetachpending", partition));
 
         await tx.RollbackAsync();
-        (long rows, int dropped) = await partitions.DropBeforeAsync(["message_event"], cutoff, CancellationToken.None);
+        (_, int dropped) = await partitions.DropBeforeAsync(["message_event"], cutoff, CancellationToken.None);
         Assert.True(dropped >= 1);
         Assert.Equal(0, await ScalarAsync<long>("SELECT count(*) FROM pg_class WHERE relname = $1", partition));
-        _ = rows;
     }
 
     [Fact]
     public async Task A_job_held_by_another_node_is_reported_as_skipped()
     {
-        await using AdvisoryLock? other = await AdvisoryLock.TryAcquireAsync(Pg.Runtime.Owner, AdvisoryLocks.Job("retention.metadata"), CancellationToken.None);
+        await using AdvisoryLock? other = await AdvisoryLock.TryAcquireAsync(Pg.Runtime.Owner, AdvisoryLockKeys.Job("retention.metadata"), CancellationToken.None);
         Assert.NotNull(other);
 
         var reports = await Storage.Maintenance.RunAsync(Clock.UtcNow, CancellationToken.None);

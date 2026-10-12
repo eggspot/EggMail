@@ -72,7 +72,7 @@ public sealed class PostgresStorage : IStorage
 
     public IStorageMaintenance Maintenance => _maintenance ?? throw NotInitialized();
 
-    /// <summary>The Npgsql data source for the runtime role (tests and diagnostics).</summary>
+    /// <summary>The shared runtime state (data sources, partition manager) for the PostgreSQL-specific tests.</summary>
     internal PostgresRuntime Runtime => _rt;
 
     private static InvalidOperationException NotInitialized() => new("Call InitializeAsync before using the storage.");

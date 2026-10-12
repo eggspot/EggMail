@@ -25,7 +25,7 @@ internal sealed class PostgresConfigAccess(NpgsqlDataSource dataSource, IStorage
         await using NpgsqlTransaction tx = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using (var lockCmd = new NpgsqlCommand("SELECT pg_advisory_xact_lock($1)", connection, tx))
         {
-            lockCmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bigint, Value = AdvisoryLocks.ConfigWrite });
+            lockCmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bigint, Value = AdvisoryLockKeys.ConfigWrite });
             await lockCmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
 

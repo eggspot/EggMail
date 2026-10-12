@@ -54,7 +54,7 @@ internal sealed class PostgresPartitions(NpgsqlDataSource owner)
         await using NpgsqlTransaction tx = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using (var lockCmd = new NpgsqlCommand("SELECT pg_advisory_xact_lock($1)", connection, tx))
         {
-            lockCmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bigint, Value = AdvisoryLocks.PartitionDdl });
+            lockCmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bigint, Value = AdvisoryLockKeys.PartitionDdl });
             await lockCmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
 

@@ -34,7 +34,7 @@ internal sealed class PostgresMaintenance(PostgresRuntime rt, PostgresQueueStore
         async Task Job(string name, Func<Task<(long Rows, string? Detail)>> body)
         {
             long start = Stopwatch.GetTimestamp();
-            await using AdvisoryLock? held = await AdvisoryLock.TryAcquireAsync(rt.Owner, AdvisoryLocks.Job(name), ct).ConfigureAwait(false);
+            await using AdvisoryLock? held = await AdvisoryLock.TryAcquireAsync(rt.Owner, AdvisoryLockKeys.Job(name), ct).ConfigureAwait(false);
             if (held is null)
             {
                 reports.Add(new MaintenanceReport(name, Stopwatch.GetElapsedTime(start), 0, "skipped: another node is running this job"));
