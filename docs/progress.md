@@ -13,6 +13,7 @@ Running status of the implementation, updated in every pull request. **Productio
 | M1e | Load generator and sink (`mta-tools`) | in review | feat/tools |
 | M5a | Dockerfile + release workflow (written, untested: no Docker locally, Actions disabled by org) | in review | feat/release-pipeline |
 | M3b | Certificates in the database: provider with hot reload and file override, self-signed bootstrap, ACME renewal service (Certes + Cloudflare DNS-01; **not verified against a real ACME server**) | in review | feat/tls-context |
+| M4a | Portable bundle format: manifest, NDJSON writer/reader with hashes, verification, secret protection through Data Protection + passphrase PKCS#12 | in review | feat/bundle-format |
 | M1b | Mime, DNS, DKIM, SPF/DMARC, MTA-STS/DANE/TLS-RPT libraries | in progress (parallel work) | feat/mime, feat/dns, feat/dkim, feat/auth-spf-dmarc, feat/tls-policy |
 
 ## Verified so far
