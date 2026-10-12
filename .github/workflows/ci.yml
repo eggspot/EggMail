@@ -1,0 +1,61 @@
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+    paths-ignore: ['docs/**', '**.md', '.github/FUNDING.yml']
+  push:
+    branches: [main]
+    paths-ignore: ['docs/**', '**.md', '.github/FUNDING.yml']
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: eggmail
+          POSTGRES_PASSWORD: eggmail
+          POSTGRES_DB: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U eggmail"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DOTNET_NOLOGO: 1
+      DOTNET_CLI_TELEMETRY_OPTOUT: 1
+      EGGMAIL_TEST_POSTGRES: Host=localhost;Port=5432;Username=eggmail;Password=eggmail;Database=postgres
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('Directory.Packages.props', 'global.json') }}
+          restore-keys: nuget-${{ runner.os }}-
+      - name: Restore
+        run: dotnet restore EggMail.slnx
+      - name: Build
+        run: dotnet build EggMail.slnx -c Release --no-restore
+      - name: Test
+        run: dotnet test EggMail.slnx -c Release --no-build --logger "trx;LogFileName=test.trx" --results-directory TestResults
+      - name: Upload test results on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: TestResults
+          retention-days: 3

@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>mta-tools</AssemblyName>
+    <RootNamespace>Mta.Tools</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Mta.Core\Mta.Core.csproj" />
+    <ProjectReference Include="..\Mta.Smtp.Protocol\Mta.Smtp.Protocol.csproj" />
+  </ItemGroup>
+</Project>

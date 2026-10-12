@@ -1,0 +1,50 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Mta.Auth/Mta.Auth.csproj" />
+    <Project Path="src/Mta.Core/Mta.Core.csproj" />
+    <Project Path="src/Mta.Delivery/Mta.Delivery.csproj" />
+    <Project Path="src/Mta.Dkim/Mta.Dkim.csproj" />
+    <Project Path="src/Mta.Dns/Mta.Dns.csproj" />
+    <Project Path="src/Mta.Dsn/Mta.Dsn.csproj" />
+    <Project Path="src/Mta.Host/Mta.Host.csproj" />
+    <Project Path="src/Mta.Mime/Mta.Mime.csproj" />
+    <Project Path="src/Mta.Observability/Mta.Observability.csproj" />
+    <Project Path="src/Mta.Policy/Mta.Policy.csproj" />
+    <Project Path="src/Mta.Smtp.Client/Mta.Smtp.Client.csproj" />
+    <Project Path="src/Mta.Smtp.Protocol/Mta.Smtp.Protocol.csproj" />
+    <Project Path="src/Mta.Smtp.Server/Mta.Smtp.Server.csproj" />
+    <Project Path="src/Mta.Storage.Portability/Mta.Storage.Portability.csproj" />
+    <Project Path="src/Mta.Storage.Postgres/Mta.Storage.Postgres.csproj" />
+    <Project Path="src/Mta.Storage.Sqlite/Mta.Storage.Sqlite.csproj" />
+    <Project Path="src/Mta.Storage/Mta.Storage.csproj" />
+    <Project Path="src/Mta.Tls/Mta.Tls.csproj" />
+    <Project Path="src/Mta.Tools/Mta.Tools.csproj" />
+    <Project Path="src/Mta.Webhooks/Mta.Webhooks.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Mta.ArchitectureTests/Mta.ArchitectureTests.csproj" />
+    <Project Path="tests/Mta.Auth.Tests/Mta.Auth.Tests.csproj" />
+    <Project Path="tests/Mta.Core.Tests/Mta.Core.Tests.csproj" />
+    <Project Path="tests/Mta.Delivery.Tests/Mta.Delivery.Tests.csproj" />
+    <Project Path="tests/Mta.Dkim.Tests/Mta.Dkim.Tests.csproj" />
+    <Project Path="tests/Mta.Dns.Tests/Mta.Dns.Tests.csproj" />
+    <Project Path="tests/Mta.Dsn.Tests/Mta.Dsn.Tests.csproj" />
+    <Project Path="tests/Mta.Host.Tests/Mta.Host.Tests.csproj" />
+    <Project Path="tests/Mta.Integration.Tests/Mta.Integration.Tests.csproj" />
+    <Project Path="tests/Mta.Mime.Tests/Mta.Mime.Tests.csproj" />
+    <Project Path="tests/Mta.Observability.Tests/Mta.Observability.Tests.csproj" />
+    <Project Path="tests/Mta.Policy.Tests/Mta.Policy.Tests.csproj" />
+    <Project Path="tests/Mta.Smtp.Client.Tests/Mta.Smtp.Client.Tests.csproj" />
+    <Project Path="tests/Mta.Smtp.Protocol.Tests/Mta.Smtp.Protocol.Tests.csproj" />
+    <Project Path="tests/Mta.Smtp.Server.Tests/Mta.Smtp.Server.Tests.csproj" />
+    <Project Path="tests/Mta.Storage.Portability.Tests/Mta.Storage.Portability.Tests.csproj" />
+    <Project Path="tests/Mta.Storage.Postgres.Tests/Mta.Storage.Postgres.Tests.csproj" />
+    <Project Path="tests/Mta.Storage.Sqlite.Tests/Mta.Storage.Sqlite.Tests.csproj" />
+    <Project Path="tests/Mta.Storage.Tests/Mta.Storage.Tests.csproj" />
+    <Project Path="tests/Mta.Tls.Tests/Mta.Tls.Tests.csproj" />
+    <Project Path="tests/Mta.Webhooks.Tests/Mta.Webhooks.Tests.csproj" />
+  </Folder>
+  <Folder Name="/bench/">
+    <Project Path="bench/Mta.Benchmarks/Mta.Benchmarks.csproj" />
+  </Folder>
+</Solution>
