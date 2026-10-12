@@ -190,7 +190,7 @@ public sealed class DeliveryProcessor
                 message = rented.AsMemory(0, signature.Length + raw.Length);
             }
 
-            var envelope = new SmtpEnvelope(ChooseEnvelopeFrom(first, now), pending.Select(d => d.Recipient).ToArray(), pending.Any(d => d.Recipient.IsInternational) || first.EnvelopeFrom.IsInternational, EightBit: false);
+            var envelope = new SmtpEnvelope(await ChooseEnvelopeFromAsync(first, now, ct).ConfigureAwait(false), pending.Select(d => d.Recipient).ToArray(), pending.Any(d => d.Recipient.IsInternational) || first.EnvelopeFrom.IsInternational, EightBit: false);
             var attempt = await RunRoutesAsync(first, envelope, message, ct).ConfigureAwait(false);
             Interpret(pending, attempt, results);
 
@@ -218,29 +218,38 @@ public sealed class DeliveryProcessor
 
     // ---------------------------------------------------------------- envelope
 
-    private EmailAddress ChooseEnvelopeFrom(ClaimedDelivery d, DateTimeOffset now)
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (Guid Id, long ExpiresAt)> _domainIds = new(StringComparer.OrdinalIgnoreCase);
+
+    private async ValueTask<EmailAddress> ChooseEnvelopeFromAsync(ClaimedDelivery d, DateTimeOffset now, CancellationToken ct)
     {
         if (_s.Verp is null || string.IsNullOrWhiteSpace(_options.BounceDomain) || d.EnvelopeFrom.IsNull || d.Source == MessageSource.Bounce)
         {
             return d.EnvelopeFrom;
         }
 
-        // The domain id is looked up lazily by the host through the sending domain; the token only needs a stable per-domain value.
-        Guid domainId = StableDomainId(d.SendingDomain);
+        // The token carries the sending domain's id so a bounce can be attributed without a lookup of the message.
+        Guid domainId = await FindDomainIdAsync(d.SendingDomain, ct).ConfigureAwait(false);
         string address = _s.Verp.CreateAddress(d.TenantId, domainId, _options.BounceDomain!, now);
         return EmailAddress.TryParse(address, allowUtf8: false, out var parsed) ? parsed : d.EnvelopeFrom;
     }
 
-    private static Guid StableDomainId(string? domain)
+    private async ValueTask<Guid> FindDomainIdAsync(string? sendingDomain, CancellationToken ct)
     {
-        if (string.IsNullOrEmpty(domain))
+        if (string.IsNullOrEmpty(sendingDomain))
         {
             return Guid.Empty;
         }
 
-        Span<byte> hash = stackalloc byte[32];
-        System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(domain.ToLowerInvariant()), hash);
-        return new Guid(hash[..16]);
+        long now = _s.Clock.Timestamp;
+        if (_domainIds.TryGetValue(sendingDomain, out var cached) && now < cached.ExpiresAt)
+        {
+            return cached.Id;
+        }
+
+        var record = await _s.Storage.Config.FindDomainByNameAsync(sendingDomain, ct).ConfigureAwait(false);
+        Guid id = record?.Id ?? Guid.Empty;
+        _domainIds[sendingDomain] = (id, now + 60 * Stopwatch.Frequency);
+        return id;
     }
 
     // ---------------------------------------------------------------- routes

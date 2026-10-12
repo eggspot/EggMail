@@ -621,6 +621,29 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
             return (IReadOnlyList<WebhookAttemptRecord>)list;
         }).ConfigureAwait(false);
 
+    public async ValueTask<int> EnqueueAsync(Guid tenantId, WebhookEventDraft draft, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        WebhookTarget[] targets = (await rt.GetWebhookTargetsAsync(cancellationToken).ConfigureAwait(false))
+            .Where(t => t.TenantId == tenantId && WebhookSubscriptions.Matches(t.EventTypes, draft.EventType)).ToArray();
+        if (targets.Length == 0)
+        {
+            return 0;
+        }
+
+        return await rt.QueueWriter.SubmitAsync((targets, draft, tenantId, now), static (ctx, s) =>
+        {
+            long atMs = StorageTime.ToUnixMs(s.now);
+            SqliteCommand insert = ctx.Command(QueueSql.OutboxInsert);
+            foreach (WebhookTarget target in s.targets)
+            {
+                insert.Set(0, Ids.New(s.now)).Set(1, target.EndpointId).Set(2, s.tenantId).Set(3, s.draft.EventType).Set(4, s.draft.EventId).Set(5, s.draft.PayloadJson).Set(6, atMs)
+                    .ExecuteNonQuery();
+            }
+
+            return s.targets.Length;
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
     public async ValueTask<bool> ReplayAsync(Guid tenantId, Guid outboxId, DateTimeOffset now, CancellationToken cancellationToken) =>
         await rt.QueueWriter.SubmitAsync((outboxId, tenantId, StorageTime.ToUnixMs(now)), static (ctx, s) =>
             ctx.Command(QueueSql.OutboxReplay).Set(0, s.outboxId).Set(1, s.tenantId).Set(2, s.Item3).ExecuteNonQuery() > 0, cancellationToken).ConfigureAwait(false);

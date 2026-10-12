@@ -232,6 +232,12 @@ public interface IWebhookOutbox
 
     ValueTask<IReadOnlyList<WebhookAttemptRecord>> GetAttemptsAsync(Guid tenantId, Guid endpointId, int max, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Fans an event that is not tied to a delivery attempt (an asynchronous bounce, a spam complaint, an endpoint being disabled) out to the
+    /// tenant's enabled endpoints that subscribe to it. Returns the number of outbox rows created.
+    /// </summary>
+    ValueTask<int> EnqueueAsync(Guid tenantId, WebhookEventDraft draft, DateTimeOffset now, CancellationToken cancellationToken);
+
     /// <summary>Re-queues a finished or failed outbox item for manual replay.</summary>
     ValueTask<bool> ReplayAsync(Guid tenantId, Guid outboxId, DateTimeOffset now, CancellationToken cancellationToken);
 }

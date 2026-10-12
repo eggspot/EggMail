@@ -162,10 +162,4 @@ public sealed class DeliveryAttempt
     public SuppressionReason? Suppress { get; init; }
 
     public IReadOnlyList<WebhookEventDraft> WebhookEvents { get; init; } = [];
-
-    /// <summary>
-    /// False for a local hold where nothing was sent (sending limit, destination throttle): with <see cref="DeliveryOutcome.Deferred"/>
-    /// the row is only rescheduled; the attempt counter, history events, statistics and webhooks are untouched.
-    /// </summary>
-    public bool CountAttempt { get; init; } = true;
 }
