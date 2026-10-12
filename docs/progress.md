@@ -11,6 +11,7 @@ Running status of the implementation, updated in every pull request. **Productio
 | M1c | Outbound SMTP client (STARTTLS policy, AUTH, pipelining, DATA/BDAT, pool) | in review | feat/smtp-client |
 | M1d | Webhooks library (Standard Webhooks signing, SSRF guard, dispatcher, event factory) | in review | feat/webhooks |
 | M1e | Load generator and sink (`mta-tools`) | in review | feat/tools |
+| M5a | Dockerfile + release workflow (written, untested: no Docker locally, Actions disabled by org) | in review | feat/release-pipeline |
 | M1b | Mime, DNS, DKIM, SPF/DMARC, MTA-STS/DANE/TLS-RPT libraries | in progress (parallel work) | feat/mime, feat/dns, feat/dkim, feat/auth-spf-dmarc, feat/tls-policy |
 
 ## Verified so far
