@@ -101,6 +101,10 @@ public sealed class SmtpServer : IAsyncDisposable
             {
                 return;
             }
+            catch (SocketException ex) when (ex.SocketErrorCode == SocketError.OperationAborted || ct.IsCancellationRequested)
+            {
+                return;   // the listener was closed on purpose
+            }
             catch (SocketException ex)
             {
                 Log.Write(MtaLogLevel.Warning, "smtp.server", $"accept failed on {listener.Options.Name}: {ex.SocketErrorCode}");

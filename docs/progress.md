@@ -25,10 +25,12 @@ Running status of the implementation, updated in every pull request. **Productio
 | Dashboard SPA (Preact + Vite) | merged (**not run in a real browser**) | 371 tests against a mock API |
 | Delivery engine: grouping, MX/relay routes, TLS policy, DKIM signing at delivery, VERP return path, retry/hold/expiry, DSN generation, quiesce | this PR | 13 end-to-end tests over loopback with in-memory storage |
 | SMTP ingest (AUTH, sender policy, submission service, bounce listener, bounce/complaint processing) | this PR | 8 loopback tests with MailKit |
+| Host composition: Data Protection key ring in the config store, runtime wiring (SMTP, delivery, webhooks, certificates/ACME, maintenance), `mta` CLI (`serve`, `migrate-db`, `--healthcheck`, `--version`), dashboard static hosting with strict headers | this PR | 3 secrets tests, 2 full-pipeline integration tests on the SQLite backend, manual smoke run of the real process (healthz, SMTP banner, graceful shutdown) |
 | PostgreSQL backend (EF Core + Npgsql: day partitions, `SKIP LOCKED` claim, owner/runtime roles, advisory-locked maintenance, outage handling) | this PR | 266 tests against a real PostgreSQL 18.6 and 16.13: the whole shared conformance suite, three-backend equivalence, multi-replica claims, partitions and interrupted detach, role-permission split, migrator, outages |
 | HTTP API (docs/api.md) | not started | |
 | Domain verification service (scheduler over the planner/checker and `VerificationSchedule`) | not started | |
-| Host composition root and `mta` CLI (`--healthcheck`, `migrate-db`, `admin create`, `migrate-storage`), Data Protection wiring, hosted services | not started | |
+| TLS-RPT: session recording in the delivery engine (MTA-STS/DANE domains only), daily report sender (HTTPS POST or mailto through the normal queue; retries in memory) | this PR | 7 recorder tests, 2 sender tests; **not verified against a real reporting endpoint** |
+| `mta admin create` and `mta migrate-storage` commands (need the API's dashboard users and the switch engine) | not started | |
 | Backend switch engine (export/import, quiesce, fence, activation, rollback, history migration) | not started | |
 | Dashboard hosting, TLS-RPT/DMARC report sending, metrics endpoint wiring | not started | |
 | Soak, fuzz and benchmark gates; external security audit | not started | |
@@ -39,7 +41,7 @@ Running status of the implementation, updated in every pull request. **Productio
 - Docker image build and GHCR publish can only run in GitHub Actions (no Docker is used locally).
 - No real-internet MX delivery has been tested; no independent security audit has been done.
 - Delivery engine: state of throttles, circuit breakers and sending counters is per process (documented in [components/policy.md](components/policy.md)); sending counters and warm-up are in memory.
-- Delivery engine: TLS-RPT counters are not recorded yet; the engine uses the resolver's per-MX decision but does not feed the report collector.
+- TLS-RPT: pending reports are retried from memory only (a restart loses them); the collected counters are in memory too.
 - Async bounces are correlated to the tenant through the VERP token and to the message through the `Message-ID` in the returned headers only for the webhook payload; they are not attached to the message's history events.
 - One flaky test was seen once under heavy parallel load (`Mta.Dkim` timing-sensitive test); not reproduced when run alone.
 
