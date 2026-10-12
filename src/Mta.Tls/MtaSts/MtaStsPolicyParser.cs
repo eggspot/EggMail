@@ -311,14 +311,15 @@ public static class MtaStsPolicyParser
             }
         }
 
-        // Values with more than 10 digits cannot be below the ceiling; clamp without risking overflow.
-        if (value.Length > 10)
+        // Values with more than 10 significant digits cannot be below the ceiling; clamp without risking overflow.
+        string significant = value.TrimStart('0');
+        if (significant.Length > 10)
         {
             seconds = MaxAgeCeilingSeconds;
             return true;
         }
 
-        seconds = Math.Min(long.Parse(value, System.Globalization.CultureInfo.InvariantCulture), MaxAgeCeilingSeconds);
+        seconds = significant.Length == 0 ? 0 : Math.Min(long.Parse(significant, System.Globalization.CultureInfo.InvariantCulture), MaxAgeCeilingSeconds);
         return true;
     }
 }
