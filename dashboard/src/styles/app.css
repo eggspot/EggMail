@@ -976,3 +976,57 @@ pre.patch {
 details summary {
   cursor: pointer;
 }
+
+/* ---------- messages, charts, send (fork A) ---------- */
+
+.chart-figure {
+  margin: 0;
+}
+.chart-data {
+  margin-top: 0.5rem;
+}
+.chart-data summary {
+  cursor: pointer;
+  color: var(--accent);
+}
+.sparkline {
+  display: block;
+}
+.stats-summary {
+  margin-bottom: 1rem;
+}
+.th-sort {
+  font: inherit;
+  font-weight: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.timeline-flagged > .row {
+  font-weight: 600;
+}
+.tls-details {
+  margin-top: 0.25rem;
+}
+.tls-details summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 0.8125rem;
+}
+.plain-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.resend-result {
+  margin-top: 0.75rem;
+  width: 100%;
+}
+.pressure {
+  margin-top: 1rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border);
+}
