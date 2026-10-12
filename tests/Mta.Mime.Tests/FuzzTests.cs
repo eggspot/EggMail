@@ -165,7 +165,7 @@ public class FuzzTests
     }
 
     [Fact]
-    public void Single_line_truncations_of_a_complex_message_never_throw()
+    public void Every_prefix_of_a_complex_message_never_throws()
     {
         // Every prefix of a complex message (including cuts inside boundaries, encoded words and escapes).
         byte[] message = Seeds[2];
@@ -176,7 +176,7 @@ public class FuzzTests
     }
 
     [Fact]
-    public void Single_byte_deletions_of_a_complex_message_never_throw()
+    public void Every_single_byte_deletion_of_a_complex_message_never_throws()
     {
         byte[] message = Seeds[1];
         for (int i = 0; i < message.Length; i++)
