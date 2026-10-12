@@ -9,7 +9,7 @@ namespace Mta.Policy;
 /// Evidence is used in this order: (1) the reply code's first digit decides temporary versus permanent (an enhanced code of a
 /// different class is ignored as a misbehaving server); (2) specific RFC 3463 enhanced codes; (3) keyword heuristics on the text
 /// (for generic codes, 5.7.x and replies without an enhanced code); (4) generic enhanced subjects; (5) the basic reply code and the
-/// SMTP stage. Rules are listed in priority order in <see cref="Rules"/>; the first match wins. The keyword lists and the mapping
+/// SMTP stage. Rules are listed in priority order in the private rule tables; the first match wins. The keyword lists and the mapping
 /// are proposed defaults based on typical provider texts (Gmail, Microsoft, Yahoo, Postfix, Exim), not an exhaustive standard.
 /// </remarks>
 public sealed class ReplyClassifier
