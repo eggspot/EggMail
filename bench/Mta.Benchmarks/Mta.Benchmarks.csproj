@@ -8,5 +8,22 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Mta.Core\Mta.Core.csproj" />
+    <ProjectReference Include="..\..\src\Mta.Dns\Mta.Dns.csproj" />
+    <ProjectReference Include="..\..\src\Mta.Mime\Mta.Mime.csproj" />
+    <ProjectReference Include="..\..\src\Mta.Dkim\Mta.Dkim.csproj" />
+    <ProjectReference Include="..\..\src\Mta.Auth\Mta.Auth.csproj" />
+    <ProjectReference Include="..\..\src\Mta.Dsn\Mta.Dsn.csproj" />
+    <ProjectReference Include="..\..\src\Mta.Tls\Mta.Tls.csproj" />
+    <ProjectReference Include="..\..\src\Mta.Smtp.Protocol\Mta.Smtp.Protocol.csproj" />
+    <ProjectReference Include="..\..\src\Mta.Smtp.Server\Mta.Smtp.Server.csproj" />
+    <ProjectReference Include="..\..\src\Mta.Smtp.Client\Mta.Smtp.Client.csproj" />
+    <ProjectReference Include="..\..\src\Mta.Storage\Mta.Storage.csproj" />
+    <ProjectReference Include="..\..\src\Mta.Storage.Postgres\Mta.Storage.Postgres.csproj" />
+    <ProjectReference Include="..\..\src\Mta.Storage.Sqlite\Mta.Storage.Sqlite.csproj" />
+    <ProjectReference Include="..\..\src\Mta.Storage.Portability\Mta.Storage.Portability.csproj" />
+    <ProjectReference Include="..\..\src\Mta.Policy\Mta.Policy.csproj" />
+    <ProjectReference Include="..\..\src\Mta.Delivery\Mta.Delivery.csproj" />
+    <ProjectReference Include="..\..\src\Mta.Webhooks\Mta.Webhooks.csproj" />
+    <ProjectReference Include="..\..\src\Mta.Observability\Mta.Observability.csproj" />
   </ItemGroup>
 </Project>
