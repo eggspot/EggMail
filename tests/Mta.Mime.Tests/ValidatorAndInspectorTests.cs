@@ -247,15 +247,15 @@ public class ValidatorAndInspectorTests
     public void Detects_utf8_and_eight_bit()
     {
         Assert.False(MessageInspector.HasUtf8Headers(T.Crlf(T.SimpleMessage)));
-        Assert.False(MessageInspector.HasUtf8OrEightBitBody(T.Crlf(T.SimpleMessage)));
+        Assert.False(MessageInspector.HasEightBitBody(T.Crlf(T.SimpleMessage)));
         var utf8 = Encoding.UTF8.GetBytes("Subject: café\r\n\r\nplain");
         Assert.True(MessageInspector.HasUtf8Headers(utf8));
         Assert.True(MessageInspector.HasValidUtf8Headers(utf8));
-        Assert.False(MessageInspector.HasUtf8OrEightBitBody(utf8));
+        Assert.False(MessageInspector.HasEightBitBody(utf8));
         var latin1 = new byte[] { (byte)'S', (byte)':', (byte)' ', 0xE9, (byte)'\r', (byte)'\n', (byte)'\r', (byte)'\n', 0xE9 };
         Assert.True(MessageInspector.HasUtf8Headers(latin1));
         Assert.False(MessageInspector.HasValidUtf8Headers(latin1));
-        Assert.True(MessageInspector.HasUtf8OrEightBitBody(latin1));
+        Assert.True(MessageInspector.HasEightBitBody(latin1));
         // 8-bit bytes in the body must not be mistaken for header bytes
         Assert.False(MessageInspector.HasUtf8Headers("S: x\r\n\r\né"u8.ToArray()));
     }

@@ -126,6 +126,26 @@ public class RoundTripTests
     }
 
     [Fact]
+    public void Long_non_ascii_attachment_names_round_trip_through_rfc2231_continuations()
+    {
+        string name = string.Concat(Enumerable.Repeat("\u00fcber \u4e16\u754c r\u00e9sum\u00e9 ", 8)).Trim() + ".pdf";
+        string asciiName = new string('a', 150) + ".txt";
+        var builder = Builder();
+        builder.From = Mailbox.Create(null, "alice@example.com");
+        builder.Subject = "names";
+        builder.TextBody = "x";
+        builder.Attachments.Add(new BuilderAttachment(name, "application/pdf", new byte[] { 1 }));
+        builder.Attachments.Add(new BuilderAttachment(asciiName, "text/plain", new byte[] { 2 }));
+        byte[] bytes = builder.Build().Content;
+
+        Assert.True(MessageInspector.Inspect(bytes).LongestHeaderLine <= 998);
+        Assert.All(Encoding.ASCII.GetString(bytes).Split("\r\n").Take(40).Where(l => l.Length > 0), l => Assert.True(l.Length <= 78, l));
+        var theirs = MkParse(bytes);
+        Assert.Equal(new[] { name, asciiName }, theirs.Attachments.OfType<Mk.MimePart>().Select(p => p.FileName).ToArray());
+        Assert.Equal(new[] { name, asciiName }, MessageContentExtractor.Extract(bytes).Attachments.Select(a => a.FileName).ToArray());
+    }
+
+    [Fact]
     public void Inline_related_resources_round_trip()
     {
         var builder = Builder();

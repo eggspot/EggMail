@@ -363,7 +363,7 @@ public sealed class MessageBuilder
 
             if (a.IsInline && HtmlBody is not null)
             {
-                inlines.Add(new BinaryNode(a, id ?? GenerateContentId()));
+                inlines.Add(new BinaryNode(a, id ?? NormalizeContentId(GenerateContentId())));
             }
             else
             {

@@ -202,7 +202,7 @@ public class MessageBuilderTests
         var (bytes, _) = b.Build();
         var msg = MimeMessage.Parse(bytes);
         Assert.Equal(ContentTransferEncoding.EightBit, msg.Root.TransferEncoding);
-        Assert.True(MessageInspector.HasUtf8OrEightBitBody(bytes));
+        Assert.True(MessageInspector.HasEightBitBody(bytes));
         Assert.Equal("Café\r\n", msg.Root.GetText(100, out _));
     }
 

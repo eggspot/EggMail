@@ -9,15 +9,6 @@ namespace Mta.Mime.Tests;
 /// </summary>
 public class DifferentialTests
 {
-    /// <summary>
-    /// Documented differences from MimeKit (also in docs/components/mime.md):
-    /// 1. Invalid addresses are kept as invalid mailboxes by Mta.Mime; MimeKit drops or repairs them differently.
-    /// 2. Mta.Mime recovers "Name addr@host" (no angle brackets) and flags it; MimeKit rejects the entry.
-    /// 3. Text decoded as US-ASCII with 8-bit bytes: Mta.Mime uses UTF-8/windows-1252, MimeKit substitutes.
-    /// 4. Bodies are compared as bytes after transfer decoding; MimeKit text parts may normalize line endings.
-    /// </summary>
-    public const string KnownDifferences = "see summary";
-
     static DifferentialTests() => MimeCharsets.RegisterCodePages();
 
     private static Mk.MimeMessage MkLoad(byte[] raw)

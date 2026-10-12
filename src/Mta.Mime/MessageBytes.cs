@@ -167,7 +167,7 @@ public static class MessageInspector
     }
 
     /// <summary>True when the body (everything after the header block) contains bytes above 0x7F (8BITMIME decision).</summary>
-    public static bool HasUtf8OrEightBitBody(ReadOnlySpan<byte> message)
+    public static bool HasEightBitBody(ReadOnlySpan<byte> message)
     {
         int end = HeaderList.FindBodyOffset(message);
         return !Ascii.IsValid(message[end..]);
