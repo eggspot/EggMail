@@ -151,6 +151,13 @@ public sealed class DeliveryAttempt
     /// <summary>Mark the delivery as possibly sent twice (aborted after end-of-data).</summary>
     public bool PossibleDuplicate { get; init; }
 
+    /// <summary>
+    /// For <see cref="DeliveryOutcome.Deferred"/>: <c>false</c> for a hold where nothing was sent (a local sending limit or a
+    /// destination throttle). The row is only rescheduled to <see cref="NextAttemptAt"/> and its lease released: the attempt
+    /// counter is not incremented, no "deferred" history event or statistic is written and no webhook events are fanned out.
+    /// </summary>
+    public bool CountAttempt { get; init; } = true;
+
     /// <summary>For <see cref="DeliveryOutcome.Failed"/> hard bounces or complaints: suppress the recipient (written before completing the row).</summary>
     public SuppressionReason? Suppress { get; init; }
 
