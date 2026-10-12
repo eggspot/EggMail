@@ -118,6 +118,19 @@ public class Rfc2047Tests
     }
 
     [Fact]
+    public void Flood_of_distinct_unknown_charsets_is_fast()
+    {
+        // every distinct unknown name costs a failed lookup; the 64 KiB header value cap bounds the flood
+        string input = string.Concat(Enumerable.Range(0, 5000).Select(i => $"=?x{i}?Q?a?="));
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        string result = Rfc2047.Decode(input, out var an);
+        sw.Stop();
+        Assert.Equal(5000, result.Length);
+        Assert.True(an.HasAny(MimeAnomaly.UnknownCharset));
+        Assert.True(sw.ElapsedMilliseconds < 3000, $"took {sw.ElapsedMilliseconds} ms");
+    }
+
+    [Fact]
     public void Decode_returns_same_instance_when_nothing_to_decode()
     {
         string s = "nothing here";

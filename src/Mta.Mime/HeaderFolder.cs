@@ -180,6 +180,11 @@ public static class HeaderFolder
             }
         }
 
+        if (!lineHasToken)
+        {
+            sb.Length--; // empty value: "Name:" without a trailing space
+        }
+
         sb.Append("\r\n");
     }
 }
