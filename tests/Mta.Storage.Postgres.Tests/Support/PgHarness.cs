@@ -21,6 +21,9 @@ internal sealed class PgHarness
         return PostgresStorage.Create(WithDatabase(options, db.ConnectionString, tune), clock);
     }
 
+    /// <summary>Takes over a database the caller created, so <see cref="DisposeAsync"/> drops it.</summary>
+    public void Adopt(TestDatabase db) => _databases.Add(db);
+
     public static StorageOptions WithDatabase(StorageOptions o, string connectionString, Func<PostgresOptions, PostgresOptions>? tune = null)
     {
         var pg = new PostgresOptions

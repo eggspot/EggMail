@@ -187,14 +187,20 @@ internal sealed class PostgresTestServer
             RedirectStandardOutput = true,
             UseShellExecute = false,
         };
-        foreach (string arg in new[]
+        var args = new List<string>
         {
             "-D", data, "-p", port.ToString(CultureInfo.InvariantCulture),
             "-c", "listen_addresses=127.0.0.1", "-c", "unix_socket_directories=",
-            "-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "full_page_writes=off",
             "-c", "max_connections=500", "-c", "shared_buffers=128MB", "-c", "max_wal_size=2GB",
             "-c", "log_min_messages=warning", "-c", "autovacuum_naptime=5s",
-        })
+        };
+        if (Environment.GetEnvironmentVariable("EGGMAIL_TEST_PG_DURABLE") != "1")
+        {
+            // The test cluster is disposable, so it skips every fsync. The benchmarks set EGGMAIL_TEST_PG_DURABLE=1 to keep PostgreSQL's real durability.
+            args.AddRange(["-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "full_page_writes=off"]);
+        }
+
+        foreach (string arg in args)
         {
             psi.ArgumentList.Add(arg);
         }

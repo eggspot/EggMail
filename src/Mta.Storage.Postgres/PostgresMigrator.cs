@@ -71,11 +71,12 @@ public static class PostgresMigrator
         if (!string.IsNullOrWhiteSpace(runtimeRole))
         {
             string role = QuoteIdentifier(runtimeRole);
+            string roleInFormat = role.Replace("%", "%%", StringComparison.Ordinal); // the name is embedded in a format() template below
             sb.AppendLine($"  GRANT USAGE ON SCHEMA public TO {role};");
             sb.AppendLine($"  GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {role};");
             sb.AppendLine($"  GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO {role};");
-            sb.AppendLine($"  EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {role}', current_user);");
-            sb.AppendLine($"  EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO {role}', current_user);");
+            sb.AppendLine($"  EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {roleInFormat}', current_user);");
+            sb.AppendLine($"  EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO {roleInFormat}', current_user);");
         }
 
         sb.AppendLine("END");

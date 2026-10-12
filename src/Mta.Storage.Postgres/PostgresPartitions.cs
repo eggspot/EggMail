@@ -130,7 +130,11 @@ internal sealed class PostgresPartitions(NpgsqlDataSource owner)
             {
                 await using var count = new NpgsqlCommand($"SELECT count(*) FROM {p.Name}", connection);
                 rows += Convert.ToInt64(await count.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture);
-                await using var detach = new NpgsqlCommand($"ALTER TABLE {p.Table} DETACH PARTITION {p.Name} CONCURRENTLY", connection) { CommandTimeout = 300 };
+                // A concurrent detach is refused while the table has a DEFAULT partition; fall back to the short-locking plain detach.
+                await using var hasDefault = new NpgsqlCommand("SELECT EXISTS (SELECT 1 FROM pg_partitioned_table WHERE partrelid = $1::regclass AND partdefid <> 0)", connection);
+                hasDefault.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = p.Table });
+                string mode = (bool)(await hasDefault.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))! ? "" : " CONCURRENTLY";
+                await using var detach = new NpgsqlCommand($"ALTER TABLE {p.Table} DETACH PARTITION {p.Name}{mode}", connection) { CommandTimeout = 300 };
                 await detach.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             }
             else
