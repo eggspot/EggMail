@@ -40,6 +40,65 @@ internal sealed class TestClock : IClock
     public void Advance(TimeSpan by) => Interlocked.Add(ref _utcTicks, by.Ticks);
 }
 
+/// <summary>A DNS resolver tests can change: records come and go, and answers can fail with SERVFAIL.</summary>
+internal sealed class MutableDns : IDnsResolver
+{
+    private readonly object _gate = new();
+    private readonly List<DnsRecord> _records = [];
+
+    public bool ServerFailure { get; set; }
+
+    private static string Normalize(string name) => name.TrimEnd('.').ToLowerInvariant();
+
+    public MutableDns AddTxt(string name, string text)
+    {
+        lock (_gate)
+        {
+            _records.Add(new TxtRecord(Normalize(name), 300, text));
+        }
+
+        return this;
+    }
+
+    public MutableDns AddCname(string name, string target)
+    {
+        lock (_gate)
+        {
+            _records.Add(new CnameRecord(Normalize(name), 300, Normalize(target)));
+        }
+
+        return this;
+    }
+
+    public void RemoveAll(string name)
+    {
+        lock (_gate)
+        {
+            _records.RemoveAll(r => r.Name == Normalize(name));
+        }
+    }
+
+    public ValueTask<DnsResponse> QueryAsync(string name, DnsRecordType type, CancellationToken cancellationToken = default)
+    {
+        if (ServerFailure)
+        {
+            return ValueTask.FromResult(new DnsResponse { Rcode = DnsRcode.ServerFailure });
+        }
+
+        lock (_gate)
+        {
+            string n = Normalize(name);
+            var named = _records.Where(r => r.Name == n).ToList();
+            if (named.Count == 0)
+            {
+                return ValueTask.FromResult(new DnsResponse { Rcode = DnsRcode.NameError, Ttl = 300 });
+            }
+
+            return ValueTask.FromResult(new DnsResponse { Rcode = DnsRcode.NoError, Answers = named.Where(r => r.Type == type).ToArray(), Ttl = 300 });
+        }
+    }
+}
+
 internal sealed class ApiFixtureOptions
 {
     public bool Sqlite { get; init; }
@@ -69,7 +128,7 @@ internal sealed class ApiFixture : IAsyncDisposable
     public IStorage Storage { get; private set; } = null!;
     public StorageOptions StorageOptions { get; private set; } = null!;
     public ApiOptions Options { get; private set; } = null!;
-    public StaticDnsResolver Dns { get; } = new();
+    public MutableDns Dns { get; } = new();
     public AuthThrottle Throttle { get; private set; } = null!;
     public TestProtector Protector { get; } = new();
     public IServiceProvider Services => _app.Services;
