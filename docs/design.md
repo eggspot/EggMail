@@ -67,9 +67,9 @@ Dependencies point downward. The pure libraries do no I/O so they can be fuzzed 
 | `IMessageBodyStore` | Spool, content and retained-raw tables; partition drop (PostgreSQL) vs batched DELETE (SQLite). Postgres/SQLite implementations only; FS/S3 providers are not built but the interface remains |
 | `IEventStore` | Per-message delivery events (`History:Mode=Full`, either backend) |
 | `IStatsStore` | Hourly/daily counters, recorded in every history mode; one shared implementation using `INSERT … ON CONFLICT DO UPDATE` |
-| `IConfigStore` | Tenants, domains, keys, suppressions, webhook endpoints, settings; one shared implementation over EF for both providers |
+| `IConfigStore` | Tenants, domains, keys, suppressions, webhook endpoints, settings, certificates and ACME state; one shared implementation over EF for both providers |
 | `IPortableStore`, `IBundleWriter` / `IBundleReader` | Export, import, count and checksum contract implemented by the config, stats, queue and history stores; used by the backend-switch engine (§4.6) |
-| `ICertificateStore` | Serve certificates, reload on change |
+| `ICertificateStore` | Certificates, private keys (Data Protection) and ACME state held in the config store on both backends; serve from memory, reload on change by polling the store (§7.3) |
 | `ISpfEvaluator`, `IDmarcEvaluator`, `IDkimSigner`, `IDkimVerifier` | Authentication |
 | `IRoutingPolicy` | Routing, rate limits, retry schedule per message |
 | `IClock` (and file-system seam) | Test seams for time and crash simulation |
@@ -85,7 +85,7 @@ Two EF Core providers, one `DbContext`, a separate migrations assembly per provi
 ## 3. SMTP stack and performance design
 
 - **Pipelines-based server.** Copy Kestrel's zero-byte-read default (`WaitForDataBeforeAllocatingBuffer`) so idle connections hold no buffer; cap read/write buffers explicitly (Kestrel defaults are 1 MiB and 64 KiB). Always call `AdvanceTo(consumed, examined)` and never touch a `ReadOnlySequence` afterwards.
-- **DATA path.** Scan for `\r\n.\r\n` incrementally with `SearchValues<byte>`. The body is buffered in memory up to `Smtp:MaxMessageSize` (25 MiB Full preset, 10 MiB Lite preset) behind a **global in-flight bytes budget**; when exhausted, reply `452`. Objects of 85,000 bytes or more land on the large object heap. Start with EF `byte[]`; use Npgsql directly for the body insert only if profiling shows LOH pressure (owner permission for raw Npgsql is an open question).
+- **DATA path.** Scan for `\r\n.\r\n` incrementally with `SearchValues<byte>`. The body is buffered in memory up to `Smtp:MaxMessageSize` (default 25 MiB on both backends) behind a **global in-flight bytes budget**; when exhausted, reply `452`. Objects of 85,000 bytes or more land on the large object heap. Start with EF `byte[]`; use Npgsql directly for the body insert only if profiling shows LOH pressure (owner permission for raw Npgsql is an open question).
 - **Smuggling and STARTTLS hardening.** Only `\r\n` ends a line; reject bare CR/LF and NUL with a 5xx and close; end DATA only on `\r\n.\r\n`. On STARTTLS, if the reader holds any bytes beyond the command line, close the connection; rebuild pipes over `SslStream` and reset session state (RFC 3207 §4.2). The client must re-EHLO after TLS and ignore the pre-TLS capability list. The client never emits a bare CR/LF.
 - **Group commit.** One writer per database file drains queued commands into one transaction so the per-commit cost (an fsync under SQLite `Normal`/`Full` or a PostgreSQL commit; transaction overhead under the SQLite default `Off`) is amortized across many messages. `250` is sent only after the commit returns. On PostgreSQL, events are buffered in a channel and flushed every few milliseconds, and claims fetch N rows per round trip.
 - **TLS.** One shared `SslServerAuthenticationOptions` and certificate; stable `TargetHost` on outbound so session resumption works.
@@ -105,7 +105,7 @@ Two orthogonal settings:
 | `Storage:Backend` | `Sqlite` \| `Postgres` | Where data is stored |
 | `History:Mode` | `StatsOnly` \| `Full` | How much per-message history is recorded |
 
-**Any combination is allowed:** SQLite + `Full` history, PostgreSQL + `StatsOnly`, and the two default pairings below.
+**Any combination is allowed:** SQLite + `Full` history, PostgreSQL + `StatsOnly`, SQLite + `StatsOnly` and PostgreSQL + `Full`. The default is `History:Mode=Full` on both backends (below).
 
 `History:Mode`:
 
@@ -118,19 +118,30 @@ Two orthogonal settings:
 | Bounce correlation | stateless signed VERP token (tenant id, domain id, timestamp, HMAC); the recipient to suppress comes from the DSN's `Final-Recipient` | same token, additionally linked to the message's rows |
 | Send response | returns an id, for log correlation only | returns an id that resolves to the message |
 
-Everything not listed in this table (queue, delivery, suppressions, webhooks, domain verification, authentication, all settings) is identical in both history modes. The dashboard shows the same pages on every backend; pages that need per-message history show an explanatory state when `History:Mode=StatsOnly`, and the UI reads `History:Mode` from a capabilities endpoint (never the backend). Per-message API lookups made in `StatsOnly` return a clear error with code `history_not_recorded` (HTTP status proposed 404; to be decided). That reflects data that was never recorded, not a missing feature of the backend.
+Everything not listed in this table (queue, delivery, suppressions, webhooks, domain verification, authentication, all settings) is identical in both history modes. The dashboard shows the same pages on every backend; pages that need per-message history show an explanatory state when `History:Mode=StatsOnly`, and the UI reads `History:Mode` from a capabilities endpoint (never the backend). Per-message API lookups made in `StatsOnly` return `410 Gone` with code `history_not_recorded` (error body and the other cases in §5.2). That reflects data that was never recorded, not a missing feature of the backend.
 
-**Presets.** "Lite" and "Full" remain friendly names for the two default presets. A preset is only a bundle of *default values*, chosen by `Storage:Backend` when a setting is not set explicitly; every setting is available on every backend. (`Queue:MaxLifetime` and `Smtp:MaxMessageSize` are proposed setting names.)
+**Presets (unified defaults, owner-decided).** "Lite" and "Full" remain friendly names, now for the two storage backends' default deployment shapes: **Lite = the SQLite backend, Full = the PostgreSQL backend.** They have **exactly the same defaults for every behavioural setting.** Only storage-backend characteristics differ (§4.2), and backend-specific storage tuning defaults (the SQLite sync pragmas, connection-pool sizes, partition granularity) are not behavioural settings.
 
-| Setting | **Lite** preset (default when `Backend=Sqlite`) | **Full** preset (default when `Backend=Postgres`) |
+The single default set, on both backends (names marked proposed; values are the earlier Full-preset values unless noted):
+
+| Setting | Default | Notes |
 |---|---|---|
-| `History:Mode` | `StatsOnly` (the lightweight "fire-and-forget, no per-message record" behavior the owner asked for) | `Full` |
-| `Queue:MaxLifetime` | 48 h (proposed; keeps the SQLite file small) | 5 days |
-| `Smtp:MaxMessageSize` | 10 MiB (proposed) | 25 MiB |
-| `Sqlite:SyncMode` | `Off` (owner-decided) | n/a |
-| Typical deployment | one container, one volume, one replica | app + managed Postgres, one or more replicas |
+| `History:Mode` | **`Full`** | **DESIGN-DECIDED** (the owner delegated the value). Justification below |
+| `History:RecentEvents` | 1,000 | |
+| `Retention:MetadataDays` | 30 | `0` = keep forever (§5.1) |
+| `Content:Mode` / `Content:RetentionDays` | `Retain` / 7 | subject + text + html + attachment index; range 6–30 |
+| `Content:StoreAttachments` | `false` | `Content:AllowAttachmentStorage` master switch also `false` |
+| `Content:MaxStoredBodyBytes` | 256 KiB | |
+| `Stats:*` | 30 days hourly, 400 days daily, top-20/top-10 domains, 200,000 series | |
+| `Queue:MaxLifetime` (proposed name) | 5 days | |
+| `Smtp:MaxMessageSize` (proposed name) / recipients | 25 MiB / 50 | |
+| `Webhooks:*` | 7-day outbox and attempt-log retention, 15 s timeout, concurrency 4, HTTPS only | |
 
-Switching backends never changes behavior silently: the migration tool carries the *effective* values of these backend-dependent settings into the target explicitly (§4.6), so a Lite → Full switch keeps `History:Mode=StatsOnly` unless the owner changes it.
+Backend-specific storage defaults (not behavioural, and not changed by the other backend): SQLite: `Sqlite:SyncMode=Off`, `Sqlite:ConfigSyncMode=Full`, `Sqlite:QueuePersistence=Persistent`; PostgreSQL: `Mail__Database__Migrate=Auto`, pool sizes, day partitions.
+
+**Why `History:Mode=Full` is the default.** (1) EggMail's product is delivery tracking: the dashboard's message search, timeline and resend work out of the box. (2) The owner wanted identical behavior on both backends, so a single default must serve both, and tracking is the behavior users expect from an outbound email service. (3) `StatsOnly`, the lightweight "fire-and-forget, no per-message record" option the owner asked for earlier, stays one setting away and is documented as such. (4) Switching backends then changes nothing. The cost, stated plainly: `Full` writes more per message (events, content, optionally attachments) and stores personal data (subject and body) for the content retention period (7 days by default); operators who do not want that set `History:Mode=StatsOnly` or `Content:Mode=None`. On the SQLite backend `Full` also means more writes and a larger `history.db`. Benchmarks publish both history levels ([benchmarks.md](benchmarks.md)). The value is easy to flip if the owner prefers `StatsOnly` as the single default.
+
+Switching backends never changes behavior silently: the migration tool records the *effective* values of all settings in the bundle and writes them explicitly into the target (§4.6).
 
 ### 4.2 Backend characteristics (not feature differences)
 
@@ -162,7 +173,7 @@ Tables:
 | `message_content` | day | (`History:Mode=Full`) Subject, text, html, attachment index (name, type, size), extracted at accept time. Dropped after `Content:RetentionDays` |
 | `message_raw_retained` | day | (`History:Mode=Full`, attachment storage on) Raw `.eml` including attachments; written by moving the spool row at the final state in one transaction |
 | delivery events | day | (`History:Mode=Full`) 30 days of metadata by default |
-| stats, config, webhook, tenant, key, domain, suppression tables | none | See §4.5, §6 |
+| stats, config, webhook, tenant, key, domain, suppression, certificate and ACME-state tables | none | See §4.5, §6, §7.3 |
 
 The schema is identical whatever `History:Mode` is; the history tables are simply left empty in `StatsOnly`.
 
@@ -178,7 +189,7 @@ Rules:
 
 ### 4.4 SQLite backend (Microsoft.Data.Sqlite)
 
-Single node, one replica, local volume only (WAL does not work on network filesystems). Microsoft.Data.Sqlite 10.0.12 bundles SQLite 3.53.3, so `UPDATE … RETURNING` works; the WAL-reset bug (3.7.0–3.51.2) is fixed in 3.51.3. Everything in §4.1 applies: this backend runs every feature, with `History:Mode` defaulting to `StatsOnly`.
+Single node, one replica, local volume only (WAL does not work on network filesystems). Microsoft.Data.Sqlite 10.0.12 bundles SQLite 3.53.3, so `UPDATE … RETURNING` works; the WAL-reset bug (3.7.0–3.51.2) is fixed in 3.51.3. Everything in §4.1 applies: this backend runs every feature, with the same defaults as the PostgreSQL backend (including `History:Mode=Full`).
 
 **Database files, each with its own WAL and its own writer:**
 
@@ -186,10 +197,23 @@ Single node, one replica, local volume only (WAL does not work on network filesy
 |---|---|---|
 | `queue.db` | Spool bodies, delivery queue, webhook outbox | `Sqlite:SyncMode`, default **`Off`** |
 | `stats.db` | Aggregates, recent-events ring, webhook attempt log | `Sqlite:SyncMode`, default **`Off`** |
-| `history.db` | (`History:Mode=Full` only; created on demand) delivery events, content, retained raw | `Sqlite:SyncMode`, default **`Off`** |
-| `config.db` | Tenants, API keys, domains, DKIM keys, suppressions, webhook endpoints, settings, Data Protection keys | `Sqlite:ConfigSyncMode`, default `Full` (rarely written) |
+| `history.db` | (`History:Mode=Full`, the default; absent under `StatsOnly`) delivery events, content, retained raw | `Sqlite:SyncMode`, default **`Off`** |
+| `config.db` | Tenants, API keys, domains, DKIM keys, suppressions, webhook endpoints, settings, certificates and ACME state, Data Protection keys | `Sqlite:ConfigSyncMode`, default `Full` (rarely written) |
 
-`history.db` as a separate file is a proposal that follows the same reasoning as the other files: its writes (and batched retention deletes) must not stall queue commits. The `Off` default for the data files is **owner-decided**. Keeping `config.db` at `Full` is **owner-decided** (it is rarely written and holds DKIM keys, API-key hashes and the Data Protection key ring, whose loss or corruption would be severe).
+The `Off` default for the data files is **owner-decided**. Keeping `config.db` at `Full` is **owner-decided** (it is rarely written and holds DKIM keys, API-key hashes, certificates and ACME state, and the Data Protection key ring, whose loss or corruption would be severe).
+
+**History file layout (DESIGN-DECIDED): one `history.db`, with batched deletes.** SQLite has no partition drop, so retention of events and content cannot be a cheap metadata operation the way it is on PostgreSQL. Options considered:
+
+| | A. Single `history.db` (chosen) | B. Per-day files (`history-YYYYMMDD.db`) | C. Per-day tables in one file |
+|---|---|---|---|
+| Retention | Batched `DELETE` in short transactions plus `incremental_vacuum`: costs write amplification and WAL churn at high volume | Delete the file: as cheap as a partition drop | `DROP TABLE` per day, then `incremental_vacuum` |
+| Writers / WAL | One writer, one WAL | Writer touches only today's file; a WAL per open file | One writer, one WAL |
+| Queries across days (search, timelines) | One SQL query | Fan-out over up to retention-window files and merge in the app; or `ATTACH`, whose default limit is 10 databases (compile-time maximum 125; the limit in the bundled SQLite build is **unverified**), too few for a 30-day window | `UNION ALL` views or fan-out; EF cannot map table names that change daily, so raw SQL |
+| Schema migrations | One file | Apply to every existing day file, and to a number of files that is unbounded when `Retention:MetadataDays=0` | One file, but daily tables are created dynamically |
+| Export and backup | One consistent stream | Old day files are immutable: copy or stream whole files (best for large history) | One file |
+| EF Core fit | Plain | One `DbContext` per file, dynamic connection strings | Poor |
+
+Recommendation: **A for v1.** It is the simplest to implement, search and export, keeps the EF model plain and avoids the `ATTACH` limit. Its weakness is retention cost at high volume, mitigated by `WITHOUT ROWID` tables keyed `(day, id)` so expiry is a sequential range delete (proposed), small delete batches off-peak, and `incremental_vacuum`; and at volumes where this still hurts, PostgreSQL's partition drop is the backend characteristic designed for that (§4.2). B is the upgrade path if SQLite history retention proves too expensive: the store interface hides the layout, and day-first keys and UUIDv7 ids (time-ordered, so the day is derivable from an id) keep the move mechanical. C is rejected because of the EF mapping cost. This is a design judgement without measurements; the retention-delete cost under load is a spike item ([open-questions.md](open-questions.md)).
 
 Separate files keep a stats rollup or history retention job from stalling queue commits. That independent-writer property is inferred from per-file WALs; no explicit sqlite.org statement was found (**unverified**). SQLite documents that a transaction across several databases in WAL mode is atomic per file but not as a set, so **every cross-file effect must be idempotent and ordered**. Examples: on a hard bounce, write the suppression to `config.db` first, then complete the queue row (a crash in between just means the retry bounces again); with attachment storage on, write the retained raw to `history.db` first, then delete the spool row (a crash in between leaves a duplicate that a reconcile job removes). On PostgreSQL these are single transactions; the observable behavior is the same.
 
@@ -248,17 +272,18 @@ Size model (assumes about 120 B per row plus a similar index, about 250 B per ro
 
 ### 4.6 Switching backends: manual and symmetric
 
-EggMail never changes backend on its own: no auto-failover, no auto-upgrade, no threshold that triggers a switch. Switching is an **owner-triggered, explicit action** and works **the same in both directions** (SQLite → PostgreSQL and PostgreSQL → SQLite). Because the backend only decides how data is stored, a switch moves data and nothing else changes: every feature, setting and behavior stays as it was.
+EggMail never changes backend on its own: no auto-failover, no auto-upgrade, no threshold that triggers a switch. Switching is an **owner-triggered, explicit action** and works **the same in both directions** (SQLite → PostgreSQL and PostgreSQL → SQLite). Because the backend only decides how data is stored, a switch moves data and nothing else changes: every feature, setting and behavior stays as it was (and because the presets share every behavioural default, §4.1, nothing needs translating).
 
-**Two entry points, one engine:** a guided dashboard action, and a CLI, `mta migrate-storage --to postgres|sqlite` (subcommands `export`, `import`, `verify`, `activate`, `rollback`; options such as `--dry-run`, `--bundle <path>`, `--include queue,history`, `--quiesce`). Both call the same portable export/import engine.
+**Two entry points, one engine:** a guided dashboard action, and a CLI, `mta migrate-storage --to postgres|sqlite` (subcommands `export`, `import`, `verify`, `confirm`, `activate`, `rollback`, `finalize`; options such as `--dry-run`, `--bundle <path>`, `--drain` or `--quiesce`, `--skip-history`). Both call the same portable export/import engine.
 
 **One portable, versioned bundle** (NDJSON files plus a `manifest.json`, streamed so memory stays bounded):
 
-- `manifest.json`: bundle format version (semantic; the importer accepts older minors and refuses a newer major), source backend and schema version, creation time, counts and SHA-256 per file, what is included (config, stats, queue, history), the effective values of backend-dependent settings, and key-wrapping metadata.
-- `config/*.ndjson`: tenants, domains, DKIM keys, API-key hashes, SMTP credential hashes, suppressions, webhook endpoints, relay routes, per-domain TLS policies, settings, warm-up and rate-limit configuration.
+- `manifest.json`: switch id (UUIDv7), bundle format version (semantic; the importer accepts older minors and refuses a newer major), source backend and schema version, creation time, counts and SHA-256 per file and per chunk, what is included, the effective values of settings, and secret-protection metadata.
+- `config/*.ndjson`: tenants, domains, DKIM keys (protected), API-key hashes, SMTP credential hashes, suppressions, webhook endpoints (secrets protected), relay routes, per-domain TLS policies, settings, warm-up and rate-limit configuration, **certificates and ACME state** (§7.3; private keys and the ACME account key protected), and API idempotency keys.
 - `stats/*.ndjson`: hourly and daily aggregates, the recent-events ring, the webhook attempt log.
-- `queue/*.ndjson` plus spool bodies: queued deliveries, spool bodies and the pending webhook outbox (optional; see below).
-- `history/*.ndjson` plus raw files: delivery events, content, retained raw (optional; only when `History:Mode=Full` on both sides).
+- `queue/*.ndjson` plus spool bodies: queued deliveries with their retry state, spool bodies and the pending webhook outbox.
+- `history/*.ndjson` plus raw files: delivery events, content, retained raw, in checksummed chunks (resumable).
+- `secrets/`: the bundle's own Data Protection key ring and its passphrase-protected certificate (below).
 
 Each store (config, stats, queue, history) implements the same export/import contract over the provider-neutral EF model, so adding a table adds it to the bundle in one place. Config is accessed through one shared config-store abstraction implemented once over EF for both providers.
 
@@ -266,31 +291,64 @@ Each store (config, stats, queue, history) implements the same export/import con
 
 | Data | Moves? |
 |---|---|
-| Config: tenants, domains, DKIM keys, API-key hashes, suppressions, webhook endpoints, relay routes, TLS policies, settings | Always |
-| Effective backend-dependent settings (`History:Mode`, `Queue:MaxLifetime`, `Smtp:MaxMessageSize`, …) | Always, written explicitly into the target so behavior does not change |
+| Config: tenants, domains, DKIM keys, API-key hashes, suppressions, webhook endpoints, relay routes, TLS policies, settings, API idempotency keys | Always |
+| Certificates and ACME state (account key, certificates, private keys, renewal metadata) | Always (they live in the config store on both backends; secrets protected as below). In-flight ACME orders and DNS-01 challenge state are not moved; the target restarts any pending order |
+| Effective values of settings | Always, recorded in the manifest and written explicitly into the target, so behavior does not change |
 | Stats and aggregates, recent-events ring, webhook attempt log | Yes |
-| Queued messages and pending webhook outbox | **Drain-first is the safe default** (the queue is empty, nothing to move). Alternative `--quiesce`: stop accepting and stop dispatching, export queue rows and spool bodies, import preserving ids, due times and attempt counts (leases cleared) |
-| Per-message history (events, content, retained raw) | Only when `History:Mode=Full` on **both** sides and requested (`--include history`); optional and streamed, expect size- and time-proportional cost (hours for hundreds of GB; not estimated). If the target is `StatsOnly`, history is not carried to the target and stays in the read-only source; the guided flow states this in the confirmation |
-| Data Protection key ring | No: the target generates its own; wrapped secrets are re-wrapped (below) |
-| Certificates and ACME state | Not backend-bound; they live in the certificate store (volume or secret mount) configured independently of the backend. If a deployment keeps them in the database they travel in the bundle as wrapped secrets (to be confirmed) |
-| Deployment configuration (ports, connection strings, `Storage:Backend`, sync modes) | Not exported; it belongs to the deployment. The guided action shows exactly what to change |
+| Queued messages with bodies and retry state, pending webhook outbox | **In v1, two ways** (below): `--drain` (safe default; waits for an empty queue, nothing to move) or `--quiesce` (does not wait; transfers what remains) |
+| Per-message history (events, content, retained raw) | **In v1** when `History:Mode=Full` on both sides: streamed, resumable, skippable with `--skip-history`. If the target is `StatsOnly`, history is not carried to the target and stays in the read-only source; the guided flow states this in the confirmation |
+| Data Protection key ring of the deployment | No: the target keeps its own ring; secrets are re-protected (below) |
+| Deployment configuration (ports, connection strings, `Storage:Backend`, sync modes, the key-protection certificate or KMS credential) | Not exported; it belongs to the deployment. The tool shows exactly what to change (see "Activation, and orchestrator-managed configuration" below) |
 
-**Secrets are re-wrapped, never written in clear.** DKIM private keys and webhook secrets are wrapped in the source with its Data Protection / KMS / certificate settings. On export they are unwrapped in memory and written into the bundle encrypted under a bundle key (derived from an operator-supplied passphrase, or the target's certificate public key); on import they are decrypted and wrapped again under the target's key protection. The two sides may therefore have different `Secrets:KeyProtection` settings (a certificate on one, a KMS on the other). API-key digests and credential hashes need no re-wrapping. The exact bundle encryption scheme is a proposal and an open question ([open-questions.md](open-questions.md)). Plain-text private keys are never written to disk.
+**Secrets: ASP.NET Core Data Protection is the mechanism, and nothing is ever written in clear.** Everything secret in the bundle (DKIM private keys, webhook secrets, the ACME account key, certificate private keys) is protected with Data Protection. In each deployment these secrets are protected at rest by that deployment's own Data Protection key ring, which is persisted in the config store and itself protected by `Secrets:KeyProtection` (`Certificate` or `Kms`; `None` is dev only). Those two settings are *how a deployment protects its ring*; they are independent of the bundle and may differ between source and target.
 
-**Steps (identical in both directions; each is a checkpoint the owner can stop at):**
+Across two different key rings the design is (the simplest sound design that still uses Data Protection; **DESIGN-DECIDED**):
+
+1. **Export** (needs a user-supplied *export passphrase*): the source unwraps each secret in memory with its own ring (so the source's certificate or KMS must be reachable during export). The export then creates a **bundle certificate** (a throwaway self-signed RSA certificate) and a **bundle key ring**, a standalone Data Protection key ring written under `secrets/` and protected with that certificate (`ProtectKeysWithCertificate`). Each secret is protected with a purpose string dedicated to the bundle (for example `EggMail.Bundle.v1`) from that ring and written as a protected blob. The bundle certificate's private key is exported as PKCS#12 encrypted under the passphrase (`ExportPkcs12` with PBES2 / AES-256 / SHA-256, available in .NET 9 and later; exact parameters to be confirmed). Plain-text keys are never written to disk.
+2. **Import** (same passphrase): load the PKCS#12 to recover the bundle certificate, open the bundle key ring, unprotect each secret in memory, and **re-protect it with the target's own ring** (the target's own `Secrets:KeyProtection`). The target never needs the source's ring, certificate or KMS key, and the bundle certificate and key ring are discarded after import.
+3. The only secret that must travel out of band is the passphrase. Its strength is the strength of the bundle (PKCS#12 password-based encryption); the guided flow enforces a minimum length and the bundle should be treated as sensitive and deleted after finalization.
+
+Sub-choices, flagged honestly: (a) Data Protection has no built-in passphrase mode, so the passphrase goes through a PKCS#12 certificate rather than custom crypto; this is a design choice. (b) A "public-key mode" (protect the bundle to the *target's* certificate, so no passphrase is shared) is possible later and is not in v1. (c) RSA is assumed for the bundle certificate because Data Protection's certificate-based key encryption is documented with RSA certificates (**unverified** for other key types). (d) If the target runs with `Secrets:KeyProtection=None` the import warns and requires explicit confirmation, since the re-protected keys are then only as safe as the database.
+
+**Draining and quiescing queued mail (both in v1).** Delivery stays **at-least-once**. The goal is that the switch itself adds no duplicate sends.
+
+- **`--drain` (the safe option):** stop accepting, stop starting new deliveries, wait for the queue to empty (the owner can wait, cancel and resume, or let messages expire). Nothing queued moves, so there is nothing to duplicate.
+- **`--quiesce` (does not wait for a full drain):**
+  1. *Stop accepting:* SMTP listeners reply `421` and the API replies `503` with `Retry-After`; clients retry later (client-side retries are inherently at-least-once).
+  2. *Stop starting deliveries:* the scheduler stops claiming new rows. Deliveries already leased (mid-conversation with a remote server) are allowed to **finish**, up to `--inflight-timeout` (default 10 minutes, matching the post-`.` wait the SMTP client already allows; proposed). Finished deliveries are recorded final in the source before export.
+  3. *Fence:* the source writes a durable **fence record** (`switch_id`, state `Fenced`, time) in its config store. A fenced source never accepts mail and never claims or sends, including after a restart, until the fence is cleared by `rollback`. This is the cutover fence: at most one side is ever allowed to dispatch.
+  4. *Resolve what did not finish:* anything still in flight at the timeout is aborted; its lease is cleared and its row is marked `in_doubt` (the remote server may have accepted the message even though we did not see the final reply). These are the only deliveries that can be sent twice, the same window as an ordinary crash; the `in_doubt` mark is carried into the target and shown in history so the operator knows.
+  5. *Export and mark:* queued rows (retry state: attempt count, `due_at`, last error), spool bodies and pending webhook outbox rows are exported with their **message ids, delivery ids, webhook event ids and API idempotency keys preserved**, and the source marks each exported row `transferred(switch_id)`. A marked row cannot be claimed even if the fence were cleared by mistake.
+  6. *Import:* the target stores the rows with ids preserved, leases cleared and state `queued`, but **does not dispatch** until it is activated. Import is idempotent per `switch_id` and chunk, so repeating it creates no duplicates; the importer refuses a non-empty target that does not carry the same `switch_id`.
+  7. *After cutover:* receivers can de-duplicate webhooks by event id, and clients retrying an API send after cutover are de-duplicated by the preserved idempotency keys. SMTP submissions have no idempotency key, so a client that retried because it never saw a `250` can still create a duplicate, as in any SMTP system.
+- **Rollback and the fence:** before activation, `rollback` clears the transfer marks and the fence on the source and discards the target's imported data; nothing was sent from the target, so no duplicates are possible. After activation the target may have delivered the rows, so un-fencing the source is refused; going back means running the same flow in reverse (target → source), which fences the target and transfers what is still queued.
+
+**History migration (in v1).** When `History:Mode=Full` on both sides, events, content and retained raw are exported in time-ordered, checksummed chunks (per-day chunks, further split by size) and imported in order with a progress record (`switch_id`, last verified chunk). The job is **streamed** (bounded memory) and **resumable** (restart continues after the last verified chunk; re-sending a chunk is idempotent). `--skip-history` skips it. History is not needed to send mail, so the cutover does not wait for it: the config, stats and queue move in the cutover, and history can be copied **before activation (default for small history) or backfilled after activation** from the read-only source (the target keeps recording new history meanwhile; backfilled rows are older and cannot conflict). The source is kept until the backfill is verified. Size and time are proportional to retained bytes (the modeled example of §5 is about 14 GB at 7 days of content, or about 35–150 GB with attachments) but **no throughput was measured**, so any time estimate is **unverified**; the preflight prints row and byte counts, and the throughput is to be measured in a spike ([open-questions.md](open-questions.md)).
+
+**Steps (identical in both directions; each is a checkpoint the owner can stop at).** Source states: `Active → Quiescing | Draining → Fenced → (Active again on rollback | Finalized)`. Target states: `Importing → Verified → Confirmed → Active`.
 
 1. **Preflight**: target reachable and empty (the importer refuses to merge into a non-empty target), schema/migrations current, target key protection available, bundle format compatible, disk space and size/time estimate from row counts, sync-mode warning if the target is SQLite with `Off`, and a statement of what will not carry over (for example history when the target is `StatsOnly`).
-2. **Stop accepting new mail**: drain (default) or quiesce. Queued messages are only moved if `--quiesce` was chosen; otherwise the flow waits for an empty queue (the owner can wait, cancel and resume accepting, or let messages expire).
-3. **Export** the bundle from a quiescent source (stats flushed first).
-4. **Import** into the target.
-5. **Verify**: per-table row counts against the manifest, per-file SHA-256, and a checksum recomputed from the target's tables, plus a report shown to the owner.
-6. **Confirm** (explicit owner action).
-7. **Activate**: switch the storage pointer (`Storage:Backend` and its connection) and restart. When the configuration lives in a writable bootstrap file on the data volume the tool writes it; where configuration comes from orchestrator manifests (environment variables, Kubernetes) the tool cannot change it and displays the exact change to apply.
+2. **Drain or quiesce** the source, ending with the source `Fenced`.
+3. **Export** the bundle (stats flushed first).
+4. **Import** into the target (state `Importing`).
+5. **Verify**: per-table row counts against the manifest, per-file and per-chunk SHA-256, and a checksum recomputed from the target's tables; report shown to the owner. State `Verified`.
+6. **Confirm** (explicit owner action). State `Confirmed`.
+7. **Activate**: see "Activation".
 8. **Finalize** (separate, explicit): only then may the owner remove the old data. The tool never deletes the source.
 
-**Rollback.** The source is kept read-only (not started, files unmodified) until the owner finalizes. Before activation, rollback is trivial: discard the target and resume the source. After activation the target may already have delivered queued mail, so going back means running the same flow in reverse (target → source), which is just another switch. That symmetry is the point of the design.
+**Activation, and orchestrator-managed configuration (DESIGN-DECIDED).** The storage pointer (`Storage:Backend` and its connection) cannot live in the database it points to, so it is always *deployment configuration*. Precedence for every setting is: **command line > environment variables / mounted ConfigMap files > bootstrap file on the data volume > settings persisted in the config store > built-in defaults**. A value supplied by the deployment layer shows in the dashboard as "locked by deployment" and cannot be edited there; settings that are not set by the deployment are editable in the dashboard and persisted in the config store. The storage pointer itself is never persisted in the config store (it would be circular, and a stale override in the old store would conflict after a switch).
 
-Effort: a shared config-store abstraction, a portable export/import engine, key re-wrapping, verification, CLI and dashboard flow ([plan.md](plan.md)).
+The switch **never rewrites environment variables, ConfigMaps or compose files.** The tool detects where `Storage:*` comes from:
+
+- *Bootstrap-file-managed* (typically a single container with a writable data volume): after confirmation the tool writes the new pointer into the bootstrap file and restarts.
+- *Orchestrator-managed* (Kubernetes, compose with environment-supplied settings): the tool completes everything up to `Confirmed`, then **produces a cutover patch** with the exact keys to change (an environment diff, a ConfigMap patch or a compose override snippet; secrets are referenced by name, never printed) and stops. The operator applies it and restarts.
+- **Startup gate (the same in both cases):** on start, the application reads the `switch_state` of the store it is pointed at. With no switch record, or `Active`, it runs normally. With `Confirmed`, it atomically moves to `Active` and only then starts accepting and dispatching. With `Importing` or `Verified` it starts in a restricted mode (dashboard and API read-only, no accepting, no dispatching) and shows what is pending. A **fenced source** (an old pod, or an instance restarted with the old configuration) shows a banner naming the switch and refuses to accept or dispatch, so a forgotten replica cannot double-send.
+
+Rationale: patching the deployment is the operator's job and cannot be done safely from inside the pod; the persisted state plus the startup gate make the order of operations safe whatever the orchestrator does.
+
+**Rollback.** The source is kept read-only (fenced, files unmodified) until the owner finalizes. Before activation, rollback is `rollback`: discard the target, clear marks and fence, resume the source. After activation, going back is the same flow in reverse. That symmetry is the point of the design.
+
+Effort: the switch engine, quiesce and fence, resumable history migration, Data Protection bundle protection, the orchestrator-aware cutover, the CLI and the dashboard flow ([plan.md](plan.md)).
 
 ## 5. History and content retention
 
@@ -299,7 +357,7 @@ Effort: a shared config-store abstraction, a portable export/import engine, key 
 - Default stored content: subject + text + html + attachment index. Attachments are **not** stored unless enabled.
 - Attachment flag precedence: per-send API flag, then per-tenant setting, then global default (`false`), behind the master switch `Content:AllowAttachmentStorage`. SMTP ingress uses the tenant setting only.
 - Config (proposed): `Content:Mode = Retain | None` (default `Retain`; `None` deletes content at the final state), `Content:RetentionDays = 7` (range 6–30, **no unlimited value**; see §5.1), `Content:StoreAttachments = false`, `Content:MaxStoredBodyBytes = 256 KiB` (truncated with a flag), `Content:StoreSubject` configurable (subjects can contain personal data). Event metadata is kept 30 days (`Retention:MetadataDays`, `0` = keep forever, see §5.1); anything content-like (e.g. a preview) follows the content retention.
-- Resend: from retained raw when attachment storage was on; for attachment-free messages, "send again from content" re-composes from stored subject/body and is labelled as re-composed (headers not byte-identical); otherwise the dashboard shows "attachments were not stored" and the API returns a clear error. In `StatsOnly` there is nothing to resend from (`history_not_recorded`).
+- Resend: from retained raw when attachment storage was on; for attachment-free messages, "send again from content" re-composes from stored subject/body and is labelled as re-composed (headers not byte-identical); otherwise the dashboard shows "attachments were not stored" and the API returns a clear error. In `StatsOnly` there is nothing to resend from (§5.2).
 - The dashboard renders stored HTML only in a sandboxed iframe under a strict CSP, with plain text as the default.
 - Size model (illustrative, not measured; 100k messages/day, about 20 KB content per message, an assumption; sizes are bytes, whichever backend): about 2 GB/day and 14 GB at 7 days before TOAST compression (PostgreSQL). Worst case spool (all mail deferred 5 days) about 25 GB. With attachment storage on: about 35 GB at 7 days, about 150 GB at 30 days.
 - Revisit the Postgres-only body design if retained content passes roughly 200–300 GB, WAL passes roughly 50 GB/day or restore time becomes unacceptable (rules of thumb, unsourced).
@@ -319,6 +377,36 @@ Effort: a shared config-store abstraction, a portable export/import engine, key 
 | `History:RecentEvents` | 1,000 | count, not time | n/a | A bounded ring by design |
 
 **Why `Content:RetentionDays` stays 6–30 and has no unlimited value.** The floor of 6 exists because content must outlive the 5-day queue lifetime (otherwise the dashboard view and resend would vanish before the message is final). The ceiling of 30 is a safety bound, not a technical limit: content holds personal data (subjects, bodies, optionally attachments), so unlimited retention is a privacy and compliance liability, and it is the largest storage consumer (about 150 GB at 30 days with attachments in the modeled example, with a revisit threshold of roughly 200–300 GB). For operators who need to keep nothing, `Content:Mode=None` deletes content at the final state, and `History:Mode=StatsOnly` records no content at all. Whether to raise the ceiling or add an explicit override is an open question ([open-questions.md](open-questions.md)).
+
+### 5.2 API behavior when history is not recorded or has expired (DESIGN-DECIDED)
+
+The rules are the same on both backends. They reuse the earlier `body_expired` state (an expected state, as opposed to `body_missing`, which is an error).
+
+| Situation | Response |
+|---|---|
+| `History:Mode=StatsOnly`: any per-message resource (`GET /messages/{id}`, `/events`, `/content`, `POST …/resend`) or message search/list | **`410 Gone`**, code `history_not_recorded` |
+| `History:Mode=Full`, message found, content past `Content:RetentionDays` | `GET /messages/{id}` returns **`200`** with `content.state = "body_expired"` (metadata and events are still available); `GET /messages/{id}/content` returns **`410 Gone`**, code `body_expired`; resend returns `410` `body_expired` |
+| `History:Mode=Full`, message id unknown or past `Retention:MetadataDays` | **`404 Not Found`**, code `message_not_found` |
+| Resend of an attachment-free message that has no retained raw | Allowed, labelled as re-composed (§5); with attachments and no retained raw: **`409 Conflict`**, code `attachments_not_stored` |
+| Content missing although it should exist | **`500`**, code `body_missing` (an error state, alerted) |
+
+Why `410` and not `404`, `409` or `200`: in `StatsOnly` the server cannot tell an unknown id from a message it never recorded, so `404` would wrongly say "no such message"; `409` implies a conflict the client could resolve by retrying; `410` states that the resource is intentionally not available and will not appear, which is exactly the situation. Expired content is also `410` for the same reason, while the message resource itself stays `200` so dashboards can still show the timeline. `501` is not used because the capability is not missing. Clients can avoid the error by reading the capabilities endpoint (`history.mode`, `content.retentionDays`) first.
+
+Error body: RFC 9457 problem details (`application/problem+json`, supported natively by ASP.NET Core), with extension members:
+
+```json
+{
+  "type": "https://eggmail.example/problems/history_not_recorded",
+  "title": "Per-message history is not recorded",
+  "status": 410,
+  "detail": "History:Mode is StatsOnly; per-message data is not stored.",
+  "code": "history_not_recorded",
+  "history_mode": "StatsOnly",
+  "request_id": "01J…"
+}
+```
+
+For `body_expired`, add `"expired_at"` and `"retention_days"`. The `type` URI is a placeholder (a proposal; no domain is registered for it).
 
 ## 6. Webhooks (identical on both backends)
 
@@ -354,8 +442,12 @@ Direct MX delivery uses port 25. A relay fallback chain on 587, 465 or 2525 is *
 
 ### 7.3 TLS
 
-- One shared certificate store for SMTP and the dashboard. Own `ServerCertificateSelector`; TLS 1.2 minimum (1.3 on). Certificate hot reload by polling (every 30–60 s on mtime/size/thumbprint, debounce 2–5 s, validate key match, `NotAfter`, SAN and chain before swapping; keep the old certificate and alert on failure). inotify is unreliable with Kubernetes' `..data` symlink swap.
-- Sources: mounted PEM/PFX, cert-manager (prefer under Kubernetes; the app only watches files), self-signed on first run (flagged in the dashboard), or built-in ACME with Certes (pin 4.1.x behind an interface; **DNS-01 by default**, Cloudflare first, pluggable DNS-provider interface; renew using ARI). Let's Encrypt moves the default profile to 64-day certificates on 2027-02-10 and 45 days on 2028-02-16, and no longer sends expiry emails, so expiry must be monitored. Certes was dormant 2021–2026 with a single recent author; the fallback is an own client (6–12 weeks).
+- **Certificates and ACME state live in the database** (the config store, on both backends; owner-decided): the ACME account key, issued certificates and chains, private keys, challenge state and renewal metadata (not-after, last attempt, ARI data, failures). Private keys and the account key are protected with Data Protection (§9.1). They are included in the switch bundle (§4.6). One certificate store serves SMTP and the dashboard through an own `ServerCertificateSelector`; TLS 1.2 minimum (1.3 on).
+- **Hot reload from the database:** each replica holds the certificates in memory and polls the store every 30–60 s for a changed version or thumbprint (a cheap query), validates the new certificate (key match, `NotAfter`, SAN, chain) before swapping, and keeps the old one and alerts on failure. This replaces polling files (which was unreliable with Kubernetes' `..data` symlink swap). If the database is briefly unavailable, replicas keep serving the certificates already in memory.
+- **Renewal lock for multiple replicas (Full):** renewal must run on one replica at a time. A long-running ACME flow (DNS-01 propagation takes minutes) cannot hold a database transaction or a pooled session-level advisory lock, so the design uses a **renewal lease row** (`lock name, owner, lease_until, fencing token`, renewed while working) that works on both backends; on PostgreSQL a short transaction-level advisory lock (`pg_try_advisory_xact_lock`) guards acquiring the lease. The owner suggested an advisory lock; this is the same idea adapted to a long flow (**DESIGN-DECIDED sub-choice**).
+- **Sources and precedence:** certificate in the database (ACME-issued, or imported through the dashboard), self-signed on first run (stored in the database and flagged in the dashboard), or built-in ACME with Certes (pin 4.1.x behind an interface; **DNS-01 by default**, Cloudflare first, pluggable DNS-provider interface; renew using ARI). An **optional file or environment override** (mounted PEM/PFX, e.g. cert-manager under Kubernetes) takes precedence when configured, and the app then only watches those files. Let's Encrypt moves the default profile to 64-day certificates on 2027-02-10 and 45 days on 2028-02-16, and no longer sends expiry emails, so expiry must be monitored. Certes was dormant 2021–2026 with a single recent author; the fallback is an own client (6–12 weeks).
+- **Bootstrap problem:** the app needs the database to read its certificates, so it cannot terminate TLS before the database is reachable. Startup order: connect to the database (the database connection has its own TLS, independent of these certificates); start the plain HTTP listener on 8080 (probes; reachable on loopback or the internal network for first setup); load certificates from the store (or the file/environment override); if none exist, generate and store a self-signed certificate so HTTPS (8443) and SMTP STARTTLS come up, and flag it in the dashboard. SMTP does not accept mail while the database is down (`451`), so no certificate is needed in that state. The certificate that protects the Data Protection key ring (`Secrets:KeyProtection=Certificate`) or the KMS credential is *deployment configuration outside the database*, otherwise the secrets could not be opened; it is not one of these TLS certificates.
+- **Security note on keys in the database:** TLS private keys and the ACME account key are stored encrypted by Data Protection (AES-256-CBC with HMAC-SHA256 by default), and the key ring is protected by a certificate or KMS held outside the database. Anyone who can read the database *and* the key-protection certificate/KMS can recover the keys, and database backups, replicas and dumps contain the ciphertext, so protect the key-protection secret separately and restrict who can use it. Grant the read-only dashboard role no access to the secret tables. With `Secrets:KeyProtection=None` (dev only) the keys are effectively unprotected in the database.
 - Outbound: opportunistic by default (Postfix `may` equivalent) with per-domain levels (none, may, encrypt, verify); MTA-STS enforce; DANE via the local validating resolver (a failing DANE result is not overridden by MTA-STS). In opportunistic mode, accept untrusted certificates but record the errors; revocation checks off for MX delivery.
 - Record per delivery attempt: TLS used/version/cipher, peer certificate subject/issuer/validity/SHA-256, SSL policy errors, verified, policy applied (none, opportunistic, required, mta-sts-enforce/testing, dane), policy id, MX host, STARTTLS advertised, plaintext fallback, failure reason.
 - MTA-STS: fetch `https://mta-sts.<domain>/.well-known/mta-sts.txt` with no redirects and only HTTP 200, cache until `max_age`, refetch when the `_mta-sts` TXT id changes, keep the cached policy if a fetch fails.
@@ -371,7 +463,7 @@ State machine (**proposed** in earlier research; the decisions record is truncat
 ### 9.1 Secrets
 - API keys are shown once and stored as SHA-256 digests (high-entropy keys); constant-time comparison via `CryptographicOperations.FixedTimeEquals`.
 - SMTP auth: PLAIN and LOGIN only, only after TLS, so passwords can be stored as hashes (CRAM-MD5 would need plaintext).
-- DKIM private keys and the Data Protection key ring are wrapped with a certificate or KMS (`Secrets:KeyProtection = Certificate | Kms | None`; `None` is for dev only); credentials come from the `*_FILE` secret convention. Never delete old Data Protection keys.
+- DKIM private keys, webhook secrets, TLS private keys and the ACME account key are protected with ASP.NET Core Data Protection; the Data Protection key ring is persisted in the config store and itself protected by a certificate or KMS (`Secrets:KeyProtection = Certificate | Kms | None`; `None` is for dev only). That certificate or KMS credential is deployment configuration outside the database and comes from the `*_FILE` secret convention. Never delete old Data Protection keys. Backend switching re-protects secrets under the target's ring through a bundle-specific Data Protection key ring (§4.6).
 - Dashboard passwords: PBKDF2 from the BCL (iteration count per current OWASP guidance, to be set) or an Argon2 library.
 - Encryption at rest is a storage-layer responsibility (volume or database); application-level envelope encryption is deferred behind an interface.
 
@@ -385,11 +477,11 @@ Preact + Vite recommended. Build in a Node stage of the Dockerfile and copy only
 
 ## 10. Deployment
 
-- **PostgreSQL backend (Full preset):** app + managed Postgres via compose (app + `postgres:17` with a `pg_isready` healthcheck) or a Kubernetes Deployment. More than one replica is safe (no local blobs; `SKIP LOCKED` claims; advisory-locked retention job).
-- **SQLite backend (Lite preset):** one container, one volume (ReadWriteOnce, local), one replica, recreate rollout. Characteristics of the backend (§4.2), not missing features.
+- **PostgreSQL backend ("Full"):** app + managed Postgres via compose (app + `postgres:17` with a `pg_isready` healthcheck) or a Kubernetes Deployment. More than one replica is safe (no local blobs; `SKIP LOCKED` claims; advisory-locked retention job).
+- **SQLite backend ("Lite"):** one container, one volume (ReadWriteOnce, local), one replica, recreate rollout. Characteristics of the backend (§4.2), not missing features.
 - **Switching backends** is manual and symmetric (§4.6); the guided action cannot provision Postgres or change container topology.
 - **Image:** one image, chiseled, with ICU (the `-extra` variant) plus a startup Unicode self-test (silent failure in invariant mode is a risk). ReadyToRun; no trimming (EF is not trim-safe). Pin versions.
 - **Health:** `--healthcheck`; liveness separate from readiness. When the backend is PostgreSQL and it is down: `451` to SMTP clients, `/readyz` fails, `/healthz` stays alive.
 - **Observability:** `System.Diagnostics.Metrics` and `ActivitySource` (BCL, so even the SMTP stack emits metrics), OpenTelemetry with OTLP, JSON console logs. The OTel Prometheus exporter was still beta and prometheus-net had no release since January 2024, so a hand-rolled `/metrics` endpoint (about 150 lines) was suggested as the alternative.
-- **Limits (settings, same on both backends; defaults follow the preset):** `Smtp:MaxMessageSize` 25 MiB (Full preset) or 10 MiB (Lite preset), 50 recipients, `Queue:MaxLifetime` 5 days (Full preset) or 48 h (Lite preset).
+- **Limits (settings with identical defaults on both backends):** `Smtp:MaxMessageSize` 25 MiB, 50 recipients, `Queue:MaxLifetime` 5 days.
 - **Deliverability operations** (IP reputation, warm-up, PTR/EHLO, port-25 blocking, abuse desk) are operational, not code, and sit outside the engineering estimate.

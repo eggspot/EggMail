@@ -4,14 +4,14 @@ All numbers are the design authors' **estimates**, not measurements, built from 
 
 ## Current totals
 
-**About 272 engineer-weeks central (range about 201–398).** This is the earlier 264 (196–385) plus two sets of new author estimates (not from the earlier effort model): the owner decisions of 2026-10-12 (+2.5) and the owner correction that makes the storage backends feature-identical with a symmetric switch (+5.5, range +3.5 to +8.5). Re-estimate before committing.
+**About 279 engineer-weeks central (range about 206–409).** This is the earlier 264 (196–385) plus three sets of new author estimates (not from the earlier effort model): the owner decisions of 2026-10-12 (+2.5), the owner correction that makes the storage backends feature-identical with a symmetric switch (+5.5, range +3.5 to +8.5), and the answers to the open questions that grew the scope (+6.5, range +4.5 to +10.5; quiesce and history migration are now in the first release, plus Data Protection bundle protection, an orchestrator-aware cutover and certificates in the database). Re-estimate before committing.
 
 Calendar uses the same capacity assumptions throughout: 4 engineers ≈ 3.1 effective weeks per week, 2 engineers ≈ 1.7.
 
 | Team | Low | Central | High |
 |---|---|---|---|
-| 4 engineers | about 15 months | about 20 months | about 30 months |
-| 2 engineers | about 27 months | about 37 months | about 54 months |
+| 4 engineers | about 15 months | about 21 months | about 30 months |
+| 2 engineers | about 28 months | about 38 months | about 55 months |
 
 Outside the estimate: deliverability operations (IP reputation, warm-up, abuse desk) and the external security audit.
 
@@ -26,6 +26,7 @@ Outside the estimate: deliverability operations (IP reputation, warm-up, abuse d
 | Lite webhooks, multi-tenant stats, three SQLite files, stress tests, benchmark harness | +13 (range +10 to +19.5) | 264 |
 | Owner decisions of 2026-10-12: corruption detection/recovery for `synchronous=OFF`, guided manual mode switch (the switch part is replaced by the next row) | +2.5 (range +1.5 to +4.5) | 267 |
 | Owner correction: feature-identical backends, `History:Mode`, symmetric Lite ↔ Full switch (net of the replaced items) | +5.5 (range +3.5 to +8.5) | 272 |
+| Answers to the open questions: quiesce and history migration in v1, Data Protection bundle protection, orchestrator-aware cutover, certificates and ACME state in the database | +6.5 (range +4.5 to +10.5) | 278.5, about 279 |
 
 ## Component list (baseline of 236)
 
@@ -115,16 +116,34 @@ The owner's correction removes every backend-dependent feature and makes switchi
 | Switch engine: bundle format and manifest/checksums, export/import contract on the config, stats and queue stores, streaming, one shared config-store abstraction, key re-wrapping, preflight and verification, rollback handling, `mta migrate-storage` CLI | +3.5 | 2.5–5 |
 | Guided dashboard flow over the engine (both directions) | +1.5 | 1–2 |
 | *Subtotal: replaces the earlier drain/export/import (+1.5) and guided switch (+1.5)* | *+5.0 (was +3.0)* | *3.5–7 (was 2–4.5)* |
-| Optional history migration across backends (events, content, retained raw; streamed) | +1.5 | 1–2.5 |
+| History migration across backends (events, content, retained raw; streamed). Estimated here as optional; made mandatory and resumable by the answers below | +1.5 | 1–2.5 |
 | SQLite history stores: events, content, retained raw in `history.db`, batched-delete retention, cross-file ordering | +2.5 | 1.5–4 |
 | `History:Mode` gating replacing backend gating (capabilities, `history_not_recorded`, dashboard states; no per-backend dashboard variant) | −0.5 | −0.5 |
 | **Net change** | **+5.5** | **+3.5 to +8.5** |
 
-Is it more or less than before? **More:** the switch itself costs about 2 weeks more (5.0 vs 3.0) because it is symmetric, can carry queued mail, re-wraps secrets, verifies checksums and supports rollback, plus 1.5 for optional history migration. SQLite now also implements history stores (+2.5), partly offset by dropping the per-backend dashboard variant (−0.5). The earlier "Lite → Full stats import" cut item disappears: stats are one more store in the same bundle, so there is nothing separate to cut. Benchmark and test matrices already covered both backends; no additional change. The history migration (+1.5) and, if needed, the dashboard flow (CLI remains) are the cuttable parts.
+Is it more or less than before? **More:** the switch itself costs about 2 weeks more (5.0 vs 3.0) because it is symmetric, can carry queued mail, re-wraps secrets, verifies checksums and supports rollback, plus 1.5 for history migration (since made mandatory, see below). SQLite now also implements history stores (+2.5), partly offset by dropping the per-backend dashboard variant (−0.5). The earlier "Lite → Full stats import" cut item disappears: stats are one more store in the same bundle, so there is nothing separate to cut. Benchmark and test matrices already covered both backends; no additional change. 
+
+### Answers to the open questions (+6.5, range +4.5 to +10.5)
+
+Scope grew: quiesce and history migration are in the first release (they were optional or deferred), and three further design answers add work. New author estimates, rounded; **the first release now includes all of these, none is an optional or cuttable item**.
+
+| Item | Central | Range |
+|---|---|---|
+| Quiesce in v1: in-flight handling, durable source fence, in-doubt and transfer marks, transfer of queue rows, spool bodies, pending webhook outbox and API idempotency keys with ids preserved, target activation gate, no-duplicate and rollback tests | +2.0 | 1.5–3.5 |
+| History migration made mandatory, streamed, resumable and checksummed per chunk, with backfill after activation (was +1.5 as an optional item; now 3.0 in total) | +1.5 | 1–2 |
+| Secrets in the bundle through Data Protection: bundle key ring, passphrase-protected PKCS#12, re-protection under the target's ring, tests across differing `Secrets:KeyProtection` settings (the generic re-wrapping was already in the engine estimate) | +0.5 | 0.5–1 |
+| Orchestrator-aware cutover: config-source detection, precedence rules, cutover patch generation, startup gate on `switch_state` | +1.0 | 0.5–1.5 |
+| Certificates and ACME state in the database: tables, Data Protection-protected keys, renewal lease, hot reload by database polling, file/environment override, bootstrap flow, inclusion in the bundle | +1.5 | 1–2.5 |
+| Unified preset defaults, SQLite history layout (single `history.db`), `410`/problem-details history errors | 0 | 0 |
+| **Total** | **+6.5** | **+4.5 to +10.5** |
+
+New central total: 272 + 6.5 = 278.5, about **279** (about 206–409). Calendar on the same capacity assumptions (4 engineers ≈ 3.1 effective weeks per week, 2 ≈ 1.7): **4 engineers about 21 months** (low about 15, high about 30); **2 engineers about 38 months** (low about 28, high about 55).
+
+Cut candidates that remain from the switch: only the guided *dashboard* flow, which could fall back to the `mta migrate-storage` CLI alone. History migration, quiesce, the secrets protection and certificates in the database are in scope. History throughput is unmeasured, so any time estimate for moving large histories is **unverified**.
 
 ## Phases
 
-Phase scope at the 236 baseline, with later deltas applied. Per-phase totals below are **derived by summing the recorded phase deltas**; they sum to 267, not 272, because the +5 step above was not assigned to phases in the sources.
+Phase scope at the 236 baseline, with later deltas applied. Per-phase totals below are **derived by summing the recorded phase deltas**; they sum to 273.5, not 278.5, because the +5 step above was not assigned to phases in the sources.
 
 | Phase | Scope | Baseline | Deltas since | Derived |
 |---|---|---|---|---|
@@ -132,8 +151,8 @@ Phase scope at the 236 baseline, with later deltas applied. Per-phase totals bel
 | 1 Core engines | SMTP server, DNS, MIME, Postgres and SQLite stores (queue claim, retention job, spool/content/history tables on both backends), `IStatsStore`, `IConfigStore` | 64 | −0.5, +9, +4.5, +2.5 (SQLite history stores) | 79.5 |
 | 2 Outbound | SMTP client, scheduler, DKIM, DSN; SQLite-backend crash tests (process kill, OS crash/power loss), corruption detection/recovery, terminal-state strip/move job | 47 | −6 (no S3 provider or suite), +3, +2.5, +1 | 47.5 |
 | 3 Authentication and policy | SPF, DMARC, MTA-STS, TLS-RPT, DANE, ARC; stateless VERP | 33 | −4 (no blob reconciliation), +1, +0.5 | 30.5 |
-| 4 Product surface | API, webhooks, domain verification, dashboard (same pages on both backends, `History:Mode` states), observability, ACME, per-tenant/per-send flags, extraction | 33 | +1 (message view/resend UI), +4.5, +3, −0.5 | 41 |
-| 5 Deployment | Compose and Kubernetes, packaging, glue; symmetric backend-switch engine, CLI and guided flow; optional history migration | 14 | +5.0 (replaces +1.5 and +1.5), +1.5 | 20.5 |
+| 4 Product surface | API, webhooks, domain verification, dashboard (same pages on both backends, `History:Mode` states), observability, ACME with certificate and ACME state in the config store, per-tenant/per-send flags, extraction | 33 | +1 (message view/resend UI), +4.5, +3, −0.5, +1.5 (certificates in the database) | 42.5 |
+| 5 Deployment | Compose and Kubernetes, packaging, glue; symmetric backend-switch engine with quiesce and fence, resumable history migration, Data Protection bundle protection, orchestrator-aware cutover, CLI and guided flow | 14 | +5.0 (replaces +1.5 and +1.5), +1.5, +5.0 (quiesce +2.0, history +1.5, Data Protection +0.5, cutover +1.0) | 25.5 |
 | 6 Hardening | Final security pass, soak, performance tuning, warm-up playbook, runbooks, limited real-traffic pilot; test matrix | 27 | −0.5 (no FS self-test), +1.5, +1.5 | 29.5 |
 
 Baseline calendar at 4 engineers was about 77 weeks (6 / 21 / 15 / 11 / 11 / 4.5 / 9 per phase); it has not been recomputed per phase.
@@ -154,7 +173,7 @@ Carried from the earlier plan version (storage-engine-specific gates dropped); t
 | 2 | Delivery to a sink meets the allocation and throughput budgets; interop matrix passes; DKIM signatures verify at Gmail (`Authentication-Results`) |
 | 3 | SPF/DMARC/DKIM results match a reference implementation on a shared corpus; MTA-STS and DANE tested against real policies; bounces correlate end to end |
 | 4 | OWASP ASVS L2 checklist on API and dashboard; strict CSP verified; ACME renewal tested through a forced expiry |
-| 5 | Upgrade, restore and rollback drills pass; fresh single-container start works with minimal config; backend-switch drills pass in both directions (round trip preserves config, stats and queue; checksums verify; rollback works) |
+| 5 | Upgrade, restore and rollback drills pass; fresh single-container start works with minimal config; backend-switch drills pass in both directions (round trip preserves config, certificates, stats, queue and history; checksums verify; quiesce produces no duplicate sends except documented in-doubt cases; rollback works; resume of an interrupted history copy works) |
 | 6 | No open critical or high findings; 7-day soak; DoS suite within memory and CPU ceilings; runbooks reviewed |
 
 ## Cut order
@@ -164,7 +183,7 @@ If the schedule slips, cut in this order (cheapest to cut first):
 1. ARC and Ed25519
 2. TLS-RPT sending (keep collection)
 3. DMARC aggregate-report generation
-4. History migration across backends (keep config, stats and queue migration)
+4. Guided dashboard switch flow (keep the `mta migrate-storage` CLI)
 5. Webhook replay UI (keep automatic retries)
 6. Benchmark baselines beyond Postfix and KumoMTA
 7. Per-send attachment flag (keep the tenant setting)
@@ -192,10 +211,13 @@ The Postgres provider is no longer cuttable: it is the only path to more than on
 12. **Stats flush window** (up to about 10 s of counters lost on process crash).
 13. **SQLite default `synchronous=OFF` can corrupt the database on an OS crash or power loss** (SQLite docs), losing all queued mail including mail acknowledged with `250`. A process kill is safe. Owner-accepted for speed; mitigated by prominent README/design wording, `Sqlite:SyncMode=Normal|Full`, startup integrity check with quarantine, optional backups, and `config.db` kept at `Full` (owner-decided). Also keep "fire-and-forget" from being misread as "may lose mail" under process-crash-safe operation.
 14. **Disk-full queue on the SQLite backend** (reply `452`).
-15. **No per-message traceability under `History:Mode=StatsOnly`** (the SQLite default) makes support harder (mitigated by the ring and logs; any backend can use `Full` history).
+15. **No per-message traceability under `History:Mode=StatsOnly`** (an opt-in lightweight setting on either backend; `Full` is the default) makes support harder (mitigated by the ring and logs).
 16. **Forged VERP tokens** if the HMAC key is mishandled.
 17. **Unlimited retention (`0`)** can fill the disk or inflate Postgres/SQLite files if operators forget manual cleanup; mitigated by dashboard warnings.
 18. **Supply chain:** npm (dashboard), Certes (dormant 2021–2026, single recent author; own-client fallback is 6–12 weeks).
 19. **EF Core overhead on the hot path:** several KB per operation even when tuned; mitigated by batching.
 20. **Backend-switch engine** is a data-moving feature: an incorrect export/import could lose or corrupt data, mishandle queued mail, or mis-rewrap DKIM keys. Mitigated by refusing a non-empty target, drain-first by default, checksums and counts, a read-only source kept until the owner finalizes, round-trip tests in both directions and a documented rollback.
 21. **Cross-file non-atomicity on the SQLite backend** (several files, atomic per file only) requires idempotent, ordered effects; the same code paths must behave identically to PostgreSQL's single transactions.
+22. **Private keys and the ACME account key live in the database** (encrypted by Data Protection). A leak of both a database copy and the key-protection certificate/KMS exposes them; backups and replicas carry the ciphertext. Mitigated by keeping the key-protection secret outside the database, least-privilege roles and the dashboard's read-only role having no access to secret tables.
+23. **Quiesce can still duplicate in-doubt deliveries** (aborted in-flight sends whose outcome is unknown) and cannot de-duplicate SMTP clients that retried without an idempotency key. Mitigated by waiting for in-flight work up to a timeout, `in_doubt` marks, preserved ids and API idempotency keys.
+24. **Certificate renewal across replicas** (lease lock correctness and a database outage during renewal) and the bootstrap order (database before TLS) need dedicated tests.

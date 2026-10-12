@@ -1,6 +1,6 @@
 # Performance measurement plan
 
-EggMail's primary goal is to be the fastest SMTP server. **Performance is a permanent first-class goal on both storage backends:** the SQLite backend is engineered for large, high-throughput workloads and is not treated as a toy. Because the backends are feature-identical (they differ only in how data is stored), both are benchmarked and optimized **separately on the identical feature set**: same protocol features, same history level, same settings, each backend with its own results, regression gate and budgets. "Lite" and "Full" below are the two default presets (SQLite + `StatsOnly` history; PostgreSQL + `Full` history). This document defines what that claim means and how it will be measured. **No measurements exist yet.** All targets are proposals to be tuned after the first runs. Claim "fastest" only once an independent run reproduces it.
+EggMail's primary goal is to be the fastest SMTP server. **Performance is a permanent first-class goal on both storage backends:** the SQLite backend is engineered for large, high-throughput workloads and is not treated as a toy. Because the backends are feature-identical (they differ only in how data is stored), both are benchmarked and optimized **separately on the identical feature set**: same protocol features, same history level, same settings, each backend with its own results, regression gate and budgets. "Lite" and "Full" below are the two backends' default deployment shapes (SQLite and PostgreSQL); they have identical behavioural defaults, including `History:Mode=Full`. This document defines what that claim means and how it will be measured. **No measurements exist yet.** All targets are proposals to be tuned after the first runs. Claim "fastest" only once an independent run reproduces it.
 
 ## Scope of the claim
 
@@ -17,7 +17,7 @@ EggMail's primary goal is to be the fastest SMTP server. **Performance is a perm
 
 The SQLite backend additionally reports `sqlite_commit_latency_ms`, `sqlite_writer_batch_size`, `sqlite_writer_queue_depth` and WAL size, which also feed the dashboard's advisory storage-pressure indicator (advisory only; backend switching is manual). The PostgreSQL backend additionally reports round trips per message, claim latency, WAL volume and connection-pool saturation.
 
-Because `History:Mode` changes how much is written per message, results always state it. The matrix is backend × history level; the four combinations are all valid (SQLite + `StatsOnly` and PostgreSQL + `Full` are the preset defaults; SQLite + `Full` and PostgreSQL + `StatsOnly` are published too, since any combination is allowed). Switch-engine throughput (export/import of a bundle) is measured separately and is not part of the ingest claim.
+Because `History:Mode` changes how much is written per message, results always state it. The matrix is backend × history level; the four combinations are all valid. The default for both backends is `Full` history, so the headline numbers use `Full`; `StatsOnly` results are published alongside, since any combination is allowed. Default `Full` history means the SQLite backend writes more per message by default than a statistics-only configuration would, which the published results make visible. Switch-engine throughput (export/import of a bundle) is measured separately and is not part of the ingest claim.
 
 ## Targets (proposed)
 
@@ -71,4 +71,5 @@ Message size, concurrency, TLS on/off, pipelining on/off, recipients per message
 
 - SQLite commit rate on SSD with any `synchronous` setting, including the new default `OFF` (one search snippet claimed about 442 inserts/s WAL+FULL vs 33k/s NORMAL; unopened and not our workload)
 - Haraka's ingest behavior and fsync policy
+- Switch-engine and history-migration throughput on both backends (no measurement exists)
 - All numeric targets above (proposals)

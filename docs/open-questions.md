@@ -2,7 +2,7 @@
 
 ## Owner decisions applied (2026-10-12)
 
-The four former "decided by default" items are **OWNER-DECIDED**, and a later owner correction (5) makes the storage backends feature-identical. See [decisions.md](decisions.md) (A–G).
+The four former "decided by default" items are **OWNER-DECIDED**, and a later owner correction (5) makes the storage backends feature-identical. See [decisions.md](decisions.md) (A–N).
 
 | # | Topic | Decision |
 |---|---|---|
@@ -13,22 +13,23 @@ The four former "decided by default" items are **OWNER-DECIDED**, and a later ow
 | 5 | Backends are feature-identical | SQLite vs PostgreSQL is only a storage choice; every feature behaves identically. `History:Mode = StatsOnly \| Full` is a separate setting on either backend. Switching is symmetric (Lite ↔ Full), via one portable bundle, a CLI and a guided dashboard action, with rollback. This resolves the earlier question about Full → Lite |
 | 6 | `config.db` sync mode | **OWNER-DECIDED:** `config.db` stays at `synchronous=FULL` (`Sqlite:ConfigSyncMode` default `Full`); `queue.db` and `stats.db` stay `OFF` |
 | 7 | Name and trademark | **OWNER-DECIDED:** keep the name EggMail; no formal trademark search and no mark registration planned. Optional, light recommendation: before wide promotion, do a free check of the USPTO, EUIPO and WIPO databases. MIT licenses the code, not the name |
+| 8 | Secrets in the bundle | **OWNER-DECIDED:** Data Protection is the mechanism. Design (bundle key ring protected by a passphrase-protected throwaway certificate; target re-protects under its own ring) is DESIGN-DECIDED ([design.md §4.6](design.md#46-switching-backends-manual-and-symmetric)) |
+| 9 | Quiesce and history migration | **OWNER-DECIDED:** both are in v1; `--drain` stays the safe option; history migration is streamed, resumable and skippable |
+| 10 | Preset defaults | **OWNER-DECIDED:** identical defaults for every behavioural setting. The value `History:Mode=Full` (5-day queue, 25 MiB, 7-day content) is DESIGN-DECIDED |
+| 11 | Certificates and ACME state | **OWNER-DECIDED:** live in the database (config store, both backends) and travel in the bundle |
+| 12 | SQLite history layout | **DESIGN-DECIDED:** single `history.db`, batched deletes ([design.md §4.4](design.md#44-sqlite-backend-microsoftdatasqlite)) |
+| 13 | API status for history not recorded | **DESIGN-DECIDED:** `410 Gone` / `history_not_recorded`; `body_expired` reused; `404` for unknown ids ([design.md §5.2](design.md#52-api-behavior-when-history-is-not-recorded-or-has-expired-design-decided)) |
+| 14 | Orchestrator-managed configuration | **DESIGN-DECIDED:** the switch never rewrites env/ConfigMaps; verified target plus cutover patch, startup gate and source fence ([design.md §4.6](design.md#46-switching-backends-manual-and-symmetric)) |
 
 Note on the license: the Unlicense / CC0 public-domain dedication is the only more-permissive alternative to MIT (weaker legal footing in some jurisdictions, and no patent grant either); say so if the owner wants it. MIT itself also has no express patent grant, unlike Apache-2.0.
 
 ## Questions awaiting the owner
 
-1. **DKIM key re-wrapping across different key protection.** Source and target may use different `Secrets:KeyProtection` (a certificate on one, a KMS on the other, different Data Protection key rings). The design exports keys encrypted under a bundle key and re-wraps them on import. Which bundle encryption do we want: an operator passphrase (PBKDF2 from the BCL), the target's certificate public key, or both? Must it work when the source KMS key cannot be exported (the tool only needs to unwrap, so it needs access to the source KMS during export)? The exact scheme is unspecified.
-2. **Queued mail during a switch.** Drain-first (empty queue, nothing to move) is the default. Is `--quiesce` (export queued deliveries and spool bodies, import preserving ids and due times) in scope for v1? It risks duplicate delivery if the source is later resumed after the target has dispatched; the design guards this by keeping the source read-only and by making rollback after activation a reverse switch.
-3. **Per-message history across backends.** Moving events, content and retained raw (only when `History:Mode=Full` on both sides) is designed as optional and streamed, but can be hundreds of GB. Is it in scope for v1, or is "config, stats, queue" enough with history left in the read-only source? (It is the first cut item after ARC/TLS-RPT/DMARC reports; +1.5 weeks.)
-4. **Preset defaults vs identical settings.** Every setting exists on every backend, but defaults follow the backend (SQLite: `StatsOnly`, 48 h queue lifetime, 10 MiB max message; PostgreSQL: `Full`, 5 days, 25 MiB). Should the queue lifetime and max message size defaults be unified across backends? The switch tool already carries effective values across, so switching never changes behavior silently.
-5. **SQLite with `History:Mode=Full`.** A fourth file, `history.db`, holds events, content and retained raw. Is that layout acceptable, and what sizing guidance should the docs give (retention is batched `DELETE`, no partition drop)?
-6. **Error status for `history_not_recorded`.** Per-message lookups in `StatsOnly` return a clear error code; the HTTP status (proposed 404) is undecided.
-7. **Activating a switch.** The tool can rewrite a bootstrap file on the data volume; under orchestrators that inject configuration (environment, Kubernetes manifests) it can only display the change to apply. Acceptable?
-8. **Where certificates and ACME state live.** The design keeps them in a certificate store independent of the backend (volume or secret mount). If they are meant to live in the database, they must travel in the bundle as wrapped secrets.
-9. **`Content:RetentionDays`.** It stays 6–30 with no unlimited value (floor: outlive the 5-day queue; ceiling: personal data and storage). Does the owner want a higher ceiling or an explicit override switch? Unlimited was allowed for webhook outbox/attempt log, `Retention:MetadataDays`, `Stats:HourlyRetentionDays` and `Stats:DailyRetentionDays` ([design.md §5.1](design.md#51-retention-knobs-and-unlimited-retention)); confirm that `0` as the "keep forever" value is fine.
-10. **SQLite default warnings.** Is the prominent power-loss/corruption warning in the README acceptable as the main mitigation, or should the SQLite backend refuse `Off` unless an explicit acknowledgement setting is present? (Current design: `Off` is the silent default plus a dashboard banner.)
-11. **Effort.** The totals now include roughly +8 weeks (+2.5 corruption handling and the earlier switch, +5.5 for feature-identical backends and the symmetric switch) as new rough author estimates; they should be re-estimated ([plan.md](plan.md)).
+1. **`Content:RetentionDays`.** It stays 6–30 with no unlimited value (floor: outlive the 5-day queue; ceiling: personal data and storage). Does the owner want a higher ceiling or an explicit override switch? Unlimited was allowed for webhook outbox/attempt log, `Retention:MetadataDays`, `Stats:HourlyRetentionDays` and `Stats:DailyRetentionDays` ([design.md §5.1](design.md#51-retention-knobs-and-unlimited-retention)); confirm that `0` as the "keep forever" value is fine.
+2. **SQLite default warnings.** Is the prominent power-loss/corruption warning in the README acceptable as the main mitigation, or should the SQLite backend refuse `Off` unless an explicit acknowledgement setting is present? (Current design: `Off` is the silent default plus a dashboard banner.)
+3. **`History:Mode` default.** The owner asked for identical defaults and delegated the value; the design chose `Full` (delivery tracking out of the box, `StatsOnly` one setting away). Confirm, or choose `StatsOnly` as the single default (lighter, no personal data stored by default, but no message search or resend out of the box).
+4. **Quiesce timeout.** `--inflight-timeout` defaults to 10 minutes (the SMTP client's post-`.` wait). Is it acceptable that deliveries still in flight at the timeout are aborted and marked `in_doubt` (possible duplicate), or should the switch refuse to proceed until they finish?
+5. **Effort.** The totals now include about +14.5 weeks over the earlier 264 as new rough author estimates (+2.5 corruption handling, +5.5 feature-identical backends and the symmetric switch, +6.5 for the answers that grew scope); they should be re-estimated ([plan.md](plan.md)).
 
 ## Questions still open in the sources
 
@@ -49,6 +50,11 @@ Note on the license: the Unlicense / CC0 public-domain dedication is the only mo
 - SQLite commit rate on SSD under `synchronous=OFF`, `NORMAL` and `FULL` (Phase 0/1 benchmark spike), and the SQLite backend's behavior under group commit; whether group commit still pays off under `OFF`.
 - Bundle export/import throughput on both backends (EF bulk insert in batches), and verification cost, for large stats and history volumes.
 - Round-trip fidelity: SQLite → PostgreSQL → SQLite preserves config, stats and queue exactly (date/time and decimal handling differ between the providers).
+- History migration throughput and resumability on realistic volumes (chunking, checksums, backfill after activation); all time estimates for it are unverified.
+- Retention-delete cost on a single SQLite `history.db` under load, and the `WITHOUT ROWID (day, id)` key proposal; whether the bundled SQLite build's `ATTACH` limit would matter (only relevant if per-day files are adopted later).
+- The bundle's Data Protection flow: certificate-protected standalone key ring, PKCS#12 export with PBES2 / AES-256 (`ExportPkcs12`), and RSA assumptions, across source and target with different `Secrets:KeyProtection`.
+- Quiesce correctness: no duplicate sends except documented in-doubt cases, fence behavior on restart, rollback before and after activation.
+- Certificates in the database: renewal lease under contention and outage, hot reload by polling, bootstrap order, first-run self-signed flow.
 - Startup integrity-check cost (`quick_check` vs `integrity_check`) on large `queue.db` files, and whether it should run only after an unclean shutdown.
 - Fault injection: behavior of `Off`, `Normal` and `Full` under simulated OS crash and power loss.
 - Whether the advisory thresholds (1,000 queue depth / 100 ms p99) are meaningful under `OFF`, where commit latency should be much lower.
@@ -70,4 +76,4 @@ Claims not confirmed against a primary source (also noted inline in the other do
 - Mailgun and SendGrid retention/at-rest figures; Cloud SQL pricing and HA behavior
 - OpenSSL TLS 1.3 ticket caching; fsync behavior on overlayfs/XFS/ext4; Native AOT feasibility
 - The partition-count cost of unlimited `Retention:MetadataDays` (PostgreSQL partitioning docs, not re-fetched)
-- All values marked "proposed" or "mine" in the source: 256 KiB stored body, 48 h Lite-preset queue lifetime, 10 MiB Lite-preset max message, 1,000-event ring, 20 KB average content size, 7-day retention default, per-endpoint concurrency 4, connection pool sizes, volume thresholds for splitting databases, and the 15–20 week Lite-first saving
+- All values marked "proposed" or "mine" in the source: 256 KiB stored body, 1,000-event ring, 20 KB average content size, 7-day retention default, per-endpoint concurrency 4, connection pool sizes, volume thresholds for splitting databases, and the 15–20 week Lite-first saving

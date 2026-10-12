@@ -21,26 +21,28 @@ An open-source, self-hosted **outbound email server** from [eggspot](https://git
 
 How much **per-message history** is recorded is a separate setting, `History:Mode` (`StatsOnly` | `Full`), that works on either backend. **Any combination is allowed.**
 
-"Lite" and "Full" are friendly names for the two default presets:
+"Lite" and "Full" are friendly names for the two backends' default deployment shapes: **Lite = SQLite, Full = PostgreSQL. They have exactly the same defaults for every behavioural setting.** Only the storage backend and its storage-specific defaults differ:
 
-| | **Lite** preset | **Full** preset |
+| | **Lite** (SQLite) | **Full** (PostgreSQL) |
 |---|---|---|
-| `Storage:Backend` | SQLite | PostgreSQL |
-| `History:Mode` default | `StatsOnly` (statistics and a recent-events ring, no per-message record) | `Full` (events, search, content, resend) |
-| `Queue:MaxLifetime` default | 48 hours | 5 days |
-| `Smtp:MaxMessageSize` default | 10 MiB | 25 MiB |
-| Acknowledgement | `250`/`202` after the data is handed to the OS (`Sqlite:SyncMode=Off`): **process-crash-safe, not power-loss-safe** | `250`/`202` only after a durable (synced) commit |
+| `Storage:Backend` | `Sqlite` | `Postgres` |
+| `History:Mode` default | `Full` | `Full` |
+| Queue lifetime / max message / recipients | 5 days / 25 MiB / 50 | 5 days / 25 MiB / 50 |
+| Content retention, attachments, webhooks, stats | identical | identical |
+| Acknowledgement | `250`/`202` after the data is handed to the OS (`Sqlite:SyncMode=Off`, a storage setting): **process-crash-safe, not power-loss-safe** | `250`/`202` only after a durable (synced) commit |
+
+`History:Mode=Full` (events, search, content for 7 days, resend) is the default on both. For the lightweight, fire-and-forget behavior (statistics and a recent-events ring, no per-message record) set `History:Mode=StatsOnly` on either backend. See [docs/design.md §4.1](docs/design.md#41-backends-history-level-and-presets).
 
 Backend **characteristics** (not missing features): SQLite is single node and one replica, has a single-writer throughput ceiling, uses a local volume only, and retains data with batched deletes instead of partition drops; PostgreSQL brings HA and multiple replicas and needs a managed Postgres. Details in [docs/design.md §4.2](docs/design.md#42-backend-characteristics-not-feature-differences).
 
-**Switching is manual, symmetric and easy; it never happens automatically.** Dashboard indicators are advisory only. A guided dashboard action and a CLI (`mta migrate-storage --to postgres|sqlite`) move you in either direction with one portable, versioned bundle: preflight, drain, export, import, verify, confirm, activate, with rollback. Only the storage changes; features and settings stay as they were. See [docs/design.md §4.6](docs/design.md#46-switching-backends-manual-and-symmetric).
+**Switching is manual, symmetric and easy; it never happens automatically.** Dashboard indicators are advisory only. A guided dashboard action and a CLI (`mta migrate-storage --to postgres|sqlite`) move you in either direction with one portable, versioned bundle: preflight, drain or quiesce (no need to wait for an empty queue), export, import, verify, confirm, activate, with rollback. The bundle carries config, certificates and ACME state, stats, queued mail and, optionally, per-message history; secrets travel protected by Data Protection and are never written in clear. Only the storage changes; features and settings stay as they were. See [docs/design.md §4.6](docs/design.md#46-switching-backends-manual-and-symmetric).
 
 ## Documentation
 
 | Document | Contents |
 |---|---|
 | [docs/design.md](docs/design.md) | Architecture, components, interfaces, storage backends and history level, switching, content retention, webhooks, TLS and ports, security, deployment |
-| [docs/decisions.md](docs/decisions.md) | The decisions record (owner decisions A–G and items 1–30) |
+| [docs/decisions.md](docs/decisions.md) | The decisions record (owner and design decisions A–N and items 1–36) |
 | [docs/plan.md](docs/plan.md) | Components with engineer-week estimates, phases, cut order, risks, calendar |
 | [docs/benchmarks.md](docs/benchmarks.md) | How performance will be measured and compared, per mode |
 | [docs/open-questions.md](docs/open-questions.md) | Questions awaiting the owner, items to settle with spikes, unverified items |
