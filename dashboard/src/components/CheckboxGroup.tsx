@@ -37,7 +37,12 @@ export function CheckboxGroup({
             />
             <label for={`${id}-${i}`}>
               <code>{opt}</code>
-              {describe?.(opt) && <span class="muted small"> {describe(opt)}</span>}
+              {describe?.(opt) && (
+                <>
+                  {' '}
+                  <span class="muted small">{describe(opt)}</span>
+                </>
+              )}
             </label>
           </div>
         ))}
