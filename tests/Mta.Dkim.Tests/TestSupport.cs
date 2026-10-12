@@ -24,9 +24,16 @@ internal sealed class FixedClock : IClock
 /// <summary>RSA keys are slow to generate; share them across tests.</summary>
 internal static class TestKeys
 {
-    public static readonly RSA Rsa2048 = RSA.Create(2048);
-    public static readonly RSA Rsa2048Other = RSA.Create(2048);
-    public static readonly RSA Rsa1024 = RSA.Create(1024);
+    public static readonly RSA Rsa2048 = Warm(RSA.Create(2048));
+    public static readonly RSA Rsa2048Other = Warm(RSA.Create(2048));
+    public static readonly RSA Rsa1024 = Warm(RSA.Create(1024));
+
+    // Some platforms (macOS) generate the key lazily on first use; doing that from several test threads at once races.
+    private static RSA Warm(RSA key)
+    {
+        _ = key.ExportSubjectPublicKeyInfo();
+        return key;
+    }
 }
 
 internal static class Msg

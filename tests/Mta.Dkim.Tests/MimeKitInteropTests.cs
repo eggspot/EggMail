@@ -120,7 +120,7 @@ public class MimeKitInteropTests
 
         var results = await Msg.Verifier(Msg.Dns(TestKeys.Rsa2048)).VerifyAsync(wire);
         var r = Assert.Single(results);
-        Assert.True(r.Status == DkimStatus.Pass, $"{headerCanon}/{bodyCanon}: {r.Status} {r.Reason}\n{Encoding.Latin1.GetString(wire, 0, Math.Min(wire.Length, 900))}");
+        Assert.True(r.Status == DkimStatus.Pass, $"{headerCanon}/{bodyCanon}: {r.Status} {r.Reason}\n{Encoding.Latin1.GetString(wire, 0, Math.Min(wire.Length, 2000)).Replace("\r", "\\r")}");
         Assert.Equal(2048, r.KeyBits);
     }
 
