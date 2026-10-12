@@ -43,6 +43,7 @@ public sealed class SpfEvaluator : ISpfEvaluator
     public async ValueTask<SpfCheckResult> CheckHostAsync(SpfCheckRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(request.ClientIp);
         if (!SpfDomainName.TryNormalizeCheckDomain(request.Domain, out string? domain))
         {
             return new SpfCheckResult(SpfResult.None, (request.Domain ?? string.Empty).ToLowerInvariant(), Reason: "not a valid domain name");
@@ -78,7 +79,10 @@ public sealed class SpfEvaluator : ISpfEvaluator
     public async ValueTask<SpfSessionResult> CheckSessionAsync(IPAddress clientIp, string heloDomain, string? mailFrom, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(clientIp);
-        SpfCheckResult helo = await CheckHostAsync(SpfCheckRequest.ForHelo(clientIp, heloDomain), cancellationToken).ConfigureAwait(false);
+        heloDomain ??= string.Empty;
+        SpfCheckResult helo = !string.IsNullOrEmpty(mailFrom) && !_options.CheckHeloIdentity
+            ? new SpfCheckResult(SpfResult.None, heloDomain.ToLowerInvariant(), Reason: "HELO identity not checked")
+            : await CheckHostAsync(SpfCheckRequest.ForHelo(clientIp, heloDomain), cancellationToken).ConfigureAwait(false);
         if (string.IsNullOrEmpty(mailFrom))
         {
             return new SpfSessionResult(helo, null);
@@ -533,6 +537,8 @@ public sealed class SpfEvaluator : ISpfEvaluator
                 return null;
             }
 
+            // Problems with the explanation must never turn a computed Fail into a PermError.
+            bool overflowBefore = _macroOverflow;
             string? text = null;
             if (record.Explanation is not null)
             {
@@ -545,6 +551,7 @@ public sealed class SpfEvaluator : ISpfEvaluator
                 text = await ExpandExplanationAsync(defaultMacro, domain).ConfigureAwait(false);
             }
 
+            _macroOverflow = overflowBefore;
             return text;
         }
 

@@ -45,7 +45,9 @@ public static class DmarcAggregateReportReader
             report = Parse(xml);
             return report is not null;
         }
-        catch (Exception ex) when (ex is XmlException or InvalidDataException or FormatException or OverflowException or ArgumentException or IOException)
+#pragma warning disable CA1031 // Received reports are hostile; whatever goes wrong, the answer is "not a usable report".
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+#pragma warning restore CA1031
         {
             report = null;
             return false;

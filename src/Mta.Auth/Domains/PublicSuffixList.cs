@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 
 namespace Mta.Auth.Domains;
@@ -10,7 +11,9 @@ namespace Mta.Auth.Domains;
 public sealed class PublicSuffixList
 {
     private const string ResourceName = "Mta.Auth.public_suffix_list.dat";
+    private const int MaxLabels = 128;
     private static readonly Lazy<PublicSuffixList> DefaultInstance = new(LoadEmbedded, LazyThreadSafetyMode.ExecutionAndPublication);
+    private static readonly IdnMapping StrictIdn = new() { UseStd3AsciiRules = false };
 
     private readonly HashSet<string> _rules;
     private readonly HashSet<string> _wildcardParents;
@@ -124,14 +127,15 @@ public sealed class PublicSuffixList
     /// <returns>The suffix in lower-case A-label form, or <see langword="null"/> when the input is not a usable domain name.</returns>
     public string? GetPublicSuffix(string domain)
     {
-        string[]? labels = SplitLabels(domain);
-        if (labels is null)
+        if (!TryNormalize(domain, out string? name))
         {
             return null;
         }
 
-        int suffixLabels = CountSuffixLabels(labels);
-        return string.Join('.', labels, labels.Length - suffixLabels, suffixLabels);
+        Span<int> starts = stackalloc int[MaxLabels];
+        int labels = SplitLabels(name, starts);
+        int suffixLabels = CountSuffixLabels(name, starts[..labels]);
+        return name[starts[labels - suffixLabels]..];
     }
 
     /// <summary>
@@ -142,51 +146,64 @@ public sealed class PublicSuffixList
     /// </summary>
     public string GetOrganizationalDomain(string domain)
     {
-        string[]? labels = SplitLabels(domain);
-        if (labels is null)
+        if (!TryNormalize(domain, out string? name))
         {
             string raw = (domain ?? string.Empty).Trim();
             return (raw.EndsWith('.') ? raw[..^1] : raw).ToLowerInvariant();
         }
 
-        int suffixLabels = CountSuffixLabels(labels);
-        int take = Math.Min(labels.Length, suffixLabels + 1);
-        return string.Join('.', labels, labels.Length - take, take);
+        Span<int> starts = stackalloc int[MaxLabels];
+        int labels = SplitLabels(name, starts);
+        int suffixLabels = CountSuffixLabels(name, starts[..labels]);
+        int take = Math.Min(labels, suffixLabels + 1);
+        return take == labels ? name : name[starts[labels - take]..];
     }
 
     /// <summary>True when <paramref name="domain"/> is exactly a public suffix (for example <c>co.uk</c>).</summary>
     public bool IsPublicSuffix(string domain)
     {
-        string[]? labels = SplitLabels(domain);
-        return labels is not null && CountSuffixLabels(labels) == labels.Length;
+        if (!TryNormalize(domain, out string? name))
+        {
+            return false;
+        }
+
+        Span<int> starts = stackalloc int[MaxLabels];
+        int labels = SplitLabels(name, starts);
+        return CountSuffixLabels(name, starts[..labels]) == labels;
     }
 
     /// <summary>True when both names share the same organizational domain (relaxed identifier alignment).</summary>
     public bool HaveSameOrganizationalDomain(string first, string second) =>
         string.Equals(GetOrganizationalDomain(first), GetOrganizationalDomain(second), StringComparison.Ordinal);
 
-    private int CountSuffixLabels(string[] labels)
+    /// <summary>Counts how many trailing labels of <paramref name="name"/> form its public suffix.</summary>
+    private int CountSuffixLabels(string name, ReadOnlySpan<int> starts)
     {
-        int n = labels.Length;
+        int n = starts.Length;
+        var exceptions = _exceptions.GetAlternateLookup<ReadOnlySpan<char>>();
+        var rules = _rules.GetAlternateLookup<ReadOnlySpan<char>>();
+        var wildcards = _wildcardParents.GetAlternateLookup<ReadOnlySpan<char>>();
 
         // Exception rules prevail over every other matching rule: the suffix is the exception minus its leftmost label.
-        for (int i = 0; i < n; i++)
+        if (_exceptions.Count > 0)
         {
-            if (_exceptions.Count > 0 && _exceptions.Contains(Join(labels, i)))
+            for (int i = 0; i < n; i++)
             {
-                return n - i - 1;
+                if (exceptions.Contains(name.AsSpan(starts[i])))
+                {
+                    return n - i - 1;
+                }
             }
         }
 
         for (int i = 0; i < n; i++)
         {
-            string candidate = Join(labels, i);
-            if (_rules.Contains(candidate))
+            if (rules.Contains(name.AsSpan(starts[i])))
             {
                 return n - i;
             }
 
-            if (i + 1 < n && _wildcardParents.Contains(Join(labels, i + 1)))
+            if (i + 1 < n && wildcards.Contains(name.AsSpan(starts[i + 1])))
             {
                 return n - i;
             }
@@ -195,13 +212,32 @@ public sealed class PublicSuffixList
         return 1; // implicit "*" rule
     }
 
-    private static string Join(string[] labels, int from) => string.Join('.', labels, from, labels.Length - from);
-
-    private static string[]? SplitLabels(string? domain)
+    /// <summary>Writes the start index of every label of an already validated name; returns the label count.</summary>
+    private static int SplitLabels(string name, Span<int> starts)
     {
+        int count = 0;
+        starts[count++] = 0;
+        for (int i = 0; i < name.Length; i++)
+        {
+            if (name[i] == '.')
+            {
+                starts[count++] = i + 1;
+            }
+        }
+
+        return count;
+    }
+
+    /// <summary>
+    /// Validates and normalises a name to lower-case A-label form without a trailing dot: non-empty labels of at most
+    /// 63 characters, at most 253 characters in total (and so at most 127 labels).
+    /// </summary>
+    private static bool TryNormalize(string? domain, [NotNullWhen(true)] out string? name)
+    {
+        name = null;
         if (string.IsNullOrWhiteSpace(domain))
         {
-            return null;
+            return false;
         }
 
         string d = domain.Trim();
@@ -212,25 +248,40 @@ public sealed class PublicSuffixList
 
         if (d.Length == 0 || d.Length > 253)
         {
-            return null;
+            return false;
         }
 
-        string? ascii = ToAscii(d, new IdnMapping { UseStd3AsciiRules = false });
-        if (ascii is null)
+        string? ascii = ToAscii(d, StrictIdn);
+        if (ascii is null || ascii.Length > 253)
         {
-            return null;
+            return false;
         }
 
-        string[] labels = ascii.Split('.');
-        foreach (string label in labels)
+        int labelLength = 0;
+        foreach (char c in ascii)
         {
-            if (label.Length == 0 || label.Length > 63)
+            if (c == '.')
             {
-                return null;
+                if (labelLength == 0)
+                {
+                    return false;
+                }
+
+                labelLength = 0;
+            }
+            else if (++labelLength > 63)
+            {
+                return false;
             }
         }
 
-        return labels;
+        if (labelLength == 0)
+        {
+            return false;
+        }
+
+        name = ascii;
+        return true;
     }
 
     private static string? ToAscii(string name, IdnMapping idn)

@@ -107,6 +107,19 @@ public class SpfEvaluatorTests
     }
 
     [Fact]
+    public async Task Helo_check_can_be_skipped_when_a_mail_from_is_present()
+    {
+        var zone = Build(Z("helo.example.net TXT v=spf1 -all", "example.com TXT v=spf1 +all"));
+        var skipped = await new SpfEvaluator(zone, new SpfOptions { CheckHeloIdentity = false }).CheckSessionAsync(Ip("192.0.2.3"), Helo, "u@example.com");
+        Assert.Equal(SpfResult.None, skipped.Helo.Result);
+        Assert.Equal(SpfResult.Pass, skipped.MailFrom!.Result);
+
+        // With a null reverse-path the HELO identity is the only one and is always checked.
+        var nullSender = await new SpfEvaluator(zone, new SpfOptions { CheckHeloIdentity = false }).CheckSessionAsync(Ip("192.0.2.3"), Helo, null);
+        Assert.Equal(SpfResult.Fail, nullSender.Helo.Result);
+    }
+
+    [Fact]
     public void For_mail_from_without_at_sign_uses_postmaster()
     {
         var request = SpfCheckRequest.ForMailFrom(Ip("192.0.2.3"), Helo, "example.com");

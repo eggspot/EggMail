@@ -352,8 +352,8 @@ public sealed class DmarcEvaluator : IDmarcEvaluator
     public static bool IsAligned(string authenticatedDomain, string fromDomain, DmarcAlignmentMode mode, PublicSuffixList publicSuffixList)
     {
         ArgumentNullException.ThrowIfNull(publicSuffixList);
-        string a = Normalize(authenticatedDomain);
-        string f = Normalize(fromDomain);
+        string a = Normalize(authenticatedDomain ?? string.Empty);
+        string f = Normalize(fromDomain ?? string.Empty);
         if (a.Length == 0 || f.Length == 0)
         {
             return false;

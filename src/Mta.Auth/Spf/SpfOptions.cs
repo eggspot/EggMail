@@ -41,6 +41,12 @@ public sealed class SpfOptions
     /// <summary>Whether to fetch <c>exp=</c> explanations (one extra TXT query, not counted against the lookup limit).</summary>
     public bool EvaluateExplanations { get; init; } = true;
 
+    /// <summary>
+    /// Whether <see cref="ISpfEvaluator.CheckSessionAsync"/> also checks the HELO identity when a MAIL FROM address is present
+    /// (RFC 7208 section 2.3 recommends it; it costs a second evaluation). With a null reverse-path the HELO identity is always checked.
+    /// </summary>
+    public bool CheckHeloIdentity { get; init; } = true;
+
     /// <summary>Time source for the <c>%{t}</c> macro.</summary>
     public IClock Clock { get; init; } = SystemClock.Instance;
 
