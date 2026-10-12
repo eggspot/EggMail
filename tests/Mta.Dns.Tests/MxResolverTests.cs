@@ -426,3 +426,20 @@ public class LiveDnsTests
         Assert.Contains(txt, t => t.StartsWith("v=spf1", StringComparison.Ordinal));
     }
 }
+
+public class MxAuthenticatedTests
+{
+    [Fact]
+    public async Task Exposes_the_ad_bit_of_the_mx_answer()
+    {
+        var dns = new StaticDnsResolver { AuthenticatedData = true };
+        dns.AddMx("example.com", 10, "mx.example.com").AddA("mx.example.com", "192.0.2.10");
+        var r = await new MxResolver(dns).ResolveAsync("example.com");
+        Assert.True(r.IsOk);
+        Assert.True(r.MxAuthenticated);
+
+        var plain = new StaticDnsResolver();
+        plain.AddMx("example.com", 10, "mx.example.com").AddA("mx.example.com", "192.0.2.10");
+        Assert.False((await new MxResolver(plain).ResolveAsync("example.com")).MxAuthenticated);
+    }
+}

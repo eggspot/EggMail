@@ -55,6 +55,12 @@ public sealed record MxResolution(MxResolutionStatus Status, IReadOnlyList<MailE
     public string? Detail { get; init; }
 
     public bool IsOk => Status == MxResolutionStatus.Ok;
+
+    /// <summary>
+    /// The AD bit of the MX answer (only ever true when the resolver is configured to trust it, for example a local
+    /// validating Unbound). DANE (RFC 7672) requires a secure MX RRset before TLSA records may be used.
+    /// </summary>
+    public bool MxAuthenticated { get; init; }
 }
 
 /// <summary>The result of <see cref="MxResolver.ResolveHostAsync"/>.</summary>
@@ -171,7 +177,7 @@ public sealed class MxResolver
 
         if (exchangers.Count > 0)
         {
-            return new MxResolution(MxResolutionStatus.Ok, exchangers);
+            return new MxResolution(MxResolutionStatus.Ok, exchangers) { MxAuthenticated = mx.AuthenticatedData };
         }
 
         return anyTemporary
