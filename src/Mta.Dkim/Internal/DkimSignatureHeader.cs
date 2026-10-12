@@ -68,6 +68,18 @@ internal sealed class DkimSignatureHeader
         tags = tags.Slice(0, count);
 
         // d= and s= first so that they are reported even when a later tag is bad.
+        // Single-token tags may not contain folding or other whitespace.
+        foreach (var tag in tags)
+        {
+            var name = field.Slice(tag.NameStart, tag.NameLength);
+            if ((name.SequenceEqual("d"u8) || name.SequenceEqual("s"u8) || name.SequenceEqual("v"u8) || name.SequenceEqual("a"u8) || name.SequenceEqual("c"u8)
+                    || name.SequenceEqual("q"u8) || name.SequenceEqual("l"u8) || name.SequenceEqual("t"u8) || name.SequenceEqual("x"u8))
+                && HasWhitespace(field.Slice(tag.ValueStart, tag.ValueLength)))
+            {
+                return sig.Fail(DkimStatus.Neutral, DkimFailure.MalformedSignature, "whitespace inside a single-token tag value");
+            }
+        }
+
         if (!TagListParser.TryFind(field, tags, "d"u8, out var d) || d.ValueLength == 0) { return sig.Fail(DkimStatus.Neutral, DkimFailure.MalformedSignature, "missing d= tag"); }
         string domain = TagListParser.CompactAscii(TagListParser.Value(field, d)).ToLowerInvariant();
         if (!DkimNames.IsValidDomain(domain)) { return sig.Fail(DkimStatus.Neutral, DkimFailure.MalformedSignature, "invalid d= domain"); }
@@ -168,6 +180,16 @@ internal sealed class DkimSignatureHeader
         }
 
         return sig;
+    }
+
+    private static bool HasWhitespace(ReadOnlySpan<byte> value)
+    {
+        foreach (byte b in value)
+        {
+            if (TagListParser.IsWhitespace(b)) { return true; }
+        }
+
+        return false;
     }
 
     private static bool TryCanon(string value, out bool relaxed)
