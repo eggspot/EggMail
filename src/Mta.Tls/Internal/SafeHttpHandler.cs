@@ -104,6 +104,29 @@ internal static class PublicAddressGuard
             return false;
         }
 
+        // Addresses that embed an IPv4 address inherit that address's classification: IPv4-compatible (::a.b.c.d),
+        // NAT64 (64:ff9b::/96) and 6to4 (2002::/16).
+        bool zeroPrefix = true;
+        for (int i = 0; i < 12; i++)
+        {
+            zeroPrefix &= b[i] == 0;
+        }
+
+        if (zeroPrefix)
+        {
+            return IsPublic(new IPAddress(b.Slice(12, 4)));
+        }
+
+        if (b[0] == 0x00 && b[1] == 0x64 && b[2] == 0xff && b[3] == 0x9b && b[4..12].IndexOfAnyExcept((byte)0) < 0)
+        {
+            return IsPublic(new IPAddress(b.Slice(12, 4)));
+        }
+
+        if (b[0] == 0x20 && b[1] == 0x02)
+        {
+            return IsPublic(new IPAddress(b.Slice(2, 4)));
+        }
+
         // The 2001:db8::/32 documentation range is not a valid delivery target either.
         if (b[0] == 0x20 && b[1] == 0x01 && b[2] == 0x0d && b[3] == 0xb8)
         {

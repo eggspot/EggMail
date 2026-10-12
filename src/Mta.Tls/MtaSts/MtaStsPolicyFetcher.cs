@@ -1,7 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Security.Authentication;
-using System.Text;
 
 namespace Mta.Tls.MtaSts;
 
@@ -144,8 +143,9 @@ public sealed class MtaStsPolicyFetcher : IMtaStsPolicyFetcher, IDisposable
         {
             return Fail(MtaStsFetchFailure.ConnectionFailed, "request failed");
         }
-        catch (Exception ex) when (ex is IOException or InvalidOperationException or AuthenticationException or UriFormatException)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            // Anything else from the transport (I/O errors, malformed responses, disposed streams) is a failed fetch.
             return Fail(MtaStsFetchFailure.ConnectionFailed, "request failed");
         }
     }

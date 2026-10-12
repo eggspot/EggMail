@@ -1,5 +1,4 @@
 using System.Net.Http.Headers;
-using System.Security.Authentication;
 
 namespace Mta.Tls.TlsRpt;
 
@@ -85,7 +84,7 @@ public sealed class TlsRptHttpsSender : IDisposable
         {
             return new TlsRptSendResult(false, null, "request timed out");
         }
-        catch (Exception ex) when (ex is HttpRequestException or IOException or AuthenticationException or InvalidOperationException)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return new TlsRptSendResult(false, null, "request failed");
         }

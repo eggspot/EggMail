@@ -477,6 +477,14 @@ public class PublicAddressGuardTests
     [InlineData("::ffff:10.0.0.1", false)]
     [InlineData("::ffff:127.0.0.1", false)]
     [InlineData("::ffff:8.8.8.8", true)]
+    [InlineData("64:ff9b::7f00:1", false)]
+    [InlineData("64:ff9b::a00:1", false)]
+    [InlineData("64:ff9b::808:808", true)]
+    [InlineData("2002:7f00:1::", false)]
+    [InlineData("2002:c0a8:101::", false)]
+    [InlineData("2002:808:808::", true)]
+    [InlineData("::7f00:1", false)]
+    [InlineData("::a00:1", false)]
     public void Classifies_addresses(string address, bool isPublic)
     {
         Assert.Equal(isPublic, PublicAddressGuard.IsPublic(IPAddress.Parse(address)));
