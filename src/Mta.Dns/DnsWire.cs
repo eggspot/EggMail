@@ -129,7 +129,7 @@ public static class DnsWire
     }
 
     /// <summary>The length in bytes of the (uncompressed) question section of a query: name, type and class.</summary>
-    internal static bool TryGetQuestionLength(ReadOnlySpan<byte> query, out int length)
+    public static bool TryGetQuestionLength(ReadOnlySpan<byte> query, out int length)
     {
         int pos = HeaderLength;
         int wire = 0;

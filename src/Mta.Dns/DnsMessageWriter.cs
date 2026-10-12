@@ -18,7 +18,8 @@ public readonly record struct DnsQueryOptions(
     /// <summary>1232 bytes avoids IP fragmentation on a 1280-byte-MTU IPv6 path (DNS Flag Day 2020).</summary>
     public const ushort DefaultEdnsUdpPayloadSize = 1232;
 
-    public static DnsQueryOptions Default => new();
+    /// <summary>Recursion desired, EDNS0 with a 1232-byte payload, no DNSSEC flags. (Note that <c>default(DnsQueryOptions)</c> is all-zero: no RD, no EDNS.)</summary>
+    public static DnsQueryOptions Default => new(RecursionDesired: true, EdnsUdpPayloadSize: DefaultEdnsUdpPayloadSize);
 }
 
 /// <summary>Builds DNS query messages (RFC 1035 §4, EDNS0 per RFC 6891). Allocation-free: writes into a caller-supplied span.</summary>
