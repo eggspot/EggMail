@@ -170,7 +170,7 @@ public static class MessageContentExtractor
         return text;
     }
 
-    /// <summary>Replaces control characters (including CR, LF, TAB and NUL) with spaces, trims, and caps the length.</summary>
+    /// <summary>Replaces each run of control characters (including CR, LF, TAB and NUL) with one space, trims, and caps the length.</summary>
     private static string SanitizeLine(string value, out bool truncated)
     {
         truncated = false;
@@ -201,12 +201,27 @@ public static class MessageContentExtractor
             return value.Trim();
         }
 
-        return string.Create(value.Length, value, static (span, src) =>
+        // Each run of control characters becomes one space.
+        var sb = new System.Text.StringBuilder(value.Length);
+        bool inRun = false;
+        foreach (char c in value)
         {
-            for (int i = 0; i < span.Length; i++)
+            if (char.IsControl(c))
             {
-                span[i] = char.IsControl(src[i]) ? ' ' : src[i];
+                if (!inRun)
+                {
+                    sb.Append(' ');
+                }
+
+                inRun = true;
             }
-        }).Trim();
+            else
+            {
+                sb.Append(c);
+                inRun = false;
+            }
+        }
+
+        return sb.ToString().Trim();
     }
 }
