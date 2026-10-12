@@ -403,7 +403,9 @@ public sealed class ArcMessageSignatureHeader
         {
             int colon = value.IndexOf((byte)':');
             var part = colon < 0 ? value : value.Slice(0, colon);
-            string name = ArcTagList.CompactAscii(part).ToLowerInvariant();
+            while (!part.IsEmpty && ArcTagList.IsWhitespace(part[0])) { part = part.Slice(1); }
+            while (!part.IsEmpty && ArcTagList.IsWhitespace(part[^1])) { part = part.Slice(0, part.Length - 1); }
+            string name = Encoding.ASCII.GetString(part).ToLowerInvariant();
             if (name.Length == 0) { error = "empty header name in h="; return false; }
             foreach (char ch in name)
             {
