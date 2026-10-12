@@ -1,8 +1,16 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <RootNamespace>Mta.Auth</RootNamespace>
+  </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Mta.Core\Mta.Core.csproj" />
     <ProjectReference Include="..\Mta.Dns\Mta.Dns.csproj" />
     <ProjectReference Include="..\Mta.Mime\Mta.Mime.csproj" />
     <ProjectReference Include="..\Mta.Dkim\Mta.Dkim.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Public Suffix List (MPL-2.0), embedded unmodified. See docs/components/auth.md for the notice. -->
+    <EmbeddedResource Include="Domains\public_suffix_list.dat" LogicalName="Mta.Auth.public_suffix_list.dat" />
   </ItemGroup>
 </Project>
