@@ -8,6 +8,11 @@ public static class ApiKeys
 {
     public const string Prefix = "egm_";
 
+    // 6 id bytes and 32 secret bytes in unpadded base64url (8 and 43 characters). Base64url may itself contain '_', so the layout is positional.
+    private const int IdLength = 8;
+    private const int SecretLength = 43;
+    private const int TokenLength = 4 + IdLength + 1 + SecretLength;
+
     /// <summary>Creates a key. Returns the full token (show once), its display prefix and the digest to store.</summary>
     public static (string Token, string DisplayPrefix, byte[] Digest) Generate()
     {
@@ -21,7 +26,8 @@ public static class ApiKeys
 
     /// <summary>Cheap syntax check before touching the database.</summary>
     public static bool LooksLikeKey(string? token) =>
-        token is { Length: >= 40 and <= 80 } && token.StartsWith(Prefix, StringComparison.Ordinal) && token.Count(c => c == '_') == 2;
+        token is { Length: TokenLength } && token.StartsWith(Prefix, StringComparison.Ordinal) && token[Prefix.Length + IdLength] == '_'
+        && token.AsSpan(Prefix.Length).ToString().All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_');
 
     private static string ToBase64Url(byte[] data) => Convert.ToBase64String(data).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 }
