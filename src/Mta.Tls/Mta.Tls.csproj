@@ -1,6 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Mta.Core\Mta.Core.csproj" />
     <ProjectReference Include="..\Mta.Dns\Mta.Dns.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Mta.Tls.Tests" />
   </ItemGroup>
 </Project>

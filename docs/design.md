@@ -32,26 +32,31 @@ The one carve-out from "no external binaries": DANE uses a local validating reso
 
 ### 2.2 Indicative solution layout
 
-Carried from the earlier plan with the custom storage engine removed; treat as indicative.
+As built (the first sketch had no separate Dsn, Tls, Delivery, Webhooks or Portability projects; they were split out when the components were implemented).
 
 ```
 src/
-  Mta.Core              ids, time, results, options
-  Mta.Dns               packet codec + resolver (I/O behind IDnsTransport)
-  Mta.Mime              parse/compose, header folding
+  Mta.Core              ids (UUIDv7), clock, EmailAddress, log/secret seams       } package-free
+  Mta.Dns               packet codec, UDP/TCP transport, cache, MX resolver         } (CI-guarded,
+  Mta.Mime              parse/compose, header folding, content extraction           }  decision 4)
   Mta.Dkim              canonicalization, sign/verify
-  Mta.Auth              SPF / DMARC / ARC
-  Mta.Smtp.Protocol     commands, replies, dot-stuffing, state machine (pure, no I/O)
+  Mta.Auth              SPF / DMARC / Authentication-Results / ARC
+  Mta.Dsn               DSN/ARF generation and parsing, VERP tokens
+  Mta.Tls               MTA-STS, DANE, TLS-RPT, outbound TLS policy decision
+  Mta.Smtp.Protocol     commands, replies, dot-stuffing, DATA scanner, state machine (pure, no I/O)
   Mta.Smtp.Server       listeners, sessions, pipelines, STARTTLS
-  Mta.Smtp.Client       outbound delivery, connection reuse, MX selection
-  Mta.Storage          store interfaces + shared logic (config store, stats store)
-  Mta.Storage.Postgres  EF Core provider (PostgreSQL backend)
-  Mta.Storage.Sqlite    EF Core provider (SQLite backend)
-  Mta.Storage.Portability  bundle format, export/import engine, verification, key re-wrapping
-  Mta.Policy            routing, rate limits, retries, tenancy
-  Mta.Observability     metrics, JSON logs, trace context
-  Mta.Host              composition root, config, API, dashboard
-  Mta.Tools             load generator, sink, crash harness
+  Mta.Smtp.Client       outbound connections, TLS policy, AUTH, DATA/BDAT, connection pool
+  Mta.Storage           contracts, options, shared EF model, in-memory backend
+  Mta.Storage.Sqlite    SQLite backend (per-file writers)
+  Mta.Storage.Postgres  PostgreSQL backend (partitions, SKIP LOCKED claim)
+  Mta.Storage.Portability  bundle format, switch engine, verification, secret re-protection
+  Mta.Policy            retry schedule, reply classification, throttling, routes, warm-up, sender policy
+  Mta.Delivery          scheduler/engine, bounce processing, DKIM signing at delivery
+  Mta.Webhooks          Standard Webhooks signing, SSRF guard, dispatcher
+  Mta.Observability     metrics (Prometheus text, OTLP), log adapter, health
+  Mta.Host              composition root (`mta`), configuration, HTTP API, dashboard hosting, ACME
+  Mta.Tools             load generator, sink (`mta-tools`)
+dashboard/              Preact + Vite SPA (built in the Docker Node stage)
 tests/  bench/
 ```
 
