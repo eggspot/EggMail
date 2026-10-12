@@ -25,10 +25,11 @@ Running status of the implementation, updated in every pull request. **Productio
 | Dashboard SPA (Preact + Vite) | merged (**not run in a real browser**) | 371 tests against a mock API |
 | Delivery engine: grouping, MX/relay routes, TLS policy, DKIM signing at delivery, VERP return path, retry/hold/expiry, DSN generation, quiesce | this PR | 13 end-to-end tests over loopback with in-memory storage |
 | SMTP ingest (AUTH, sender policy, submission service, bounce listener, bounce/complaint processing) | this PR | 8 loopback tests with MailKit |
+| Host composition: Data Protection key ring in the config store, runtime wiring (SMTP, delivery, webhooks, certificates/ACME, maintenance), `mta` CLI (`serve`, `migrate-db`, `--healthcheck`, `--version`), dashboard static hosting with strict headers | this PR | 3 secrets tests, 2 full-pipeline integration tests on the SQLite backend, manual smoke run of the real process (healthz, SMTP banner, graceful shutdown) |
 | PostgreSQL backend | in progress (parallel work) | |
 | HTTP API (docs/api.md) | not started | |
 | Domain verification service (scheduler over the planner/checker and `VerificationSchedule`) | not started | |
-| Host composition root and `mta` CLI (`--healthcheck`, `migrate-db`, `admin create`, `migrate-storage`), Data Protection wiring, hosted services | not started | |
+| `mta admin create` and `mta migrate-storage` commands (need the API's dashboard users and the switch engine) | not started | |
 | Backend switch engine (export/import, quiesce, fence, activation, rollback, history migration) | not started | |
 | Dashboard hosting, TLS-RPT/DMARC report sending, metrics endpoint wiring | not started | |
 | Soak, fuzz and benchmark gates; external security audit | not started | |

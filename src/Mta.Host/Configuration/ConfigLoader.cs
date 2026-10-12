@@ -75,6 +75,7 @@ public static class ConfigLoader
                 SmtpUtf8 = smtp.SmtpUtf8, Listeners = listeners,
             },
             Storage = storage,
+            Dns = Bind<DnsSection>(configuration, "Dns"),
             Delivery = Bind<DeliverySection>(configuration, "Delivery"),
             Webhooks = Bind<Mta.Webhooks.WebhookOptions>(configuration, "Webhooks"),
             Dashboard = Bind<DashboardSection>(configuration, "Dashboard"),
