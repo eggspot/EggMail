@@ -99,6 +99,137 @@ public abstract class ConfigConformance : StorageTestBase
             await C.UpsertSmtpCredentialAsync(new SmtpCredential(Ids.New(), TenantB, "mailer", "x", true, Clock.UtcNow), Ct));
     }
 
+    [Fact]
+    public async Task Smtp_credentials_are_deleted_only_within_their_tenant()
+    {
+        var cred = new SmtpCredential(Ids.New(), TenantA, "to-delete", "$hash", true, Clock.UtcNow);
+        await C.UpsertSmtpCredentialAsync(cred, Ct);
+        Assert.False(await C.DeleteSmtpCredentialAsync(TenantB, cred.Id, Ct), "wrong tenant");
+        Assert.NotNull(await C.FindSmtpCredentialAsync("to-delete", Ct));
+        Assert.True(await C.DeleteSmtpCredentialAsync(TenantA, cred.Id, Ct));
+        Assert.False(await C.DeleteSmtpCredentialAsync(TenantA, cred.Id, Ct), "already gone");
+        Assert.Null(await C.FindSmtpCredentialAsync("to-delete", Ct));
+        Assert.Empty(await C.GetSmtpCredentialsAsync(TenantA, Ct));
+    }
+
+    // Dashboard users and sessions
+
+    private DashboardUser NewUser(string name, DashboardRole role = DashboardRole.Tenant, Guid? tenant = null) =>
+        new(Ids.New(), name, "pbkdf2-sha256$1$salt$hash", role, role == DashboardRole.Admin ? null : tenant ?? TenantA, true, Clock.UtcNow);
+
+    private DashboardSession NewSession(Guid userId, string secret, TimeSpan? lifetime = null) =>
+        new(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(secret)), userId, "csrf-" + secret, Clock.UtcNow, Clock.UtcNow, Clock.UtcNow + (lifetime ?? TimeSpan.FromHours(12)));
+
+    [Fact]
+    public async Task Dashboard_users_round_trip_and_are_found_case_insensitively()
+    {
+        var admin = NewUser("Admin", DashboardRole.Admin);
+        var tenantUser = NewUser("jane@acme.test", tenant: TenantB);
+        await C.UpsertDashboardUserAsync(admin, Ct);
+        await C.UpsertDashboardUserAsync(tenantUser, Ct);
+
+        var found = (await C.FindDashboardUserAsync("ADMIN", Ct))!;
+        Assert.Equal(admin.Id, found.Id);
+        Assert.Equal("admin", found.UserName);
+        Assert.Equal(DashboardRole.Admin, found.Role);
+        Assert.Null(found.TenantId);
+        Assert.Equal(admin.PasswordHash, found.PasswordHash);
+
+        var jane = (await C.GetDashboardUserAsync(tenantUser.Id, Ct))!;
+        Assert.Equal(TenantB, jane.TenantId);
+        Assert.Equal(DashboardRole.Tenant, jane.Role);
+        Assert.Null(await C.GetDashboardUserAsync(Ids.New(), Ct));
+        Assert.Null(await C.FindDashboardUserAsync("nobody", Ct));
+        Assert.Equal(["admin", "jane@acme.test"], (await C.GetDashboardUsersAsync(Ct)).Select(u => u.UserName));
+    }
+
+    [Fact]
+    public async Task Dashboard_user_upsert_replaces_and_the_user_name_is_unique()
+    {
+        var user = NewUser("sam");
+        await C.UpsertDashboardUserAsync(user, Ct);
+        await C.UpsertDashboardUserAsync(user with { Enabled = false, PasswordHash = "new-hash", Role = DashboardRole.Admin, TenantId = null }, Ct);
+        var back = (await C.GetDashboardUserAsync(user.Id, Ct))!;
+        Assert.False(back.Enabled);
+        Assert.Equal("new-hash", back.PasswordHash);
+        Assert.Equal(DashboardRole.Admin, back.Role);
+        Assert.Single(await C.GetDashboardUsersAsync(Ct));
+
+        await Assert.ThrowsAsync<StorageConflictException>(async () => await C.UpsertDashboardUserAsync(NewUser("SAM"), Ct));
+        Assert.Single(await C.GetDashboardUsersAsync(Ct));
+    }
+
+    [Fact]
+    public async Task Dashboard_sessions_are_found_by_digest_touched_and_deleted()
+    {
+        var user = NewUser("pat");
+        await C.UpsertDashboardUserAsync(user, Ct);
+        var session = NewSession(user.Id, "secret-one");
+        await C.AddDashboardSessionAsync(session, Ct);
+
+        var found = (await C.FindDashboardSessionAsync(session.IdHash, Ct))!;
+        Assert.Equal(user.Id, found.UserId);
+        Assert.Equal("csrf-secret-one", found.CsrfToken);
+        Assert.Equal(session.ExpiresAt, found.ExpiresAt);
+        Assert.Equal(Clock.UtcNow, found.CreatedAt);
+        Assert.Null(await C.FindDashboardSessionAsync(System.Security.Cryptography.SHA256.HashData("other"u8), Ct));
+
+        DateTimeOffset seen = Clock.UtcNow.AddMinutes(7);
+        await C.TouchDashboardSessionAsync(session.IdHash, seen, Ct);
+        Assert.Equal(seen, (await C.FindDashboardSessionAsync(session.IdHash, Ct))!.LastSeenAt);
+
+        await Assert.ThrowsAsync<StorageConflictException>(async () => await C.AddDashboardSessionAsync(session, Ct));
+
+        Assert.True(await C.DeleteDashboardSessionAsync(session.IdHash, Ct));
+        Assert.False(await C.DeleteDashboardSessionAsync(session.IdHash, Ct));
+        Assert.Null(await C.FindDashboardSessionAsync(session.IdHash, Ct));
+    }
+
+    [Fact]
+    public async Task Expired_dashboard_sessions_are_purged_and_users_can_be_signed_out_everywhere()
+    {
+        var a = NewUser("alpha");
+        var b = NewUser("bravo");
+        await C.UpsertDashboardUserAsync(a, Ct);
+        await C.UpsertDashboardUserAsync(b, Ct);
+        var short1 = NewSession(a.Id, "s1", TimeSpan.FromMinutes(5));
+        var long1 = NewSession(a.Id, "s2", TimeSpan.FromHours(5));
+        var long2 = NewSession(b.Id, "s3", TimeSpan.FromHours(5));
+        foreach (var s in new[] { short1, long1, long2 })
+        {
+            await C.AddDashboardSessionAsync(s, Ct);
+        }
+
+        Clock.Advance(TimeSpan.FromMinutes(5));
+        Assert.Equal(1, await C.DeleteExpiredDashboardSessionsAsync(Clock.UtcNow, Ct));
+        Assert.Null(await C.FindDashboardSessionAsync(short1.IdHash, Ct));
+        Assert.NotNull(await C.FindDashboardSessionAsync(long1.IdHash, Ct));
+
+        Assert.Equal(1, await C.DeleteDashboardSessionsOfUserAsync(a.Id, Ct));
+        Assert.Null(await C.FindDashboardSessionAsync(long1.IdHash, Ct));
+        Assert.NotNull(await C.FindDashboardSessionAsync(long2.IdHash, Ct));
+    }
+
+    [Fact]
+    public async Task Deleting_a_dashboard_user_deletes_their_sessions()
+    {
+        var user = NewUser("gone");
+        var other = NewUser("stays");
+        await C.UpsertDashboardUserAsync(user, Ct);
+        await C.UpsertDashboardUserAsync(other, Ct);
+        var s1 = NewSession(user.Id, "x1");
+        var s2 = NewSession(other.Id, "x2");
+        await C.AddDashboardSessionAsync(s1, Ct);
+        await C.AddDashboardSessionAsync(s2, Ct);
+
+        Assert.True(await C.DeleteDashboardUserAsync(user.Id, Ct));
+        Assert.False(await C.DeleteDashboardUserAsync(user.Id, Ct));
+        Assert.Null(await C.FindDashboardUserAsync("gone", Ct));
+        Assert.Null(await C.FindDashboardSessionAsync(s1.IdHash, Ct));
+        Assert.NotNull(await C.FindDashboardSessionAsync(s2.IdHash, Ct));
+        Assert.NotNull(await C.FindDashboardUserAsync("stays", Ct));
+    }
+
     // Domains and DKIM
 
     private DomainRecord NewDomain(string name, Guid? tenant = null, DateTimeOffset? next = null) =>

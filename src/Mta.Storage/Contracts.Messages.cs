@@ -43,6 +43,12 @@ public sealed class AcceptedMessage
     /// <summary>API idempotency key, if any (unique per tenant).</summary>
     public string? IdempotencyKey { get; init; }
 
+    /// <summary>
+    /// Digest of the request that carries <see cref="IdempotencyKey"/> (the API hashes the body). Stored with the key and returned in
+    /// <see cref="IntakeResult.IdempotencyFingerprint"/> on a duplicate, so the caller can tell a safe retry from key reuse with another body.
+    /// </summary>
+    public string? IdempotencyFingerprint { get; init; }
+
     public string? RemoteAddress { get; init; }
     public string? Authenticated { get; init; }
     public bool SmtpUtf8 { get; init; }
@@ -65,7 +71,10 @@ public enum IntakeStatus : byte
     DuplicateIdempotencyKey,
 }
 
-public sealed record IntakeResult(IntakeStatus Status, Guid MessageId);
+/// <param name="Status">Whether a message was created.</param>
+/// <param name="MessageId">The new message, or the original message for a duplicate idempotency key.</param>
+/// <param name="IdempotencyFingerprint">For <see cref="IntakeStatus.DuplicateIdempotencyKey"/>: the fingerprint stored with the original request (null when it had none).</param>
+public sealed record IntakeResult(IntakeStatus Status, Guid MessageId, string? IdempotencyFingerprint = null);
 
 /// <summary>A delivery handed to a worker by <see cref="IDeliveryStore.ClaimAsync"/>.</summary>
 public sealed class ClaimedDelivery
