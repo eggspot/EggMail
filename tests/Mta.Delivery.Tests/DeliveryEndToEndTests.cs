@@ -237,3 +237,20 @@ public class DeliveryDkimAndLimitsTests
         Assert.DoesNotContain(events, e => e.Type is MessageEventType.Deferred or MessageEventType.Delivered or MessageEventType.Bounced);
     }
 }
+
+public class DeliveryResumeTests
+{
+    [Fact]
+    public async Task The_engine_delivers_again_after_a_quiesce_and_resume()
+    {
+        await using var f = new DeliveryFixture();
+        await f.Engine.QuiesceAsync(TimeSpan.FromMilliseconds(50), default);
+        var id = await f.EnqueueAsync(["rcpt@dest.example"]);
+        await Task.Delay(200);
+        Assert.Empty(f.Remote.Messages);
+
+        f.Engine.Resume();
+
+        await f.WaitForEventAsync(id, MessageEventType.Delivered);
+    }
+}

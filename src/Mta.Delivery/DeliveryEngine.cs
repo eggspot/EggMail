@@ -18,7 +18,7 @@ public sealed class DeliveryEngine
     private readonly DeliveryOptions _options;
     private readonly SemaphoreSlim _wake = new(0, int.MaxValue);
     private readonly SemaphoreSlim _slots;
-    private readonly CancellationTokenSource _abort = new();
+    private volatile CancellationTokenSource _abort = new();
     private int _pendingGroups;
     private volatile bool _paused;
     private readonly TaskCompletionSource _stopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -73,11 +73,16 @@ public sealed class DeliveryEngine
 
         if (PendingGroups > 0)
         {
-            await _abort.CancelAsync().ConfigureAwait(false);
+            var aborted = _abort;
+            await aborted.CancelAsync().ConfigureAwait(false);
             while (PendingGroups > 0)
             {
                 await Task.Delay(20, CancellationToken.None).ConfigureAwait(false);
             }
+
+            // A later Resume() (for example after a rolled-back backend switch) must work with a fresh token.
+            _abort = new CancellationTokenSource();
+            aborted.Dispose();
         }
 
         await _s.Storage.Deliveries.ReleaseOwnedLeasesAsync(_options.Owner, CancellationToken.None).ConfigureAwait(false);
@@ -157,18 +162,19 @@ public sealed class DeliveryEngine
         {
             var items = group.ToList();
             Interlocked.Increment(ref _pendingGroups);
-            _ = Task.Run(() => RunGroupAsync(items));
+            var abort = _abort.Token;
+            _ = Task.Run(() => RunGroupAsync(items, abort));
         }
     }
 
-    private async Task RunGroupAsync(List<ClaimedDelivery> items)
+    private async Task RunGroupAsync(List<ClaimedDelivery> items, CancellationToken abort)
     {
         try
         {
-            await _slots.WaitAsync(_abort.Token).ConfigureAwait(false);
+            await _slots.WaitAsync(abort).ConfigureAwait(false);
             try
             {
-                await _processor.ProcessAsync(items, _abort.Token).ConfigureAwait(false);
+                await _processor.ProcessAsync(items, abort).ConfigureAwait(false);
             }
             finally
             {
