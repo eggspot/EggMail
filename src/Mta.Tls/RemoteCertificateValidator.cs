@@ -305,6 +305,7 @@ public sealed class RemoteCertificateValidator
             presented,
             _decision.ExpectedHostname,
             new DaneVerifyOptions { AdditionalReferenceNames = _decision.DaneReferenceNames, Now = _options.Now?.Invoke() });
+        notes.Add("certificates available for chain building: " + string.Join(" | ", presented.Select(c => c.Subject).Distinct()));
         notes.AddRange(result.Notes);
         return new CertificateValidationOutcome(result.Success, result.Success, result.Failure, errors, notes);
     }
