@@ -30,7 +30,7 @@ public static class TestPki
         request.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
         request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign, true));
         request.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(request.PublicKey, false));
-        var cert = request.CreateSelfSigned(notBefore ?? DateTimeOffset.UtcNow.AddDays(-30), notAfter ?? DateTimeOffset.UtcNow.AddYears(10));
+        var cert = request.CreateSelfSigned(notBefore ?? DateTimeOffset.UtcNow.AddDays(-400), notAfter ?? DateTimeOffset.UtcNow.AddYears(10));
         return new IssuedCertificate(cert);
     }
 
@@ -40,7 +40,7 @@ public static class TestPki
         request.CertificateExtensions.Add(new X509BasicConstraintsExtension(isCa, false, 0, true));
         request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign, true));
         request.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(request.PublicKey, false));
-        return Issue(request, issuer, notBefore, notAfter);
+        return Issue(request, issuer, notBefore ?? DateTimeOffset.UtcNow.AddDays(-390), notAfter ?? DateTimeOffset.UtcNow.AddYears(5));
     }
 
     public static IssuedCertificate CreateLeaf(IssuedCertificate issuer, string[] dnsNames, string? commonName = null, bool rsa = false, DateTimeOffset? notBefore = null, DateTimeOffset? notAfter = null)
@@ -112,8 +112,12 @@ public static class TestPki
     private static IssuedCertificate Issue(CertificateRequest request, IssuedCertificate issuer, DateTimeOffset? notBefore, DateTimeOffset? notAfter)
     {
         byte[] serial = BitConverter.GetBytes(Interlocked.Increment(ref _serial));
+        X509SignatureGenerator generator = issuer.WithKey.GetRSAPrivateKey() is { } issuerRsa
+            ? X509SignatureGenerator.CreateForRSA(issuerRsa, RSASignaturePadding.Pkcs1)
+            : X509SignatureGenerator.CreateForECDsa(issuer.WithKey.GetECDsaPrivateKey()!);
         X509Certificate2 signed = request.Create(
-            issuer.WithKey,
+            issuer.WithKey.SubjectName,
+            generator,
             notBefore ?? DateTimeOffset.UtcNow.AddDays(-1),
             notAfter ?? DateTimeOffset.UtcNow.AddDays(90),
             serial);
