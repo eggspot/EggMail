@@ -145,7 +145,7 @@ public sealed class MimePart
     /// <summary>The decoded body bytes (bounded by <paramref name="maxBytes"/> / the limit).</summary>
     public byte[] GetDecodedBytes(long? maxBytes = null)
     {
-        var writer = new ArrayBufferWriter<byte>(Math.Min(Body.Length, 64 * 1024));
+        var writer = new ArrayBufferWriter<byte>(Math.Clamp(Body.Length, 256, 64 * 1024));
         DecodeBodyTo(writer, maxBytes);
         return writer.WrittenSpan.ToArray();
     }
@@ -187,7 +187,7 @@ public sealed class MimePart
         }
         else
         {
-            var writer = new ArrayBufferWriter<byte>(Math.Min(Body.Length, 64 * 1024));
+            var writer = new ArrayBufferWriter<byte>(Math.Clamp(Body.Length, 256, 64 * 1024));
             var result = BodyDecoder.Decode(Body.Span, enc, writer, cap);
             truncated = result.Truncated;
             anomalies |= result.Anomalies;
