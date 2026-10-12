@@ -18,3 +18,10 @@ public sealed class SystemClock : IClock
 
     public long Timestamp => System.Diagnostics.Stopwatch.GetTimestamp();
 }
+
+public static class ClockExtensions
+{
+    /// <summary>Elapsed time since a <see cref="IClock.Timestamp"/> value taken earlier from the same clock.</summary>
+    public static TimeSpan GetElapsedTime(this IClock clock, long startTimestamp) =>
+        System.Diagnostics.Stopwatch.GetElapsedTime(startTimestamp, clock.Timestamp);
+}

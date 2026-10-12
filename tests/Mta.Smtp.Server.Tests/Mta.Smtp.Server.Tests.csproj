@@ -7,8 +7,11 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="MailKit" />
+    <PackageReference Include="MimeKit" />
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="..\..\src\Mta.Smtp.Protocol\Mta.Smtp.Protocol.csproj" />
     <ProjectReference Include="..\..\src\Mta.Smtp.Server\Mta.Smtp.Server.csproj" />
   </ItemGroup>
 </Project>

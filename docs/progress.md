@@ -6,10 +6,14 @@ Running status of the implementation, updated in every pull request. **Productio
 
 | # | Milestone | Status | PR |
 |---|---|---|---|
-| M0 | Foundations: solution, shared contracts, package-free guard, CI | in review | feat/p0-foundations |
+| M0 | Foundations: solution, shared contracts, package-free guard, CI | done (merged) | #1, #2 |
+| M1a | SMTP protocol library and server (STARTTLS, implicit TLS, AUTH, BDAT, pipelining, smuggling defenses) | in review | feat/smtp-protocol |
+| M1b | Mime, DNS, DKIM, SPF/DMARC, MTA-STS/DANE/TLS-RPT libraries | in progress (parallel work) | feat/mime, feat/dns, feat/dkim, feat/auth-spf-dmarc, feat/tls-policy |
 
 ## Verified so far
 
+- Smtp.Protocol: 90 tests (command parser incl. fuzz, DATA scanner incl. smuggling vectors and chunk-independence, reply parser, dot-stuffer round trips, SASL, session state).
+- Smtp.Server: 32 loopback tests (full transactions, pipelining, BDAT, smuggling attempts refused, STARTTLS and its injection guard, implicit TLS, AUTH PLAIN/LOGIN, limits, timeouts, quiesce, concurrency, garbage-input fuzz) and MailKit interop over STARTTLS and implicit TLS including a 3 MiB attachment.
 - `dotnet build EggMail.slnx` and `dotnet test EggMail.slnx` pass locally (Core address/id tests, architecture guard tests).
 - The package-free guard checks `.csproj` files and `obj/project.assets.json` of the guarded assemblies.
 
