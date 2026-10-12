@@ -396,13 +396,38 @@ public class MessageBuilderTests
     }
 
     [Fact]
-    public void Custom_header_with_long_ascii_word_is_encoded_so_it_folds()
+    public void Custom_header_with_a_long_url_is_kept_verbatim_up_to_the_line_limit()
     {
         var b = NewBuilder();
-        b.AddHeader("X-Long", new string('a', 1200));
+        string url = "<https://example.com/u?" + new string('a', 900) + ">";
+        b.AddHeader("List-Unsubscribe", url);
         var (bytes, _) = b.Build();
         Assert.True(MessageInspector.Inspect(bytes).LongestHeaderLine <= 998);
-        Assert.Equal(new string('a', 1200), HeaderList.Parse(bytes).TryGetFirst("X-Long", out var h) ? h.DecodedValue : null);
+        Assert.Equal(url, HeaderList.Parse(bytes).GetFirstValue("List-Unsubscribe"));
+
+        b.AddHeader("X-Too-Long", "<https://example.com/u?" + new string('a', 1200) + ">");
+        Assert.Throws<MessageBuildException>(() => b.Build());
+    }
+
+    [Fact]
+    public void Subject_with_a_very_long_word_is_encoded_so_it_folds()
+    {
+        var b = NewBuilder();
+        b.Subject = new string('a', 1200);
+        var (bytes, _) = b.Build();
+        Assert.True(MessageInspector.Inspect(bytes).LongestHeaderLine <= 998);
+        Assert.Equal(new string('a', 1200), HeaderList.Parse(bytes).TryGetFirst("Subject", out var h) ? h.DecodedValue : null);
+    }
+
+    [Fact]
+    public void A_failing_build_writes_nothing_to_the_writer()
+    {
+        var b = NewBuilder();
+        b.HtmlBody = "<p/>";
+        b.Attachments.Add(new BuilderAttachment("a.png", "image/png", new byte[] { 1 }) { IsInline = true, ContentId = "bad id with spaces" });
+        var writer = new ArrayBufferWriter<byte>();
+        Assert.Throws<MessageBuildException>(() => b.WriteTo(writer));
+        Assert.Equal(0, writer.WrittenCount);
     }
 
     [Fact]

@@ -257,6 +257,7 @@ public sealed class MessageBuilder
         var date = Date ?? now;
         string messageId = MessageId is null ? GenerateMessageId(_options.MessageIdDomain, _options.Clock) : NormalizeMessageId(MessageId);
 
+        var root = BuildStructure(); // validates attachments and ids before anything is written
         var h = new StringBuilder(512);
         HeaderFolder.AppendField(h, HeaderNames.Date, MimeDate.Format(date));
         HeaderFolder.AppendField(h, HeaderNames.From, From.ToHeaderValue(utf8), utf8);
@@ -304,7 +305,7 @@ public sealed class MessageBuilder
 
         foreach (var (name, value) in _customHeaders)
         {
-            string v = utf8 ? value : Rfc2047.Encode(value);
+            string v = utf8 ? value : Rfc2047.Encode(value, encodeLongWords: false); // custom headers may have their own syntax (URLs)
             HeaderFolder.AppendField(h, name, v, utf8);
         }
 
@@ -312,7 +313,6 @@ public sealed class MessageBuilder
         long total = Emit(writer, h.ToString());
 
         _endsWithCrlf = true;
-        var root = BuildStructure();
         total += WriteEntity(writer, root);
         if (!_endsWithCrlf)
         {

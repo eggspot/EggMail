@@ -43,6 +43,8 @@ All input is hostile. Every parser is bounded by `MimeLimits`, runs in time line
 | `MaxAddresses` | 1000 | `TooManyAddresses` |
 | `MaxBoundaryLength` | 200 | treated as a missing boundary |
 
+Worst-case materialized memory of a parse is bounded by the limits: a header record is 40 bytes, so at most `MaxParts` x `MaxHeaderCount` x 40 B = about 40 MB for the defaults, regardless of input size.
+
 `MessageContentExtractor.Extract(raw, maxBodyBytes = 256 KiB)` limits each stored body to that many UTF-8 bytes (cut on a character boundary) and sets `TextTruncated` / `HtmlTruncated`; subjects are capped at 2048 chars. Decoded text has NUL removed (PostgreSQL text cannot hold it), subject and file names have control characters replaced.
 
 ## Security properties (each has tests)

@@ -407,8 +407,12 @@ public static class Rfc2047
     /// separated by single spaces, so the result can be folded at those spaces. The default charset is UTF-8.
     /// Returns the same instance when nothing needs encoding. Line folding is the caller's job (<see cref="HeaderFolder"/>).
     /// </summary>
+    /// <param name="value">The text.</param>
+    /// <param name="charset">The charset of the encoded words (default UTF-8).</param>
+    /// <param name="encodeLongWords">Also encode ASCII words longer than 900 characters so that they can be folded (right for
+    /// free text such as Subject; wrong for values with their own syntax such as URLs).</param>
     /// <exception cref="ArgumentException">The charset is stateful or wide (ISO-2022, UTF-7, UTF-16, UTF-32).</exception>
-    public static string Encode(string value, Encoding? charset = null)
+    public static string Encode(string value, Encoding? charset = null, bool encodeLongWords = true)
     {
         ArgumentNullException.ThrowIfNull(value);
         charset ??= Encoding.UTF8;
@@ -431,7 +435,7 @@ public static class Rfc2047
             if (i > start)
             {
                 var word = value.AsSpan(start, i - start);
-                if (RequiresEncoding(word) || word.Length > MaxPlainWordLength)
+                if (RequiresEncoding(word) || (encodeLongWords && word.Length > MaxPlainWordLength))
                 {
                     if (first < 0)
                     {
