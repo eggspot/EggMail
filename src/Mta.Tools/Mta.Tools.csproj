@@ -7,5 +7,6 @@
   <ItemGroup>
     <ProjectReference Include="..\Mta.Core\Mta.Core.csproj" />
     <ProjectReference Include="..\Mta.Smtp.Protocol\Mta.Smtp.Protocol.csproj" />
+    <ProjectReference Include="..\Mta.Smtp.Server\Mta.Smtp.Server.csproj" />
   </ItemGroup>
 </Project>

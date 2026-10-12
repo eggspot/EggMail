@@ -1,1 +1,3 @@
-Console.WriteLine("mta-tools");
+using Mta.Tools;
+
+return await ToolsMain.RunAsync(args);

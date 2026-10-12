@@ -73,3 +73,16 @@ Message size, concurrency, TLS on/off, pipelining on/off, recipients per message
 - Haraka's ingest behavior and fsync policy
 - Switch-engine and history-migration throughput on both backends (no measurement exists)
 - All numeric targets above (proposals)
+
+## Running the harness (`mta-tools`)
+
+```sh
+dotnet build src/Mta.Tools -c Release
+dotnet src/Mta.Tools/bin/Release/net10.0/mta-tools.dll sink --port 2525                      # discard sink (optionally --delay-ms for back-pressure)
+dotnet src/Mta.Tools/bin/Release/net10.0/mta-tools.dll load --port 2525 --connections 16 \
+    --messages 100000 --size 2048 --pipelining --label "sink-pipelined"                       # closed-loop ingest benchmark
+```
+
+`load` reports accepted messages/s, MB/s and p50/p95/p99 transaction latency, and (with `--server-pid`) the server's CPU per 1,000 messages.
+
+**Sample, not a claim:** the SMTP server alone against the discard `sink` on one developer machine (10-core Apple silicon, load generator and server on the same host, loopback, no TLS, no storage) accepted about 63k messages/s of 2 KB with 16 pipelined connections (p99 about 0.6 ms). This measures the protocol path only, not durable ingest through storage; numbers with storage, TLS and on dedicated hardware are published per release under the fairness rules above.

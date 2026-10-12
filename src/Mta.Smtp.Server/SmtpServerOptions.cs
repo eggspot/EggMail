@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Security;
 using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 
@@ -44,6 +45,19 @@ public interface IServerCertificateProvider
 {
     /// <summary>Returns the certificate for the given SNI name (may be null) or null if none is available.</summary>
     X509Certificate2? GetCertificate(string? serverName);
+
+    /// <summary>
+    /// Returns the handshake context, which carries the intermediate certificates that must be sent with the leaf (strict
+    /// peers such as MTA-STS enforcing senders fail without them). The default builds one from <see cref="GetCertificate"/>
+    /// without intermediates and caches it per certificate; real providers override this and return cached contexts.
+    /// </summary>
+    SslStreamCertificateContext? GetContext(string? serverName)
+    {
+        var cert = GetCertificate(serverName);
+        return cert is null ? null : DefaultContexts.GetValue(cert, c => SslStreamCertificateContext.Create(c, additionalCertificates: null, offline: true));
+    }
+
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<X509Certificate2, SslStreamCertificateContext> DefaultContexts = new();
 }
 
 public sealed class SmtpServerOptions

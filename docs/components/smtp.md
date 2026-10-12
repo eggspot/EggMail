@@ -24,3 +24,13 @@ Hand-written and package-free (decision 4). `Mta.Smtp.Protocol` is pure (no I/O)
 
 - DSN extension parameters are parsed on RCPT but not advertised.
 - `REQUIRETLS`, `BINARYMIME` and `LIMITS` are not implemented.
+
+## Outbound client (`Mta.Smtp.Client`)
+
+`SmtpClientConnection` connects to one address, reads the banner, issues EHLO, negotiates STARTTLS according to a caller-supplied `SmtpTlsPolicy` (the delivery layer derives it from the MTA-STS / DANE / per-domain decision), optionally authenticates (relay routes; credentials are never sent without TLS), and sends transactions with PIPELINING, DATA or BDAT.
+
+- Network failures throw `SmtpConnectionException` with `EndOfDataSent`, which the delivery layer maps to "possible duplicate" when the connection dies after the terminating dot (decision R). SMTP-level refusals are returned in `SmtpSendResult`.
+- The client never emits a bare CR/LF (the `DotStuffer` refuses them); such messages fail locally with `LocalFailure.MalformedMessage` and the connection is dropped.
+- Local checks before touching the wire: SIZE limit, SMTPUTF8 and 8BITMIME support.
+- STARTTLS stripping is surfaced (`TlsSession.StartTlsAdvertised == false`, `TlsException(NotAdvertised)` when TLS is required) and plaintext injected behind the server's `220` aborts the upgrade.
+- `SmtpConnectionPool` keeps idle connections per target (idle timeout, per-target and total caps, transaction cap).
