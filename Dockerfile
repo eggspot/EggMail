@@ -39,7 +39,7 @@ LABEL org.opencontainers.image.source="https://github.com/eggspot/EggMail" \
 WORKDIR /app
 COPY --from=build /out/ ./
 ENV Storage__Backend=Sqlite \
-    Storage__Sqlite__DataDirectory=/data \
+    Sqlite__DataDirectory=/data \
     DOTNET_gcServer=0 \
     DOTNET_TieredPGO=1
 # Container ports (high, mapped outward): 5587 submission STARTTLS, 4465 submissions, 2525 alt STARTTLS, 2526 bounce, 8080 HTTP (probes), 8443 HTTPS.
