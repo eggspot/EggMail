@@ -20,6 +20,9 @@ public sealed record DnsResolverOptions
     /// <summary>The upper bound for a single attempt's timeout. Default 8 s.</summary>
     public TimeSpan MaxAttemptTimeout { get; init; } = TimeSpan.FromSeconds(8);
 
+    /// <summary>The upper bound for one complete network exchange including all retries and failover; the exchange fails with <see cref="DnsFailureReason.Timeout"/> after this. Default 30 s.</summary>
+    public TimeSpan QueryTimeout { get; init; } = TimeSpan.FromSeconds(30);
+
     /// <summary>The number of rounds over the server list when servers time out (each round tries every server that has not given a definite failure). Default 3.</summary>
     public int Attempts { get; init; } = 3;
 
@@ -76,6 +79,7 @@ public sealed record DnsResolverOptions
         Require(AttemptTimeout > TimeSpan.Zero, nameof(AttemptTimeout));
         Require(MaxAttemptTimeout >= AttemptTimeout, nameof(MaxAttemptTimeout) + " must not be smaller than " + nameof(AttemptTimeout));
         Require(BackoffMultiplier >= 1.0 && BackoffMultiplier <= 16.0, nameof(BackoffMultiplier));
+        Require(QueryTimeout > TimeSpan.Zero, nameof(QueryTimeout));
         Require(Attempts is >= 1 and <= 10, nameof(Attempts));
         Require(EdnsUdpPayloadSize == 0 || EdnsUdpPayloadSize >= 512, nameof(EdnsUdpPayloadSize));
         Require(MaxCacheEntries >= 0, nameof(MaxCacheEntries));

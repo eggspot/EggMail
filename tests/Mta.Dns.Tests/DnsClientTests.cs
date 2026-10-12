@@ -13,6 +13,8 @@ internal sealed class FakeQuery
 
     public required int Index { get; init; }
 
+    public CancellationToken Token { get; init; }
+
     public bool HasEdns => DnsMessageReader.Parse(Bytes).AdditionalCount > 0;
 
     public PacketBuilder Reply(int rcode = 0) => PacketBuilder.ReplyTo(Bytes, rcode);
@@ -38,7 +40,7 @@ internal sealed class FakeTransport : IDnsTransport
         // The caller reuses its buffer after this returns, so copy.
         byte[] copy = query.ToArray();
         var parsed = DnsMessageReader.Parse(copy);
-        var q = new FakeQuery { Bytes = copy, Name = parsed.QuestionName!, Type = parsed.QuestionType, Index = Interlocked.Increment(ref _calls) };
+        var q = new FakeQuery { Bytes = copy, Name = parsed.QuestionName!, Type = parsed.QuestionType, Index = Interlocked.Increment(ref _calls), Token = cancellationToken };
         Queries.Enqueue(q);
         return await _handler(q);
     }
@@ -215,6 +217,19 @@ public class DnsClientTests
         var cancelling = new DnsClient(FakeTransport.Throwing(new OperationCanceledException()), Opts(), new FakeClock());
         var timeout = await Assert.ThrowsAsync<DnsException>(async () => await cancelling.QueryAsync("example.com", DnsRecordType.A));
         Assert.Equal(DnsFailureReason.Timeout, timeout.Reason);
+    }
+
+    [Fact]
+    public async Task A_transport_that_never_answers_is_cut_off_by_the_query_timeout()
+    {
+        var transport = new FakeTransport(async q =>
+        {
+            await Task.Delay(Timeout.Infinite, q.Token);
+            return [];
+        });
+        var client = new DnsClient(transport, Opts(o => o with { QueryTimeout = TimeSpan.FromMilliseconds(200) }), new FakeClock());
+        var ex = await Assert.ThrowsAsync<DnsException>(async () => await client.QueryAsync("example.com", DnsRecordType.A));
+        Assert.Equal(DnsFailureReason.Timeout, ex.Reason);
     }
 
     [Fact]

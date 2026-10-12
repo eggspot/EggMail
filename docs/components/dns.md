@@ -54,6 +54,7 @@ The last two rows are both **temporary failures** for a caller such as SPF (`tem
 | `Servers` | empty | Resolver endpoints. Empty in `DnsClient.Create` means discover from the system. |
 | `AttemptTimeout` | 2 s | First-round wait; grows by `BackoffMultiplier` (2) per round, up to `MaxAttemptTimeout` (8 s). |
 | `Attempts` | 3 | Rounds over the server list. |
+| `QueryTimeout` | 30 s | Upper bound for one exchange including retries and failover. |
 | `EnableTcpFallback` | true | Retry over TCP (2-byte length prefix) when a UDP answer has TC. |
 | `EdnsUdpPayloadSize` | 1232 | Advertised EDNS0 size; 0 disables EDNS (and DO). Otherwise at least 512. |
 | `RequestDnssecOk` | false | Set DO. |
@@ -79,7 +80,7 @@ The last two rows are both **temporary failures** for a caller such as SPF (`tem
 
 ## Behaviors worth knowing
 
-- **Coalescing.** Concurrent identical questions share one network query. A caller's cancellation token cancels only that caller's wait; the shared query runs to completion (bounded by the transport timeouts) and its answer is cached.
+- **Coalescing.** Concurrent identical questions share one network query. A caller's cancellation token cancels only that caller's wait; the shared query runs to completion (bounded by `QueryTimeout`) and its answer is cached.
 - **Failover.** A server that answers SERVFAIL/REFUSED/NOTIMP/FORMERR, or whose socket fails (for example ICMP port unreachable), is skipped for the rest of that query; one that merely times out is retried in later rounds. The last server that gave a usable answer is asked first next time. If every server gave a definitive failure the last such response is returned (so the caller sees the rcode).
 - **EDNS fallback.** A FORMERR to an EDNS query is retried once without the OPT record.
 - **TXT** character-strings are concatenated; bytes map 1:1 to chars (Latin-1).

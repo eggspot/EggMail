@@ -21,7 +21,7 @@ namespace Mta.Dns;
 /// </list>
 /// <para>
 /// <b>Cancellation</b>: the caller's token cancels the caller's wait only. The network query it joined keeps running to
-/// completion (bounded by the transport timeouts) because other callers may share it and the answer will be cached.
+/// completion (bounded by <see cref="DnsResolverOptions.QueryTimeout"/>) because other callers may share it and the answer will be cached.
 /// </para>
 /// <para>
 /// <b>Cache clock</b>: entries expire by <see cref="IClock.UtcNow"/>; a wall clock that jumps backwards makes affected entries expire early, never live longer.
@@ -161,7 +161,7 @@ public sealed class DnsClient : IDnsResolver
 
     private void StoreInCache(DnsCache.Key key, DnsResponse response)
     {
-        if (_cache is not null && response.Rcode is DnsRcode.NoError or DnsRcode.NameError && response.Ttl > 0)
+        if (_cache is not null && response.Rcode is (DnsRcode.NoError or DnsRcode.NameError) && response.Ttl > 0)
         {
             _cache.Set(key, response, TimeSpan.FromSeconds(response.Ttl));
         }
@@ -298,7 +298,8 @@ public sealed class DnsClient : IDnsResolver
         try
         {
             int length = BuildQuery(buffer, name, type, edns, out ushort id);
-            ReadOnlyMemory<byte> response = await _transport.ExchangeAsync(buffer.AsMemory(0, length), CancellationToken.None).ConfigureAwait(false);
+            using var deadline = new CancellationTokenSource(_options.QueryTimeout);
+            ReadOnlyMemory<byte> response = await _transport.ExchangeAsync(buffer.AsMemory(0, length), deadline.Token).ConfigureAwait(false);
             return ParseAndValidate(buffer.AsSpan(0, length), response.Span, id, name, type);
         }
         finally

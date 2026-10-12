@@ -88,17 +88,36 @@ public static class DnsMessageReader
 
         // Every record needs at least 11 bytes (1-byte root name + 10 fixed), which bounds what a lying header can make us allocate.
         int plausible = Math.Min(count, Math.Max(0, packet.Length - pos) / 11);
-        var list = new List<DnsRecord>(plausible);
+        var records = new DnsRecord[plausible];
+        int n = 0;
         for (int i = 0; i < count; i++)
         {
             var record = ReadRecord(packet, ref pos, nameBuffer, ref lastOwner);
-            if (record is not null)
+            if (record is null)
             {
-                list.Add(record);
+                continue;
             }
+
+            if (n == records.Length)
+            {
+                // Cannot happen for a well-formed message (records are at least 11 bytes), but never trust the arithmetic.
+                Array.Resize(ref records, Math.Max(4, n * 2));
+            }
+
+            records[n++] = record;
         }
 
-        return list.Count == 0 ? [] : list.ToArray();
+        if (n == 0)
+        {
+            return [];
+        }
+
+        if (n != records.Length)
+        {
+            Array.Resize(ref records, n);
+        }
+
+        return records;
     }
 
     private static DnsRecord? ReadRecord(ReadOnlySpan<byte> packet, ref int pos, Span<char> nameBuffer, ref string? lastOwner)
