@@ -200,6 +200,11 @@ If the schedule slips, cut in this order (cheapest to cut first):
 
 The Postgres provider is no longer cuttable: it is the only path to more than one replica.
 
+## Owner action items outside the engineering estimate
+
+- Enable GitHub Sponsors for the eggspot organization and complete payout and tax setup; optionally add other funding platforms ([funding.md](funding.md)). No engineering effort; the funding files are documentation.
+- Make the `ghcr.io/eggspot/eggmail` package public after its first publish ([release.md](release.md)).
+
 ## Risks
 
 1. **Schedule.** The estimate has a 2× spread; a first-time hand-written MTA hits interop surprises from real-world servers.

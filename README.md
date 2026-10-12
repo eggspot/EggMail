@@ -51,10 +51,11 @@ docker run -d --name eggmail -p 587:5587 -p 465:4465 -p 2525:2525 -p 8443:8443 \
 | Document | Contents |
 |---|---|
 | [docs/design.md](docs/design.md) | Architecture, components, interfaces, storage backends and history level, switching, content retention, webhooks, TLS and ports, security, deployment |
-| [docs/decisions.md](docs/decisions.md) | The decisions record (owner and design decisions A–N and items 1–36) |
+| [docs/decisions.md](docs/decisions.md) | The decisions record (owner and design decisions A–T and items 1–40) |
 | [docs/plan.md](docs/plan.md) | Components with engineer-week estimates, phases, cut order, risks, calendar |
 | [docs/benchmarks.md](docs/benchmarks.md) | How performance will be measured and compared, per mode |
 | [docs/release.md](docs/release.md) | Release and packaging plan: the single Docker image, `ghcr.io/eggspot/eggmail`, GitHub Actions release, quick-start snippets (a plan; nothing is published yet) |
+| [docs/funding.md](docs/funding.md) | Sponsorship and funding policy draft, platform options, the owner's setup steps |
 | [docs/open-questions.md](docs/open-questions.md) | Questions awaiting the owner, items to settle with spikes, unverified items |
 
 ## Caveats
@@ -62,6 +63,14 @@ docker run -d --name eggmail -p 587:5587 -p 465:4465 -p 2525:2525 -p 8443:8443 \
 - All effort figures are estimates and all sizes are modeled, not measured.
 - Items marked **unverified** in the docs were not confirmed against a primary source.
 - Defaults marked "proposed" are the design authors' choices, not industry standards.
+
+## Sponsor / Support the project
+
+[![Sponsor eggspot](https://img.shields.io/badge/sponsor-eggspot-ea4aaa?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/eggspot)
+
+EggMail is free and MIT-licensed, and stays that way: sponsors get no features and no priority. If it is useful to you, sponsorship helps pay for maintenance, security work (including a future external audit), benchmark hardware and documentation. Details and policy: [docs/funding.md](docs/funding.md).
+
+<!-- The sponsor link works once GitHub Sponsors is enabled for the eggspot organization (see docs/funding.md). -->
 
 ## License
 

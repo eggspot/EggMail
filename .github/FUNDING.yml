@@ -1,0 +1,13 @@
+# Sponsor button configuration (shown on the repository page).
+# Docs: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/displaying-a-sponsor-button-in-your-repository
+#
+# The `github` entry below only produces a working button once GitHub Sponsors
+# is enabled and approved for the eggspot organization. See docs/funding.md.
+github: [eggspot]
+
+# Other platforms: uncomment and fill in only the ones the owner actually uses.
+# One username/slug per platform (the docs allow up to four custom URLs).
+# open_collective: YOUR_COLLECTIVE_SLUG
+# ko_fi: YOUR_KOFI_USERNAME
+# liberapay: YOUR_LIBERAPAY_USERNAME
+# custom: ["https://example.com/your-donation-page"]

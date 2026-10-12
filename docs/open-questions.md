@@ -34,6 +34,11 @@ Note on the license: the Unlicense / CC0 public-domain dedication is the only mo
 2. **Effort.** The totals now include about +15 weeks over the earlier 264 as new rough author estimates (+2.5 corruption handling, +5.5 feature-identical backends and the symmetric switch, +6.5 for the answers that grew scope, +0.5 release automation); they should be re-estimated ([plan.md](plan.md)).
 3. **Release details.** Docker Hub mirror (later), standalone `mta` binaries as release assets, the nightly tag name and the arm64 build approach ([release.md](release.md)).
 
+## Owner action items
+
+- **Funding:** enable and get approved for **GitHub Sponsors for the eggspot organization**; choose a payout route (bank account in a supported region, or a fiscal host); add other platforms to `.github/FUNDING.yml` if wanted; review the policy draft. Until Sponsors is enabled, the README badge and the `FUNDING.yml` button point at a profile that does not exist yet. Steps in [funding.md](funding.md).
+- **Release:** after the first image publish, set the `ghcr.io/eggspot/eggmail` package to public once, by hand ([release.md](release.md)).
+
 ## Questions still open in the sources
 
 - What are the real daily message volume and average message size? The Postgres content-storage sizing and split thresholds scale with them.

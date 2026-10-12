@@ -1,6 +1,6 @@
 # Decisions record
 
-Consolidated record of decisions for EggMail (as of 2026-10-12, after owner decisions A–K and O–Q and design decisions L–N and P, R). Rationale and detail are in [design.md](design.md). Figures and defaults marked "proposed" are design-author choices, not independent standards.
+Consolidated record of decisions for EggMail (as of 2026-10-12, after owner decisions A–K, O–Q and T and design decisions L–N, P and R). Rationale and detail are in [design.md](design.md). Figures and defaults marked "proposed" are design-author choices, not independent standards.
 
 ## Owner decisions (2026-10-12)
 
@@ -27,6 +27,7 @@ The four items previously "decided by default" are now **OWNER-DECIDED**, with t
 | Q | Default storage backend is SQLite | **OWNER-DECIDED:** `Storage:Backend` defaults to `Sqlite` for the single-container quick start. `History:Mode` stays `Full` on both backends (decision J). **Flagged, not changed:** whether `Full` history as the default conflicts with the quick start's SQLite size and performance expectations is unmeasured (open question) |
 | R | Quiesce timeout semantics | **DESIGN-DECIDED** (owner delegated, "best and common"): the graceful-shutdown pattern. Stop accepting, wait for in-flight deliveries up to `Switch:QuiesceTimeoutSeconds` (default **30**), then requeue what is left with the **same message id and retry state preserved** (at-least-once, like Postfix and Exim) and record a `possible_duplicate` flag/event on that delivery. The earlier blocking `in_doubt` state and the 10-minute `--inflight-timeout` are removed (supersedes the timeout and `in_doubt` parts of decision I and item 32) |
 | S | Release and packaging | **Requested by the owner, designed in [release.md](release.md):** a single Docker image (SQLite out of the box, PostgreSQL by configuration), multi-arch, published to `ghcr.io/eggspot/eggmail` from GitHub Actions on version tags with `GITHUB_TOKEN`, SBOM and provenance attestations, GitHub Release with changelog and checksums. A plan only: no workflow exists yet |
+| T | Sponsorship and funding | **Requested by the owner (the project is open source):** `.github/FUNDING.yml` with `github: [eggspot]`, a low-key README section and badge, and a draft policy in [funding.md](funding.md): sponsors get no features or priority, the project stays 100% MIT, optional opt-in recognition, transparency about use of funds. The GitHub button only becomes useful once GitHub Sponsors is enabled and approved for the eggspot organization (owner action) |
 
 ## Product and goals
 
@@ -90,3 +91,4 @@ The four items previously "decided by default" are now **OWNER-DECIDED**, with t
 37. **Default backend and single image:** `Storage:Backend` defaults to `Sqlite`; one Docker image serves both backends (decisions Q, S).
 38. **Loud warnings for `synchronous=OFF`:** startup log warning, persistent dashboard banner, metric and health detail, README text; no acknowledgement gate (decision P).
 39. **Release plan:** [release.md](release.md): GHCR `ghcr.io/eggspot/eggmail`, tags `vX.Y.Z`, `X.Y`, `latest`, `nightly`; `GITHUB_TOKEN` with `packages: write`; SBOM and provenance; GitHub Release with changelog and checksums; the package must be made public once by hand (decision S).
+40. **Funding:** policy draft in [funding.md](funding.md); no feature gating or priority code for sponsors; other platforms (Open Collective, Ko-fi, Liberapay, custom links) are added to `FUNDING.yml` only when the owner names them (decision T).
