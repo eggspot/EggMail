@@ -18,7 +18,6 @@ public sealed class SmtpServer : IAsyncDisposable
     private readonly List<ListenerRuntime> _listeners = [];
     private readonly ConcurrentDictionary<Task, byte> _sessions = new();
     private readonly CancellationTokenSource _stoppingCts = new();
-    private readonly ConcurrentDictionary<string, SslStreamCertificateContext> _certContexts = new();
     private readonly ConnectionLimiter _limiter;
     private volatile bool _acceptingMail = true;
     private bool _started;
@@ -148,13 +147,12 @@ public sealed class SmtpServer : IAsyncDisposable
     /// <summary>TLS options for a handshake: picks the certificate by SNI and caches the chain context per certificate.</summary>
     internal ValueTask<SslServerAuthenticationOptions> ServerOptionsCallback(SslStream stream, SslClientHelloInfo hello, object? state, CancellationToken ct)
     {
-        X509Certificate2? cert = Options.Certificates?.GetCertificate(hello.ServerName);
-        if (cert is null)
+        var context = Options.Certificates?.GetContext(hello.ServerName);
+        if (context is null)
         {
             throw new AuthenticationException("No server certificate available.");
         }
 
-        var context = _certContexts.GetOrAdd(cert.Thumbprint, _ => SslStreamCertificateContext.Create(cert, additionalCertificates: null, offline: true));
         return ValueTask.FromResult(new SslServerAuthenticationOptions
         {
             ServerCertificateContext = context,
