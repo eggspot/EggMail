@@ -1,4 +1,17 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Mta.Storage</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Mta.Storage.Tests" />
+    <InternalsVisibleTo Include="Mta.Storage.Sqlite" />
+    <InternalsVisibleTo Include="Mta.Storage.Sqlite.Tests" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.EntityFrameworkCore" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" />
+    <PackageReference Include="Microsoft.AspNetCore.DataProtection.EntityFrameworkCore" />
+  </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Mta.Core\Mta.Core.csproj" />
   </ItemGroup>

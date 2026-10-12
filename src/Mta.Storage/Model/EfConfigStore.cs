@@ -1,0 +1,394 @@
+using Microsoft.EntityFrameworkCore;
+using Mta.Storage.Logic;
+
+namespace Mta.Storage.Model;
+
+/// <summary>
+/// How <see cref="EfConfigStore{TContext}"/> reaches its database. The SQLite provider serializes writes through the
+/// config.db writer (own thread, transaction per batch); PostgreSQL can simply open a context per call.
+/// </summary>
+public interface IConfigDbAccess<TContext> where TContext : DbContext, IConfigDbSets
+{
+    /// <summary>A short-lived, no-tracking context for one read; the caller disposes it.</summary>
+    TContext CreateReadContext();
+
+    /// <summary>
+    /// Runs <paramref name="work"/> with a context joined to an open transaction and commits when it returns. The work
+    /// must call <c>SaveChanges</c> itself and may run more than once when a batch is retried, so it must be repeatable.
+    /// </summary>
+    ValueTask<T> WriteAsync<T>(Func<TContext, T> work, CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// <see cref="IConfigStore"/> over EF Core, shared by every relational provider (design §2.3: one implementation for
+/// both). Secrets arrive already protected. Uniqueness violations surface as <see cref="StorageConflictException"/>.
+/// </summary>
+public sealed class EfConfigStore<TContext>(IConfigDbAccess<TContext> db) : IConfigStore where TContext : DbContext, IConfigDbSets
+{
+    private long _webhookVersion;
+
+    /// <summary>Incremented after every change to webhook endpoints; lets callers cache the endpoint list.</summary>
+    public long WebhookEndpointVersion => Interlocked.Read(ref _webhookVersion);
+
+    // Reads are short synchronous queries on a fresh no-tracking context (SQLite has no real async I/O).
+    private ValueTask<T> Read<T>(Func<TContext, T> query)
+    {
+        using TContext ctx = db.CreateReadContext();
+        return ValueTask.FromResult(query(ctx));
+    }
+
+    private async ValueTask Write(Action<TContext> work, CancellationToken ct) =>
+        await Write<object?>(c =>
+        {
+            work(c);
+            return null;
+        }, ct).ConfigureAwait(false);
+
+    private async ValueTask<T> Write<T>(Func<TContext, T> work, CancellationToken ct)
+    {
+        try
+        {
+            return await db.WriteAsync(work, ct).ConfigureAwait(false);
+        }
+        catch (DbUpdateException ex)
+        {
+            throw new StorageConflictException("A configuration write violated a constraint: " + (ex.InnerException?.Message ?? ex.Message), ex);
+        }
+    }
+
+    private static void Upsert<T>(TContext ctx, T entity, params object[] key) where T : class
+    {
+        var existing = ctx.Find<T>(key);
+        if (existing is null)
+        {
+            ctx.Add(entity);
+        }
+        else
+        {
+            ctx.Entry(existing).CurrentValues.SetValues(entity);
+        }
+
+        ctx.SaveChanges();
+    }
+
+    // Tenants and credentials
+
+    public async ValueTask<IReadOnlyList<Tenant>> GetTenantsAsync(CancellationToken ct) =>
+        await Read<IReadOnlyList<Tenant>>(c => c.Tenants.AsNoTracking().OrderBy(t => t.Name).ThenBy(t => t.Id).AsEnumerable().Select(t => t.ToRecord()).ToList()).ConfigureAwait(false);
+
+    public async ValueTask<Tenant?> GetTenantAsync(Guid id, CancellationToken ct) =>
+        await Read(c => c.Tenants.AsNoTracking().Where(t => t.Id == id).AsEnumerable().Select(t => t.ToRecord()).FirstOrDefault()).ConfigureAwait(false);
+
+    public async ValueTask<Tenant?> GetTenantBySlugAsync(string slug, CancellationToken ct)
+    {
+        string s = ConfigMapping.NormalizeSlug(slug);
+        return await Read(c => c.Tenants.AsNoTracking().Where(t => t.Slug == s).AsEnumerable().Select(t => t.ToRecord()).FirstOrDefault()).ConfigureAwait(false);
+    }
+
+    public async ValueTask UpsertTenantAsync(Tenant tenant, CancellationToken ct)
+    {
+        var e = tenant.ToEntity();
+        await Write(c => Upsert(c, e, e.Id), ct).ConfigureAwait(false);
+    }
+
+    public async ValueTask<ApiKeyRecord?> FindApiKeyAsync(byte[] keyHash, CancellationToken ct) =>
+        await Read(c => c.ApiKeys.AsNoTracking().Where(k => k.KeyHash == keyHash).AsEnumerable().Select(k => k.ToRecord()).FirstOrDefault()).ConfigureAwait(false);
+
+    public async ValueTask<IReadOnlyList<ApiKeyRecord>> GetApiKeysAsync(Guid tenantId, CancellationToken ct) =>
+        await Read<IReadOnlyList<ApiKeyRecord>>(c => c.ApiKeys.AsNoTracking().Where(k => k.TenantId == tenantId).OrderBy(k => k.CreatedAt).ThenBy(k => k.Id).AsEnumerable().Select(k => k.ToRecord()).ToList()).ConfigureAwait(false);
+
+    public async ValueTask AddApiKeyAsync(ApiKeyRecord key, CancellationToken ct)
+    {
+        var e = key.ToEntity();
+        await Write(c =>
+        {
+            c.ApiKeys.Add(e);
+            c.SaveChanges();
+        }, ct).ConfigureAwait(false);
+    }
+
+    public async ValueTask<bool> RevokeApiKeyAsync(Guid tenantId, Guid keyId, DateTimeOffset at, CancellationToken ct)
+    {
+        DateTimeOffset when = StorageTime.Normalize(at);
+        return await Write(c => c.ApiKeys.Where(k => k.Id == keyId && k.TenantId == tenantId && k.RevokedAt == null)
+            .ExecuteUpdate(u => u.SetProperty(k => k.RevokedAt, when)) > 0, ct).ConfigureAwait(false);
+    }
+
+    public async ValueTask TouchApiKeyAsync(Guid keyId, DateTimeOffset at, CancellationToken ct)
+    {
+        DateTimeOffset when = StorageTime.Normalize(at);
+        await Write(c => c.ApiKeys.Where(k => k.Id == keyId).ExecuteUpdate(u => u.SetProperty(k => k.LastUsedAt, when)), ct).ConfigureAwait(false);
+    }
+
+    public async ValueTask<SmtpCredential?> FindSmtpCredentialAsync(string userName, CancellationToken ct) =>
+        await Read(c => c.SmtpCredentials.AsNoTracking().Where(x => x.UserName == userName).AsEnumerable().Select(x => x.ToRecord()).FirstOrDefault()).ConfigureAwait(false);
+
+    public async ValueTask UpsertSmtpCredentialAsync(SmtpCredential credential, CancellationToken ct)
+    {
+        var e = credential.ToEntity();
+        await Write(c => Upsert(c, e, e.Id), ct).ConfigureAwait(false);
+    }
+
+    public async ValueTask<IReadOnlyList<SmtpCredential>> GetSmtpCredentialsAsync(Guid tenantId, CancellationToken ct) =>
+        await Read<IReadOnlyList<SmtpCredential>>(c => c.SmtpCredentials.AsNoTracking().Where(x => x.TenantId == tenantId).OrderBy(x => x.UserName).AsEnumerable().Select(x => x.ToRecord()).ToList()).ConfigureAwait(false);
+
+    // Domains and DKIM
+
+    public async ValueTask<IReadOnlyList<DomainRecord>> GetDomainsAsync(Guid? tenantId, CancellationToken ct) =>
+        await Read<IReadOnlyList<DomainRecord>>(c => c.Domains.AsNoTracking().Where(d => tenantId == null || d.TenantId == tenantId).OrderBy(d => d.Name).AsEnumerable().Select(d => d.ToRecord()).ToList()).ConfigureAwait(false);
+
+    public async ValueTask<DomainRecord?> GetDomainAsync(Guid domainId, CancellationToken ct) =>
+        await Read(c => c.Domains.AsNoTracking().Where(d => d.Id == domainId).AsEnumerable().Select(d => d.ToRecord()).FirstOrDefault()).ConfigureAwait(false);
+
+    public async ValueTask<DomainRecord?> FindDomainByNameAsync(string name, CancellationToken ct)
+    {
+        string n = ConfigMapping.NormalizeDomain(name);
+        return await Read(c => c.Domains.AsNoTracking().Where(d => d.Name == n).AsEnumerable().Select(d => d.ToRecord()).FirstOrDefault()).ConfigureAwait(false);
+    }
+
+    public async ValueTask UpsertDomainAsync(DomainRecord domain, CancellationToken ct)
+    {
+        var e = domain.ToEntity();
+        await Write(c => Upsert(c, e, e.Id), ct).ConfigureAwait(false);
+    }
+
+    public async ValueTask<IReadOnlyList<DomainRecord>> GetDomainsDueForCheckAsync(DateTimeOffset now, int max, CancellationToken ct)
+    {
+        DateTimeOffset n = StorageTime.Normalize(now);
+        return await Read<IReadOnlyList<DomainRecord>>(c => c.Domains.AsNoTracking().Where(d => d.NextCheckAt != null && d.NextCheckAt <= n)
+            .OrderBy(d => d.NextCheckAt).ThenBy(d => d.Name).Take(max).AsEnumerable().Select(d => d.ToRecord()).ToList()).ConfigureAwait(false);
+    }
+
+    public async ValueTask DeleteDomainAsync(Guid domainId, CancellationToken ct) =>
+        await Write(c =>
+        {
+            c.DkimKeys.Where(k => k.DomainId == domainId).ExecuteDelete();
+            c.Domains.Where(d => d.Id == domainId).ExecuteDelete();
+        }, ct).ConfigureAwait(false);
+
+    public async ValueTask<IReadOnlyList<DkimKeyRecord>> GetDkimKeysAsync(Guid domainId, CancellationToken ct) =>
+        await Read<IReadOnlyList<DkimKeyRecord>>(c => c.DkimKeys.AsNoTracking().Where(k => k.DomainId == domainId).OrderBy(k => k.CreatedAt).ThenBy(k => k.Id).AsEnumerable().Select(k => k.ToRecord()).ToList()).ConfigureAwait(false);
+
+    public async ValueTask AddDkimKeyAsync(DkimKeyRecord key, CancellationToken ct)
+    {
+        var e = key.ToEntity();
+        await Write(c =>
+        {
+            c.DkimKeys.Add(e);
+            c.SaveChanges();
+        }, ct).ConfigureAwait(false);
+    }
+
+    public async ValueTask SetActiveDkimKeyAsync(Guid domainId, Guid keyId, DateTimeOffset at, CancellationToken ct)
+    {
+        DateTimeOffset when = StorageTime.Normalize(at);
+        await Write(c =>
+        {
+            if (!c.DkimKeys.Any(k => k.Id == keyId && k.DomainId == domainId))
+            {
+                throw new KeyNotFoundException($"DKIM key {keyId} does not belong to domain {domainId}.");
+            }
+
+            c.DkimKeys.Where(k => k.DomainId == domainId && k.Id != keyId && k.Active)
+                .ExecuteUpdate(u => u.SetProperty(k => k.Active, false).SetProperty(k => k.RetiredAt, k => k.RetiredAt ?? when));
+            c.DkimKeys.Where(k => k.Id == keyId).ExecuteUpdate(u => u.SetProperty(k => k.Active, true).SetProperty(k => k.RetiredAt, (DateTimeOffset?)null));
+        }, ct).ConfigureAwait(false);
+    }
+
+    // Suppressions
+
+    public async ValueTask<bool> IsSuppressedAsync(Guid tenantId, string address, CancellationToken ct)
+    {
+        string a = ConfigMapping.NormalizeAddress(address);
+        return await Read(c => c.Suppressions.AsNoTracking().Any(s => s.TenantId == tenantId && s.Address == a)).ConfigureAwait(false);
+    }
+
+    public async ValueTask AddSuppressionAsync(SuppressionRecord suppression, CancellationToken ct)
+    {
+        var e = suppression.ToEntity();
+        await Write(c => Upsert(c, e, e.TenantId, e.Address), ct).ConfigureAwait(false);
+    }
+
+    public async ValueTask<bool> RemoveSuppressionAsync(Guid tenantId, string address, CancellationToken ct)
+    {
+        string a = ConfigMapping.NormalizeAddress(address);
+        return await Write(c => c.Suppressions.Where(s => s.TenantId == tenantId && s.Address == a).ExecuteDelete() > 0, ct).ConfigureAwait(false);
+    }
+
+    public async ValueTask<Page<SuppressionRecord>> GetSuppressionsAsync(Guid tenantId, string? cursor, int limit, CancellationToken ct)
+    {
+        limit = Math.Clamp(limit, 1, 1000);
+        string? after = Cursors.TryDecode(cursor, out string decoded) ? decoded : null;
+        return await Read(c =>
+        {
+            IQueryable<SuppressionEntity> q = c.Suppressions.AsNoTracking().Where(s => s.TenantId == tenantId);
+            if (after is not null)
+            {
+                q = q.Where(s => s.Address.CompareTo(after) > 0);
+            }
+
+            var rows = q.OrderBy(s => s.Address).Take(limit + 1).ToList();
+            bool more = rows.Count > limit;
+            if (more)
+            {
+                rows.RemoveAt(rows.Count - 1);
+            }
+
+            return new Page<SuppressionRecord>(rows.Select(r => r.ToRecord()).ToList(), more ? Cursors.Encode(rows[^1].Address) : null);
+        }).ConfigureAwait(false);
+    }
+
+    // Webhook endpoints
+
+    public async ValueTask<IReadOnlyList<WebhookEndpointRecord>> GetWebhookEndpointsAsync(Guid? tenantId, CancellationToken ct) =>
+        await Read<IReadOnlyList<WebhookEndpointRecord>>(c => c.WebhookEndpoints.AsNoTracking().Where(w => tenantId == null || w.TenantId == tenantId).OrderBy(w => w.CreatedAt).ThenBy(w => w.Id).AsEnumerable().Select(w => w.ToRecord()).ToList()).ConfigureAwait(false);
+
+    public async ValueTask<WebhookEndpointRecord?> GetWebhookEndpointAsync(Guid id, CancellationToken ct) =>
+        await Read(c => c.WebhookEndpoints.AsNoTracking().Where(w => w.Id == id).AsEnumerable().Select(w => w.ToRecord()).FirstOrDefault()).ConfigureAwait(false);
+
+    public async ValueTask UpsertWebhookEndpointAsync(WebhookEndpointRecord endpoint, CancellationToken ct)
+    {
+        var e = endpoint.ToEntity();
+        await Write(c => Upsert(c, e, e.Id), ct).ConfigureAwait(false);
+        Interlocked.Increment(ref _webhookVersion);
+    }
+
+    public async ValueTask DeleteWebhookEndpointAsync(Guid tenantId, Guid id, CancellationToken ct)
+    {
+        await Write(c => c.WebhookEndpoints.Where(w => w.Id == id && w.TenantId == tenantId).ExecuteDelete(), ct).ConfigureAwait(false);
+        Interlocked.Increment(ref _webhookVersion);
+    }
+
+    public async ValueTask DisableWebhookEndpointAsync(Guid id, string reason, DateTimeOffset at, CancellationToken ct)
+    {
+        DateTimeOffset when = StorageTime.Normalize(at);
+        await Write(c => c.WebhookEndpoints.Where(w => w.Id == id)
+            .ExecuteUpdate(u => u.SetProperty(w => w.Enabled, false).SetProperty(w => w.DisabledReason, reason).SetProperty(w => w.DisabledAt, when)), ct).ConfigureAwait(false);
+        Interlocked.Increment(ref _webhookVersion);
+    }
+
+    // Settings, policies, routes
+
+    public async ValueTask<IReadOnlyList<SettingRecord>> GetSettingsAsync(Guid? tenantId, CancellationToken ct)
+    {
+        Guid scope = tenantId ?? Guid.Empty;
+        return await Read<IReadOnlyList<SettingRecord>>(c => c.Settings.AsNoTracking().Where(s => s.TenantId == scope).OrderBy(s => s.Key).AsEnumerable().Select(s => s.ToRecord()).ToList()).ConfigureAwait(false);
+    }
+
+    public async ValueTask SetSettingAsync(SettingRecord setting, CancellationToken ct)
+    {
+        var e = setting.ToEntity();
+        await Write(c => Upsert(c, e, e.TenantId, e.Key), ct).ConfigureAwait(false);
+    }
+
+    public async ValueTask<IReadOnlyList<TlsPolicyRecord>> GetTlsPoliciesAsync(CancellationToken ct) =>
+        await Read<IReadOnlyList<TlsPolicyRecord>>(c => c.TlsPolicies.AsNoTracking().OrderBy(t => t.DomainPattern).AsEnumerable().Select(t => t.ToRecord()).ToList()).ConfigureAwait(false);
+
+    public async ValueTask UpsertTlsPolicyAsync(TlsPolicyRecord policy, CancellationToken ct)
+    {
+        var e = policy.ToEntity();
+        await Write(c => Upsert(c, e, e.Id), ct).ConfigureAwait(false);
+    }
+
+    public async ValueTask DeleteTlsPolicyAsync(Guid id, CancellationToken ct) =>
+        await Write(c => c.TlsPolicies.Where(t => t.Id == id).ExecuteDelete(), ct).ConfigureAwait(false);
+
+    public async ValueTask<IReadOnlyList<RelayRouteRecord>> GetRelayRoutesAsync(CancellationToken ct) =>
+        await Read<IReadOnlyList<RelayRouteRecord>>(c => c.RelayRoutes.AsNoTracking().OrderBy(r => r.Priority).ThenBy(r => r.Name).ThenBy(r => r.Id).AsEnumerable().Select(r => r.ToRecord()).ToList()).ConfigureAwait(false);
+
+    public async ValueTask UpsertRelayRouteAsync(RelayRouteRecord route, CancellationToken ct)
+    {
+        var e = route.ToEntity();
+        await Write(c => Upsert(c, e, e.Id), ct).ConfigureAwait(false);
+    }
+
+    public async ValueTask DeleteRelayRouteAsync(Guid id, CancellationToken ct) =>
+        await Write(c => c.RelayRoutes.Where(r => r.Id == id).ExecuteDelete(), ct).ConfigureAwait(false);
+
+    // Certificates and ACME
+
+    public async ValueTask<IReadOnlyList<CertificateRecord>> GetCertificatesAsync(CancellationToken ct) =>
+        await Read<IReadOnlyList<CertificateRecord>>(c => c.Certificates.AsNoTracking().OrderBy(x => x.Name).AsEnumerable().Select(x => x.ToRecord()).ToList()).ConfigureAwait(false);
+
+    public async ValueTask<long> GetCertificateVersionAsync(CancellationToken ct) =>
+        await Read(c => c.Certificates.AsNoTracking().Max(x => (long?)x.Version) ?? 0L).ConfigureAwait(false);
+
+    public async ValueTask UpsertCertificateAsync(CertificateRecord certificate, CancellationToken ct)
+    {
+        var e = certificate.ToEntity();
+        await Write(c =>
+        {
+            e.Version = (c.Certificates.Max(x => (long?)x.Version) ?? 0L) + 1;
+            Upsert(c, e, e.Id);
+        }, ct).ConfigureAwait(false);
+    }
+
+    public async ValueTask<AcmeAccountRecord?> GetAcmeAccountAsync(string directoryUrl, CancellationToken ct) =>
+        await Read(c => c.AcmeAccounts.AsNoTracking().Where(a => a.DirectoryUrl == directoryUrl).AsEnumerable().Select(a => a.ToRecord()).FirstOrDefault()).ConfigureAwait(false);
+
+    public async ValueTask UpsertAcmeAccountAsync(AcmeAccountRecord account, CancellationToken ct)
+    {
+        var e = account.ToEntity();
+        await Write(c => Upsert(c, e, e.Id), ct).ConfigureAwait(false);
+    }
+
+    public async ValueTask<IReadOnlyList<AcmeRenewalRecord>> GetAcmeRenewalsAsync(CancellationToken ct) =>
+        await Read<IReadOnlyList<AcmeRenewalRecord>>(c => c.AcmeRenewals.AsNoTracking().OrderBy(r => r.CertificateName).AsEnumerable().Select(r => r.ToRecord()).ToList()).ConfigureAwait(false);
+
+    public async ValueTask UpsertAcmeRenewalAsync(AcmeRenewalRecord renewal, CancellationToken ct)
+    {
+        var e = renewal.ToEntity();
+        await Write(c => Upsert(c, e, e.CertificateName), ct).ConfigureAwait(false);
+    }
+
+    // Leases
+
+    public async ValueTask<LeaseRecord?> TryAcquireLeaseAsync(string name, string owner, TimeSpan duration, DateTimeOffset now, CancellationToken ct) =>
+        await Write(c =>
+        {
+            var existing = c.Leases.AsNoTracking().FirstOrDefault(l => l.Name == name);
+            var updated = LeaseRules.Acquire(existing, name, owner, duration, now);
+            if (updated is null)
+            {
+                return null;
+            }
+
+            Upsert(c, updated, name);
+            return updated.ToRecord();
+        }, ct).ConfigureAwait(false);
+
+    public async ValueTask<bool> RenewLeaseAsync(string name, string owner, long fencingToken, TimeSpan duration, DateTimeOffset now, CancellationToken ct) =>
+        await Write(c =>
+        {
+            var existing = c.Leases.AsNoTracking().FirstOrDefault(l => l.Name == name);
+            var updated = LeaseRules.Renew(existing, owner, fencingToken, duration, now);
+            if (updated is null)
+            {
+                return false;
+            }
+
+            Upsert(c, updated, name);
+            return true;
+        }, ct).ConfigureAwait(false);
+
+    public async ValueTask ReleaseLeaseAsync(string name, string owner, CancellationToken ct) =>
+        await Write(c =>
+        {
+            var existing = c.Leases.AsNoTracking().FirstOrDefault(l => l.Name == name);
+            if (LeaseRules.Release(existing, owner) is { } updated)
+            {
+                Upsert(c, updated, name);
+            }
+        }, ct).ConfigureAwait(false);
+
+    // Backend switch
+
+    public async ValueTask<SwitchStateRecord?> GetSwitchStateAsync(CancellationToken ct) =>
+        await Read(c => c.SwitchStates.AsNoTracking().Where(s => s.Id == 1).AsEnumerable().Select(s => s.ToRecord()).FirstOrDefault()).ConfigureAwait(false);
+
+    public async ValueTask SetSwitchStateAsync(SwitchStateRecord state, CancellationToken ct)
+    {
+        var e = state.ToEntity();
+        await Write(c => Upsert(c, e, 1), ct).ConfigureAwait(false);
+    }
+}
