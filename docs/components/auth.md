@@ -157,7 +157,7 @@ Parsing is strict: duplicate tags, empty tags, and non-ASCII are errors; `h=` in
 
 ### Sealer behaviour
 
-- First hop: `i=1`, `cv=none`. Passing chain: `i=N+1`, `cv=pass`. The `ChainArcResult` must match the ARC headers actually in the message, otherwise `ArgumentException`.
+- First hop: `i=1`, `cv=none`. Passing chain: `i=N+1`, `cv=pass`. The chain result must match the ARC headers actually in the message, otherwise `ArgumentException`.
 - Failed chain: a set with `cv=fail` whose seal covers only the new set; if the newest seal already says `cv=fail`, or the instance numbers cannot be read, or 50 sets exist, nothing is sealed and `NotSealedReason` says why. A transient DNS failure also counts as `Fail`: callers may prefer to defer the message instead of sealing `cv=fail` (`ArcChainResult.IsTransient`).
 - AMS: `rsa-sha256`, relaxed/relaxed, headers from `ArcSealerOptions.SignedHeaders` (default: the DKIM set plus DKIM-Signature), only instances that exist unless `OversignHeaders` is on (default off, because later hops are expected to alter the message). Seal the message exactly as it will leave this hop.
 
