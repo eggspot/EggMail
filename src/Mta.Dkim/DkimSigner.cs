@@ -205,12 +205,14 @@ public sealed class DkimSigner : IDisposable
 
             // Select and canonicalize the signed header instances, bottom-up per name, listing each in h=.
             var headerSink = new HashSink(hash, scratch);
+            int listed = 0;
             for (int n = 0; n < _headerNames.Length; n++)
             {
                 var nameBytes = _headerNameBytes[n];
                 for (int i = table.Count - 1; i >= 0; i--)
                 {
                     if (!table.NameEquals(message, i, nameBytes)) { continue; }
+                    if (++listed > DkimSignatureHeader.MaxSignedHeaderNames) { throw new DkimException("The message has too many instances of the signed headers."); }
                     Canonicalizer.WriteHeader(table.Raw(message, i), _headerRelaxed, appendCrlf: true, ref headerSink);
                     if (hList.Length > 0) { hList.Append((byte)':'); }
                     hList.Append(nameBytes);
@@ -219,6 +221,7 @@ public sealed class DkimSigner : IDisposable
                 if (_oversign)
                 {
                     // One more instance than exists: a verifier finds nothing for it, so adding such a header later breaks the signature.
+                    if (++listed > DkimSignatureHeader.MaxSignedHeaderNames) { throw new DkimException("The message has too many instances of the signed headers."); }
                     if (hList.Length > 0) { hList.Append((byte)':'); }
                     hList.Append(nameBytes);
                 }

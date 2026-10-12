@@ -38,13 +38,6 @@ internal struct PooledBuffer : IDisposable
         _length += text.Length;
     }
 
-    public void AppendDecimal(long value)
-    {
-        Ensure(20);
-        value.TryFormat(_array.AsSpan(_length), out int written);
-        _length += written;
-    }
-
     private void Ensure(int extra)
     {
         if (_array.Length - _length >= extra) { return; }

@@ -187,6 +187,17 @@ public class SignerTests
     }
 
     [Fact]
+    public void More_signed_header_instances_than_a_verifier_accepts_are_rejected_when_signing()
+    {
+        string message = string.Concat(Enumerable.Repeat("Comments: x\r\n", 600)) + Msg.Simple();
+        var signer = Msg.Signer(headers: ["From", "Comments"]);
+        Assert.Throws<DkimException>(() => signer.Sign(Msg.Bytes(message)));
+
+        string fewer = string.Concat(Enumerable.Repeat("Comments: x\r\n", 200)) + Msg.Simple();
+        Assert.StartsWith("DKIM-Signature:", signer.Sign(Msg.Bytes(fewer)));
+    }
+
+    [Fact]
     public void Message_with_only_headers_and_no_blank_line_can_be_signed()
     {
         var signer = Msg.Signer();
