@@ -919,6 +919,35 @@ internal sealed class MemoryWebhooks(MemoryState s) : IWebhookOutbox
         }
     }
 
+    public ValueTask<int> EnqueueAsync(Guid tenantId, WebhookEventDraft draft, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        DateTimeOffset at = StorageTime.Normalize(now);
+        lock (s.Gate)
+        {
+            int count = 0;
+            foreach (Guid endpointId in s.Config.EndpointsFor(tenantId, draft.EventType))
+            {
+                Guid id = Ids.New(at);
+                s.Outbox[id] = new WebhookOutboxEntity
+                {
+                    Id = id,
+                    EndpointId = endpointId,
+                    TenantId = tenantId,
+                    EventType = draft.EventType,
+                    EventId = draft.EventId,
+                    PayloadJson = draft.PayloadJson,
+                    NextAttemptAt = at,
+                    State = WebhookOutboxState.Pending,
+                    LeaseUntil = StorageTime.Epoch,
+                    CreatedAt = at,
+                };
+                count++;
+            }
+
+            return ValueTask.FromResult(count);
+        }
+    }
+
     public ValueTask<bool> ReplayAsync(Guid tenantId, Guid outboxId, DateTimeOffset now, CancellationToken cancellationToken)
     {
         lock (s.Gate)

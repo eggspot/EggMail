@@ -141,6 +141,25 @@ public abstract class WebhookConformance : StorageTestBase
     }
 
     [Fact]
+    public async Task Enqueue_fans_an_event_out_to_the_tenants_subscribed_enabled_endpoints_only()
+    {
+        Guid onlyBounced = await AddEndpointAsync(TenantA, true, "message.bounced");
+        await AddEndpointAsync(TenantA, false, "*");              // disabled
+        await AddEndpointAsync(TenantB, true, "*");               // other tenant
+        var draft = Draft("message.bounced", "{\"async\":true}");
+
+        Assert.Equal(2, await Storage.Webhooks.EnqueueAsync(TenantA, draft, Clock.UtcNow, CancellationToken.None));
+        Assert.Equal(1, await Storage.Webhooks.EnqueueAsync(TenantA, Draft("message.delivered", "{}"), Clock.UtcNow, CancellationToken.None));
+        Assert.Equal(0, await Storage.Webhooks.EnqueueAsync(Guid.NewGuid(), draft, Clock.UtcNow, CancellationToken.None));
+
+        var due = await ClaimDueAsync();
+        Assert.Equal(3, due.Count);
+        Assert.All(due, i => Assert.Equal(TenantA, i.TenantId));
+        Assert.Equal(2, due.Count(i => i.EventType == "message.bounced"));
+        Assert.Contains(due, i => i.EndpointId == onlyBounced && i.EventId == draft.EventId && i.PayloadJson == draft.PayloadJson);
+    }
+
+    [Fact]
     public async Task Replay_requeues_a_finished_item_for_its_tenant_only()
     {
         await SeedAsync(1);
