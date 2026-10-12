@@ -81,6 +81,38 @@ public sealed class DnsResponse
 public sealed class DnsException : Exception
 {
     public DnsException(string message, Exception? inner = null) : base(message, inner) { }
+
+    public DnsException(string message, DnsFailureReason reason, Exception? inner = null) : base(message, inner)
+    {
+        Reason = reason;
+    }
+
+    /// <summary>A coarse classification of the failure (for logging and metrics); <see cref="DnsFailureReason.Unspecified"/> when not known.</summary>
+    public DnsFailureReason Reason { get; } = DnsFailureReason.Unspecified;
+}
+
+/// <summary>Why a DNS operation failed with a <see cref="DnsException"/>. Every one of these means "temporary failure" to a caller such as SPF.</summary>
+public enum DnsFailureReason
+{
+    Unspecified = 0,
+
+    /// <summary>No (matching) response arrived within the configured attempts and timeouts.</summary>
+    Timeout,
+
+    /// <summary>A socket-level failure (connection refused, unreachable, reset).</summary>
+    Network,
+
+    /// <summary>The response bytes are not a valid DNS message.</summary>
+    MalformedResponse,
+
+    /// <summary>The response does not answer the question that was asked (ID, question or QR mismatch), or is truncated.</summary>
+    ResponseMismatch,
+
+    /// <summary>A resolution limit was hit (CNAME loop or too deep a CNAME chain).</summary>
+    ResolutionLimit,
+
+    /// <summary>The request itself cannot be encoded (for example an invalid name).</summary>
+    InvalidRequest,
 }
 
 /// <summary>Resolves DNS names. Implementations cache and are safe for concurrent use.</summary>
