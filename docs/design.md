@@ -8,6 +8,8 @@ EggMail is an open-source, self-hosted outbound email server: SMTP ingress, HTTP
 
 "Fastest" is scoped to **SMTP ingest** (accept) throughput and latency, reported separately from outbound delivery.
 
+**Design principle: performance is a permanent first-class goal in both modes.** Lite is engineered to perform well for large and high-throughput workloads and is not treated as a toy; optimization work applies to Full and Lite alike, and each is benchmarked separately ([benchmarks.md](benchmarks.md)).
+
 ## 2. Architecture
 
 ### 2.1 Build boundary
@@ -80,7 +82,7 @@ Two EF Core providers, one `DbContext`, a separate migrations assembly per provi
 - **Pipelines-based server.** Copy Kestrel's zero-byte-read default (`WaitForDataBeforeAllocatingBuffer`) so idle connections hold no buffer; cap read/write buffers explicitly (Kestrel defaults are 1 MiB and 64 KiB). Always call `AdvanceTo(consumed, examined)` and never touch a `ReadOnlySequence` afterwards.
 - **DATA path.** Scan for `\r\n.\r\n` incrementally with `SearchValues<byte>`. The body is buffered in memory up to the 25 MiB limit (Lite: 10 MiB) behind a **global in-flight bytes budget**; when exhausted, reply `452`. Objects of 85,000 bytes or more land on the large object heap. Start with EF `byte[]`; use Npgsql directly for the body insert only if profiling shows LOH pressure (owner permission for raw Npgsql is an open question).
 - **Smuggling and STARTTLS hardening.** Only `\r\n` ends a line; reject bare CR/LF and NUL with a 5xx and close; end DATA only on `\r\n.\r\n`. On STARTTLS, if the reader holds any bytes beyond the command line, close the connection; rebuild pipes over `SslStream` and reset session state (RFC 3207 §4.2). The client must re-EHLO after TLS and ignore the pre-TLS capability list. The client never emits a bare CR/LF.
-- **Group commit.** One writer per database file drains queued commands into one transaction so a single fsync is amortized across many messages; `250` is sent only after commit. In Full, events are buffered in a channel and flushed every few milliseconds; claims fetch N rows per round trip.
+- **Group commit.** One writer per database file drains queued commands into one transaction so the per-commit cost (an fsync under `Normal`/`Full`; transaction overhead under Lite's default `Off`) is amortized across many messages. `250` is sent only after the commit returns. In Full, events are buffered in a channel and flushed every few milliseconds; claims fetch N rows per round trip.
 - **TLS.** One shared `SslServerAuthenticationOptions` and certificate; stable `TargetHost` on outbound so session resumption works.
 - **GC.** Start with workstation non-concurrent GC below 2 cores and server GC with DATAS above; decide from benchmarks.
 - **EF Core on the hot path.** Use `AddPooledDbContextFactory` with a short-lived context per batch (never per message, never long-lived in a worker); `AsNoTracking`, `ExecuteUpdate`/`ExecuteSql`, `SqlQuery<T>`, compiled queries for fixed lookups. EF costs several KB per operation even when tuned, so the per-message allocation budget applies to the SMTP/protocol path; the database layer has its own proposed budget (see [benchmarks.md](benchmarks.md)).
@@ -120,17 +122,44 @@ Single node, one replica, multi-tenant, local volume only (WAL does not work on 
 
 | File | Contents | Sync mode |
 |---|---|---|
-| `queue.db` | Spool bodies, delivery queue, webhook outbox | `FULL` |
-| `stats.db` | Aggregates, recent-events ring, webhook attempt log | `NORMAL` |
-| `config.db` | Tenants, API keys, domains, DKIM keys, suppressions, webhook endpoints, Data Protection keys | `FULL` (rarely written) |
+| `queue.db` | Spool bodies, delivery queue, webhook outbox | `Lite:SyncMode`, default **`OFF`** |
+| `stats.db` | Aggregates, recent-events ring, webhook attempt log | `Lite:SyncMode`, default **`OFF`** |
+| `config.db` | Tenants, API keys, domains, DKIM keys, suppressions, webhook endpoints, Data Protection keys | `Lite:ConfigSyncMode`, default `FULL` (rarely written) |
+
+The `OFF` default for `queue.db` and `stats.db` is **owner-decided**. Keeping `config.db` at `FULL` is the design authors' recommendation (it is rarely written and holds DKIM keys, API-key hashes and the Data Protection key ring, whose loss or corruption would be severe) and **awaits owner confirmation** ([open-questions.md](open-questions.md)).
 
 Separate files keep a stats rollup from stalling queue commits. That independent-writer property is inferred from per-file WALs; no explicit sqlite.org statement was found (**unverified**). SQLite documents that a transaction across several databases in WAL mode is atomic per file but not as a set, so **every cross-file effect must be idempotent and ordered**. Example: on a hard bounce, write the suppression to `config.db` first, then complete the queue row; a crash in between just means the retry bounces again.
 
-**Writer design:** one writer thread per file. Callers submit write commands through a bounded channel and await the result; the writer drains up to N commands or T milliseconds (e.g. 2 ms) into one `BEGIN IMMEDIATE … COMMIT`. Under load, batches grow. The `250` is sent after the commit. Reads use separate short connections. Avoid `Cache=Shared` with WAL; one connection per operation.
+**Writer design:** one writer thread per file. Callers submit write commands through a bounded channel and await the result; the writer drains up to N commands or T milliseconds (e.g. 2 ms) into one `BEGIN IMMEDIATE … COMMIT`. Under load, batches grow. The `250` is sent after the commit returns (see "Acknowledgement and sync mode" below for what that does and does not guarantee). Reads use separate short connections. Avoid `Cache=Shared` with WAL; one connection per operation.
 
 **There is no rate limiter in the product.** The only back-pressure is natural: the bounded channel into the writer (SMTP reads slow through TCP flow control) and `452` for disk full.
 
-**Durability.** `Lite:QueueDurability=Durable` (default) acknowledges after a `synchronous=FULL` commit; `Memory` is an explicit opt-in documented as "accepted means in memory; lost on restart". `Lite:SyncMode=Normal` (a user opt-in, "I accept power-loss risk") skips the WAL sync: process kills and container restarts should not lose data (inference), but host or power failure can. All leases clear on startup (single process) and delivery is at-least-once, so a message in flight at crash time may duplicate.
+**Acknowledgement and sync mode (read this before deploying Lite).** The earlier design acknowledged after a `synchronous=FULL` commit and called the queue "durable". The owner chose `PRAGMA synchronous=OFF` as the default for speed, so that wording no longer applies and the term "durable queue" is retired for Lite. Lite's default is **process-crash-safe, not power-loss-safe**:
+
+- `250`/`202` now means the data has been **handed to the operating system**, not synced to disk.
+- A **process kill or container restart is safe**: per the SQLite docs, "If the application running SQLite crashes, the data will be safe".
+- If the **operating system crashes or the host loses power**, the SQLite docs say that with `synchronous=OFF` "the database might become corrupted", and their durability matrix lists WAL mode with `OFF` as "Not consistent". This is **corruption, not just loss of the last commits**: the whole `queue.db` (all queued mail and the webhook outbox, including mail already acknowledged with `250`) or `stats.db` may be unusable. By contrast, `NORMAL` in WAL mode is documented as safe from corruption but may roll back recently committed transactions, and `FULL` is documented as durable (ACID) in WAL mode. Source: [sqlite.org/pragma.html](https://www.sqlite.org/pragma.html#pragma_synchronous).
+- A server that acknowledges `250` takes responsibility for the message (RFC 5321). Under the default, that responsibility is not backed by a disk sync. Operators who need it must opt in to `Normal` or `Full`, or use Full mode (Postgres).
+
+Knobs (names are proposed):
+
+| Knob | Values | Default | Notes |
+|---|---|---|---|
+| `Lite:SyncMode` | `Off` \| `Normal` \| `Full` | `Off` | Applies to `queue.db` and `stats.db`. `Normal`: WAL synced at checkpoints only, safe from corruption, may lose recent commits on power loss. `Full`: WAL synced on every commit, ACID in WAL mode |
+| `Lite:ConfigSyncMode` | `Off` \| `Normal` \| `Full` | `Full` | Applies to `config.db`. Recommendation, pending owner confirmation |
+| `Lite:QueuePersistence` | `Persistent` \| `Memory` | `Persistent` | Renamed from the earlier `Lite:QueueDurability = Durable \| Memory` because "durable" is no longer accurate. `Memory` is an explicit opt-in: "accepted means in memory; lost on restart" |
+
+All leases clear on startup (single process) and delivery is at-least-once, so a message in flight at crash time may duplicate.
+
+Cost and benefit versus `Lite:SyncMode=Full` (qualitative; no numbers measured): SQLite documents that commits "can be much faster" with `OFF`, and with no fsync per commit the writer is no longer bound by fsync latency. The price is the corruption exposure above. The size of the speedup on our workload is **unmeasured** and must be benchmarked as a pair ([benchmarks.md](benchmarks.md)). Group commit is kept in all modes: under `Normal`/`Full` it amortizes fsync; under `Off` it still amortizes per-transaction overhead (inference, to be measured).
+
+**Corruption detection and recovery (new scope).**
+
+- At startup, run an integrity check on each file: `PRAGMA quick_check` by default (O(N), skips UNIQUE and index-content checks) or the full `PRAGMA integrity_check` (O(N log N)) by configuration. Startup time grows with file size. A passing check does not prove the file is free of corruption.
+- If a file fails: **quarantine** it (move the file and its `-wal`/`-shm` to a timestamped quarantine directory, never delete), **start with an empty file** for that database, and raise an alert (dashboard banner, log, metric). The quarantined file is kept for manual salvage.
+- Consequences by file: a quarantined `queue.db` loses all queued mail and pending webhook events; a quarantined `stats.db` loses statistics history and the attempt log; `config.db` at `FULL` is expected to survive (not guaranteed). If `config.db` is on `Off` and is quarantined, the instance starts without tenants, keys and DKIM keys and must be restored from backup or re-provisioned.
+- Optional scheduled backups with `VACUUM INTO` (works while running; `BackupDatabase` blocks writers). A restore returns the state at the last backup; mail accepted since is lost.
+- Cross-file ordering rules (suppression to `config.db` first, then complete the queue row) are unchanged.
 
 **Queue and message limits:** 48 h queue lifetime, 10 MiB max message (both proposed defaults).
 
@@ -140,8 +169,8 @@ Separate files keep a stats rollup from stalling queue commits. That independent
 
 | Knob | Default |
 |---|---|
-| `Stats:HourlyRetentionDays` | 30 (matches Full metadata) |
-| `Stats:DailyRetentionDays` | 400 |
+| `Stats:HourlyRetentionDays` | 30 (matches Full metadata); `0` = keep forever, see §5.1 |
+| `Stats:DailyRetentionDays` | 400; `0` = keep forever, see §5.1 |
 | `Stats:RecipientDomainTopNHourly` | 20 (rest bucketed as "other") |
 | `Stats:RecipientDomainTopNDaily` | 10 |
 | `Stats:MaxSeriesPerHour` | 200,000 (overflow goes to "other") |
@@ -153,17 +182,30 @@ Size model (assumes about 120 B per row plus a similar index, about 250 B per ro
 
 **Housekeeping:** `auto_vacuum=INCREMENTAL` must be set before tables exist; `VACUUM` needs up to 2× free space. Set `journal_size_limit`; run `wal_checkpoint(PASSIVE)` after batches and `TRUNCATE` at idle, because long-lived readers starve checkpoints (dashboard reads hit `stats.db`, not `queue.db`). Export WAL size as a metric. Back up with `VACUUM INTO` while running (`SqliteConnection.BackupDatabase` blocks writers). Keep the SQLite schema small and stable: AlterColumn/DropColumn need table rebuilds, idempotent scripts are unsupported, a killed migration can leave an abandoned `__EFMigrationsLock`, and `DateTimeOffset`/`decimal`/`TimeSpan` comparisons run client-side (store UTC `DateTime` or `long`).
 
-**Honest ceiling.** Throughput is bounded by fsync latency, disk write bandwidth and write amplification (each body is written to the WAL and again at checkpoint, at least 2× disk writes). No credible published commits/s figure for SQLite on SSD with `FULL` was found; one snippet (about 442 inserts/s WAL+FULL vs 33k/s NORMAL) is **unverified** and not our workload. The expectation of thousands of messages/s on local NVMe and hundreds on cloud block storage is an inference to be measured with the benchmark harness.
+**Honest ceiling.** Lite is engineered for large, high-throughput workloads; its performance is a first-class goal ([benchmarks.md](benchmarks.md)). With the default `Off` the limit is no longer fsync latency but single-writer CPU, WAL write bandwidth and checkpoint I/O (each body is written to the WAL and again at checkpoint, at least 2× disk writes); with `Normal`/`Full` fsync latency returns as a limit. No credible published commits/s figure for SQLite on SSD with `FULL` was found; one snippet (about 442 inserts/s WAL+FULL vs 33k/s NORMAL) is **unverified** and not our workload. The earlier expectation of thousands of messages/s on local NVMe and hundreds on cloud block storage was an inference made for `FULL`; it is not re-derived for `Off`. Measure it.
 
-**Dashboard and docs wording:** a "storage pressure" indicator fed by `lite_commit_latency_ms`, `lite_writer_batch_size`, `lite_writer_queue_depth` and WAL size. Published guidance: *"Lite has no built-in rate limit. Throughput is bounded by your disk. If the writer queue stays deep (suggestion: over 1,000 for 5 minutes) or p99 commit latency exceeds about 100 ms, you've reached the ceiling. Use faster local disk, or move to Full."* Move to Full when you need more than one node or HA, per-message search, history or resend, or the indicator stays red. (The two thresholds are decided by default and awaiting owner confirmation; see [open-questions.md](open-questions.md).)
+**Dashboard indicators (advisory only).** A "storage pressure" indicator fed by `lite_commit_latency_ms`, `lite_writer_batch_size`, `lite_writer_queue_depth` and WAL size. Suggested default signals: writer queue depth over 1,000 for 5 minutes, or p99 commit latency over about 100 ms (both configurable; calibrate after benchmarking, since commit latency will be much lower under `Off`). These are **advisory indicators on the dashboard only**; the system **never switches mode automatically**. Suggested docs wording: *"Lite has no built-in rate limit. Throughput is bounded by your hardware. If the writer queue stays deep or p99 commit latency is high, you have reached the ceiling; consider faster local disk or moving to Full."* Reasons to consider Full: more than one node or HA, per-message search, history or resend, power-loss safety without the cost of `Lite:SyncMode=Full`, or an indicator that stays red. The owner decides whether and when to switch (§4.3).
 
 **Lite dashboard and API:** counters and rates, per-hour/day charts, per-domain breakdowns, live queue depth and deferrals by destination, the recent-events ring, domain verification, API keys and suppressions. No message search, timeline, content or resend. The UI reads a capabilities endpoint to hide those pages; per-message API endpoints return `501` with code `not_supported_in_lite_mode`. Sends still return an id, for log correlation only.
 
 **Bounce correlation without per-message rows:** a stateless signed VERP token (tenant id, domain id, timestamp, HMAC). The recipient to suppress comes from the DSN's `Final-Recipient`.
 
-### 4.3 Upgrade path
+### 4.3 Mode switching is manual, never automatic
 
-Lite → Full: `mta drain` (stop accepting, wait for an empty queue), start Full against Postgres, and move tenants, domains, API-key hashes, suppressions and optionally stats with a config export/import tool. DKIM keys require the same Data Protection key ring or certificate. Queued messages are not migrated. Full → Lite is unsupported except for config.
+EggMail never changes mode on its own: no auto-failover, no auto-upgrade, no threshold that triggers a switch. The dashboard offers an **owner-triggered, guided "Switch mode" action** that walks through explicit steps and requires confirmation. The mode is deployment configuration (`Mail__Provider`, the Postgres connection strings and, for Full, a managed Postgres), so the guided action orchestrates the in-app steps and ends with a restart under the new configuration; it cannot provision Postgres or change container topology. This builds on the earlier drain-and-switch path; the earlier "Full → Lite unsupported" (decision 14) is preserved in the narrowed form below.
+
+**Lite → Full (supported, guided):**
+
+1. Preflight: Postgres reachable, version at least 16, owner and runtime roles and connection strings configured, migrations applied (or `Auto`), Data Protection key ring / certificate available to the target.
+2. Drain (`mta drain`): stop accepting new mail and wait for an empty queue. Queued messages are **not** migrated, so the switch does not proceed with a non-empty queue; the owner can wait, cancel (resume accepting), or let messages expire.
+3. Export config: tenants, domains, API-key hashes, suppressions and optionally stats. DKIM keys need the same Data Protection key ring or certificate.
+4. Import into Postgres and verify counts.
+5. Explicit confirmation by the owner, then restart under Full. Lite files are left untouched as a fallback.
+
+**Full → Lite (not an in-place switch):** per-message history (events, retained content, retained raw) has no home in Lite, so this direction **loses visibility of all per-message history**. Safest choice, adopted here and marked as an open question: the dashboard offers only a **config-only export** (tenants, domains, API-key hashes, suppressions, optionally aggregate stats) to seed a *new* Lite installation. It is non-destructive: Full keeps running with its data until the owner decommissions it, and the export requires explicit typed confirmation stating that history will not carry over. There is no in-place Full → Lite switch and no deletion of Full data. See [open-questions.md](open-questions.md).
+
+Effort: the guided flow (preflight, confirmations, config-only export, UI) is new scope on top of the earlier drain/export/import work; see [plan.md](plan.md).
+
 
 ## 5. Content retention (Full)
 
@@ -171,10 +213,28 @@ The raw message is delivered verbatim (apps may DKIM-sign their own mail; rebuil
 
 - Default stored content: subject + text + html + attachment index. Attachments are **not** stored unless enabled.
 - Attachment flag precedence: per-send API flag, then per-tenant setting, then global default (`false`), behind the master switch `Content:AllowAttachmentStorage`. SMTP ingress uses the tenant setting only.
-- Config (proposed): `Content:Mode = Retain | None` (default `Retain`; `None` deletes content at the final state), `Content:RetentionDays = 7` (range 6–30; must exceed the 5-day queue lifetime), `Content:StoreAttachments = false`, `Content:MaxStoredBodyBytes = 256 KiB` (truncated with a flag), `Content:StoreSubject` configurable (subjects can contain personal data). Metadata is kept 30 days; anything content-like (e.g. a preview) follows the content retention.
+- Config (proposed): `Content:Mode = Retain | None` (default `Retain`; `None` deletes content at the final state), `Content:RetentionDays = 7` (range 6–30, **no unlimited value**; see §5.1), `Content:StoreAttachments = false`, `Content:MaxStoredBodyBytes = 256 KiB` (truncated with a flag), `Content:StoreSubject` configurable (subjects can contain personal data). Metadata is kept 30 days (`Retention:MetadataDays`, `0` = keep forever, see §5.1); anything content-like (e.g. a preview) follows the content retention.
 - Resend: from retained raw when attachment storage was on; for attachment-free messages, "send again from content" re-composes from stored subject/body and is labelled as re-composed (headers not byte-identical); otherwise the dashboard shows "attachments were not stored" and the API returns a clear error.
 - The dashboard renders stored HTML only in a sandboxed iframe under a strict CSP, with plain text as the default.
 - Size model (illustrative, not measured; 100k messages/day, about 20 KB content per message, an assumption): about 2 GB/day and 14 GB at 7 days before TOAST compression. Worst case spool (all mail deferred 5 days) about 25 GB. With attachment storage on: about 35 GB at 7 days, about 150 GB at 30 days.
+
+### 5.1 Retention knobs and unlimited retention
+
+**Convention (applies everywhere): a retention value of `0` means "keep forever" (unlimited).** Negative values are invalid. Unlimited means no automatic cleanup: disk grows without bound and the operator must clean up manually or with external tooling. The dashboard shows a warning next to any knob set to `0`.
+
+| Knob | Default | Allowed | Unlimited (`0`)? | Cost / reasoning |
+|---|---|---|---|---|
+| `Webhooks:OutboxRetentionDays`, `Webhooks:AttemptLogDays` | 7 | any positive integer, or `0` (**owner-decided**; the earlier cap of 30 is removed) | Yes | Rows grow with event volume. In Lite the outbox lives in `queue.db`, the hot file, so unlimited outbox retention inflates the file the writer commits to and slows vacuum/backup; the attempt log lives in `stats.db`. Prefer a finite outbox value in Lite |
+| `Retention:MetadataDays` (Full events, day-partitioned) | 30 | positive integer, or `0` | Yes, with warning | Partitions are never dropped, so the partition count grows by one per day. PostgreSQL's partitioning docs caution that very many partitions raise planning time and memory (not re-fetched this round, **unverified**); consider week-sized partitions if used. Backup size and restore time grow too |
+| `Stats:HourlyRetentionDays` (Lite) | 30 | positive integer, or `0` | Yes, with warning | Hourly rows are the bulk of `stats.db` (about 13.7M rows, 4–5 GB total, in the modeled large case at 30 days); unlimited growth is linear in time. The `Stats:MaxSeriesPerHour` cap still bounds each hour |
+| `Stats:DailyRetentionDays` (Lite) | 400 | positive integer, or `0` | Yes | Daily rows are small (modeled as about 10k rows/day in the large case, top 10 domains), so this is the safest knob to leave unlimited |
+| `Content:RetentionDays` (Full) | 7 | **6 to 30 only** | **No** | See below |
+| Suppressions | no expiry | n/a | Already unlimited | Needed for correctness |
+| `Lite:RecentEvents` | 1,000 | count, not time | n/a | A bounded ring by design |
+
+**Why `Content:RetentionDays` stays 6–30 and has no unlimited value.** The floor of 6 exists because content must outlive the 5-day queue lifetime (otherwise the dashboard view and resend would vanish before the message is final). The ceiling of 30 is a safety bound, not a technical limit: content holds personal data (subjects, bodies, optionally attachments), so unlimited retention is a privacy and compliance liability, and it is the largest storage consumer (about 150 GB at 30 days with attachments in the modeled example, with a revisit threshold of roughly 200–300 GB). For operators who need to keep nothing, `Content:Mode=None` deletes content at the final state. Whether to raise the ceiling or add an explicit override is an open question ([open-questions.md](open-questions.md)). Retention in Full for content is by partition drop, which is why day granularity and a finite window matter.
+
+
 - Revisit the Postgres-only body design if retained content passes roughly 200–300 GB, WAL passes roughly 50 GB/day or restore time becomes unacceptable (rules of thumb, unsourced).
 
 ## 6. Webhooks (shared by Full and Lite)
@@ -184,7 +244,7 @@ The raw message is delivered verbatim (apps may DKIM-sign their own mail; rebuil
 - **Delivery rules:** success is 2xx within 15 s; `410` disables the endpoint; `429`, `502` or `504` throttle; redirects are not followed; an endpoint is disabled after 5 days of continuous failure and the tenant is notified; per-endpoint concurrency capped (default 4).
 - **SSRF protection:** HTTPS required by default (`Webhooks:AllowHttp=false`). Resolve the host, validate resolved IPs against a denylist (loopback, private ranges, link-local, `169.254.169.254`, `fc00::/7`, `fe80::/10`, multicast), connect only to the validated addresses keeping the host name for SNI and `Host` (defeats DNS rebinding). A per-tenant allowlist overrides for internal endpoints.
 - **Schema:** `webhook_endpoint` (config DB: id, tenant, url, wrapped secret, event types, enabled, disabled reason); `webhook_outbox` (queue DB in Lite: id, endpoint, tenant, event type, event id, JSON payload, next_attempt_at, attempt count, state, lease), inserted in the same transaction that completes the delivery row so a crash cannot lose an event whose outcome is already durable; `webhook_attempt` (stats DB in Lite: outbox id, time, status code, duration, error class, response snippet of at most 1 KB; losing a few rows on a crash is acceptable).
-- **Retention:** finished outbox rows and the attempt log are kept 7 days, configurable up to 30 (`Webhooks:OutboxRetentionDays`, `Webhooks:AttemptLogDays`). Decided by default, awaiting owner confirmation.
+- **Retention:** finished outbox rows and the attempt log are kept 7 days by default, configurable to any positive number of days, and **`0` keeps them forever** (owner-decided; the earlier 30-day cap is removed). Unlimited retention means no cleanup: disk grows with event volume and the operator must clean up manually or externally (§5.1). `Webhooks:OutboxRetentionDays`, `Webhooks:AttemptLogDays`.
 - **Writer interaction:** the dispatcher claims due rows through the queue writer and results flow back in the same group-commit batches; the load is small (a few events per message; about 12 events/s average at 1M messages/day).
 - **Unverified:** Stripe's and Postmark's webhook timeouts; SendGrid's 24 h retry (search snippet only).
 

@@ -1,6 +1,6 @@
 # Performance measurement plan
 
-EggMail's primary goal is to be the fastest SMTP server. This document defines what that claim means and how it will be measured. **No measurements exist yet.** All targets are proposals to be tuned after the first runs. Claim "fastest" only once an independent run reproduces it.
+EggMail's primary goal is to be the fastest SMTP server. **Performance is a permanent first-class goal in both modes:** Lite is engineered for large, high-throughput workloads and is not treated as a toy, so Lite and Full are benchmarked and optimized **separately**, each with its own results, regressions gate and budgets. This document defines what that claim means and how it will be measured. **No measurements exist yet.** All targets are proposals to be tuned after the first runs. Claim "fastest" only once an independent run reproduces it.
 
 ## Scope of the claim
 
@@ -15,7 +15,7 @@ EggMail's primary goal is to be the fastest SMTP server. This document defines w
 - CPU per 1,000 messages
 - Allocations per message
 
-Lite mode additionally reports `lite_commit_latency_ms`, `lite_writer_batch_size`, `lite_writer_queue_depth` and WAL size, which also feed the dashboard's storage-pressure indicator.
+Lite additionally reports `lite_commit_latency_ms`, `lite_writer_batch_size`, `lite_writer_queue_depth` and WAL size, which also feed the dashboard's advisory storage-pressure indicator (advisory only; mode switching is manual). Full additionally reports Postgres round trips per message, claim latency, WAL volume and connection-pool saturation.
 
 ## Targets (proposed)
 
@@ -27,19 +27,24 @@ Lite mode additionally reports `lite_commit_latency_ms`, `lite_writer_batch_size
 | Ingest, non-durable | at least 5k msg/s per core |
 | Outbound to a sink | at least 3k msg/s per core |
 | Gen2 GCs at steady load | essentially none |
-| EF Core database layer | no more than about 20 KB per database round trip, amortized over batches of tens to hundreds of rows |
+| EF Core database layer (starting proposal for both Full and Lite; Lite may get its own budget after first runs) | no more than about 20 KB per database round trip, amortized over batches of tens to hundreds of rows |
 
-The 2 KB budget applies to the SMTP/protocol path; EF costs several KB per operation even when tuned, hence the separate database budget. The Lite ceiling is expected to be thousands of messages/s on local NVMe and hundreds on cloud block storage, which is an **inference to be measured**; no credible published SQLite commit rate was found.
+The protocol-path rows apply to both modes and are measured separately in each. The 2 KB budget applies to the SMTP/protocol path; EF costs several KB per operation even when tuned, hence the separate database budget. The earlier Lite ceiling guess (thousands of messages/s on local NVMe, hundreds on cloud block storage) was an inference made for `synchronous=FULL`; it is not re-derived for the new default `OFF`. No credible published SQLite commit rate was found. Measure it; no Lite throughput target is set until the first runs.
 
 ## Fairness rules
 
-1. **Report durable and non-durable results as a pair.** Durable means fsync (or equivalent commit) before the `250`. Never compare one durable result against another system's non-durable one.
+1. **Report durable and non-durable results as a pair, per mode.** "Durable" means the data is fsynced (or equivalent) before the `250`. Never compare one durable result against another system's non-durable one.
+   - **Lite's default is a non-durable configuration:** `Lite:SyncMode=Off` (`synchronous=OFF`) is process-crash-safe but not power-loss-safe, and per the SQLite docs can corrupt the database on an OS crash or power loss. A headline Lite number measured under the default must therefore always be published next to the durable result with `Lite:SyncMode=Full` (and, as a middle point, `Normal`). Config files, WAL/checkpoint settings and message sizes are identical across the pair.
+   - **Full:** the durable result uses Postgres defaults (WAL synced at commit). A non-durable counterpart for comparison with other servers can use Postgres `synchronous_commit=off` (a Postgres setting that can lose recent commits but not corrupt the database); it is published only as a pair with the durable result. Both are proposals to confirm in the first runs.
+   - Comparing Lite-`Off` against any baseline's durable result is unfair and not allowed; compare like with like (durable vs durable, non-durable vs non-durable).
 2. Known baseline behavior: Postfix fsyncs queue files; KumoMTA's spool flush defaults to `false`; Haraka's behavior is **unverified**.
 3. Baselines run on **identical hardware under our own harness**. Do not cite vendor numbers as baselines (Haraka, for example, claims only "thousands of messages per second" without a benchmark).
 4. Use a sink that creates back-pressure. KumoMTA's testing docs warn that discard-everything sinks distort results.
 5. Never test against the public internet.
 6. Publish results per release with hardware, message size, concurrency and GC mode, using the **median of at least 3 runs**.
 7. Include a reproducible compose setup in the repository.
+8. **Lite and Full are reported separately**, never blended into one number. Lite does not use Postgres; Full does not use SQLite. Cross-mode comparisons are informational only and carry the same durable/non-durable pairing.
+9. Disk and filesystem for Lite runs are published (device type, local vs cloud block, filesystem), because Lite is bound by the local disk.
 
 ## Baselines
 
@@ -54,14 +59,14 @@ The 2 KB budget applies to the SMTP/protocol path; EF costs several KB per opera
 - **swaks:** correctness only, not load.
 - **Own load generator:** no maintained standalone tool covers TLS and pipelining, so one is written and kept in the repository (`Mta.Tools`).
 - **BenchmarkDotNet** with `[MemoryDiagnoser]` for parsers, dot-stuffing, DKIM canonicalization, the DNS codec and MIME; `dotnet-counters` and `dotnet-trace` for profiling.
-- CI regression gate on the micro-benchmarks and budgets (about 2.5 engineer-weeks for harness, generator, baseline compose and gate; see [plan.md](plan.md)).
+- CI regression gate on the micro-benchmarks and budgets, run for both Lite and Full (about 2.5 engineer-weeks for harness, generator, baseline compose and gate; see [plan.md](plan.md)).
 
 ## Workload parameters to publish and vary
 
-Message size, concurrency, TLS on/off, pipelining on/off, recipients per message, durable vs non-durable commit, Full vs Lite, `Lite:SyncMode`, GC mode (workstation non-concurrent vs server with DATAS; the choice is to be made from these benchmarks).
+Message size, concurrency, TLS on/off, pipelining on/off, recipients per message, durable vs non-durable commit, mode (Lite and Full separately), `Lite:SyncMode` (`Off`, `Normal`, `Full`), GC mode (workstation non-concurrent vs server with DATAS; the choice is to be made from these benchmarks).
 
 ## Unverified
 
-- SQLite commit rate on SSD with `synchronous=FULL` (one search snippet claimed about 442 inserts/s WAL+FULL vs 33k/s NORMAL; unopened and not our workload)
+- SQLite commit rate on SSD with any `synchronous` setting, including the new default `OFF` (one search snippet claimed about 442 inserts/s WAL+FULL vs 33k/s NORMAL; unopened and not our workload)
 - Haraka's ingest behavior and fsync policy
 - All numeric targets above (proposals)

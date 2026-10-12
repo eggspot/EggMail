@@ -4,14 +4,14 @@ All numbers are the design authors' **estimates**, not measurements, built from 
 
 ## Current totals
 
-**About 264 engineer-weeks central (range 196–385).**
+**About 267 engineer-weeks central (range about 198–390).** This is the earlier 264 (196–385) plus the owner-decision additions below (+2.5, range +1.5 to +4.5), which are new author estimates and not from the earlier effort model.
 
 Calendar uses the same capacity assumptions throughout: 4 engineers ≈ 3.1 effective weeks per week, 2 engineers ≈ 1.7.
 
 | Team | Low | Central | High |
 |---|---|---|---|
 | 4 engineers | about 15 months | about 20 months | about 29 months |
-| 2 engineers | about 27 months | about 36 months | about 52 months |
+| 2 engineers | about 27 months | about 36 months | about 53 months |
 
 Outside the estimate: deliverability operations (IP reputation, warm-up, abuse desk) and the external security audit.
 
@@ -24,6 +24,7 @@ Outside the estimate: deliverability operations (IP reputation, warm-up, abuse d
 | Blob store dropped; bodies in Postgres `bytea` | −12 | 229 |
 | Content split (+4), Lite mode on SQLite (+18) | +22 (range +16 to +29.5) | 251 |
 | Lite webhooks, multi-tenant stats, three SQLite files, stress tests, benchmark harness | +13 (range +10 to +19.5) | 264 |
+| Owner decisions of 2026-10-12: corruption detection/recovery for `synchronous=OFF`, guided manual mode switch | +2.5 (range +1.5 to +4.5) | 267 |
 
 ## Component list (baseline of 236)
 
@@ -90,18 +91,30 @@ Lite webhooks, tenancy and benchmarks (+13, versus 251):
 | Multi-tenant scoping in Lite | +0.5 | 0.5 |
 | **Total** | **+13** | **+10 to +19.5** |
 
+### Owner decisions of 2026-10-12 (new, +2.5)
+
+These are new author estimates (not from the earlier effort model), rounded; re-estimate before committing.
+
+| Item | Central | Range |
+|---|---|---|
+| Lite corruption handling for `synchronous=OFF`: startup integrity check, quarantine and start-empty, alerting, `VACUUM INTO` backup schedule, OS-crash/power-loss fault-injection tests | +1 | 0.5–2 |
+| Guided manual mode switch: preflight, confirmations, drain orchestration, config-only Full → Lite export, dashboard UI | +1.5 | 1–2.5 |
+| **Total** | **+2.5** | **+1.5 to +4.5** |
+
+No change from the other owner decisions: MIT license (docs only), unlimited-retention `0` convention (a "skip deletion" branch in retention jobs plus dashboard warnings, assumed within the existing retention-job estimates), and advisory-only indicators (the storage-pressure indicator was already in scope). Choosing `OFF` as the default does not remove the crash and writer stress tests; it adds the power-loss/OS-crash cases counted above.
+
 ## Phases
 
-Phase scope at the 236 baseline, with later deltas applied. Per-phase totals below are **derived by summing the recorded phase deltas**; they sum to 259, not 264, because the +5 step above was not assigned to phases in the sources.
+Phase scope at the 236 baseline, with later deltas applied. Per-phase totals below are **derived by summing the recorded phase deltas**; they sum to 261.5, not 267, because the +5 step above was not assigned to phases in the sources.
 
 | Phase | Scope | Baseline | Deltas since | Derived |
 |---|---|---|---|---|
 | 0 Foundations | Seams, SMTP parser skeleton, DNS codec, EF/Postgres spike, threat model, CI guard for package-free stack, two-provider skeleton and mode switch | 18 | −2 (no FS blob spike), +1.5, +1 | 18.5 |
 | 1 Core engines | SMTP server, DNS, MIME, Postgres and SQLite stores (queue claim, retention job, spool/content tables), `IStatsStore` | 64 | −0.5, +9, +4.5 | 77 |
-| 2 Outbound | SMTP client, scheduler, DKIM, DSN; durable-queue crash tests and terminal-state strip/move job | 47 | −6 (no S3 provider or suite), +3, +2.5 | 46.5 |
+| 2 Outbound | SMTP client, scheduler, DKIM, DSN; Lite crash tests (process kill, OS crash/power loss), corruption detection/recovery, terminal-state strip/move job | 47 | −6 (no S3 provider or suite), +3, +2.5, +1 | 47.5 |
 | 3 Authentication and policy | SPF, DMARC, MTA-STS, TLS-RPT, DANE, ARC; stateless VERP | 33 | −4 (no blob reconciliation), +1, +0.5 | 30.5 |
 | 4 Product surface | API, webhooks, domain verification, dashboard (incl. Lite variants), observability, ACME, per-tenant/per-send flags, extraction | 33 | +1 (message view/resend UI), +4.5, +3 | 41.5 |
-| 5 Deployment | Compose and Kubernetes, packaging, glue; Lite drain mode, export/import | 14 | +1.5 | 15.5 |
+| 5 Deployment | Compose and Kubernetes, packaging, glue; Lite drain mode, export/import, guided manual mode switch | 14 | +1.5, +1.5 | 17 |
 | 6 Hardening | Final security pass, soak, performance tuning, warm-up playbook, runbooks, limited real-traffic pilot; test matrix | 27 | −0.5 (no FS self-test), +1.5, +1.5 | 29.5 |
 
 Baseline calendar at 4 engineers was about 77 weeks (6 / 21 / 15 / 11 / 11 / 4.5 / 9 per phase); it has not been recomputed per phase.
@@ -156,11 +169,12 @@ The Postgres provider is no longer cuttable: it is the only path to more than on
 8. **Key-person risk:** a few engineers own protocol code nobody else knows.
 9. **Scope creep:** every deferred feature returns as a customer request.
 10. **Two providers** double the test and maintenance load.
-11. **SQLite single-writer ceiling**, and durability if someone puts the file on a network volume.
-12. **Lite stats flush window** (up to about 10 s of counters lost on crash).
-13. **"Fire-and-forget" misread as "may lose mail".** Documentation and the Durable default address this.
+11. **SQLite single-writer ceiling**, and corruption or loss if someone puts the file on a network volume.
+12. **Lite stats flush window** (up to about 10 s of counters lost on process crash).
+13. **Lite default `synchronous=OFF` can corrupt the database on an OS crash or power loss** (SQLite docs), losing all queued mail including mail acknowledged with `250`. A process kill is safe. Owner-accepted for speed; mitigated by prominent README/design wording, `Lite:SyncMode=Normal|Full`, startup integrity check with quarantine, optional backups, and the `FULL` recommendation for `config.db`. Also keep "fire-and-forget" from being misread as "may lose mail" under process-crash-safe operation.
 14. **Disk-full queue in Lite** (reply `452`).
 15. **No per-message traceability in Lite** makes support harder (mitigated by the ring and logs).
 16. **Forged VERP tokens** if the HMAC key is mishandled.
-17. **Supply chain:** npm (dashboard), Certes (dormant 2021–2026, single recent author; own-client fallback is 6–12 weeks).
-18. **EF Core overhead on the hot path:** several KB per operation even when tuned; mitigated by batching.
+17. **Unlimited retention (`0`)** can fill the disk or inflate Postgres/SQLite files if operators forget manual cleanup; mitigated by dashboard warnings.
+18. **Supply chain:** npm (dashboard), Certes (dormant 2021–2026, single recent author; own-client fallback is 6–12 weeks).
+19. **EF Core overhead on the hot path:** several KB per operation even when tuned; mitigated by batching.
