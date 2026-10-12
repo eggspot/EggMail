@@ -17,9 +17,6 @@ public sealed class ReplyClassifier
     /// <summary>The shared default classifier.</summary>
     public static ReplyClassifier Default { get; } = new();
 
-    private static readonly Rule[] TransientRules = BuildTransientRules();
-    private static readonly Rule[] PermanentRules = BuildPermanentRules();
-
     /// <summary>Classifies <paramref name="reply"/> received at <paramref name="stage"/>.</summary>
     public ReplyClassification Classify(in RemoteReply reply, SmtpStage stage)
     {
@@ -142,8 +139,12 @@ public sealed class ReplyClassifier
         "rfc5322", "rfc 822", "does not comply");
 
     private static readonly SearchValues<string> PolicyWords = Words(
-        "blocked", "denied", "not allowed", "not permitted", "refused", "relay", "relaying", "prohibit", "policy", "forbidden",
+        "blocked", "denied", "rcpthosts", "not allowed", "not permitted", "refused", "relay", "relaying", "prohibit", "policy", "forbidden",
         "ptr", "reverse dns", "rdns", "not accepted", "administrative", "rejected due to", "tls required", "encryption required");
+
+    // Declared after the keyword sets above: static field initializers run in textual order.
+    private static readonly Rule[] TransientRules = BuildTransientRules();
+    private static readonly Rule[] PermanentRules = BuildPermanentRules();
 
     private static Rule[] BuildTransientRules()
     {
