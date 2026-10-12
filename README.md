@@ -6,37 +6,41 @@ An open-source, self-hosted **outbound email server** from [eggspot](https://git
 
 > **Name:** "EggMail" is a working name. A real trademark search has **not** been done yet (see [docs/open-questions.md](docs/open-questions.md)).
 
-> **Lite mode default is fast, not power-loss-safe.** Lite defaults to SQLite `PRAGMA synchronous=OFF` for `queue.db` and `stats.db`. A process kill or container restart is safe. If the **operating system crashes or power fails**, the SQLite docs say the database **can be corrupted** (not just lose the latest commits), which can lose all queued mail, including mail already acknowledged with `250`. Use `Lite:SyncMode=Full` (or `Normal`) if you need power-loss safety, or use Full mode. See [docs/design.md §4.2](docs/design.md#42-lite-mode-sqlite-via-microsoftdatasqlite).
+> **The SQLite backend's default is fast, not power-loss-safe.** The SQLite backend defaults to `PRAGMA synchronous=OFF` for its data files. A process kill or container restart is safe. If the **operating system crashes or power fails**, the SQLite docs say the database **can be corrupted** (not just lose the latest commits), which can lose all queued mail, including mail already acknowledged with `250`. Use `Sqlite:SyncMode=Full` (or `Normal`) if you need power-loss safety, or use the PostgreSQL backend. See [docs/design.md §4.4](docs/design.md#44-sqlite-backend-microsoftdatasqlite).
 
 ## What and why
 
 - Accepts mail over SMTP (submission ports 587/465/2525) and over an HTTP API, queues it, and delivers it directly to recipient MX servers (or through an opt-in relay chain).
 - Tracks every delivery (events, bounces, complaints), sends signed webhooks and shows it all in a dashboard.
-- The goal is to be **the fastest SMTP server**. That claim will be made only after reproducible measurement, with durable and non-durable results always reported together and an independent run reproducing them. Performance is a permanent first-class goal in **both** modes: Lite is engineered for large, high-throughput workloads, not treated as a toy. See [docs/benchmarks.md](docs/benchmarks.md).
+- The goal is to be **the fastest SMTP server**. That claim will be made only after reproducible measurement, with durable and non-durable results always reported together and an independent run reproducing them. Performance is a permanent first-class goal on **both** storage backends: the SQLite backend is engineered for large, high-throughput workloads, not treated as a toy. See [docs/benchmarks.md](docs/benchmarks.md).
 - The SMTP stack (server and client, MIME, DKIM, SPF, DMARC, DSN/ARF, DNS client, MTA-STS, TLS-RPT, DANE) is hand-written and uses only the .NET BCL and ASP.NET Core shared framework. CI will enforce that those assemblies have no package references.
 
-## Modes
+## Storage backends: one feature set, two ways to store it
 
-| | **Full** | **Lite** |
+**SQLite vs PostgreSQL is only a storage-backend choice.** Every feature (SMTP/API, DKIM/SPF/DMARC, domain verification, tenants, API keys, suppressions, webhooks, rate limits, warm-up, settings, dashboard pages, ACME/TLS) behaves identically on both. The backend decides only how data is stored persistently and long-term.
+
+How much **per-message history** is recorded is a separate setting, `History:Mode` (`StatsOnly` | `Full`), that works on either backend. **Any combination is allowed.**
+
+"Lite" and "Full" are friendly names for the two default presets:
+
+| | **Lite** preset | **Full** preset |
 |---|---|---|
-| Storage | PostgreSQL (EF Core + Npgsql) | SQLite (Microsoft.Data.Sqlite), three files |
-| Deployment | App + managed Postgres (HA is a prerequisite), compose or Kubernetes | One container, one volume, one replica |
-| Replicas | Several | One |
-| Per-message record | Yes: events, content, search, resend | No: statistics only |
-| Tenancy | Multi-tenant | Multi-tenant |
-| Throughput cap | None built in | None built in (bounded by your hardware) |
-| Queue lifetime | 5 days | 48 hours |
-| Acknowledgement | `250`/`202` only after a durable (synced) commit | `250`/`202` after the data is handed to the OS. **Process-crash-safe, not power-loss-safe** by default (`Lite:SyncMode=Off`) |
-| Switching | Manual only (see below) | Manual only (see below) |
+| `Storage:Backend` | SQLite | PostgreSQL |
+| `History:Mode` default | `StatsOnly` (statistics and a recent-events ring, no per-message record) | `Full` (events, search, content, resend) |
+| `Queue:MaxLifetime` default | 48 hours | 5 days |
+| `Smtp:MaxMessageSize` default | 10 MiB | 25 MiB |
+| Acknowledgement | `250`/`202` after the data is handed to the OS (`Sqlite:SyncMode=Off`): **process-crash-safe, not power-loss-safe** | `250`/`202` only after a durable (synced) commit |
 
-**Modes never switch automatically.** The Lite dashboard shows advisory "consider Full" indicators; moving between modes is a guided, explicit, owner-triggered action (Lite → Full: drain, export/import config, confirm; Full → Lite: config-only export for a fresh install). Details in [docs/design.md](docs/design.md).
+Backend **characteristics** (not missing features): SQLite is single node and one replica, has a single-writer throughput ceiling, uses a local volume only, and retains data with batched deletes instead of partition drops; PostgreSQL brings HA and multiple replicas and needs a managed Postgres. Details in [docs/design.md §4.2](docs/design.md#42-backend-characteristics-not-feature-differences).
+
+**Switching is manual, symmetric and easy; it never happens automatically.** Dashboard indicators are advisory only. A guided dashboard action and a CLI (`mta migrate-storage --to postgres|sqlite`) move you in either direction with one portable, versioned bundle: preflight, drain, export, import, verify, confirm, activate, with rollback. Only the storage changes; features and settings stay as they were. See [docs/design.md §4.6](docs/design.md#46-switching-backends-manual-and-symmetric).
 
 ## Documentation
 
 | Document | Contents |
 |---|---|
-| [docs/design.md](docs/design.md) | Architecture, components, interfaces, Full vs Lite storage, content retention, webhooks, TLS and ports, security, deployment |
-| [docs/decisions.md](docs/decisions.md) | The decisions record (owner decisions and items 1–28) |
+| [docs/design.md](docs/design.md) | Architecture, components, interfaces, storage backends and history level, switching, content retention, webhooks, TLS and ports, security, deployment |
+| [docs/decisions.md](docs/decisions.md) | The decisions record (owner decisions A–E and items 1–30) |
 | [docs/plan.md](docs/plan.md) | Components with engineer-week estimates, phases, cut order, risks, calendar |
 | [docs/benchmarks.md](docs/benchmarks.md) | How performance will be measured and compared, per mode |
 | [docs/open-questions.md](docs/open-questions.md) | Pending checks, questions awaiting the owner, unverified items |
