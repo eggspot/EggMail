@@ -24,6 +24,8 @@ public sealed class MtaConfig
     public SecretsSection Secrets { get; init; } = new();
     public ObservabilitySection Observability { get; init; } = new();
     public SwitchSection Switch { get; init; } = new();
+    public TlsSection Tls { get; init; } = new();
+    public AcmeSection Acme { get; init; } = new();
 }
 
 public sealed class SmtpSection
@@ -140,4 +142,44 @@ public sealed class SwitchSection
 {
     /// <summary>Seconds to wait for in-flight deliveries when quiescing (decision R).</summary>
     public int QuiesceTimeoutSeconds { get; init; } = 30;
+}
+
+/// <summary>
+/// Certificates live in the database (decision K). An optional file override (for example cert-manager mounts) takes
+/// precedence over the database when configured.
+/// </summary>
+public sealed class TlsSection
+{
+    /// <summary>PEM certificate chain file, or a PFX file when <see cref="KeyPath"/> is empty.</summary>
+    public string? CertificatePath { get; init; }
+
+    public string? KeyPath { get; init; }
+    public string? PfxPasswordFile { get; init; }
+
+    /// <summary>How often replicas poll the store (and the override files) for changes.</summary>
+    public TimeSpan PollInterval { get; init; } = TimeSpan.FromSeconds(30);
+}
+
+public sealed class AcmeSection
+{
+    public bool Enabled { get; init; }
+    public string DirectoryUrl { get; init; } = "https://acme-v02.api.letsencrypt.org/directory";
+    public string? Email { get; init; }
+
+    /// <summary>Names for one certificate (the SMTP and dashboard host names; wildcards need DNS-01, the default).</summary>
+    public List<string> Domains { get; init; } = [];
+
+    public string CertificateName { get; init; } = "default";
+
+    /// <summary>Cloudflare is the first DNS provider (decision 19).</summary>
+    public string DnsProvider { get; init; } = "Cloudflare";
+
+    public string? CloudflareApiToken { get; init; }
+    public string? CloudflareApiTokenFile { get; init; }
+    public TimeSpan PropagationDelay { get; init; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>Renew when this fraction of the lifetime remains (Let's Encrypt recommends one third).</summary>
+    public double RenewAtRemainingFraction { get; init; } = 1.0 / 3.0;
+
+    public TimeSpan CheckInterval { get; init; } = TimeSpan.FromHours(1);
 }
