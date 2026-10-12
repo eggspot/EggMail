@@ -786,7 +786,7 @@ internal sealed class MemoryHistory(MemoryState s) : IHistoryStore
             }
 
             bool rawRetained = m.RawRetained && s.RetainedRaw.ContainsKey(messageId) && now < m.ReceivedAt.AddDays(s.Options.Content.RetentionDays);
-            var recipients = s.Recipients.TryGetValue(messageId, out var rs) ? rs.ToList() : [];
+            var recipients = s.Recipients.TryGetValue(messageId, out var rs) ? rs.OrderBy(x => x, StringComparer.Ordinal).ToList() : [];
             return ValueTask.FromResult<MessageDetail?>(new MessageDetail(ToSummary(m), content, state, recipients, rawRetained));
         }
     }

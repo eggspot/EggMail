@@ -14,7 +14,7 @@ internal enum SqliteFileKind
 }
 
 /// <summary>One SQLite database file (queue.db, stats.db, config.db, history.db): its settings, connections, schema and integrity.</summary>
-internal sealed partial class SqliteFile
+internal sealed class SqliteFile
 {
     /// <summary>Bumped when a schema change needs a migration step (stored in <c>PRAGMA user_version</c>).</summary>
     public const int SchemaVersion = 1;

@@ -374,7 +374,9 @@ public abstract class ConfigConformance : StorageTestBase
         Assert.Null(await C.GetAcmeAccountAsync(dir, Ct));
         var account = new AcmeAccountRecord(Ids.New(), dir, "ops@example.com", [1, 1], "https://acme/acct/1", Clock.UtcNow);
         await C.UpsertAcmeAccountAsync(account, Ct);
-        Assert.Equal(account, await C.GetAcmeAccountAsync(dir, Ct));
+        var stored = (await C.GetAcmeAccountAsync(dir, Ct))!;
+        Assert.Equal(account with { AccountKeyProtected = [] }, stored with { AccountKeyProtected = [] });
+        Assert.Equal<byte[]>(account.AccountKeyProtected, stored.AccountKeyProtected);
         await C.UpsertAcmeAccountAsync(account with { AccountUrl = "https://acme/acct/2" }, Ct);
         Assert.Equal("https://acme/acct/2", (await C.GetAcmeAccountAsync(dir, Ct))!.AccountUrl);
 

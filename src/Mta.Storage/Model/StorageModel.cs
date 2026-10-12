@@ -141,8 +141,8 @@ public static class StorageModel
         mb.Entity<QueuedDeliveryEntity>(e =>
         {
             e.ToTable("delivery_queue").HasKey(x => x.Id);
-            e.HasIndex(x => x.DueAt);
-            e.HasIndex(x => x.ExpiresAt);
+            e.HasIndex(x => new { x.DueAt, x.Id });
+            e.HasIndex(x => new { x.ExpiresAt, x.Id });
         });
         mb.Entity<SpoolMessageEntity>(e =>
         {
