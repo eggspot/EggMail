@@ -205,7 +205,7 @@ public static class AuthenticationResultsParser
         }
 
         string resultKeyword = r.ReadWhile(IsKeywordChar);
-        if (resultKeyword.Length == 0)
+        if (resultKeyword.Length == 0 || !IsLetDig(resultKeyword[0]))
         {
             return false;
         }
@@ -220,7 +220,7 @@ public static class AuthenticationResultsParser
         while (!r.AtEnd && r.Current != ';')
         {
             string first = r.ReadWhile(IsPropertyChar);
-            if (first.Length == 0 || !r.SkipCfws(out _))
+            if (first.Length == 0 || !IsLetDig(first[0]) || !r.SkipCfws(out _))
             {
                 return false;
             }
@@ -247,6 +247,11 @@ public static class AuthenticationResultsParser
             }
             else if (r.Current == '.')
             {
+                if (first.Contains('_'))
+                {
+                    return false; // a ptype is a plain keyword
+                }
+
                 r.Advance();
                 if (!r.SkipCfws(out _))
                 {
@@ -254,7 +259,7 @@ public static class AuthenticationResultsParser
                 }
 
                 string property = r.ReadWhile(IsPropertyChar);
-                if (property.Length == 0 || !r.SkipCfws(out _) || r.AtEnd || r.Current != '=')
+                if (property.Length == 0 || !IsLetDig(property[0]) || !r.SkipCfws(out _) || r.AtEnd || r.Current != '=')
                 {
                     return false;
                 }

@@ -73,7 +73,7 @@ public sealed class AuthenticationResultsBuilder
         foreach ((string ptype, string property, string value) in properties ?? [])
         {
             RequireKeyword(ptype, nameof(properties));
-            RequireKeyword(property, nameof(properties));
+            RequireKeyword(property, nameof(properties), allowUnderscore: true);
             props.Add(new AuthenticationResultProperty(ptype.ToLowerInvariant(), property.ToLowerInvariant(), Sanitize(value)));
         }
 
@@ -310,9 +310,9 @@ public sealed class AuthenticationResultsBuilder
         return sb.ToString();
     }
 
-    private static void RequireKeyword(string keyword, string parameter)
+    private static void RequireKeyword(string keyword, string parameter, bool allowUnderscore = false)
     {
-        if (string.IsNullOrEmpty(keyword) || !char.IsAsciiLetterOrDigit(keyword[0]) || !keyword.All(c => char.IsAsciiLetterOrDigit(c) || c == '-'))
+        if (string.IsNullOrEmpty(keyword) || !char.IsAsciiLetterOrDigit(keyword[0]) || !keyword.All(c => char.IsAsciiLetterOrDigit(c) || c == '-' || (allowUnderscore && c == '_')))
         {
             throw new ArgumentException("Invalid keyword: " + keyword, parameter);
         }
