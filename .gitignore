@@ -487,3 +487,6 @@ $RECYCLE.BIN/
 *.db-wal
 *.db-shm
 node_modules/
+
+# Local agent worktrees
+.claude/
