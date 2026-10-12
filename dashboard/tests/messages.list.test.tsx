@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { fireEvent, screen, waitFor, within } from '@testing-library/preact';
 import Messages from '../src/pages/Messages';
 import { flush, mockFetch, problem, renderWithApp } from './helpers';
+import type { RecordedCall } from './helpers';
 import { summary } from './messageFixtures';
 
 const A = summary({ id: 'a'.repeat(32), subject: 'First subject' });
@@ -41,7 +42,7 @@ describe('Messages list', () => {
 
   it('loads more with the cursor and appends rows', async () => {
     const m = mockFetch({
-      'GET /api/v1/messages': (call) => (call.query.get('cursor') === 'c2' ? { items: [B], next_cursor: null } : { items: [A], next_cursor: 'c2' }),
+      'GET /api/v1/messages': (call: RecordedCall) => (call.query.get('cursor') === 'c2' ? { items: [B], next_cursor: null } : { items: [A], next_cursor: 'c2' }),
     });
     renderWithApp(<Messages />);
     await screen.findByText('First subject');

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { fireEvent, screen, waitFor, within } from '@testing-library/preact';
 import Credentials from '../src/pages/Credentials';
 import { json, mockFetch, problem, renderWithApp } from './helpers';
+import type { RecordedCall } from './helpers';
 
 const keys = [
   { id: 'k1', name: 'Production sender', prefix: 'egk_a1b2c3', scopes: ['send'], createdAt: '2026-09-01T00:00:00.000Z', lastUsedAt: null },
@@ -38,7 +39,7 @@ describe('Credentials page', () => {
   it('shows a new API key once, with a copy button and a warning, then forgets it', async () => {
     const m = mockFetch({
       ...base(),
-      'POST /api/v1/api-keys': (c) => json({ id: 'k3', prefix: 'egk_zzzzzz', scopes: (c.body as { scopes: string[] }).scopes, name: (c.body as { name: string }).name, createdAt: '2026-10-12T00:00:00.000Z', key: 'egk_zzzzzz-SECRET-VALUE' }, 201),
+      'POST /api/v1/api-keys': (c: RecordedCall) => json({ id: 'k3', prefix: 'egk_zzzzzz', scopes: (c.body as { scopes: string[] }).scopes, name: (c.body as { name: string }).name, createdAt: '2026-10-12T00:00:00.000Z', key: 'egk_zzzzzz-SECRET-VALUE' }, 201),
     });
     renderWithApp(<Credentials />);
     await screen.findByText('Production sender');

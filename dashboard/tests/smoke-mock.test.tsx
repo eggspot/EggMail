@@ -7,6 +7,8 @@ import { LocationProvider } from 'preact-iso';
 import { App } from '../src/app';
 import { startMock } from './mockClient.mjs';
 
+const realFetch = globalThis.fetch;
+
 type Mock = Awaited<ReturnType<typeof startMock>>;
 let mock: Mock;
 
@@ -17,7 +19,7 @@ function browserFetch(base: string) {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     const headers = new Headers(init?.headers);
     if (cookie) headers.set('Cookie', cookie);
-    const res = await fetch(new URL(url, base), { ...init, headers });
+    const res = await realFetch(new URL(url, base).href, { ...init, headers });
     const set = res.headers.get('set-cookie');
     if (set) cookie = set.split(';')[0].endsWith('=') ? '' : set.split(';')[0];
     return res;

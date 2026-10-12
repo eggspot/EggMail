@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { fireEvent, screen, waitFor, within } from '@testing-library/preact';
 import Suppressions from '../src/pages/Suppressions';
 import { json, mockFetch, problem, renderWithApp } from './helpers';
+import type { RecordedCall } from './helpers';
 
 const page1 = {
   items: [
@@ -55,7 +56,7 @@ describe('Suppressions page', () => {
   it('validates the address, then adds it to the top of the list', async () => {
     const m = mockFetch({
       'GET /api/v1/suppressions': { items: [], next_cursor: null },
-      'POST /api/v1/suppressions': (c) => json({ ...(c.body as object), createdAt: '2026-10-12T00:00:00.000Z' }, 201),
+      'POST /api/v1/suppressions': (c: RecordedCall) => json({ ...(c.body as object), createdAt: '2026-10-12T00:00:00.000Z' }, 201),
     });
     renderWithApp(<Suppressions />);
     await screen.findByText('The suppression list is empty');

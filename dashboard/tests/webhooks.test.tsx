@@ -3,6 +3,7 @@ import { fireEvent, screen, waitFor, within } from '@testing-library/preact';
 import Webhooks from '../src/pages/Webhooks';
 import type { Webhook, WebhookAttempt } from '../src/api/types';
 import { json, mockFetch, problem, renderWithApp } from './helpers';
+import type { RecordedCall } from './helpers';
 
 const hook: Webhook = { id: 'w1', url: 'https://hooks.example/a', event_types: ['message.delivered'], enabled: true };
 const off: Webhook = { id: 'w2', url: 'https://old.example/b', event_types: ['message.bounced'], enabled: false, disabledReason: 'Endpoint answered 410 Gone; disabled automatically.' };
@@ -45,7 +46,7 @@ describe('Webhooks page', () => {
   it('shows the signing secret once and removes it after dismissal; never stores it in web storage', async () => {
     const m = mockFetch({
       'GET /api/v1/webhooks': [],
-      'POST /api/v1/webhooks': (c) => json({ id: 'w9', ...(c.body as object), enabled: true, secret: 'whsec_ONLYONCE123' }, 201),
+      'POST /api/v1/webhooks': (c: RecordedCall) => json({ id: 'w9', ...(c.body as object), enabled: true, secret: 'whsec_ONLYONCE123' }, 201),
     });
     renderWithApp(<Webhooks />);
     await screen.findByText('No webhook endpoints');

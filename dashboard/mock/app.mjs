@@ -9,12 +9,12 @@
 // Runtime switches (also changeable live with POST /__mock/config): history, backend, warnings, notReady.
 import { createServer, request as httpRequest } from 'node:http';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { extname, join, normalize, sep } from 'node:path';
+import { dirname, extname, join, normalize, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { HttpError, newId, problemBody, sleep } from './lib.mjs';
 
-const here = fileURLToPath(new URL('.', import.meta.url));
+const here = dirname(fileURLToPath(import.meta.url));
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',

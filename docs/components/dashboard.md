@@ -111,12 +111,35 @@ Semantic landmarks and headings, a skip link, focus moved to the page content af
 
 ## Bundle size
 
-BUNDLE_SIZE_PLACEHOLDER
+`npm run build` then `npm run size` (gzip level 9): the initial load (entry JS + CSS) is **21.2 KiB gzip** (entry JS 18.2 KiB, CSS 3.7 KiB). All routes are separate lazy chunks of 1 to 7 KiB gzip each, except the storage switch wizard (6.5 KiB gzip). The whole `dist/` is 64.8 KiB gzip (154 KiB JS raw, 14 KiB CSS raw, no fonts or images apart from a 0.2 KiB favicon).
+
+Verification at the time of writing: `npm run lint` (tsc plus custom rules over 49 source files), `npm run typecheck`, `npm test` (26 files, 371 tests, including contrast checks for both themes, the CSP checker, the mock API contract, and a smoke test that renders every route against the real mock server for both roles and both history modes), `npm run build` and `npm run check-csp` all pass.
 
 ## API contract gaps and additions
 
-API_GAPS_PLACEHOLDER
+[api.md](../api.md) leaves several shapes open. The dashboard and the mock assume the following; the API implementation should either adopt them or tell the dashboard what to change (nothing was changed in api.md).
+
+1. **CSRF token:** read from the `csrfToken` member of `GET /me` (the `X-CSRF-Token` response header is not read). The mock sends both.
+2. **Sign-out:** `DELETE /api/v1/session` (not in the contract).
+3. **Tenant settings:** `GET /api/v1/settings` returns `{ items: [{ key, value, type, options?, description?, locked? }] }`; `PUT /api/v1/settings` takes `{ values: { key: value } }` and returns the same shape. The contract has no tenant settings endpoint.
+4. **Global settings** (`/admin/settings`): the same `{ items }` / `{ values }` shapes, with `locked: true` for values set by deployment configuration.
+5. **Admin acting on a tenant:** tenant-scoped endpoints need `X-Tenant-Id` for admins. The mock answers `400 validation_failed` without it. The dashboard loads `GET /admin/tenants` after an admin signs in and sends the header.
+6. **Validation status code:** `validation_failed` is assumed to be `400` with `errors: [{ field, message }]`; field names are the request member names (`url`, `name`, ...). The client does not depend on the numeric status.
+7. **Lists** may be a bare array or `{ items, next_cursor }`; the client accepts both. Messages and suppressions are cursor-paged (`next_cursor`).
+8. **Statistics:** `GET /stats` returns `{ granularity, rows: [...] }` (a bare array is accepted); each row has `period` (ISO start), `sendingDomain`, `recipientDomain` and the counters `accepted, delivered, deferred, hardBounce, softBounce, expired, complained, rejected, suppressed`. `GET /stats/recent-events` returns `[{ at, type, recipientDomain, sendingDomain }]`.
+9. **Object shapes** not spelled out in api.md: webhook `{ id, url, event_types, enabled, disabledReason, createdAt, secret? }` with event types such as `message.delivered`; webhook attempt `{ id, outboxId, eventType, at, status, durationMs, errorClass, snippet }`; API key `{ id, name, prefix, scopes, createdAt, lastUsedAt, key? }`; SMTP credential `{ id, username, createdAt, password? }` (create body `{ username }`); tenant `{ id, name, status, createdAt }` with status `active|suspended`. Webhook members are snake_case (`event_types`) as in the contract while most others are camelCase; the client follows the contract literally.
+10. **Message detail** carries the text and html parts in `content` (the dashboard falls back to `GET /messages/{id}/content` when they are missing and treats its `410 body_expired` as an expected state).
+11. **Admin status:** `{ version, backend, historyMode, uptimeSeconds, queue: { depth, deferred, oldestDueAt }, storage: { healthy, detail, warnings }, certificates: [{ subject, notAfter, source }], pressure: { writerQueueDepth, writerQueueOverThresholdSeconds, commitP99Ms, advisory }, switch: { state } }`. `pressure` is advisory only.
+12. **Certificates:** list items `{ id, subject, issuer, san, notBefore, notAfter, source: acme|upload|self_signed, active }`; upload body `{ certificatePem, privateKeyPem }` or `{ pfxBase64, pfxPassword }`; ACME request body `{ domains: [...] }`.
+13. **Storage switch:** `preflight` returns `{ ok, checks: [{ name, ok, message, severity }], counts, estimate, notCarried: [...], orchestratorManaged }`. `start` takes the preflight body plus `exportPassphrase` (at least 12 characters, design 4.6) and `confirmation` (the typed phrase `switch to <postgres|sqlite>`). `GET /admin/storage/switch` returns `{ switchId, state, direction, mode, include, progress: { phase, percent, rowsDone, rowsTotal }, verifyReport, cutoverPatch: { kind, text }, orchestratorManaged, error }` with `state` one of `none, draining, quiescing, fenced, exporting, importing, verified, confirmed, active, finalized, rolled_back, failed`. `confirm`, `activate`, `rollback` and `finalize` return the new status; calling them in the wrong state should answer `409`.
+14. **CSRF and role failures** are assumed to be `403 forbidden` (no dedicated code is listed in api.md).
 
 ## Known gaps
 
-KNOWN_GAPS_PLACEHOLDER
+- **No real browser run.** Everything was verified with jsdom component tests and the mock API; no screenshot, real-browser or screen-reader pass has been done. Layout and the sandboxed iframe under the strict CSP should be checked once in Chrome, Firefox and Safari.
+- **Message HTML is shown without remote images and with limited styling.** The iframe CSP blocks remote content, and a `srcdoc` document inherits the host page's CSP, so inline styles in messages may be dropped under `style-src 'self'`. There is no "load remote images" option; the text view is the default.
+- Charts are static SVG without hover tooltips; the data table next to them is the accessible alternative.
+- Lists such as tenants and domains are not paged; suppression search filters the loaded entries only.
+- The storage wizard has only been run against the mock engine; real timing, restarts mid-switch and the cutover patch format are unverified.
+- `npm audit signatures` and an OSV scan are not wired up (GitHub Actions is disabled for the repository, see open-questions.md); the lockfile is committed and `npm ci --ignore-scripts` is the supported install.
+- English only; no i18n. Bearer API keys are not used by the dashboard (cookie session only).

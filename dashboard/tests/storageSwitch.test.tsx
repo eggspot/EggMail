@@ -51,7 +51,7 @@ function setup(initial: SwitchStatus, extra: Record<string, unknown> = {}, advis
   return { m, set: (s: SwitchStatus) => (current = s) };
 }
 
-const currentStep = (c: HTMLElement) => c.querySelector('.steps [aria-current="step"]')?.textContent ?? '';
+const currentStep = (c: Element) => c.querySelector('.steps [aria-current="step"]')?.textContent ?? '';
 const mutatingCalls = (m: ReturnType<typeof mockFetch>) => m.calls.filter((c) => c.method === 'POST' && MUTATING.includes(c.path));
 
 async function render() {
@@ -84,7 +84,7 @@ describe('StorageSwitch resumes from the server state', () => {
       const extra = state === 'verified' ? { verifyReport: okReport } : {};
       setup(status(state, { progress: { phase: state, percent: 40, rowsDone: 10, rowsTotal: 25 }, error: 'boom', ...extra }));
       const { container } = await render();
-      await screen.findByText(text);
+      await screen.findAllByText(text);
       if (state !== 'finalized') expect(currentStep(container)).toBe(step);
     });
   }

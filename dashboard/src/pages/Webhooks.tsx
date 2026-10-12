@@ -338,7 +338,7 @@ export default function Webhooks(_props: Record<string, unknown>) {
             onInput={setUrl}
             error={clientErrors.url ?? serverErrors.url}
             hint="HTTPS only. Internal addresses are blocked (SSRF protection) unless allowlisted for your tenant."
-            placeholder="https://example.com/hooks/eggmail"
+            placeholder="your-host.example/hooks/eggmail (https only)"
             autocomplete="off"
             spellcheck={false}
           />

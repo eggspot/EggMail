@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { fireEvent, screen, waitFor, within } from '@testing-library/preact';
 import Domains, { validateDomainName } from '../src/pages/Domains';
 import { json, mockFetch, problem, renderWithApp } from './helpers';
+import type { RecordedCall } from './helpers';
 import { makeDomain } from './domainFixtures';
 
 const list = [
@@ -69,7 +70,7 @@ describe('Domains page', () => {
   it('creates a domain with a lower-cased name and sends the CSRF token', async () => {
     const m = mockFetch({
       'GET /api/v1/domains': [],
-      'POST /api/v1/domains': (c) => json(makeDomain({ id: 'new1', name: (c.body as { name: string }).name }), 201),
+      'POST /api/v1/domains': (c: RecordedCall) => json(makeDomain({ id: 'new1', name: (c.body as { name: string }).name }), 201),
     });
     const { setCsrfToken } = await import('../src/api/client');
     setCsrfToken('tok');
