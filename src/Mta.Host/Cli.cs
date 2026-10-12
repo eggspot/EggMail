@@ -114,6 +114,7 @@ internal static class Cli
         builder.Services.AddHostedService<WebhookService>();
         builder.Services.AddHostedService<CertificateService>();
         builder.Services.AddHostedService<MaintenanceService>();
+        builder.Services.AddHostedService<TlsReportService>();
         builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(45));
 
         builder.WebHost.ConfigureKestrel(k =>

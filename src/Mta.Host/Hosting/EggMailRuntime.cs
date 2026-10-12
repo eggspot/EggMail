@@ -16,6 +16,8 @@ using Mta.Storage;
 using Mta.Tls;
 using Mta.Tls.MtaSts;
 using Mta.Tls.Dane;
+using Mta.Tls.TlsRpt;
+using Mta.Host.Reports;
 using Mta.Webhooks;
 
 namespace Mta.Host.Hosting;
@@ -43,6 +45,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
     public required RoutePlanner Routes { get; init; }
     public required SendingLimits Limits { get; init; }
     public AcmeRenewalService? Acme { get; init; }
+    public TlsReportSender? TlsReports { get; init; }
 
     private readonly List<IAsyncDisposable> _owned = [];
 
@@ -96,6 +99,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
             BounceDomain = config.Delivery.BounceDomain,
             RemotePort = config.Delivery.RemotePort,
         };
+        var collector = config.Tls.ReportingEnabled ? new TlsRptCollector(clock) : null;
         var mx = new MxResolver(dns, new MxResolverOptions { ExcludeSpecialAddresses = !config.Delivery.AllowPrivateMxAddresses });
         var mtaSts = new MtaStsPolicyStore(dns, new MtaStsPolicyFetcher(), clock: clock);
         var tls = new OutboundTlsPolicyResolver(mtaSts, new DaneTlsaLookup(dns));
@@ -115,6 +119,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
             Limits = limits,
             Retry = new RetrySchedule(),
             Dkim = new ConfigDkimSignerProvider(storage.Config, secrets, clock, deliveryOptions.DkimCacheTtl),
+            TlsReports = collector,
             Secrets = secrets,
             Verp = verp,
             Log = log,
@@ -123,6 +128,10 @@ public sealed class EggMailRuntime : IAsyncDisposable
         engine = delivery;
 
         var webhooks = new WebhookDispatcher(storage.Webhooks, storage.Config, secrets, config.Webhooks, clock, log);
+
+        TlsReportSender? reports = collector is null
+            ? null
+            : new TlsReportSender(collector, new TlsRptRecordLookup(dns), new TlsRptHttpsSender(), storage.Intake, clock, config.Hostname, config.Tls.ReportContact ?? "postmaster@" + config.Hostname, log);
 
         AcmeRenewalService? acme = null;
         if (config.Acme.Enabled)
@@ -135,7 +144,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
         {
             Config = config, Storage = storage, Clock = clock, Log = log, Secrets = secrets, Certificates = certificates, Verp = verp,
             Submission = submission, AuthThrottle = throttle, SmtpServer = smtp, Delivery = delivery, Webhooks = webhooks, Dns = dns,
-            Pool = pool, Routes = routes, Limits = limits, Acme = acme,
+            Pool = pool, Routes = routes, Limits = limits, Acme = acme, TlsReports = reports,
         };
         runtime._owned.Add(pool);
         runtime._owned.Add(smtp);

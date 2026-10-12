@@ -177,6 +177,12 @@ public sealed class TlsSection
 
     /// <summary>How often replicas poll the store (and the override files) for changes.</summary>
     public TimeSpan PollInterval { get; init; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>Send daily TLS-RPT reports (RFC 8460) to domains that publish MTA-STS or DANE and ask for them.</summary>
+    public bool ReportingEnabled { get; init; } = true;
+
+    /// <summary>Contact in the reports; defaults to <c>postmaster@</c> plus the host name.</summary>
+    public string? ReportContact { get; init; }
 }
 
 public sealed class AcmeSection
