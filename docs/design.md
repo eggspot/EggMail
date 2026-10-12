@@ -189,7 +189,7 @@ Single node, one replica, local volume only (WAL does not work on network filesy
 | `history.db` | (`History:Mode=Full` only; created on demand) delivery events, content, retained raw | `Sqlite:SyncMode`, default **`Off`** |
 | `config.db` | Tenants, API keys, domains, DKIM keys, suppressions, webhook endpoints, settings, Data Protection keys | `Sqlite:ConfigSyncMode`, default `Full` (rarely written) |
 
-`history.db` as a separate file is a proposal that follows the same reasoning as the other files: its writes (and batched retention deletes) must not stall queue commits. The `Off` default for the data files is **owner-decided**. Keeping `config.db` at `Full` is the design authors' recommendation (it is rarely written and holds DKIM keys, API-key hashes and the Data Protection key ring, whose loss or corruption would be severe) and **awaits owner confirmation** ([open-questions.md](open-questions.md)).
+`history.db` as a separate file is a proposal that follows the same reasoning as the other files: its writes (and batched retention deletes) must not stall queue commits. The `Off` default for the data files is **owner-decided**. Keeping `config.db` at `Full` is **owner-decided** (it is rarely written and holds DKIM keys, API-key hashes and the Data Protection key ring, whose loss or corruption would be severe).
 
 Separate files keep a stats rollup or history retention job from stalling queue commits. That independent-writer property is inferred from per-file WALs; no explicit sqlite.org statement was found (**unverified**). SQLite documents that a transaction across several databases in WAL mode is atomic per file but not as a set, so **every cross-file effect must be idempotent and ordered**. Examples: on a hard bounce, write the suppression to `config.db` first, then complete the queue row (a crash in between just means the retry bounces again); with attachment storage on, write the retained raw to `history.db` first, then delete the spool row (a crash in between leaves a duplicate that a reconcile job removes). On PostgreSQL these are single transactions; the observable behavior is the same.
 
@@ -209,7 +209,7 @@ Knobs (names are proposed; they were `Lite:*` before backends were made feature-
 | Knob | Values | Default | Notes |
 |---|---|---|---|
 | `Sqlite:SyncMode` | `Off` \| `Normal` \| `Full` | `Off` | Applies to `queue.db`, `stats.db` and `history.db`. `Normal`: WAL synced at checkpoints only, safe from corruption, may lose recent commits on power loss. `Full`: WAL synced on every commit, ACID in WAL mode |
-| `Sqlite:ConfigSyncMode` | `Off` \| `Normal` \| `Full` | `Full` | Applies to `config.db`. Recommendation, pending owner confirmation |
+| `Sqlite:ConfigSyncMode` | `Off` \| `Normal` \| `Full` | `Full` | Applies to `config.db`. Owner-decided |
 | `Sqlite:QueuePersistence` | `Persistent` \| `Memory` | `Persistent` | Renamed from the earlier `QueueDurability = Durable \| Memory` because "durable" is no longer accurate. `Memory` is an explicit opt-in: "accepted means in memory; lost on restart" |
 
 All leases clear on startup (single process) and delivery is at-least-once, so a message in flight at crash time may duplicate.

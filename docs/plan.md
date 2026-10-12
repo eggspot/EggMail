@@ -190,7 +190,7 @@ The Postgres provider is no longer cuttable: it is the only path to more than on
 10. **Two providers** double the test and maintenance load, and feature identity means every feature is tested on both.
 11. **SQLite single-writer ceiling**, and corruption or loss if someone puts the file on a network volume.
 12. **Stats flush window** (up to about 10 s of counters lost on process crash).
-13. **SQLite default `synchronous=OFF` can corrupt the database on an OS crash or power loss** (SQLite docs), losing all queued mail including mail acknowledged with `250`. A process kill is safe. Owner-accepted for speed; mitigated by prominent README/design wording, `Sqlite:SyncMode=Normal|Full`, startup integrity check with quarantine, optional backups, and the `FULL` recommendation for `config.db`. Also keep "fire-and-forget" from being misread as "may lose mail" under process-crash-safe operation.
+13. **SQLite default `synchronous=OFF` can corrupt the database on an OS crash or power loss** (SQLite docs), losing all queued mail including mail acknowledged with `250`. A process kill is safe. Owner-accepted for speed; mitigated by prominent README/design wording, `Sqlite:SyncMode=Normal|Full`, startup integrity check with quarantine, optional backups, and `config.db` kept at `Full` (owner-decided). Also keep "fire-and-forget" from being misread as "may lose mail" under process-crash-safe operation.
 14. **Disk-full queue on the SQLite backend** (reply `452`).
 15. **No per-message traceability under `History:Mode=StatsOnly`** (the SQLite default) makes support harder (mitigated by the ring and logs; any backend can use `Full` history).
 16. **Forged VERP tokens** if the HMAC key is mishandled.

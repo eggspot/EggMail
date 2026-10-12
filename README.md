@@ -4,7 +4,7 @@ An open-source, self-hosted **outbound email server** from [eggspot](https://git
 
 > **Status: design phase.** There is no code yet. This repository currently holds the design documents only. Nothing here is released, benchmarked or production-ready.
 
-> **Name:** "EggMail" is a working name. A real trademark search has **not** been done yet (see [docs/open-questions.md](docs/open-questions.md)).
+> **Name:** the name EggMail is kept. No formal trademark search or registration is planned (owner decision); the MIT license covers the code, not the name. A free check of the USPTO, EUIPO and WIPO databases before wide promotion is recommended but optional (see [docs/decisions.md](docs/decisions.md)).
 
 > **The SQLite backend's default is fast, not power-loss-safe.** The SQLite backend defaults to `PRAGMA synchronous=OFF` for its data files. A process kill or container restart is safe. If the **operating system crashes or power fails**, the SQLite docs say the database **can be corrupted** (not just lose the latest commits), which can lose all queued mail, including mail already acknowledged with `250`. Use `Sqlite:SyncMode=Full` (or `Normal`) if you need power-loss safety, or use the PostgreSQL backend. See [docs/design.md §4.4](docs/design.md#44-sqlite-backend-microsoftdatasqlite).
 
@@ -40,10 +40,10 @@ Backend **characteristics** (not missing features): SQLite is single node and on
 | Document | Contents |
 |---|---|
 | [docs/design.md](docs/design.md) | Architecture, components, interfaces, storage backends and history level, switching, content retention, webhooks, TLS and ports, security, deployment |
-| [docs/decisions.md](docs/decisions.md) | The decisions record (owner decisions A–E and items 1–30) |
+| [docs/decisions.md](docs/decisions.md) | The decisions record (owner decisions A–G and items 1–30) |
 | [docs/plan.md](docs/plan.md) | Components with engineer-week estimates, phases, cut order, risks, calendar |
 | [docs/benchmarks.md](docs/benchmarks.md) | How performance will be measured and compared, per mode |
-| [docs/open-questions.md](docs/open-questions.md) | Pending checks, questions awaiting the owner, unverified items |
+| [docs/open-questions.md](docs/open-questions.md) | Questions awaiting the owner, items to settle with spikes, unverified items |
 
 ## Caveats
 
