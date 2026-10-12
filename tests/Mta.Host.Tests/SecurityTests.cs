@@ -36,6 +36,16 @@ public class SecurityTests
         Assert.False(ApiKeys.LooksLikeKey("sk_" + new string('a', 50)));
     }
 
+    [Fact]
+    public void Generated_api_keys_always_look_like_keys()
+    {
+        // Base64url output can contain '_' and '-'; the syntax check must not depend on how often they appear.
+        for (int i = 0; i < 2000; i++)
+        {
+            Assert.True(ApiKeys.LooksLikeKey(ApiKeys.Generate().Token));
+        }
+    }
+
     private sealed class FakeClock : IClock
     {
         public DateTimeOffset Now { get; set; } = new(2026, 10, 12, 8, 0, 0, TimeSpan.Zero);

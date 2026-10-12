@@ -115,8 +115,60 @@ Values are emitted as a token, a `[local@]domain` pvalue, or a quoted string wit
 
 ## Known gaps
 
-- ARC is not implemented (separate task). `AddArc` only carries a string.
+- ARC: see the ARC section below for its own gaps (RSA only, no Ed25519).
 - No ZIP support in the aggregate report reader (gzip and plain XML only); no forensic (`ruf`) report generation.
 - The collector is in memory; persistence across restarts and scheduling/sending of reports is the caller's job.
 - SPF results are not cached here; the resolver is expected to cache.
 - The SPF `ptr` mechanism is implemented but discouraged; its forward lookups do not count as void lookups.
+
+## ARC (RFC 8617)
+
+Namespace `Mta.Auth.Arc`, BCL only. Canonicalization and the tag-value parser are local to `Mta.Auth` (the `Mta.Dkim` helpers are internal); only the public `DkimKeyRecord`, `DkimKeyTools` and `DkimCanonicalization` are reused. Nothing changed in `Mta.Dkim`.
+
+### API
+
+```csharp
+// Inbound: validate the chain of the message as received.
+var validator = new ArcValidator(dnsResolver);                     // ArcValidatorOptions: limits, ComputeOldestPass
+ArcChainResult chain = await validator.ValidateAsync(rawMessage);  // Status None|Pass|Fail, Failure, FailedInstance, OldestPassingInstance, SealDomains
+
+// Authentication-Results of this hop, including the arc= result.
+var ar = new AuthenticationResultsBuilder("mx.example.org")
+    .AddSpf(...).AddDkim(...).AddArc(ArcAuthenticationResults.Format(chain, remoteIp));
+
+// Outbound/forward: add the next ARC set.
+using var sealer = new ArcSealer(new ArcSealerOptions { Domain = "example.org", Selector = "arc1" }, rsaPrivateKey);
+ArcSealResult sealed = sealer.Seal(rawMessage, ar, chain);         // or Seal(bytes, string authenticationResults, chain)
+// sealed.HeaderBytes: ARC-Seal, ARC-Message-Signature, ARC-Authentication-Results, CRLF terminated: prepend to the message.
+```
+
+`ArcSealHeader`, `ArcMessageSignatureHeader` and `ArcAuthenticationResultsHeader` expose `TryParse` (never throws). `ArcAuthenticationResults.Format` gives `arc=pass header.oldest-pass=N smtp.remote-ip=...` or `arc=fail reason="..."`.
+
+### What is verified
+
+1. Structure: every instance 1..N has exactly one ARC-Seal, ARC-Message-Signature and ARC-Authentication-Results; no duplicates, no gaps; instance numbers are plain decimal 1..50 (no sign or leading zeros).
+2. `cv`: instance 1 must be `none`, later instances `pass`; any `cv=fail` makes the chain fail (`ChainFailedUpstream`).
+3. ARC-Message-Signature of the newest set over the message (header selection bottom-up as in DKIM, body hash, the signature header itself without `b=`; simple or relaxed per `c=`).
+4. ARC-Seal of every set, newest first: relaxed canonicalization of AAR, AMS, AS of sets 1..i in order, with the seal being checked having an empty `b=` and no trailing CRLF.
+5. Optionally (`ComputeOldestPass`, default on) the lowest instance whose AMS still verifies, reported as `header.oldest-pass`.
+6. Keys: TXT at `selector._domainkey.domain`, via the shared DKIM key record parser; revoked keys, non-RSA keys, keys outside 1024..4096 bits fail. Distinct lookups per message are capped (`MaxKeyLookups`, default 25).
+
+Parsing is strict: duplicate tags, empty tags, and non-ASCII are errors; `h=` in a seal, `l=` in an AMS, and ARC-Seal/ARC-Message-Signature in an AMS `h=` are rejected; unknown tags are ignored. Folding and whitespace around tags are tolerated. Limits: 50 sets, 16 KiB per ARC header, 1024 header fields.
+
+### Sealer behaviour
+
+- First hop: `i=1`, `cv=none`. Passing chain: `i=N+1`, `cv=pass`. The chain result must match the ARC headers actually in the message, otherwise `ArgumentException`.
+- Failed chain: a set with `cv=fail` whose seal covers only the new set; if the newest seal already says `cv=fail`, or the instance numbers cannot be read, or 50 sets exist, nothing is sealed and `NotSealedReason` says why. A transient DNS failure also counts as `Fail`: callers may prefer to defer the message instead of sealing `cv=fail` (`ArcChainResult.IsTransient`).
+- AMS: `rsa-sha256`, relaxed/relaxed, headers from `ArcSealerOptions.SignedHeaders` (default: the DKIM set plus DKIM-Signature), only instances that exist unless `OversignHeaders` is on (default off, because later hops are expected to alter the message). Seal the message exactly as it will leave this hop.
+
+### Verification status
+
+Verified differentially against MimeKit 4.18.1 in both directions (`ArcMimeKitInteropTests`): MimeKit-sealed 1 and 5 hop chains validate with `ArcValidator`, our 1, 2 and 5 hop chains validate with MimeKit's `ArcVerifier`, a mixed MimeKit/our/MimeKit chain validates in both, and the same tamperings fail in both. Also covered: parser tables, tamper tests (body, headers, earlier AAR/AMS, removed/duplicated/reordered/renumbered sets, cv changes, wrong/revoked/missing/malformed keys, DNS failure, 51 instances, limits), seeded mutation fuzzing, and a sealing allocation check.
+
+### Known gaps
+
+- **Not verified against an independent implementation:** the signature scope of a `cv=fail` seal (only the new set) follows our reading of RFC 8617 section 5.1.1; MimeKit cannot validate such a chain, so only the "chain fails" side is cross-checked. The `header.oldest-pass` meaning (lowest instance whose AMS verifies) is our reading of RFC 8617 section 5.2; `arc.chain`/other AR properties are not emitted.
+- `rsa-sha256` only: Ed25519 and rsa-sha1 chains fail with `UnsupportedAlgorithm` (a legitimate Ed25519 chain is reported as `fail`, not as unverifiable).
+- `x=` expiry on AMS and `t=` are not enforced.
+- Canonicalization is a copy of the DKIM one (the `Mta.Dkim` helpers are internal), so a canonicalization fix must be applied in both places; the MimeKit tests cover this code for ARC.
+- ARC trust (which sealers to believe) is policy outside this component; a `pass` only means the chain is cryptographically intact.
