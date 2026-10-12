@@ -941,3 +941,38 @@ pre.patch {
   overflow: auto;
   white-space: pre;
 }
+
+/* ---------- domains, webhooks, settings (fork B) ---------- */
+
+.dns-table td {
+  vertical-align: top;
+}
+.dns-value {
+  display: block;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  max-width: 34rem;
+}
+.dns-host {
+  overflow-wrap: anywhere;
+}
+.dns-detail td {
+  background: var(--surface-2);
+}
+.dns-hints {
+  margin: 0.25rem 0 0;
+  padding-left: 1.25rem;
+}
+.dns-hints li {
+  margin-bottom: 0.4rem;
+}
+.setting {
+  padding-bottom: 0.25rem;
+  border-bottom: 1px solid var(--border);
+}
+.setting:last-of-type {
+  border-bottom: 0;
+}
+details summary {
+  cursor: pointer;
+}
