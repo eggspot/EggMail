@@ -10,5 +10,7 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Mta.Delivery\Mta.Delivery.csproj" />
+    <ProjectReference Include="..\..\src\Mta.Smtp.Server\Mta.Smtp.Server.csproj" />
+    <ProjectReference Include="..\..\src\Mta.Storage\Mta.Storage.csproj" />
   </ItemGroup>
 </Project>

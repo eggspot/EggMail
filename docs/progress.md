@@ -4,39 +4,48 @@ Running status of the implementation, updated in every pull request. **Productio
 
 ## Milestones
 
-| # | Milestone | Status | PR |
-|---|---|---|---|
-| M0 | Foundations: solution, shared contracts, package-free guard, CI | done (merged) | #1, #2 |
-| M1a | SMTP protocol library and server (STARTTLS, implicit TLS, AUTH, BDAT, pipelining, smuggling defenses) | in review | feat/smtp-protocol |
-| M1c | Outbound SMTP client (STARTTLS policy, AUTH, pipelining, DATA/BDAT, pool) | in review | feat/smtp-client |
-| M1d | Webhooks library (Standard Webhooks signing, SSRF guard, dispatcher, event factory) | in review | feat/webhooks |
-| M1e | Load generator and sink (`mta-tools`) | in review | feat/tools |
-| M5a | Dockerfile + release workflow (written, untested: no Docker locally, Actions disabled by org) | in review | feat/release-pipeline |
-| M3b | Certificates in the database: provider with hot reload and file override, self-signed bootstrap, ACME renewal service (Certes + Cloudflare DNS-01; **not verified against a real ACME server**) | in review | feat/tls-context |
-| M4a | Portable bundle format: manifest, NDJSON writer/reader with hashes, verification, secret protection through Data Protection + passphrase PKCS#12 | in review | feat/bundle-format |
-| M1b | Mime, DNS, DKIM, SPF/DMARC, MTA-STS/DANE/TLS-RPT libraries | in progress (parallel work) | feat/mime, feat/dns, feat/dkim, feat/auth-spf-dmarc, feat/tls-policy |
-
-## Verified so far
-
-- Smtp.Protocol: 90 tests (command parser incl. fuzz, DATA scanner incl. smuggling vectors and chunk-independence, reply parser, dot-stuffer round trips, SASL, session state).
-- Smtp.Server: 32 loopback tests (full transactions, pipelining, BDAT, smuggling attempts refused, STARTTLS and its injection guard, implicit TLS, AUTH PLAIN/LOGIN, limits, timeouts, quiesce, concurrency, garbage-input fuzz) and MailKit interop over STARTTLS and implicit TLS including a 3 MiB attachment.
-- `dotnet build EggMail.slnx` and `dotnet test EggMail.slnx` pass locally (Core address/id tests, architecture guard tests).
-- The package-free guard checks `.csproj` files and `obj/project.assets.json` of the guarded assemblies.
-
-- Smtp.Client: 21 loopback tests against the real server and scripted peers (STARTTLS stripping and injection, drop after end-of-data, timeouts, pool reuse, relay AUTH over implicit TLS, local size/UTF8/bare-LF failures).
+| Area | Status | Verified by |
+|---|---|---|
+| Foundations: solution, shared contracts, package-free guard | merged | architecture tests (31) |
+| SMTP protocol library and server (STARTTLS, implicit TLS, AUTH, BDAT, pipelining, smuggling and STARTTLS-injection defenses) | merged | 90 + 32 tests, MailKit interop |
+| Outbound SMTP client (STARTTLS policy, AUTH, pipelining, DATA/BDAT, pool) | merged | 21 loopback tests |
+| MIME (parse, build, edit, validate, extract) | merged | 783 tests incl. MimeKit differential and fuzzing |
+| DNS client and MX resolver | merged | 203 tests |
+| TLS policy: MTA-STS, DANE, TLS-RPT, certificate validation | merged | 471 tests |
+| DKIM sign/verify | merged | 339 tests incl. MimeKit differential |
+| SPF, DMARC, Authentication-Results, aggregate reports, ARC | merged | 905 tests incl. MimeKit ARC cross-check |
+| VERP tokens, DSN builder, inbound DSN/ARF parser | merged | 22 tests |
+| Delivery policy: reply classifier, retry schedule, throttle, circuit breakers, route planner, limits, warm-up, sender policy | merged | 343 tests |
+| Webhooks library (Standard Webhooks signing, SSRF guard, dispatcher) | merged | 63 tests |
+| Storage contracts, in-memory backend, SQLite backend, shared conformance suite | merged | 240 + 417 tests incl. SIGKILL crash recovery in every sync mode |
+| Observability (meters, Prometheus text, health) | merged | 4 tests |
+| Bundle format and secret protection | merged | 12 tests |
+| Certificates in the database, ACME renewal service | merged (ACME **not verified against a real server**) | host tests |
+| Host primitives: configuration loader, password hashing, API keys, auth throttle, domain record planner and checker | merged | 47 tests |
+| Dashboard SPA (Preact + Vite) | merged (**not run in a real browser**) | 371 tests against a mock API |
+| Delivery engine: grouping, MX/relay routes, TLS policy, DKIM signing at delivery, VERP return path, retry/hold/expiry, DSN generation, quiesce | this PR | 13 end-to-end tests over loopback with in-memory storage |
+| SMTP ingest (AUTH, sender policy, submission service, bounce listener, bounce/complaint processing) | this PR | 8 loopback tests with MailKit |
+| PostgreSQL backend | in progress (parallel work) | |
+| HTTP API (docs/api.md) | not started | |
+| Domain verification service (scheduler over the planner/checker and `VerificationSchedule`) | not started | |
+| Host composition root and `mta` CLI (`--healthcheck`, `migrate-db`, `admin create`, `migrate-storage`), Data Protection wiring, hosted services | not started | |
+| Backend switch engine (export/import, quiesce, fence, activation, rollback, history migration) | not started | |
+| Dashboard hosting, TLS-RPT/DMARC report sending, metrics endpoint wiring | not started | |
+| Soak, fuzz and benchmark gates; external security audit | not started | |
 
 ## Not verified / known gaps
 
-- **GitHub Actions is disabled for the repository by the organization**, so the CI workflow and the release workflow cannot run. Pull requests are merged after a full local `dotnet test` and two self-review passes; the workflows are written but unproven on GitHub. Owner action: allow Actions for `eggspot/EggMail` ([open-questions.md](open-questions.md)).
-- Everything beyond the skeleton is not implemented yet. See the milestone table.
+- **GitHub Actions is disabled for the repository by the organization**, so the CI workflow and the release workflow cannot run. Pull requests are merged after a full local `dotnet test` and review passes; the workflows are written but unproven on GitHub. Owner action: allow Actions for `eggspot/EggMail` ([open-questions.md](open-questions.md)).
 - Docker image build and GHCR publish can only run in GitHub Actions (no Docker is used locally).
 - No real-internet MX delivery has been tested; no independent security audit has been done.
+- Delivery engine: state of throttles, circuit breakers and sending counters is per process (documented in [components/policy.md](components/policy.md)); sending counters and warm-up are in memory.
+- Delivery engine: TLS-RPT counters are not recorded yet; the engine uses the resolver's per-MX decision but does not feed the report collector.
+- Async bounces are correlated to the tenant through the VERP token and to the message through the `Message-ID` in the returned headers only for the webhook payload; they are not attached to the message's history events.
+- One flaky test was seen once under heavy parallel load (`Mta.Dkim` timing-sensitive test); not reproduced when run alone.
 
+## Design-forced changes recorded in code
 
-## Snapshot at the usage limit (not production ready)
-
-**Merged to main (each verified by local `dotnet test`; CI cannot run because Actions is disabled by the organization):** foundations and package-free guard, SMTP protocol + server, outbound SMTP client, DNS, TLS policy (MTA-STS/DANE/TLS-RPT), DKIM, SPF/DMARC/Authentication-Results/aggregate reports, VERP + DSN builder, webhooks library, observability, load generator/sink, host configuration, certificates in the database + ACME renewal (ACME unverified against a real server), password/API-key/throttle primitives, bundle format + secret protection, Dockerfile and release workflow (untested), API contract, docs.
-
-**In flight when work stopped (branches/PRs not merged, results unreviewed):** Mta.Mime (`feat/mime`), storage model + SQLite + in-memory backend + conformance suite (`feat/storage-sqlite`), Mta.Policy (`feat/policy`), dashboard SPA (`feat/dashboard`), ARC (`feat/arc`).
-
-**Not started:** PostgreSQL backend, delivery engine/scheduler, DSN/ARF parsing and bounce processing, the HTTP API implementation, SMTP ingest handler wiring, domain verification service, history migration/switch engine, Host composition (`mta` CLI), end-to-end tests, soak/fuzz gates, external audit.
+- `DeliveryAttempt.CountAttempt` (local holds do not count as attempts).
+- `IWebhookOutbox.EnqueueAsync` (events that are not tied to a delivery attempt: asynchronous bounces, complaints).
+- The VERP token carries the sending domain's id; the bounce domain and per-domain return-path host are configuration.
+- API keys have a fixed positional layout (`egm_` + 8 character id + `_` + 43 character secret); a syntax check by counting underscores was wrong because base64url can contain `_`.

@@ -7,6 +7,8 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="MailKit" />
+    <PackageReference Include="MimeKit" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Mta.Host\Mta.Host.csproj" />
