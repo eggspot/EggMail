@@ -79,3 +79,15 @@ public class InMemoryMaintenanceStatsOnly : MaintenanceConformance
 
     protected override Task<IStorage> CreateAsync(StorageOptions options) => Task.FromResult<IStorage>(new InMemoryStorage(options, Clock, null, TimeSpan.Zero));
 }
+
+public class InMemoryTransferFull : TransferConformance
+{
+    protected override Task<IStorage> CreateAsync(StorageOptions options) => Task.FromResult<IStorage>(new InMemoryStorage(options, Clock, null, TimeSpan.Zero));
+}
+
+public class InMemoryTransferStatsOnly : TransferConformance
+{
+    protected override HistoryMode Mode => HistoryMode.StatsOnly;
+
+    protected override Task<IStorage> CreateAsync(StorageOptions options) => Task.FromResult<IStorage>(new InMemoryStorage(options, Clock, null, TimeSpan.Zero));
+}

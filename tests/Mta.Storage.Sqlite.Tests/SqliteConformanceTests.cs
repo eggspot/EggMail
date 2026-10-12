@@ -440,3 +440,80 @@ public class SqliteDeliveryFullSync : DeliveryConformance
     }
 }
 
+
+public class SqliteTransferFull : TransferConformance
+{
+    private string? _dir;
+
+    protected override Task<IStorage> CreateAsync(StorageOptions options)
+    {
+        if (_dir is not null)
+        {
+            SqliteTestStorage.TryDelete(_dir);
+        }
+
+        _dir = SqliteTestStorage.NewDirectory();
+        return Task.FromResult<IStorage>(SqliteStorage.Create(SqliteTestStorage.WithDirectory(options, _dir, b => b.SyncMode = SqliteSyncMode.Off), Clock));
+    }
+
+    public override async Task DisposeAsync()
+    {
+        await base.DisposeAsync();
+        if (_dir is not null)
+        {
+            SqliteTestStorage.TryDelete(_dir);
+        }
+    }
+}
+
+public class SqliteTransferStatsOnly : TransferConformance
+{
+    private string? _dir;
+
+    protected override HistoryMode Mode => HistoryMode.StatsOnly;
+
+    protected override Task<IStorage> CreateAsync(StorageOptions options)
+    {
+        if (_dir is not null)
+        {
+            SqliteTestStorage.TryDelete(_dir);
+        }
+
+        _dir = SqliteTestStorage.NewDirectory();
+        return Task.FromResult<IStorage>(SqliteStorage.Create(SqliteTestStorage.WithDirectory(options, _dir, b => b.SyncMode = SqliteSyncMode.Off), Clock));
+    }
+
+    public override async Task DisposeAsync()
+    {
+        await base.DisposeAsync();
+        if (_dir is not null)
+        {
+            SqliteTestStorage.TryDelete(_dir);
+        }
+    }
+}
+
+public class SqliteTransferMemoryQueue : TransferConformance
+{
+    private string? _dir;
+
+    protected override Task<IStorage> CreateAsync(StorageOptions options)
+    {
+        if (_dir is not null)
+        {
+            SqliteTestStorage.TryDelete(_dir);
+        }
+
+        _dir = SqliteTestStorage.NewDirectory();
+        return Task.FromResult<IStorage>(SqliteStorage.Create(SqliteTestStorage.WithDirectory(options, _dir, b => b.QueuePersistence = QueuePersistence.Memory), Clock));
+    }
+
+    public override async Task DisposeAsync()
+    {
+        await base.DisposeAsync();
+        if (_dir is not null)
+        {
+            SqliteTestStorage.TryDelete(_dir);
+        }
+    }
+}
