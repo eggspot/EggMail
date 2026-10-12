@@ -17,6 +17,7 @@ public sealed class MtaConfig
     public string Hostname { get; init; } = Environment.MachineName.ToLowerInvariant();
 
     public SmtpSection Smtp { get; init; } = new();
+    public DnsSection Dns { get; init; } = new();
     public StorageOptions Storage { get; init; } = new();
     public DeliverySection Delivery { get; init; } = new();
     public WebhookOptions Webhooks { get; init; } = new();
@@ -81,10 +82,10 @@ public sealed class ListenerSection
 public sealed class DeliverySection
 {
     /// <summary>Concurrent delivery workers.</summary>
-    public int Workers { get; init; } = Math.Max(4, Environment.ProcessorCount * 2);
+    public int Workers { get; init; } = Math.Max(32, Environment.ProcessorCount * 8);
 
     public int ClaimBatchSize { get; init; } = 100;
-    public TimeSpan ClaimLease { get; init; } = TimeSpan.FromMinutes(10);
+    public TimeSpan ClaimLease { get; init; } = TimeSpan.FromMinutes(15);
     public TimeSpan PollInterval { get; init; } = TimeSpan.FromMilliseconds(250);
 
     /// <summary>EHLO name for outbound connections; defaults to <see cref="MtaConfig.Hostname"/>.</summary>
@@ -93,8 +94,26 @@ public sealed class DeliverySection
     /// <summary>Domain used for bounce (return-path) addresses: <c>bounces+token@domain</c>.</summary>
     public string? BounceDomain { get; init; }
 
-    public int MaxRecipientsPerTransaction { get; init; } = 50;
+    public int MaxRecipientsPerTransaction { get; init; } = 100;
     public bool PreferChunking { get; init; }
+
+    /// <summary>Destination port for direct MX delivery. Only change for lab setups; the Internet uses 25.</summary>
+    public int RemotePort { get; init; } = 25;
+
+    /// <summary>Allow MX hosts that resolve to loopback, private or other special-use addresses. Off in production (a hostile MX record must not aim us at the internal network); on for lab and test setups.</summary>
+    public bool AllowPrivateMxAddresses { get; init; }
+}
+
+public sealed class DnsSection
+{
+    /// <summary>Resolvers to use (IP with optional port). Empty means the system resolvers from <c>/etc/resolv.conf</c>, with public resolvers as the last resort.</summary>
+    public List<string> Servers { get; init; } = [];
+
+    /// <summary>Ask for DNSSEC records (DO bit). Needed for DANE.</summary>
+    public bool RequestDnssec { get; init; } = true;
+
+    /// <summary>Trust the AD bit of answers. Only safe when the configured resolver is local or otherwise trusted and validates DNSSEC.</summary>
+    public bool TrustAuthenticatedData { get; init; }
 }
 
 public sealed class DashboardSection
