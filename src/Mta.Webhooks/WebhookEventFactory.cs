@@ -85,4 +85,29 @@ public static class WebhookEventFactory
         });
         return new WebhookEventDraft(id, EndpointDisabled, json);
     }
+
+    /// <summary>
+    /// Creates the draft for an event learned from an inbound report: an asynchronous bounce (a remote server accepted the message and
+    /// bounced it later) or a spam complaint.
+    /// </summary>
+    public static WebhookEventDraft ForInboundReport(string eventType, DateTimeOffset at, string? recipient, string? originalMessageId, string? status, string? diagnostic, string? feedbackType)
+    {
+        var id = Ids.New(at);
+        string json = JsonSerializer.Serialize(new
+        {
+            id = $"evt_{Ids.ToCompact(id)}",
+            type = eventType,
+            timestamp = at.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", System.Globalization.CultureInfo.InvariantCulture),
+            data = new
+            {
+                recipient,
+                original_message_id = originalMessageId,
+                enhanced_code = status,
+                response = diagnostic,
+                feedback_type = feedbackType,
+                asynchronous = true,
+            },
+        });
+        return new WebhookEventDraft(id, eventType, json);
+    }
 }
