@@ -20,16 +20,19 @@ The four former "decided by default" items are **OWNER-DECIDED**, and a later ow
 | 12 | SQLite history layout | **DESIGN-DECIDED:** single `history.db`, batched deletes ([design.md §4.4](design.md#44-sqlite-backend-microsoftdatasqlite)) |
 | 13 | API status for history not recorded | **DESIGN-DECIDED:** `410 Gone` / `history_not_recorded`; `body_expired` reused; `404` for unknown ids ([design.md §5.2](design.md#52-api-behavior-when-history-is-not-recorded-or-has-expired-design-decided)) |
 | 14 | Orchestrator-managed configuration | **DESIGN-DECIDED:** the switch never rewrites env/ConfigMaps; verified target plus cutover patch, startup gate and source fence ([design.md §4.6](design.md#46-switching-backends-manual-and-symmetric)) |
+| 15 | `Content:RetentionDays` range | **OWNER-DECIDED:** stays 6–30, no unlimited; `0` = unlimited is the convention for the other retention knobs |
+| 16 | `synchronous=OFF` acknowledgement | **DESIGN-DECIDED:** no acknowledgement setting; loud warnings instead (startup log, persistent dashboard banner, metric and health detail, README). `Sqlite:SyncMode=Normal`/`Full` are the documented safer knobs |
+| 17 | Default storage backend | **OWNER-DECIDED:** SQLite (single-container quick start); `History:Mode` stays `Full` on both backends (see question 1 below for the flagged tension) |
+| 18 | Quiesce timeout | **DESIGN-DECIDED:** graceful shutdown: `Switch:QuiesceTimeoutSeconds` default 30, then requeue with the same message id and retry state and a `possible_duplicate` flag/event; no blocking `in_doubt` state |
+| 19 | Release and packaging | Single image on `ghcr.io/eggspot/eggmail`, released from GitHub Actions on version tags: planned in [release.md](release.md) |
 
 Note on the license: the Unlicense / CC0 public-domain dedication is the only more-permissive alternative to MIT (weaker legal footing in some jurisdictions, and no patent grant either); say so if the owner wants it. MIT itself also has no express patent grant, unlike Apache-2.0.
 
 ## Questions awaiting the owner
 
-1. **`Content:RetentionDays`.** It stays 6–30 with no unlimited value (floor: outlive the 5-day queue; ceiling: personal data and storage). Does the owner want a higher ceiling or an explicit override switch? Unlimited was allowed for webhook outbox/attempt log, `Retention:MetadataDays`, `Stats:HourlyRetentionDays` and `Stats:DailyRetentionDays` ([design.md §5.1](design.md#51-retention-knobs-and-unlimited-retention)); confirm that `0` as the "keep forever" value is fine.
-2. **SQLite default warnings.** Is the prominent power-loss/corruption warning in the README acceptable as the main mitigation, or should the SQLite backend refuse `Off` unless an explicit acknowledgement setting is present? (Current design: `Off` is the silent default plus a dashboard banner.)
-3. **`History:Mode` default.** The owner asked for identical defaults and delegated the value; the design chose `Full` (delivery tracking out of the box, `StatsOnly` one setting away). Confirm, or choose `StatsOnly` as the single default (lighter, no personal data stored by default, but no message search or resend out of the box).
-4. **Quiesce timeout.** `--inflight-timeout` defaults to 10 minutes (the SMTP client's post-`.` wait). Is it acceptable that deliveries still in flight at the timeout are aborted and marked `in_doubt` (possible duplicate), or should the switch refuse to proceed until they finish?
-5. **Effort.** The totals now include about +14.5 weeks over the earlier 264 as new rough author estimates (+2.5 corruption handling, +5.5 feature-identical backends and the symmetric switch, +6.5 for the answers that grew scope); they should be re-estimated ([plan.md](plan.md)).
+1. **`History:Mode=Full` as the default on the default (SQLite) backend.** The owner made SQLite the default backend and kept `History:Mode=Full` as the default on both backends. The quick start therefore writes events and content into `history.db` by default (more writes, a larger file, more retention-delete work than `StatsOnly`), which may conflict with the lightness expected of the single-container quick start and with SQLite performance. This is **unmeasured**; it is flagged here and not changed. Options if it proves a problem: keep `Full`, or choose `StatsOnly` as the single default for both backends (lighter, no personal data stored by default, but no message search or resend out of the box).
+2. **Effort.** The totals now include about +15 weeks over the earlier 264 as new rough author estimates (+2.5 corruption handling, +5.5 feature-identical backends and the symmetric switch, +6.5 for the answers that grew scope, +0.5 release automation); they should be re-estimated ([plan.md](plan.md)).
+3. **Release details.** Docker Hub mirror (later), standalone `mta` binaries as release assets, the nightly tag name and the arm64 build approach ([release.md](release.md)).
 
 ## Questions still open in the sources
 
@@ -53,7 +56,7 @@ Note on the license: the Unlicense / CC0 public-domain dedication is the only mo
 - History migration throughput and resumability on realistic volumes (chunking, checksums, backfill after activation); all time estimates for it are unverified.
 - Retention-delete cost on a single SQLite `history.db` under load, and the `WITHOUT ROWID (day, id)` key proposal; whether the bundled SQLite build's `ATTACH` limit would matter (only relevant if per-day files are adopted later).
 - The bundle's Data Protection flow: certificate-protected standalone key ring, PKCS#12 export with PBES2 / AES-256 (`ExportPkcs12`), and RSA assumptions, across source and target with different `Secrets:KeyProtection`.
-- Quiesce correctness: no duplicate sends except documented in-doubt cases, fence behavior on restart, rollback before and after activation.
+- Quiesce correctness: no duplicate sends except deliveries flagged `possible_duplicate`, requeue with preserved retry state at the 30-second timeout, fence behavior on restart, rollback before and after activation.
 - Certificates in the database: renewal lease under contention and outage, hot reload by polling, bootstrap order, first-run self-signed flow.
 - Startup integrity-check cost (`quick_check` vs `integrity_check`) on large `queue.db` files, and whether it should run only after an unclean shutdown.
 - Fault injection: behavior of `Off`, `Normal` and `Full` under simulated OS crash and power loss.
@@ -77,3 +80,4 @@ Claims not confirmed against a primary source (also noted inline in the other do
 - OpenSSL TLS 1.3 ticket caching; fsync behavior on overlayfs/XFS/ext4; Native AOT feasibility
 - The partition-count cost of unlimited `Retention:MetadataDays` (PostgreSQL partitioning docs, not re-fetched)
 - All values marked "proposed" or "mine" in the source: 256 KiB stored body, 1,000-event ring, 20 KB average content size, 7-day retention default, per-endpoint concurrency 4, connection pool sizes, volume thresholds for splitting databases, and the 15–20 week Lite-first saving
+- Release plan facts not confirmed: organization settings that may block public packages, GitHub Actions billing for public repositories, attestations on multi-platform images, ReadyToRun cross-architecture compilation ([release.md](release.md))

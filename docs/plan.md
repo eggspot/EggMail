@@ -4,7 +4,7 @@ All numbers are the design authors' **estimates**, not measurements, built from 
 
 ## Current totals
 
-**About 279 engineer-weeks central (range about 206–409).** This is the earlier 264 (196–385) plus three sets of new author estimates (not from the earlier effort model): the owner decisions of 2026-10-12 (+2.5), the owner correction that makes the storage backends feature-identical with a symmetric switch (+5.5, range +3.5 to +8.5), and the answers to the open questions that grew the scope (+6.5, range +4.5 to +10.5; quiesce and history migration are now in the first release, plus Data Protection bundle protection, an orchestrator-aware cutover and certificates in the database). Re-estimate before committing.
+**About 279 engineer-weeks central (range about 206–410).** This is the earlier 264 (196–385) plus four sets of new author estimates (not from the earlier effort model): the owner decisions of 2026-10-12 (+2.5), the owner correction that makes the storage backends feature-identical with a symmetric switch (+5.5, range +3.5 to +8.5), and the answers to the open questions that grew the scope (+6.5, range +4.5 to +10.5; quiesce and history migration are now in the first release, plus Data Protection bundle protection, an orchestrator-aware cutover and certificates in the database), and the release automation (+0.5, range +0.5 to +1; see [release.md](release.md)). The owner answers of the third round (SQLite default backend, quiesce requeue, loud warnings) change no effort. Re-estimate before committing.
 
 Calendar uses the same capacity assumptions throughout: 4 engineers ≈ 3.1 effective weeks per week, 2 engineers ≈ 1.7.
 
@@ -27,6 +27,7 @@ Outside the estimate: deliverability operations (IP reputation, warm-up, abuse d
 | Owner decisions of 2026-10-12: corruption detection/recovery for `synchronous=OFF`, guided manual mode switch (the switch part is replaced by the next row) | +2.5 (range +1.5 to +4.5) | 267 |
 | Owner correction: feature-identical backends, `History:Mode`, symmetric Lite ↔ Full switch (net of the replaced items) | +5.5 (range +3.5 to +8.5) | 272 |
 | Answers to the open questions: quiesce and history migration in v1, Data Protection bundle protection, orchestrator-aware cutover, certificates and ACME state in the database | +6.5 (range +4.5 to +10.5) | 278.5, about 279 |
+| Release automation (tag-driven multi-arch GHCR publish, attestations, GitHub Release, nightly); not enumerated in the baseline Packaging component | +0.5 (range +0.5 to +1) | 279 |
 
 ## Component list (baseline of 236)
 
@@ -129,7 +130,7 @@ Scope grew: quiesce and history migration are in the first release (they were op
 
 | Item | Central | Range |
 |---|---|---|
-| Quiesce in v1: in-flight handling, durable source fence, in-doubt and transfer marks, transfer of queue rows, spool bodies, pending webhook outbox and API idempotency keys with ids preserved, target activation gate, no-duplicate and rollback tests | +2.0 | 1.5–3.5 |
+| Quiesce in v1: in-flight handling with requeue and a `possible_duplicate` flag (no blocking `in_doubt` state), durable source fence, transfer marks, transfer of queue rows, spool bodies, pending webhook outbox and API idempotency keys with ids preserved, target activation gate, no-duplicate and rollback tests | +2.0 | 1.5–3.5 |
 | History migration made mandatory, streamed, resumable and checksummed per chunk, with backfill after activation (was +1.5 as an optional item; now 3.0 in total) | +1.5 | 1–2 |
 | Secrets in the bundle through Data Protection: bundle key ring, passphrase-protected PKCS#12, re-protection under the target's ring, tests across differing `Secrets:KeyProtection` settings (the generic re-wrapping was already in the engine estimate) | +0.5 | 0.5–1 |
 | Orchestrator-aware cutover: config-source detection, precedence rules, cutover patch generation, startup gate on `switch_state` | +1.0 | 0.5–1.5 |
@@ -137,13 +138,17 @@ Scope grew: quiesce and history migration are in the first release (they were op
 | Unified preset defaults, SQLite history layout (single `history.db`), `410`/problem-details history errors | 0 | 0 |
 | **Total** | **+6.5** | **+4.5 to +10.5** |
 
-New central total: 272 + 6.5 = 278.5, about **279** (about 206–409). Calendar on the same capacity assumptions (4 engineers ≈ 3.1 effective weeks per week, 2 ≈ 1.7): **4 engineers about 21 months** (low about 15, high about 30); **2 engineers about 38 months** (low about 28, high about 55).
+New central total: 272 + 6.5 = 278.5, about **279** (278.5 + 0.5 for the release automation = 279.0) (about 206–410 after the release automation below). Calendar on the same capacity assumptions (4 engineers ≈ 3.1 effective weeks per week, 2 ≈ 1.7): **4 engineers about 21 months** (low about 15, high about 30); **2 engineers about 38 months** (low about 28, high about 55).
 
 Cut candidates that remain from the switch: only the guided *dashboard* flow, which could fall back to the `mta migrate-storage` CLI alone. History migration, quiesce, the secrets protection and certificates in the database are in scope. History throughput is unmeasured, so any time estimate for moving large histories is **unverified**.
 
+### Release automation (+0.5)
+
+The baseline **Packaging (4 weeks)** component was defined as one image with no second variant, plus compose and Kubernetes manifests; it does not enumerate release automation. The tag-driven multi-arch build, GHCR publishing with `GITHUB_TOKEN`, SBOM/provenance and attestation steps, GitHub Release with changelog and checksums, the nightly build, smoke tests and the one-time package-visibility step ([release.md](release.md)) are therefore **not clearly covered** and are added here as **+0.5 week (range 0.5–1)**, a new author estimate. Not covered either way: a Docker Hub mirror (a later decision).
+
 ## Phases
 
-Phase scope at the 236 baseline, with later deltas applied. Per-phase totals below are **derived by summing the recorded phase deltas**; they sum to 273.5, not 278.5, because the +5 step above was not assigned to phases in the sources.
+Phase scope at the 236 baseline, with later deltas applied. Per-phase totals below are **derived by summing the recorded phase deltas**; they sum to 274, not 279, because the +5 step above was not assigned to phases in the sources.
 
 | Phase | Scope | Baseline | Deltas since | Derived |
 |---|---|---|---|---|
@@ -152,7 +157,7 @@ Phase scope at the 236 baseline, with later deltas applied. Per-phase totals bel
 | 2 Outbound | SMTP client, scheduler, DKIM, DSN; SQLite-backend crash tests (process kill, OS crash/power loss), corruption detection/recovery, terminal-state strip/move job | 47 | −6 (no S3 provider or suite), +3, +2.5, +1 | 47.5 |
 | 3 Authentication and policy | SPF, DMARC, MTA-STS, TLS-RPT, DANE, ARC; stateless VERP | 33 | −4 (no blob reconciliation), +1, +0.5 | 30.5 |
 | 4 Product surface | API, webhooks, domain verification, dashboard (same pages on both backends, `History:Mode` states), observability, ACME with certificate and ACME state in the config store, per-tenant/per-send flags, extraction | 33 | +1 (message view/resend UI), +4.5, +3, −0.5, +1.5 (certificates in the database) | 42.5 |
-| 5 Deployment | Compose and Kubernetes, packaging, glue; symmetric backend-switch engine with quiesce and fence, resumable history migration, Data Protection bundle protection, orchestrator-aware cutover, CLI and guided flow | 14 | +5.0 (replaces +1.5 and +1.5), +1.5, +5.0 (quiesce +2.0, history +1.5, Data Protection +0.5, cutover +1.0) | 25.5 |
+| 5 Deployment | Compose and Kubernetes, packaging, glue; symmetric backend-switch engine with quiesce and fence, resumable history migration, Data Protection bundle protection, orchestrator-aware cutover, CLI and guided flow, release automation | 14 | +5.0 (replaces +1.5 and +1.5), +1.5, +5.0 (quiesce +2.0, history +1.5, Data Protection +0.5, cutover +1.0), +0.5 (release automation) | 26 |
 | 6 Hardening | Final security pass, soak, performance tuning, warm-up playbook, runbooks, limited real-traffic pilot; test matrix | 27 | −0.5 (no FS self-test), +1.5, +1.5 | 29.5 |
 
 Baseline calendar at 4 engineers was about 77 weeks (6 / 21 / 15 / 11 / 11 / 4.5 / 9 per phase); it has not been recomputed per phase.
@@ -173,7 +178,7 @@ Carried from the earlier plan version (storage-engine-specific gates dropped); t
 | 2 | Delivery to a sink meets the allocation and throughput budgets; interop matrix passes; DKIM signatures verify at Gmail (`Authentication-Results`) |
 | 3 | SPF/DMARC/DKIM results match a reference implementation on a shared corpus; MTA-STS and DANE tested against real policies; bounces correlate end to end |
 | 4 | OWASP ASVS L2 checklist on API and dashboard; strict CSP verified; ACME renewal tested through a forced expiry |
-| 5 | Upgrade, restore and rollback drills pass; fresh single-container start works with minimal config; backend-switch drills pass in both directions (round trip preserves config, certificates, stats, queue and history; checksums verify; quiesce produces no duplicate sends except documented in-doubt cases; rollback works; resume of an interrupted history copy works) |
+| 5 | Upgrade, restore and rollback drills pass; fresh single-container start works with minimal config; backend-switch drills pass in both directions (round trip preserves config, certificates, stats, queue and history; checksums verify; quiesce adds no duplicate sends except deliveries flagged `possible_duplicate`; rollback works; resume of an interrupted history copy works) |
 | 6 | No open critical or high findings; 7-day soak; DoS suite within memory and CPU ceilings; runbooks reviewed |
 
 ## Cut order
@@ -209,7 +214,7 @@ The Postgres provider is no longer cuttable: it is the only path to more than on
 10. **Two providers** double the test and maintenance load, and feature identity means every feature is tested on both.
 11. **SQLite single-writer ceiling**, and corruption or loss if someone puts the file on a network volume.
 12. **Stats flush window** (up to about 10 s of counters lost on process crash).
-13. **SQLite default `synchronous=OFF` can corrupt the database on an OS crash or power loss** (SQLite docs), losing all queued mail including mail acknowledged with `250`. A process kill is safe. Owner-accepted for speed; mitigated by prominent README/design wording, `Sqlite:SyncMode=Normal|Full`, startup integrity check with quarantine, optional backups, and `config.db` kept at `Full` (owner-decided). Also keep "fire-and-forget" from being misread as "may lose mail" under process-crash-safe operation.
+13. **SQLite default `synchronous=OFF` can corrupt the database on an OS crash or power loss** (SQLite docs), losing all queued mail including mail acknowledged with `250`. A process kill is safe. Owner-accepted for speed; mitigated by loud warnings (startup log, persistent dashboard banner, metric and health detail; no acknowledgement gate), prominent README/design wording, `Sqlite:SyncMode=Normal|Full`, startup integrity check with quarantine, optional backups, and `config.db` kept at `Full` (owner-decided). Also keep "fire-and-forget" from being misread as "may lose mail" under process-crash-safe operation.
 14. **Disk-full queue on the SQLite backend** (reply `452`).
 15. **No per-message traceability under `History:Mode=StatsOnly`** (an opt-in lightweight setting on either backend; `Full` is the default) makes support harder (mitigated by the ring and logs).
 16. **Forged VERP tokens** if the HMAC key is mishandled.
@@ -219,5 +224,5 @@ The Postgres provider is no longer cuttable: it is the only path to more than on
 20. **Backend-switch engine** is a data-moving feature: an incorrect export/import could lose or corrupt data, mishandle queued mail, or mis-rewrap DKIM keys. Mitigated by refusing a non-empty target, drain-first by default, checksums and counts, a read-only source kept until the owner finalizes, round-trip tests in both directions and a documented rollback.
 21. **Cross-file non-atomicity on the SQLite backend** (several files, atomic per file only) requires idempotent, ordered effects; the same code paths must behave identically to PostgreSQL's single transactions.
 22. **Private keys and the ACME account key live in the database** (encrypted by Data Protection). A leak of both a database copy and the key-protection certificate/KMS exposes them; backups and replicas carry the ciphertext. Mitigated by keeping the key-protection secret outside the database, least-privilege roles and the dashboard's read-only role having no access to secret tables.
-23. **Quiesce can still duplicate in-doubt deliveries** (aborted in-flight sends whose outcome is unknown) and cannot de-duplicate SMTP clients that retried without an idempotency key. Mitigated by waiting for in-flight work up to a timeout, `in_doubt` marks, preserved ids and API idempotency keys.
+23. **Quiesce can still duplicate deliveries** that were in flight after the end of message data when the 30-second timeout aborted them (they are requeued at-least-once and flagged `possible_duplicate`), and cannot de-duplicate SMTP clients that retried without an idempotency key. Mitigated by waiting for in-flight work, the flag and event, preserved ids and API idempotency keys.
 24. **Certificate renewal across replicas** (lease lock correctness and a database outage during renewal) and the bootstrap order (database before TLS) need dedicated tests.

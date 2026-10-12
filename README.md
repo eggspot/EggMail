@@ -6,7 +6,7 @@ An open-source, self-hosted **outbound email server** from [eggspot](https://git
 
 > **Name:** the name EggMail is kept. No formal trademark search or registration is planned (owner decision); the MIT license covers the code, not the name. A free check of the USPTO, EUIPO and WIPO databases before wide promotion is recommended but optional (see [docs/decisions.md](docs/decisions.md)).
 
-> **The SQLite backend's default is fast, not power-loss-safe.** The SQLite backend defaults to `PRAGMA synchronous=OFF` for its data files. A process kill or container restart is safe. If the **operating system crashes or power fails**, the SQLite docs say the database **can be corrupted** (not just lose the latest commits), which can lose all queued mail, including mail already acknowledged with `250`. Use `Sqlite:SyncMode=Full` (or `Normal`) if you need power-loss safety, or use the PostgreSQL backend. See [docs/design.md §4.4](docs/design.md#44-sqlite-backend-microsoftdatasqlite).
+> **The SQLite backend's default is fast, not power-loss-safe.** The SQLite backend defaults to `PRAGMA synchronous=OFF` for its data files. A process kill or container restart is safe. If the **operating system crashes or power fails**, the SQLite docs say the database **can be corrupted** (not just lose the latest commits), which can lose all queued mail, including mail already acknowledged with `250`. EggMail does not ask you to acknowledge this; instead it warns loudly (a startup log warning, a persistent dashboard banner, and a metric and health detail). Use `Sqlite:SyncMode=Full` (or `Normal`) if you need power-loss safety, or use the PostgreSQL backend. See [docs/design.md §4.4](docs/design.md#44-sqlite-backend-microsoftdatasqlite).
 
 ## What and why
 
@@ -19,13 +19,13 @@ An open-source, self-hosted **outbound email server** from [eggspot](https://git
 
 **SQLite vs PostgreSQL is only a storage-backend choice.** Every feature (SMTP/API, DKIM/SPF/DMARC, domain verification, tenants, API keys, suppressions, webhooks, rate limits, warm-up, settings, dashboard pages, ACME/TLS) behaves identically on both. The backend decides only how data is stored persistently and long-term.
 
-How much **per-message history** is recorded is a separate setting, `History:Mode` (`StatsOnly` | `Full`), that works on either backend. **Any combination is allowed.**
+**SQLite is the default backend**, so a single container with one volume works out of the box; PostgreSQL is selected by configuration in the same image. How much **per-message history** is recorded is a separate setting, `History:Mode` (`StatsOnly` | `Full`), that works on either backend. **Any combination is allowed.**
 
 "Lite" and "Full" are friendly names for the two backends' default deployment shapes: **Lite = SQLite, Full = PostgreSQL. They have exactly the same defaults for every behavioural setting.** Only the storage backend and its storage-specific defaults differ:
 
 | | **Lite** (SQLite) | **Full** (PostgreSQL) |
 |---|---|---|
-| `Storage:Backend` | `Sqlite` | `Postgres` |
+| `Storage:Backend` | `Sqlite` (**the default**) | `Postgres` |
 | `History:Mode` default | `Full` | `Full` |
 | Queue lifetime / max message / recipients | 5 days / 25 MiB / 50 | 5 days / 25 MiB / 50 |
 | Content retention, attachments, webhooks, stats | identical | identical |
@@ -37,6 +37,15 @@ Backend **characteristics** (not missing features): SQLite is single node and on
 
 **Switching is manual, symmetric and easy; it never happens automatically.** Dashboard indicators are advisory only. A guided dashboard action and a CLI (`mta migrate-storage --to postgres|sqlite`) move you in either direction with one portable, versioned bundle: preflight, drain or quiesce (no need to wait for an empty queue), export, import, verify, confirm, activate, with rollback. The bundle carries config, certificates and ACME state, stats, queued mail and, optionally, per-message history; secrets travel protected by Data Protection and are never written in clear. Only the storage changes; features and settings stay as they were. See [docs/design.md §4.6](docs/design.md#46-switching-backends-manual-and-symmetric).
 
+## Quick start (planned)
+
+A single Docker image will run out of the box on the SQLite backend with one volume at `/data`. This is a plan: nothing is published yet. See [docs/release.md](docs/release.md) for the snippets, including a compose file with PostgreSQL.
+
+```sh
+docker run -d --name eggmail -p 587:5587 -p 465:4465 -p 2525:2525 -p 8443:8443 \
+  -v eggmail-data:/data ghcr.io/eggspot/eggmail:latest
+```
+
 ## Documentation
 
 | Document | Contents |
@@ -45,6 +54,7 @@ Backend **characteristics** (not missing features): SQLite is single node and on
 | [docs/decisions.md](docs/decisions.md) | The decisions record (owner and design decisions A–N and items 1–36) |
 | [docs/plan.md](docs/plan.md) | Components with engineer-week estimates, phases, cut order, risks, calendar |
 | [docs/benchmarks.md](docs/benchmarks.md) | How performance will be measured and compared, per mode |
+| [docs/release.md](docs/release.md) | Release and packaging plan: the single Docker image, `ghcr.io/eggspot/eggmail`, GitHub Actions release, quick-start snippets (a plan; nothing is published yet) |
 | [docs/open-questions.md](docs/open-questions.md) | Questions awaiting the owner, items to settle with spikes, unverified items |
 
 ## Caveats

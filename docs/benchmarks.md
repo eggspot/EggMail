@@ -17,7 +17,7 @@ EggMail's primary goal is to be the fastest SMTP server. **Performance is a perm
 
 The SQLite backend additionally reports `sqlite_commit_latency_ms`, `sqlite_writer_batch_size`, `sqlite_writer_queue_depth` and WAL size, which also feed the dashboard's advisory storage-pressure indicator (advisory only; backend switching is manual). The PostgreSQL backend additionally reports round trips per message, claim latency, WAL volume and connection-pool saturation.
 
-Because `History:Mode` changes how much is written per message, results always state it. The matrix is backend × history level; the four combinations are all valid. The default for both backends is `Full` history, so the headline numbers use `Full`; `StatsOnly` results are published alongside, since any combination is allowed. Default `Full` history means the SQLite backend writes more per message by default than a statistics-only configuration would, which the published results make visible. Switch-engine throughput (export/import of a bundle) is measured separately and is not part of the ingest claim.
+Because `History:Mode` changes how much is written per message, results always state it. The matrix is backend × history level; the four combinations are all valid. The default for both backends is `Full` history, so the headline numbers use `Full` on the default SQLite backend as well as on PostgreSQL; `StatsOnly` results are published alongside, since any combination is allowed. Default `Full` history means the SQLite backend writes more per message by default than a statistics-only configuration would, which the published results make visible. Switch-engine throughput (export/import of a bundle) is measured separately and is not part of the ingest claim.
 
 ## Targets (proposed)
 
@@ -44,7 +44,7 @@ The protocol-path rows apply to both backends and are measured separately on eac
 4. Use a sink that creates back-pressure. KumoMTA's testing docs warn that discard-everything sinks distort results.
 5. Never test against the public internet.
 6. Publish results per release with hardware, message size, concurrency and GC mode, using the **median of at least 3 runs**.
-7. Include a reproducible compose setup in the repository.
+7. Include a reproducible compose setup in the repository, using the released single image ([release.md](release.md)) so the numbers describe what users run. A quick-start user gets the SQLite backend with `Sqlite:SyncMode=Off` and `Full` history: that exact default configuration is benchmarked, and published with its durable (`Sqlite:SyncMode=Full`) pair.
 8. **The two backends are reported separately**, never blended into one number, and always on the identical feature set and history level. A cross-backend comparison is informational only, is made at the same `History:Mode`, and carries the same durable/non-durable pairing.
 9. Disk and filesystem for SQLite runs are published (device type, local vs cloud block, filesystem), because that backend is bound by the local disk. PostgreSQL runs publish the server version, instance/storage class and HA setup.
 
