@@ -2,9 +2,6 @@ using Mta.Storage.Model;
 
 namespace Mta.Storage.Logic;
 
-/// <summary>Raised when a write violates a uniqueness or key constraint (for example a duplicate tenant slug).</summary>
-public sealed class StorageConflictException(string message, Exception? inner = null) : InvalidOperationException(message, inner);
-
 /// <summary>Lease semantics with fencing tokens, shared by every backend (they differ only in how the row is read and written atomically).</summary>
 public static class LeaseRules
 {

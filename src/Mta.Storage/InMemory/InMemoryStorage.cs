@@ -176,6 +176,11 @@ internal sealed class MemoryIntake(MemoryState s) : IMessageIntake
         DateTimeOffset received = StorageTime.Normalize(message.ReceivedAt);
         lock (s.Gate)
         {
+            if (s.Spool.ContainsKey(message.MessageId))
+            {
+                throw new StorageConflictException($"Message {message.MessageId} already exists.");
+            }
+
             if (message.IdempotencyKey is { } key)
             {
                 var k = (message.TenantId, key);
@@ -192,11 +197,6 @@ internal sealed class MemoryIntake(MemoryState s) : IMessageIntake
                     CreatedAt = StorageTime.Normalize(now),
                     ExpiresAt = StorageTime.Normalize(now + s.Options.Queue.IdempotencyKeyLifetime),
                 };
-            }
-
-            if (s.Spool.ContainsKey(message.MessageId))
-            {
-                throw new StorageConflictException($"Message {message.MessageId} already exists.");
             }
 
             string from = AddressText.Format(message.EnvelopeFrom);
