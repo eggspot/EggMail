@@ -4,6 +4,9 @@ public enum StorageBackend : byte
 {
     Sqlite = 0,
     Postgres,
+
+    /// <summary>In-process, non-persistent backend used by tests of other components (addition; never selected by configuration).</summary>
+    InMemory,
 }
 
 /// <summary>How much per-message history is recorded (decision 29). Independent of the backend.</summary>
@@ -51,6 +54,9 @@ public sealed class QueueOptions
 {
     /// <summary>Maximum time a delivery may stay queued (<c>Queue:MaxLifetime</c>, default 5 days).</summary>
     public TimeSpan MaxLifetime { get; init; } = TimeSpan.FromDays(5);
+
+    /// <summary>How long an API idempotency key is remembered (addition; default 24 hours).</summary>
+    public TimeSpan IdempotencyKeyLifetime { get; init; } = TimeSpan.FromHours(24);
 }
 
 public sealed class ContentOptions
@@ -92,6 +98,23 @@ public sealed class SqliteOptions
     public TimeSpan WriterBatchWindow { get; init; } = TimeSpan.FromMilliseconds(2);
     public int WriterMaxBatch { get; init; } = 512;
     public int WriterQueueCapacity { get; init; } = 8192;
+
+    // Additions (SQLite tuning knobs; behaviour-neutral):
+
+    /// <summary>Rows per batched retention DELETE (about 5k, design §4.5).</summary>
+    public int RetentionDeleteBatchSize { get; init; } = 5000;
+
+    /// <summary>Pause between retention DELETE batches so the writer stays available to intake.</summary>
+    public TimeSpan RetentionDeletePause { get; init; } = TimeSpan.FromMilliseconds(20);
+
+    /// <summary>PRAGMA busy_timeout for every connection.</summary>
+    public TimeSpan BusyTimeout { get; init; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>PRAGMA journal_size_limit: the WAL file is truncated to at most this size after a checkpoint.</summary>
+    public long JournalSizeLimitBytes { get; init; } = 64L * 1024 * 1024;
+
+    /// <summary>How often the statistics aggregate is flushed to stats.db (design §4.5: about 10 s).</summary>
+    public TimeSpan StatsFlushInterval { get; init; } = TimeSpan.FromSeconds(10);
 }
 
 public sealed class PostgresOptions

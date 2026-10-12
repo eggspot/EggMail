@@ -1,5 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <ItemGroup>
+    <InternalsVisibleTo Include="Mta.Storage.Sqlite.Tests" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" />
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="..\Mta.Core\Mta.Core.csproj" />
     <ProjectReference Include="..\Mta.Storage\Mta.Storage.csproj" />
   </ItemGroup>
