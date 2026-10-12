@@ -35,6 +35,9 @@ public sealed class DeliveryServices
     public ISecretProtector? Secrets { get; init; }
     public VerpCodec? Verp { get; init; }
     public IMtaLog Log { get; init; } = NullMtaLog.Instance;
+
+    /// <summary>Collects TLS-RPT data about sessions to MTA-STS / DANE domains; null disables reporting.</summary>
+    public Mta.Tls.TlsRpt.TlsRptCollector? TlsReports { get; init; }
 }
 
 /// <summary>
@@ -269,6 +272,9 @@ public sealed class DeliveryProcessor
         public TimeSpan Duration { get; set; }
         public DateTimeOffset? HoldUntil { get; set; }
         public bool Aborted { get; set; }
+        public TlsFailure? TlsFailure { get; set; }
+        public RemoteCertificateValidator? Validator { get; set; }
+        public string? ReceivingIp { get; set; }
         public bool WasConnected { get; set; }
         public bool Connected => Route is not (RouteAttemptResult.ConnectTimeout or RouteAttemptResult.ConnectRefused);
     }
@@ -357,6 +363,7 @@ public sealed class DeliveryProcessor
             var decision = await _s.Tls.ResolveForMxAsync(domainTls, exchanger.Host, mx.MxAuthenticated, _options.RemotePort, ct).ConfigureAwait(false);
             if (decision.IsBlocked)
             {
+                TlsReportRecorder.RecordBlocked(_s.TlsReports, decision, sendingIp: null);
                 lastFailure = new AttemptResult
                 {
                     Route = RouteAttemptResult.TlsPolicyFailure,
@@ -381,11 +388,14 @@ public sealed class DeliveryProcessor
                     Host = exchanger.Host,
                     Address = address,
                     Port = _options.RemotePort,
-                    Tls = BuildTlsPolicy(decision, exchanger.Host),
+                    Tls = BuildTlsPolicy(decision, exchanger.Host, out var validator),
                 };
                 var result = await SendOnceAsync(target, envelope, message, ct).ConfigureAwait(false);
                 result.MxHost = exchanger.Host;
                 result.Decision = decision;
+                result.Validator = validator;
+                result.ReceivingIp = address.ToString();
+                ReportTls(first.RecipientDomain, decision, result);
                 if (result.Route is RouteAttemptResult.ConnectTimeout or RouteAttemptResult.ConnectRefused)
                 {
                     _s.Routes.ReportMxHost(exchanger.Host, result.Route);
@@ -407,6 +417,22 @@ public sealed class DeliveryProcessor
         }
 
         return lastFailure ?? Synthetic(RouteAttemptResult.ConnectRefused, 451, "4.4.1", "no mail host is currently reachable");
+    }
+
+    private void ReportTls(string recipientDomain, TlsPolicyDecision decision, AttemptResult result)
+    {
+        if (_s.TlsReports is null || result.Route is RouteAttemptResult.ConnectTimeout or RouteAttemptResult.ConnectRefused || result.Aborted)
+        {
+            return;
+        }
+
+        // A reply before STARTTLS (for example a refusing banner) is not a TLS result either.
+        if (result.TlsFailure is null && result.Tls is null)
+        {
+            return;
+        }
+
+        TlsReportRecorder.RecordSession(_s.TlsReports, decision, result.ReceivingIp, sendingIp: null, result.TlsFailure, result.Validator?.Outcome, result.Tls?.Used ?? false);
     }
 
     private async Task<AttemptResult> TryRelayAsync(ClaimedDelivery first, RelayRouteRecord relay, SmtpEnvelope envelope, ReadOnlyMemory<byte> message, CancellationToken ct)
@@ -451,14 +477,15 @@ public sealed class DeliveryProcessor
         return lastFailure!;
     }
 
-    private static SmtpTlsPolicy BuildTlsPolicy(TlsPolicyDecision decision, string mxHost)
+    private static SmtpTlsPolicy BuildTlsPolicy(TlsPolicyDecision decision, string mxHost, out RemoteCertificateValidator? validator)
     {
+        validator = null;
         if (!decision.AttemptTls)
         {
             return SmtpTlsPolicy.Disabled;
         }
 
-        var validator = new RemoteCertificateValidator(decision);
+        validator = new RemoteCertificateValidator(decision);
         return new SmtpTlsPolicy
         {
             Mode = SmtpTlsMode.StartTls,
@@ -522,6 +549,7 @@ public sealed class DeliveryProcessor
         {
             return new AttemptResult
             {
+                TlsFailure = ex.Failure,
                 Route = RouteAttemptResult.TlsPolicyFailure,
                 Reply = SmtpReply.Create(451, "4.7.5", "TLS negotiation failed: " + ex.Message),
                 Error = ex.Message,

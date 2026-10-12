@@ -79,3 +79,39 @@ internal sealed class MaintenanceService(EggMailRuntime runtime) : BackgroundSer
         }
     }
 }
+
+/// <summary>Sends the TLS-RPT reports of completed days, hourly.</summary>
+internal sealed class TlsReportService(EggMailRuntime runtime) : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        if (runtime.TlsReports is not { } sender)
+        {
+            return;
+        }
+
+        using var timer = new PeriodicTimer(TimeSpan.FromHours(1));
+        try
+        {
+            do
+            {
+                try
+                {
+                    int sent = await sender.RunOnceAsync(stoppingToken).ConfigureAwait(false);
+                    if (sent > 0)
+                    {
+                        runtime.Log.Write(MtaLogLevel.Information, "tlsrpt", $"sent {sent} TLS report(s)");
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    runtime.Log.Write(MtaLogLevel.Error, "tlsrpt", "report run failed", ex);
+                }
+            }
+            while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false));
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+}
