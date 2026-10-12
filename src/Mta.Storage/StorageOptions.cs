@@ -127,4 +127,18 @@ public sealed class PostgresOptions
 
     public int MaxPoolSize { get; init; } = 32;
     public int PartitionsAheadDays { get; init; } = 7;
+
+    // Additions (PostgreSQL tuning knobs; behaviour-neutral):
+
+    /// <summary>How often the statistics aggregate is flushed (design §4.5: about 10 s). <c>TimeSpan.Zero</c> disables the timer (tests).</summary>
+    public TimeSpan StatsFlushInterval { get; init; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>Rows per batched retention DELETE (tables that are not day partitioned).</summary>
+    public int RetentionDeleteBatchSize { get; init; } = 5000;
+
+    /// <summary>Pause between retention DELETE batches so intake and claims interleave with them.</summary>
+    public TimeSpan RetentionDeletePause { get; init; } = TimeSpan.FromMilliseconds(20);
+
+    /// <summary>Command timeout in seconds for hot-path statements (Npgsql default 30).</summary>
+    public int CommandTimeoutSeconds { get; init; } = 30;
 }
