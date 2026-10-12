@@ -41,11 +41,14 @@ public sealed class SubmissionRequest
     public bool SmtpUtf8 { get; init; }
     public string? IdempotencyKey { get; init; }
 
+    /// <summary>Digest of the request that carries <see cref="IdempotencyKey"/>; storage returns the stored one on a duplicate so the caller can detect key reuse with another body.</summary>
+    public string? IdempotencyFingerprint { get; init; }
+
     /// <summary>The caller asks to keep the raw message with its attachments after delivery (needs the global switch too).</summary>
     public bool StoreAttachments { get; init; }
 }
 
-public sealed record SubmissionResult(SubmissionStatus Status, Guid MessageId, SenderRejection? Rejection = null, string? Detail = null)
+public sealed record SubmissionResult(SubmissionStatus Status, Guid MessageId, SenderRejection? Rejection = null, string? Detail = null, string? IdempotencyFingerprint = null)
 {
     public bool IsAccepted => Status is SubmissionStatus.Accepted or SubmissionStatus.Duplicate;
 }
@@ -152,6 +155,7 @@ public sealed class SubmissionService
             ReceivedAt = now,
             ExpiresAt = now + _storageOptions.Queue.MaxLifetime,
             IdempotencyKey = request.IdempotencyKey,
+            IdempotencyFingerprint = request.IdempotencyFingerprint,
             RemoteAddress = request.RemoteAddress,
             Authenticated = request.Authenticated,
             SmtpUtf8 = request.SmtpUtf8,
@@ -161,7 +165,7 @@ public sealed class SubmissionService
         };
 
         var result = await _storage.Intake.AcceptAsync(accepted, ct).ConfigureAwait(false);
-        return new SubmissionResult(result.Status == IntakeStatus.Accepted ? SubmissionStatus.Accepted : SubmissionStatus.Duplicate, result.MessageId);
+        return new SubmissionResult(result.Status == IntakeStatus.Accepted ? SubmissionStatus.Accepted : SubmissionStatus.Duplicate, result.MessageId, IdempotencyFingerprint: result.IdempotencyFingerprint);
     }
 
     private MessageContent? ExtractContent(byte[] raw)
