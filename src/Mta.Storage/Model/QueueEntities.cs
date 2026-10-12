@@ -31,6 +31,12 @@ public sealed class QueuedDeliveryEntity
     public DateTimeOffset LeaseUntil { get; set; }
     public string? LastError { get; set; }
     public bool PossibleDuplicate { get; set; }
+
+    /// <summary>
+    /// Backend switch hold (design §4.6): when set, the row cannot be claimed. On the source it is the transfer mark
+    /// <c>transferred(switch_id)</c>, on the target it keeps imported rows from being dispatched until activation.
+    /// </summary>
+    public Guid? TransferSwitchId { get; set; }
 }
 
 /// <summary>The verbatim message (<c>message_spool</c>), kept until every recipient is final.</summary>
@@ -75,6 +81,9 @@ public sealed class WebhookOutboxEntity
 
     /// <summary>Set when the item reached Delivered or Failed (retention clock).</summary>
     public DateTimeOffset? FinishedAt { get; set; }
+
+    /// <summary>Backend switch hold, see <see cref="QueuedDeliveryEntity.TransferSwitchId"/>.</summary>
+    public Guid? TransferSwitchId { get; set; }
 }
 
 /// <summary>

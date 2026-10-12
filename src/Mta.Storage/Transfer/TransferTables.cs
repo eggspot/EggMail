@@ -1,0 +1,201 @@
+using Microsoft.EntityFrameworkCore;
+using Mta.Core;
+using Mta.Storage.Model;
+
+namespace Mta.Storage.Transfer;
+
+/// <summary>
+/// The registry of every table that moves in a backend switch (design §4.6), in import order. A table that is not listed
+/// here does not move: the Data Protection key ring (the target keeps its own), leases (runtime state), the switch state
+/// and the transfer progress records.
+/// </summary>
+public static class TransferTables
+{
+    /// <summary>Settings with this key prefix are the deployment's Data Protection key ring; they never move.</summary>
+    public const string DataProtectionSettingPrefix = "dataprotection.key.";
+
+    public static readonly TransferTable<TenantEntity> Tenants = new("tenant", TransferPart.Config, new()
+    {
+        Order = q => q.OrderBy(x => x.Id),
+    });
+
+    public static readonly TransferTable<ApiKeyEntity> ApiKeys = new("api_key", TransferPart.Config, new()
+    {
+        Order = q => q.OrderBy(x => x.Id),
+    });
+
+    public static readonly TransferTable<SmtpCredentialEntity> SmtpCredentials = new("smtp_credential", TransferPart.Config, new()
+    {
+        Order = q => q.OrderBy(x => x.Id),
+    });
+
+    public static readonly TransferTable<DomainEntity> Domains = new("domain", TransferPart.Config, new()
+    {
+        Order = q => q.OrderBy(x => x.Id),
+    });
+
+    public static readonly TransferTable<DkimKeyEntity> DkimKeys = new("dkim_key", TransferPart.Config, new()
+    {
+        Order = q => q.OrderBy(x => x.Id),
+        Secrets = [new TransferSecret<DkimKeyEntity>(nameof(DkimKeyEntity.PrivateKeyProtected), SecretPurposes.DkimKey, x => x.PrivateKeyProtected, (x, v) => x.PrivateKeyProtected = v ?? [])],
+    });
+
+    public static readonly TransferTable<SuppressionEntity> Suppressions = new("suppression", TransferPart.Config, new()
+    {
+        Order = q => q.OrderBy(x => x.TenantId).ThenBy(x => x.Address),
+    });
+
+    public static readonly TransferTable<WebhookEndpointEntity> WebhookEndpoints = new("webhook_endpoint", TransferPart.Config, new()
+    {
+        Order = q => q.OrderBy(x => x.Id),
+        Secrets = [new TransferSecret<WebhookEndpointEntity>(nameof(WebhookEndpointEntity.SecretProtected), SecretPurposes.WebhookSecret, x => x.SecretProtected, (x, v) => x.SecretProtected = v ?? [])],
+    });
+
+    /// <summary>Settings, without the Data Protection key ring. Upserted: a fresh target may already hold a setting of its own.</summary>
+    public static readonly TransferTable<SettingEntity> Settings = new("setting", TransferPart.Config, new()
+    {
+        Order = q => q.OrderBy(x => x.TenantId).ThenBy(x => x.Key),
+        Scope = q => q.Where(x => !x.Key.StartsWith(DataProtectionSettingPrefix)),
+        Upsert = true,
+    });
+
+    public static readonly TransferTable<TlsPolicyEntity> TlsPolicies = new("tls_policy", TransferPart.Config, new()
+    {
+        Order = q => q.OrderBy(x => x.Id),
+    });
+
+    public static readonly TransferTable<RelayRouteEntity> RelayRoutes = new("relay_route", TransferPart.Config, new()
+    {
+        Order = q => q.OrderBy(x => x.Id),
+        Secrets = [new TransferSecret<RelayRouteEntity>(nameof(RelayRouteEntity.PasswordProtected), SecretPurposes.RelayPassword, x => x.PasswordProtected, (x, v) => x.PasswordProtected = v)],
+    });
+
+    public static readonly TransferTable<CertificateEntity> Certificates = new("certificate", TransferPart.Config, new()
+    {
+        Order = q => q.OrderBy(x => x.Id),
+        Secrets = [new TransferSecret<CertificateEntity>(nameof(CertificateEntity.PrivateKeyProtected), SecretPurposes.TlsPrivateKey, x => x.PrivateKeyProtected, (x, v) => x.PrivateKeyProtected = v ?? [])],
+    });
+
+    public static readonly TransferTable<AcmeAccountEntity> AcmeAccounts = new("acme_account", TransferPart.Config, new()
+    {
+        Order = q => q.OrderBy(x => x.Id),
+        Secrets = [new TransferSecret<AcmeAccountEntity>(nameof(AcmeAccountEntity.AccountKeyProtected), SecretPurposes.AcmeAccountKey, x => x.AccountKeyProtected, (x, v) => x.AccountKeyProtected = v ?? [])],
+    });
+
+    /// <summary>Renewal metadata moves; an in-flight DNS-01 challenge does not (the target restarts any pending order, design §4.6).</summary>
+    public static readonly TransferTable<AcmeRenewalEntity> AcmeRenewals = new("acme_renewal", TransferPart.Config, new()
+    {
+        Order = q => q.OrderBy(x => x.CertificateName),
+        PrepareExport = x => x.ChallengeStateJson = null,
+        CanonicalExcludes = [nameof(AcmeRenewalEntity.ChallengeStateJson)],
+    });
+
+    public static readonly TransferTable<StatAggregateEntity> StatAggregates = new("stat_aggregate", TransferPart.Stats, new()
+    {
+        Order = q => q.OrderBy(x => x.Daily).ThenBy(x => x.PeriodStart).ThenBy(x => x.TenantId).ThenBy(x => x.SendingDomain).ThenBy(x => x.RecipientDomain),
+    });
+
+    public static readonly TransferTable<StatMetaEntity> StatMeta = new("stat_meta", TransferPart.Stats, new()
+    {
+        Order = q => q.OrderBy(x => x.Key),
+        Upsert = true,
+    });
+
+    /// <summary>The ring: exported oldest first; the target assigns new sequence numbers in that order.</summary>
+    public static readonly TransferTable<RecentEventEntity> RecentEvents = new("recent_event", TransferPart.Stats, new()
+    {
+        Order = q => q.OrderBy(x => x.Seq),
+        PrepareImport = x => x.Seq = 0,
+        CanonicalExcludes = [nameof(RecentEventEntity.Seq)],
+    });
+
+    public static readonly TransferTable<WebhookAttemptEntity> WebhookAttempts = new("webhook_attempt", TransferPart.Stats, new()
+    {
+        Order = q => q.OrderBy(x => x.Seq),
+        PrepareImport = x => x.Seq = 0,
+        CanonicalExcludes = [nameof(WebhookAttemptEntity.Seq)],
+    });
+
+    public static readonly TransferTable<QueuedDeliveryEntity> Deliveries = new("delivery_queue", TransferPart.Queue, new()
+    {
+        Order = q => q.OrderBy(x => x.Id),
+        Hold = new TransferHold<QueuedDeliveryEntity>
+        {
+            Property = nameof(QueuedDeliveryEntity.TransferSwitchId),
+            Set = (x, id) => x.TransferSwitchId = id,
+            HoldAll = (q, id, ct) => q.Where(x => x.TransferSwitchId == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.TransferSwitchId, (Guid?)id), ct),
+            Release = (q, id, ct) => q.Where(x => x.TransferSwitchId == id).ExecuteUpdateAsync(s => s.SetProperty(x => x.TransferSwitchId, (Guid?)null), ct),
+            CountHeld = (q, id, ct) => q.LongCountAsync(x => x.TransferSwitchId == id, ct),
+        },
+    });
+
+    public static readonly TransferTable<SpoolMessageEntity> Spool = new("message_spool", TransferPart.Queue, new()
+    {
+        Order = q => q.OrderBy(x => x.MessageId),
+        Body = new TransferBody<SpoolMessageEntity>(nameof(SpoolMessageEntity.Raw), x => x.Raw, (x, v) => x.Raw = v),
+    });
+
+    public static readonly TransferTable<WebhookOutboxEntity> WebhookOutbox = new("webhook_outbox", TransferPart.Queue, new()
+    {
+        Order = q => q.OrderBy(x => x.Id),
+        Hold = new TransferHold<WebhookOutboxEntity>
+        {
+            Property = nameof(WebhookOutboxEntity.TransferSwitchId),
+            Set = (x, id) => x.TransferSwitchId = id,
+            HoldAll = (q, id, ct) => q.Where(x => x.TransferSwitchId == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.TransferSwitchId, (Guid?)id), ct),
+            Release = (q, id, ct) => q.Where(x => x.TransferSwitchId == id).ExecuteUpdateAsync(s => s.SetProperty(x => x.TransferSwitchId, (Guid?)null), ct),
+            CountHeld = (q, id, ct) => q.LongCountAsync(x => x.TransferSwitchId == id, ct),
+        },
+    });
+
+    /// <summary>API idempotency keys are logically configuration (they move in every switch, drain or quiesce) but live in the queue file on SQLite.</summary>
+    public static readonly TransferTable<IdempotencyKeyEntity> IdempotencyKeys = new("api_idempotency_key", TransferPart.Queue, new()
+    {
+        Order = q => q.OrderBy(x => x.TenantId).ThenBy(x => x.IdempotencyKey),
+    });
+
+    public static readonly TransferTable<MessageIndexEntity> MessageIndex = new("message_index", TransferPart.History, new()
+    {
+        Order = q => q.OrderBy(x => x.Day).ThenBy(x => x.MessageId),
+        Day = x => x.Day,
+    });
+
+    public static readonly TransferTable<MessageRecipientEntity> MessageRecipients = new("message_recipient", TransferPart.History, new()
+    {
+        Order = q => q.OrderBy(x => x.Day).ThenBy(x => x.MessageId).ThenBy(x => x.Recipient),
+        Day = x => x.Day,
+    });
+
+    public static readonly TransferTable<MessageEventEntity> MessageEvents = new("message_event", TransferPart.History, new()
+    {
+        Order = q => q.OrderBy(x => x.Day).ThenBy(x => x.MessageId).ThenBy(x => x.EventId),
+        Day = x => x.Day,
+    });
+
+    public static readonly TransferTable<MessageContentEntity> MessageContents = new("message_content", TransferPart.History, new()
+    {
+        Order = q => q.OrderBy(x => x.Day).ThenBy(x => x.MessageId),
+        Day = x => x.Day,
+    });
+
+    public static readonly TransferTable<RetainedRawEntity> RetainedRaw = new("message_raw_retained", TransferPart.History, new()
+    {
+        Order = q => q.OrderBy(x => x.Day).ThenBy(x => x.MessageId),
+        Day = x => x.Day,
+        Body = new TransferBody<RetainedRawEntity>(nameof(RetainedRawEntity.Raw), x => x.Raw, (x, v) => x.Raw = v),
+    });
+
+    /// <summary>Every table, in import order (config, stats, queue, history).</summary>
+    public static IReadOnlyList<TransferTable> All { get; } =
+    [
+        Tenants, ApiKeys, SmtpCredentials, Domains, DkimKeys, Suppressions, WebhookEndpoints, Settings, TlsPolicies, RelayRoutes, Certificates, AcmeAccounts, AcmeRenewals,
+        StatAggregates, StatMeta, RecentEvents, WebhookAttempts,
+        Deliveries, Spool, WebhookOutbox, IdempotencyKeys,
+        MessageIndex, MessageRecipients, MessageEvents, MessageContents, RetainedRaw,
+    ];
+
+    public static IEnumerable<TransferTable> Of(TransferPart part) => All.Where(t => t.Part == part);
+
+    public static TransferTable ByName(string name) =>
+        All.FirstOrDefault(t => string.Equals(t.Name, name, StringComparison.Ordinal)) ?? throw new KeyNotFoundException($"'{name}' is not a transferable table.");
+}

@@ -95,7 +95,7 @@ public class FilesAndPragmaTests : SqliteTestBase
             Assert.Equal(2, ScalarLong(w.File.Path!, "PRAGMA auto_vacuum"));
             Assert.Equal(5000, await WriterScalarAsync(w.File.Name, "PRAGMA busy_timeout"));
             Assert.Equal(64L * 1024 * 1024, await WriterScalarAsync(w.File.Name, "PRAGMA journal_size_limit"));
-            Assert.Equal(1, ScalarLong(w.File.Path!, "PRAGMA user_version"));
+            Assert.Equal(SqliteFile.SchemaVersion, ScalarLong(w.File.Path!, "PRAGMA user_version"));
         }
     }
 
@@ -213,6 +213,36 @@ public class FilesAndPragmaTests : SqliteTestBase
         }
 
         await Assert.ThrowsAnyAsync<InvalidOperationException>(async () => await ReopenAsync());
+    }
+
+    [Fact]
+    public async Task A_version_1_database_is_upgraded_with_the_backend_switch_columns_and_tables()
+    {
+        await AcceptAsync(Msg(to: ["a@example.org"]));
+        await Storage.DisposeAsync();
+
+        // Rebuild what version 1 files looked like: no transfer hold column, no progress tables.
+        foreach (string file in new[] { "queue.db", "stats.db", "config.db", "history.db" })
+        {
+            string kind = file[..^3];
+            using var c = new SqliteConnection($"Data Source={PathOf(file)};Pooling=False");
+            c.Open();
+            using SqliteCommand cmd = c.CreateCommand();
+            cmd.CommandText = $"DROP TABLE transfer_chunk_{kind};" + (kind == "queue"
+                ? "ALTER TABLE delivery_queue DROP COLUMN transfer_switch_id; ALTER TABLE webhook_outbox DROP COLUMN transfer_switch_id;"
+                : "") + "PRAGMA user_version = 1";
+            cmd.ExecuteNonQuery();
+        }
+
+        await ReopenAsync();
+        foreach (string kind in new[] { "queue", "stats", "config", "history" })
+        {
+            Assert.Equal(SqliteFile.SchemaVersion, ScalarLong(PathOf(kind + ".db"), "PRAGMA user_version"));
+            Assert.Equal(0, ScalarLong(PathOf(kind + ".db"), $"SELECT count(*) FROM transfer_chunk_{kind}"));
+        }
+
+        Assert.Equal(1, ScalarLong(PathOf("queue.db"), "SELECT count(*) FROM delivery_queue WHERE transfer_switch_id IS NULL"));
+        Assert.Single(await ClaimAsync());
     }
 
     [Fact]

@@ -17,7 +17,7 @@ internal enum SqliteFileKind
 internal sealed class SqliteFile
 {
     /// <summary>Bumped when a schema change needs a migration step (stored in <c>PRAGMA user_version</c>).</summary>
-    public const int SchemaVersion = 1;
+    public const int SchemaVersion = 2;
 
     private readonly SqliteOptions _options;
     private readonly Func<string> _createScript;
@@ -158,6 +158,12 @@ internal sealed class SqliteFile
             return;
         }
 
+        if (version == 1)
+        {
+            UpgradeFromVersion1(connection);
+            return;
+        }
+
         if (!IsEmptyDatabase(connection))
         {
             throw new InvalidOperationException($"{FileName} contains tables but no schema version; refusing to modify an unknown database.");
@@ -179,6 +185,41 @@ internal sealed class SqliteFile
             cmd.ExecuteNonQuery();
         }
 
+        tx.Commit();
+    }
+
+    /// <summary>
+    /// Version 2 added the backend switch columns and progress table (design §4.6): <c>transfer_switch_id</c> on the queue and
+    /// outbox rows (a transfer mark or activation hold) and one <c>transfer_chunk_*</c> table per file.
+    /// </summary>
+    private void UpgradeFromVersion1(SqliteConnection connection)
+    {
+        string chunkTable = "transfer_chunk_" + Name;
+        var regex = new Regex("CREATE TABLE \"" + chunkTable + "\" \\(.*?\\r?\\n\\);", RegexOptions.Singleline);
+        Match create = regex.Match(_createScript());
+        if (!create.Success)
+        {
+            throw new InvalidOperationException($"Could not find CREATE TABLE for {chunkTable} in the generated schema script.");
+        }
+
+        using var tx = connection.BeginTransaction();
+
+        void Run(string sql)
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = sql;
+            cmd.ExecuteNonQuery();
+        }
+
+        if (Kind == SqliteFileKind.Queue)
+        {
+            Run("ALTER TABLE \"delivery_queue\" ADD COLUMN \"transfer_switch_id\" TEXT NULL");
+            Run("ALTER TABLE \"webhook_outbox\" ADD COLUMN \"transfer_switch_id\" TEXT NULL");
+        }
+
+        Run(create.Value);
+        Run("PRAGMA user_version=" + SchemaVersion.ToString(CultureInfo.InvariantCulture));
         tx.Commit();
     }
 

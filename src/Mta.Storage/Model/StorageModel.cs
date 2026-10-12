@@ -133,6 +133,7 @@ public static class StorageModel
         {
             e.ToTable("data_protection_key");
         });
+        ConfigureChunk<ConfigTransferChunkEntity>(mb, "transfer_chunk_config");
         ApplyColumnNaming(mb);
     }
 
@@ -160,6 +161,7 @@ public static class StorageModel
             e.ToTable("api_idempotency_key").HasKey(x => new { x.TenantId, x.IdempotencyKey });
             e.HasIndex(x => x.ExpiresAt);
         });
+        ConfigureChunk<QueueTransferChunkEntity>(mb, "transfer_chunk_queue");
         ApplyColumnNaming(mb);
     }
 
@@ -186,6 +188,7 @@ public static class StorageModel
             e.HasIndex(x => new { x.TenantId, x.EndpointId, x.Seq });
             e.HasIndex(x => x.At);
         });
+        ConfigureChunk<StatsTransferChunkEntity>(mb, "transfer_chunk_stats");
         ApplyColumnNaming(mb);
     }
 
@@ -219,8 +222,12 @@ public static class StorageModel
         {
             e.ToTable("message_raw_retained").HasKey(x => new { x.Day, x.MessageId });
         });
+        ConfigureChunk<HistoryTransferChunkEntity>(mb, "transfer_chunk_history");
         ApplyColumnNaming(mb);
     }
+
+    private static void ConfigureChunk<T>(ModelBuilder mb, string table) where T : TransferChunkEntity =>
+        mb.Entity<T>(e => e.ToTable(table).HasKey(x => new { x.SwitchId, x.ChunkId }));
 
     /// <summary>Renames every column to snake_case. Idempotent; called by each part.</summary>
     public static void ApplyColumnNaming(ModelBuilder mb)
