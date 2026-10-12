@@ -395,9 +395,13 @@ internal sealed class MemoryDeliveries(MemoryState s) : IDeliveryStore
                     s.Deliveries.Remove(row.Id);
                     break;
                 case QueueRowAction.Reschedule:
-                    row.Attempt++;
+                    if (plan.CountAttempt)
+                    {
+                        row.Attempt++;
+                        row.LastError = plan.LastError;
+                    }
+
                     row.DueAt = plan.NextAttemptAt!.Value;
-                    row.LastError = plan.LastError;
                     Unlease(row, plan);
                     break;
                 default:
@@ -406,7 +410,7 @@ internal sealed class MemoryDeliveries(MemoryState s) : IDeliveryStore
             }
 
             // 3. webhook outbox rows (same commit as the completion)
-            foreach (WebhookEventDraft draft in attempt.WebhookEvents)
+            foreach (WebhookEventDraft draft in plan.CountAttempt ? attempt.WebhookEvents : [])
             {
                 foreach (Guid endpointId in s.Config.EndpointsFor(row.TenantId, draft.EventType))
                 {
@@ -452,7 +456,7 @@ internal sealed class MemoryDeliveries(MemoryState s) : IDeliveryStore
             }
 
             // 5. history events and index
-            if (s.IsFull)
+            if (s.IsFull && plan.Events.Count > 0)
             {
                 RecordHistory(plan, row.MessageId, row.TenantId, lastRecipient && s.RetainedRaw.ContainsKey(row.MessageId));
             }

@@ -242,6 +242,48 @@ public abstract class DeliveryConformance : StorageTestBase
     }
 
     [Fact]
+    public async Task An_uncounted_hold_only_reschedules_the_row()
+    {
+        await AddEndpointAsync(TenantA, true, "*");
+        var m = await AcceptAsync();
+        var d = (await ClaimAsync()).Single();
+        DateTimeOffset retryAt = Start.AddMinutes(5);
+        await RecordAsync(d, DeliveryOutcome.Deferred, next: retryAt, countAttempt: false, message: "rate limited", events: [Draft("message.deferred")]);
+
+        Assert.Empty(await ClaimAsync(owner: "worker-2"));
+        Clock.Set(retryAt);
+        var again = (await ClaimAsync(owner: "worker-2")).Single();
+        Assert.Equal(d.DeliveryId, again.DeliveryId);
+        Assert.Equal(d.Attempt, again.Attempt);
+        Assert.Equal(0, again.Attempt);
+        Assert.Null(again.LastError);
+
+        Assert.Empty(await Storage.Webhooks.ClaimDueAsync("d", 10, Clock.UtcNow.AddDays(1), TimeSpan.FromMinutes(1), CancellationToken.None));
+        await FlushStatsAsync();
+        Assert.All(await Storage.Stats.QueryAsync(null, Start.AddHours(-1), Start.AddDays(1), false, CancellationToken.None), r => Assert.Equal(0, r.Deferred));
+        Assert.Empty(await Storage.Stats.GetRecentEventsAsync(null, 10, CancellationToken.None));
+        if (IsFull)
+        {
+            var events = await Storage.History.GetEventsAsync(TenantA, m.MessageId, CancellationToken.None);
+            Assert.Equal([MessageEventType.Queued], events.Select(e => e.Type));
+            Assert.Equal("queued", (await Storage.History.GetAsync(TenantA, m.MessageId, CancellationToken.None))!.Summary.Status);
+        }
+
+        // A counted deferral afterwards still starts from attempt 0.
+        await RecordAsync(again, DeliveryOutcome.Deferred, next: retryAt.AddMinutes(1));
+        Clock.Set(retryAt.AddMinutes(1));
+        Assert.Equal(1, (await ClaimAsync()).Single().Attempt);
+    }
+
+    [Fact]
+    public async Task An_uncounted_hold_requires_a_next_attempt_time()
+    {
+        await AcceptAsync();
+        var d = (await ClaimAsync()).Single();
+        await Assert.ThrowsAnyAsync<ArgumentException>(async () => await RecordAsync(d, DeliveryOutcome.Deferred, countAttempt: false));
+    }
+
+    [Fact]
     public async Task Deferred_requires_a_next_attempt_time()
     {
         await AcceptAsync();

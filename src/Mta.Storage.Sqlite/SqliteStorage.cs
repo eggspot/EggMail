@@ -71,6 +71,9 @@ public sealed class SqliteStorage : IStorage
     /// <summary>Writer counters per file (commits, batch sizes, queue depth) for the storage-pressure indicator and tests.</summary>
     public IReadOnlyDictionary<string, WriterMetrics> WriterMetrics => _rt.Writers.ToDictionary(w => w.File.Name, w => w.Metrics);
 
+    /// <summary>Internals for the SQLite-specific tests (pragmas, writer fault injection).</summary>
+    internal SqliteRuntime Runtime => _rt;
+
     private static InvalidOperationException NotInitialized() => new("Call InitializeAsync before using the storage.");
 
     public async Task InitializeAsync(CancellationToken cancellationToken)

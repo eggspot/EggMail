@@ -3,7 +3,7 @@ using Mta.Storage.Tests;
 namespace Mta.Storage.Sqlite.Tests;
 
 /// <summary>Creates SQLite storages in private temp directories. Shared by every suite.</summary>
-internal static class SqliteTestStorage
+public static class SqliteTestStorage
 {
     public static string NewDirectory()
     {
@@ -47,7 +47,7 @@ internal static class SqliteTestStorage
 }
 
 /// <summary>Mutable mirror of the init-only <see cref="SqliteOptions"/> for tests.</summary>
-internal sealed class SqliteOptionsBuilder(SqliteOptions s)
+public sealed class SqliteOptionsBuilder(SqliteOptions s)
 {
     public string DataDirectory { get; set; } = s.DataDirectory;
     public SqliteSyncMode SyncMode { get; set; } = s.SyncMode;

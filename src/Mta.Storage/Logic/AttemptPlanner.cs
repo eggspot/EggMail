@@ -46,6 +46,9 @@ public sealed class AttemptPlan
     public required IReadOnlyList<RecentEvent> Ring { get; init; }
     public DateTimeOffset? NextAttemptAt { get; init; }
     public string? LastError { get; init; }
+
+    /// <summary>False for an uncounted hold (<c>CountAttempt=false</c>): reschedule only; no attempt increment, event, statistic, ring entry or webhook fan-out.</summary>
+    public bool CountAttempt { get; init; } = true;
 }
 
 /// <summary>Turns a <see cref="DeliveryAttempt"/> into queue, event, statistic, ring and (outside) outbox consequences.</summary>
@@ -60,6 +63,26 @@ public static class AttemptPlanner
     {
         ArgumentNullException.ThrowIfNull(attempt);
         DateTimeOffset at = StorageTime.Normalize(attempt.At);
+        if (attempt.Outcome == DeliveryOutcome.Deferred && !attempt.CountAttempt)
+        {
+            // Nothing was sent (local sending limit or destination throttle): only move the due time.
+            return new AttemptPlan
+            {
+                Action = QueueRowAction.Reschedule,
+                IsFinal = false,
+                Delivered = false,
+                Failed = false,
+                SetPossibleDuplicate = false,
+                Events = [],
+                Counters = [],
+                Ring = [],
+                NextAttemptAt = attempt.NextAttemptAt is { } hold
+                    ? StorageTime.Normalize(hold)
+                    : throw new ArgumentException("A Deferred attempt requires NextAttemptAt.", nameof(attempt)),
+                CountAttempt = false,
+            };
+        }
+
         var events = new List<MessageEvent>(3);
         var counters = new List<PlannedCounter>(2);
         var ring = new List<RecentEvent>(3);

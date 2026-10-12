@@ -174,8 +174,10 @@ public abstract class StorageTestBase : IAsyncLifetime
         string? enhanced = null,
         string? message = null,
         IReadOnlyList<WebhookEventDraft>? events = null,
-        bool possibleDuplicate = false) => new()
+        bool possibleDuplicate = false,
+        bool countAttempt = true) => new()
         {
+            CountAttempt = countAttempt,
             DeliveryId = d.DeliveryId,
             Outcome = outcome,
             At = Clock.UtcNow,
@@ -192,8 +194,8 @@ public abstract class StorageTestBase : IAsyncLifetime
             WebhookEvents = events ?? [],
         };
 
-    protected async Task RecordAsync(ClaimedDelivery d, DeliveryOutcome outcome, DateTimeOffset? next = null, SuppressionReason? suppress = null, IReadOnlyList<WebhookEventDraft>? events = null, int? smtp = null, string? enhanced = null, string? message = null, bool possibleDuplicate = false) =>
-        await Storage.Deliveries.RecordAttemptAsync(Attempt(d, outcome, next, suppress, smtp, enhanced, message, events, possibleDuplicate), CancellationToken.None);
+    protected async Task RecordAsync(ClaimedDelivery d, DeliveryOutcome outcome, DateTimeOffset? next = null, SuppressionReason? suppress = null, IReadOnlyList<WebhookEventDraft>? events = null, int? smtp = null, string? enhanced = null, string? message = null, bool possibleDuplicate = false, bool countAttempt = true) =>
+        await Storage.Deliveries.RecordAttemptAsync(Attempt(d, outcome, next, suppress, smtp, enhanced, message, events, possibleDuplicate, countAttempt), CancellationToken.None);
 
     protected async Task FlushStatsAsync() => await Storage.Stats.FlushAsync(CancellationToken.None);
 

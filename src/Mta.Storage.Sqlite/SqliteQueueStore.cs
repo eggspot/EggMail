@@ -52,6 +52,9 @@ internal static class QueueSql
         "possible_duplicate = CASE WHEN @dup = 1 THEN 1 ELSE possible_duplicate END WHERE id = @id",
         "@id", "@due", "@err", "@dup");
 
+    public static readonly Stmt DeliveryHold = new(
+        "UPDATE delivery_queue SET due_at = @due, lease_owner = NULL, lease_until = 0 WHERE id = @id", "@id", "@due");
+
     public static readonly Stmt DeliveryRequeue = new(
         "UPDATE delivery_queue SET lease_owner = NULL, lease_until = 0, possible_duplicate = CASE WHEN @dup = 1 THEN 1 ELSE possible_duplicate END WHERE id = @id",
         "@id", "@dup");
@@ -351,7 +354,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
         }
 
         // 4. History events, status, content lifecycle.
-        if (rt.IsFull)
+        if (rt.IsFull && plan.Events.Count > 0)
         {
             try
             {
@@ -406,6 +409,9 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
             case QueueRowAction.Complete:
                 ctx.Command(QueueSql.DeliveryDelete).Set(0, a.DeliveryId).ExecuteNonQuery();
                 break;
+            case QueueRowAction.Reschedule when !plan.CountAttempt:
+                ctx.Command(QueueSql.DeliveryHold).Set(0, a.DeliveryId).Set(1, StorageTime.ToUnixMs(plan.NextAttemptAt!.Value)).ExecuteNonQuery();
+                break;
             case QueueRowAction.Reschedule:
                 ctx.Command(QueueSql.DeliveryReschedule)
                     .Set(0, a.DeliveryId).Set(1, StorageTime.ToUnixMs(plan.NextAttemptAt!.Value)).Set(2, plan.LastError).Set(3, plan.SetPossibleDuplicate ? 1 : 0)
@@ -417,7 +423,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
         }
 
         // Webhook fan-out in the same transaction as the completion: a crash cannot lose an event whose outcome is durable.
-        if (a.WebhookEvents.Count > 0 && s.Targets.Length > 0)
+        if (plan.CountAttempt && a.WebhookEvents.Count > 0 && s.Targets.Length > 0)
         {
             long atMs = StorageTime.ToUnixMs(a.At);
             SqliteCommand insert = ctx.Command(QueueSql.OutboxInsert);
