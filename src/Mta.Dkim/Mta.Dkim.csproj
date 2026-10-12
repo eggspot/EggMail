@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\Mta.Core\Mta.Core.csproj" />
+    <ProjectReference Include="..\Mta.Dns\Mta.Dns.csproj" />
+    <ProjectReference Include="..\Mta.Mime\Mta.Mime.csproj" />
+  </ItemGroup>
+</Project>

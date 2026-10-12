@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\Mta.Core\Mta.Core.csproj" />
+    <ProjectReference Include="..\Mta.Storage\Mta.Storage.csproj" />
+    <ProjectReference Include="..\Mta.Policy\Mta.Policy.csproj" />
+    <ProjectReference Include="..\Mta.Smtp.Client\Mta.Smtp.Client.csproj" />
+    <ProjectReference Include="..\Mta.Dns\Mta.Dns.csproj" />
+    <ProjectReference Include="..\Mta.Mime\Mta.Mime.csproj" />
+    <ProjectReference Include="..\Mta.Dkim\Mta.Dkim.csproj" />
+    <ProjectReference Include="..\Mta.Dsn\Mta.Dsn.csproj" />
+    <ProjectReference Include="..\Mta.Tls\Mta.Tls.csproj" />
+    <ProjectReference Include="..\Mta.Auth\Mta.Auth.csproj" />
+  </ItemGroup>
+</Project>

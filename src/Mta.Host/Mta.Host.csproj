@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>mta</AssemblyName>
+    <RootNamespace>Mta.Host</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Mta.Core\Mta.Core.csproj" />
+    <ProjectReference Include="..\Mta.Dns\Mta.Dns.csproj" />
+    <ProjectReference Include="..\Mta.Mime\Mta.Mime.csproj" />
+    <ProjectReference Include="..\Mta.Dkim\Mta.Dkim.csproj" />
+    <ProjectReference Include="..\Mta.Auth\Mta.Auth.csproj" />
+    <ProjectReference Include="..\Mta.Dsn\Mta.Dsn.csproj" />
+    <ProjectReference Include="..\Mta.Tls\Mta.Tls.csproj" />
+    <ProjectReference Include="..\Mta.Smtp.Protocol\Mta.Smtp.Protocol.csproj" />
+    <ProjectReference Include="..\Mta.Smtp.Server\Mta.Smtp.Server.csproj" />
+    <ProjectReference Include="..\Mta.Smtp.Client\Mta.Smtp.Client.csproj" />
+    <ProjectReference Include="..\Mta.Storage\Mta.Storage.csproj" />
+    <ProjectReference Include="..\Mta.Storage.Postgres\Mta.Storage.Postgres.csproj" />
+    <ProjectReference Include="..\Mta.Storage.Sqlite\Mta.Storage.Sqlite.csproj" />
+    <ProjectReference Include="..\Mta.Storage.Portability\Mta.Storage.Portability.csproj" />
+    <ProjectReference Include="..\Mta.Policy\Mta.Policy.csproj" />
+    <ProjectReference Include="..\Mta.Delivery\Mta.Delivery.csproj" />
+    <ProjectReference Include="..\Mta.Webhooks\Mta.Webhooks.csproj" />
+    <ProjectReference Include="..\Mta.Observability\Mta.Observability.csproj" />
+  </ItemGroup>
+</Project>

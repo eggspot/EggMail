@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\Mta.Core\Mta.Core.csproj" />
+    <ProjectReference Include="..\Mta.Smtp.Protocol\Mta.Smtp.Protocol.csproj" />
+    <ProjectReference Include="..\Mta.Dns\Mta.Dns.csproj" />
+    <ProjectReference Include="..\Mta.Tls\Mta.Tls.csproj" />
+  </ItemGroup>
+</Project>
