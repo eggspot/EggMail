@@ -12,6 +12,8 @@ Running status of the implementation, updated in every pull request. **Productio
 | M1d | Webhooks library (Standard Webhooks signing, SSRF guard, dispatcher, event factory) | in review | feat/webhooks |
 | M1e | Load generator and sink (`mta-tools`) | in review | feat/tools |
 | M5a | Dockerfile + release workflow (written, untested: no Docker locally, Actions disabled by org) | in review | feat/release-pipeline |
+| M3b | Certificates in the database: provider with hot reload and file override, self-signed bootstrap, ACME renewal service (Certes + Cloudflare DNS-01; **not verified against a real ACME server**) | in review | feat/tls-context |
+| M4a | Portable bundle format: manifest, NDJSON writer/reader with hashes, verification, secret protection through Data Protection + passphrase PKCS#12 | in review | feat/bundle-format |
 | M1b | Mime, DNS, DKIM, SPF/DMARC, MTA-STS/DANE/TLS-RPT libraries | in progress (parallel work) | feat/mime, feat/dns, feat/dkim, feat/auth-spf-dmarc, feat/tls-policy |
 
 ## Verified so far
@@ -29,3 +31,12 @@ Running status of the implementation, updated in every pull request. **Productio
 - Everything beyond the skeleton is not implemented yet. See the milestone table.
 - Docker image build and GHCR publish can only run in GitHub Actions (no Docker is used locally).
 - No real-internet MX delivery has been tested; no independent security audit has been done.
+
+
+## Snapshot at the usage limit (not production ready)
+
+**Merged to main (each verified by local `dotnet test`; CI cannot run because Actions is disabled by the organization):** foundations and package-free guard, SMTP protocol + server, outbound SMTP client, DNS, TLS policy (MTA-STS/DANE/TLS-RPT), DKIM, SPF/DMARC/Authentication-Results/aggregate reports, VERP + DSN builder, webhooks library, observability, load generator/sink, host configuration, certificates in the database + ACME renewal (ACME unverified against a real server), password/API-key/throttle primitives, bundle format + secret protection, Dockerfile and release workflow (untested), API contract, docs.
+
+**In flight when work stopped (branches/PRs not merged, results unreviewed):** Mta.Mime (`feat/mime`), storage model + SQLite + in-memory backend + conformance suite (`feat/storage-sqlite`), Mta.Policy (`feat/policy`), dashboard SPA (`feat/dashboard`), ARC (`feat/arc`).
+
+**Not started:** PostgreSQL backend, delivery engine/scheduler, DSN/ARF parsing and bounce processing, the HTTP API implementation, SMTP ingest handler wiring, domain verification service, history migration/switch engine, Host composition (`mta` CLI), end-to-end tests, soak/fuzz gates, external audit.
