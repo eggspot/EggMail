@@ -95,6 +95,18 @@ public class AddressTests
         Assert.Equal("Alice Smith", m.DisplayName);
     }
 
+    [Theory]
+    [InlineData("Alice <alice@example.com> <evil@example.org>")]
+    [InlineData("<alice@example.com> trailing junk")]
+    [InlineData("Alice <alice@example.com> \"quoted junk\"")]
+    public void Second_angle_addr_and_trailing_text_are_ignored_but_flagged(string value)
+    {
+        // Receivers disagree about such headers (a From-spoofing technique), so the first angle-addr wins and the anomaly is raised.
+        var list = AddressList.Parse(value);
+        Assert.Equal("alice@example.com", Assert.Single(list.Mailboxes).Address.ToString());
+        Assert.True(list.Anomalies.HasAny(MimeAnomaly.InvalidAddress));
+    }
+
     [Fact]
     public void Missing_closing_angle_is_reported()
     {

@@ -39,8 +39,6 @@ public enum MimeAnomaly : ulong
     /// <summary>Whitespace between a field name and its colon (obsolete syntax).</summary>
     SpaceBeforeColon = 1UL << 9,
 
-    /// <summary>A header value was longer than <see cref="MimeLimits.MaxHeaderValueBytes"/> and was truncated.</summary>
-    HeaderValueTooLong = 1UL << 10,
 
     /// <summary>A multipart entity has no usable boundary parameter; it is kept as an opaque leaf.</summary>
     MissingBoundary = 1UL << 11,
@@ -102,11 +100,7 @@ public enum MimeAnomaly : ulong
     /// <summary>Body bytes outside US-ASCII.</summary>
     NonAsciiBody = 1UL << 30,
 
-    /// <summary>A bare LF in the body.</summary>
-    BareLfInBody = 1UL << 31,
 
-    /// <summary>A bare CR in the body.</summary>
-    BareCrInBody = 1UL << 32,
 }
 
 /// <summary>Helpers for <see cref="MimeAnomaly"/>.</summary>

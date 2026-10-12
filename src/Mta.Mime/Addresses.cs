@@ -449,6 +449,10 @@ internal static class AddressParser
                     angle = el[start..Math.Min(i, el.Length)].ToString();
                     sawAnglePhrase = true;
                 }
+                else
+                {
+                    an |= MimeAnomaly.InvalidAddress; // a second angle-addr: only the first one is used
+                }
 
                 if (i >= el.Length)
                 {
@@ -471,6 +475,10 @@ internal static class AddressParser
 
                     phrase.Append(Unescape(el[(start + 1)..Math.Max(start + 1, end)]));
                 }
+                else
+                {
+                    an |= MimeAnomaly.InvalidAddress; // text after the angle-addr is ignored
+                }
             }
             else
             {
@@ -488,6 +496,10 @@ internal static class AddressParser
                     }
 
                     phrase.Append(el[start..i]);
+                }
+                else
+                {
+                    an |= MimeAnomaly.InvalidAddress; // text after the angle-addr is ignored
                 }
             }
         }

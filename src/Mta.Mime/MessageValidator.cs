@@ -16,26 +16,47 @@ public enum IssueSeverity
 /// <summary>Kinds of problems <see cref="MessageValidator"/> reports.</summary>
 public enum MessageIssueCode
 {
+    /// <summary>There is no From header.</summary>
     MissingFrom,
+    /// <summary>A header that may occur only once (From, Subject, Date, Content-Type ...) occurs several times.</summary>
     DuplicateSingletonHeader,
+    /// <summary>The From header contains no valid mailbox.</summary>
     InvalidFrom,
+    /// <summary>Several From mailboxes and no Sender header (RFC 5322 section 3.6.2).</summary>
     MultipleFromWithoutSender,
+    /// <summary>There is no Date header.</summary>
     MissingDate,
+    /// <summary>The Date header cannot be parsed.</summary>
     InvalidDate,
+    /// <summary>There is no Message-ID header.</summary>
     MissingMessageId,
+    /// <summary>A header line has no colon or an invalid field name.</summary>
     MalformedHeader,
+    /// <summary>A header line is longer than the line limit.</summary>
     HeaderLineTooLong,
+    /// <summary>A body line is longer than the line limit.</summary>
     BodyLineTooLong,
+    /// <summary>A line ends with LF instead of CRLF.</summary>
     BareLineFeed,
+    /// <summary>A CR that is not part of CRLF.</summary>
     BareCarriageReturn,
+    /// <summary>A NUL byte in the headers.</summary>
     NulInHeaders,
+    /// <summary>A NUL byte in the body.</summary>
     NulInBody,
+    /// <summary>More header fields than the limit.</summary>
     TooManyHeaders,
+    /// <summary>The header block is larger than the limit.</summary>
     HeaderBlockTooLarge,
+    /// <summary>No empty line between headers and body.</summary>
     NoHeaderBodySeparator,
+    /// <summary>Non-ASCII header bytes (needs SMTPUTF8 to be relayed unchanged).</summary>
     Utf8Headers,
+    /// <summary>8-bit body bytes (needs 8BITMIME to be relayed unchanged).</summary>
     EightBitBody,
+    /// <summary>Many Received headers: probable mail loop.</summary>
     TooManyReceivedHeaders,
+    /// <summary>A MIME structure problem (missing boundary, no closing delimiter, nesting or part limits, duplicate boundary).</summary>
     MimeStructure,
 }
 

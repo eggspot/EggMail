@@ -10,7 +10,7 @@ All input is hostile. Every parser is bounded by `MimeLimits`, runs in time line
 |---|---|
 | Limits and anomalies | `MimeLimits`, `MimeAnomaly` (flags), `HeaderInjectionException`, `MessageBuildException` |
 | Headers | `HeaderList.Parse`, `HeaderList.FindBodyOffset`, `MimeHeader` (raw bytes, unfolded value, decoded value), `HeaderId`, `HeaderNames` |
-| Structured fields | `ContentType`, `ContentDisposition`, `ParameterList` / `MimeParameter` (RFC 2231 resolved), `ContentTransferEncoding` + `ContentTransferEncodings.Parse` |
+| Structured fields | `ContentType`, `ContentDisposition`, `ParameterList` / `MimeParameter` (RFC 2231 resolved), `ContentTransferEncoding` + `ContentTransferEncodings.Parse`, `MimeVersion` |
 | Encoded words | `Rfc2047.Decode` / `Encode` / `EncodeWords` / `TryDecodeWord`, `MimeCharsets` (`RegisterCodePages`, `TryGetEncoding`, `Decode`) |
 | Addresses | `AddressList.Parse`, `Mailbox` (display name + `Mta.Core.EmailAddress`, `Domain`, `ToHeaderValue`), `MailboxGroup`, `AddressItem` |
 | Dates | `MimeDate.Format` / `TryFormat` / `TryParse` |

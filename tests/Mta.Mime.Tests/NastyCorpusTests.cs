@@ -101,8 +101,7 @@ public class NastyCorpusTests(ITestOutputHelper output)
     public void Utf7_and_unknown_charsets_do_not_decode_as_utf7()
     {
         var c = MessageContentExtractor.Extract(Lookup.Value["77-base64-dump-in-text-plain-utf7"]);
-        Assert.Equal("+2D3cAA-".Length > 0, c.TextBody is not null);
-        Assert.DoesNotContain('\uD83D', c.TextBody!);
+        Assert.Equal("+2D3cAA-", c.TextBody); // the base64 payload is "+2D3cAA-"; UTF-7 would turn it into an emoji
         Assert.True(c.Anomalies.HasAny(MimeAnomaly.UnknownCharset));
     }
 
