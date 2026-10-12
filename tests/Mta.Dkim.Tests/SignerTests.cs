@@ -285,7 +285,6 @@ public class SignerTests
         var signer = Msg.Signer();
         var dns = Msg.Dns(TestKeys.Rsa2048);
         var verifier = Msg.Verifier(dns);
-        string message = Msg.Simple();
         var failures = new List<string>();
         Parallel.For(0, 64, new ParallelOptions { MaxDegreeOfParallelism = 8 }, i =>
         {
@@ -296,6 +295,5 @@ public class SignerTests
             if (r.Count != 1 || r[0].Status != DkimStatus.Pass) { lock (failures) { failures.Add(i + ": " + r[0].Reason); } }
         });
         Assert.Empty(failures);
-        _ = message;
     }
 }

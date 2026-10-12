@@ -116,6 +116,13 @@ public sealed record DkimVerificationResult
     /// <summary>True when <c>l=</c> is smaller than the canonicalised body, so some body bytes are not covered by the signature.</summary>
     public bool BodyPartiallySigned { get; init; }
 
+    /// <summary>
+    /// True when <c>h=</c> lists From at least as many times as the message has From headers. When false, a From header may have been
+    /// added above the signed one (the signature can pass while a mail client shows the unsigned From); DMARC evaluation should not
+    /// accept such a signature as aligned. Only set once the cryptographic check ran (pass or signature mismatch).
+    /// </summary>
+    public bool AllFromHeadersSigned { get; init; }
+
     public DkimCanonicalization? HeaderCanonicalization { get; init; }
 
     public DkimCanonicalization? BodyCanonicalization { get; init; }

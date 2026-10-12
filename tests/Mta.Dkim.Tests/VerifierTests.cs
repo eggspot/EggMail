@@ -161,11 +161,9 @@ public class VerifierTests
     public async Task Oversigning_rejects_headers_added_after_signing(string added)
     {
         string signed = SignedMessage();
-        // On top of the whole message, and directly below the signature: both positions must break it.
+        // On top of the whole message, and at the end of the header block: both positions must break it.
         Assert.Equal(DkimFailure.SignatureMismatch, (await Msg.VerifyOne(DefaultVerifier(), added + signed)).Failure);
-        int firstLineEnd = signed.IndexOf("\r\nFrom:", StringComparison.Ordinal) + 2;
         Assert.Equal(DkimFailure.SignatureMismatch, (await Msg.VerifyOne(DefaultVerifier(), Msg.InsertBeforeBlankLine(signed, added))).Failure);
-        Assert.True(firstLineEnd > 2);
     }
 
     [Theory]
@@ -178,6 +176,24 @@ public class VerifierTests
         string injected = signed.StartsWith("DKIM-Signature", StringComparison.Ordinal) ? added + signed : signed;
         var r = await Msg.VerifyOne(DefaultVerifier(), injected);
         Assert.Equal(DkimStatus.Pass, r.Status);
+    }
+
+    [Fact]
+    public async Task Extra_from_header_is_visible_through_all_from_headers_signed()
+    {
+        string plain = Msg.Sign(Msg.Signer(oversign: false), Msg.Simple());
+        var intact = await Msg.VerifyOne(DefaultVerifier(), plain);
+        Assert.True(intact.AllFromHeadersSigned);
+
+        // Without oversigning the added From goes unnoticed by the signature, but the flag exposes it.
+        var injected = await Msg.VerifyOne(DefaultVerifier(), "From: evil@example.org\r\n" + plain);
+        Assert.Equal(DkimStatus.Pass, injected.Status);
+        Assert.False(injected.AllFromHeadersSigned);
+
+        // With oversigning the signature itself fails.
+        string oversigned = Msg.Sign(Msg.Signer(), Msg.Simple());
+        Assert.True((await Msg.VerifyOne(DefaultVerifier(), oversigned)).AllFromHeadersSigned);
+        Assert.Equal(DkimStatus.Fail, (await Msg.VerifyOne(DefaultVerifier(), "From: evil@example.org\r\n" + oversigned)).Status);
     }
 
     [Fact]

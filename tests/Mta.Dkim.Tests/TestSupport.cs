@@ -57,8 +57,6 @@ internal static class Msg
         + "\r\n"
         + body;
 
-    public static string Prepend(string header, string message) => header + message;
-
     public static string InsertBeforeBlankLine(string message, string header)
     {
         int i = message.IndexOf("\r\n\r\n", StringComparison.Ordinal);

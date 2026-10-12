@@ -287,9 +287,24 @@ public sealed class DkimVerifier
             valid = false;
         }
 
+        // Does h= name every From instance of the message? If not, an extra From header may have been added above the signed one.
+        int fromInMessage = 0;
+        for (int i = 0; i < table.Count; i++)
+        {
+            if (table.NameEquals(message, i, "from"u8)) { fromInMessage++; }
+        }
+
+        int fromInSignature = 0;
+        foreach (string name in sig.SignedHeaderNames)
+        {
+            if (name == "from") { fromInSignature++; }
+        }
+
+        bool allFromSigned = fromInMessage <= fromInSignature;
+
         return valid
-            ? Build(sig, DkimStatus.Pass, DkimFailure.None, "signature verified", key, partial)
-            : Build(sig, DkimStatus.Fail, DkimFailure.SignatureMismatch, "signature did not verify", key, partial);
+            ? Build(sig, DkimStatus.Pass, DkimFailure.None, "signature verified", key, partial, allFromSigned)
+            : Build(sig, DkimStatus.Fail, DkimFailure.SignatureMismatch, "signature did not verify", key, partial, allFromSigned);
     }
 
     internal static void HashBody(ReadOnlySpan<byte> body, bool relaxed, long limit, Span<byte> hash, out long totalCanonicalBytes)
@@ -362,7 +377,7 @@ public sealed class DkimVerifier
         Sha256Pool.FinishAndReturn(h, hash);
     }
 
-    private DkimVerificationResult Build(DkimSignatureHeader sig, DkimStatus status, DkimFailure failure, string reason, KeyLookup? key, bool bodyPartiallySigned = false)
+    private DkimVerificationResult Build(DkimSignatureHeader sig, DkimStatus status, DkimFailure failure, string reason, KeyLookup? key, bool bodyPartiallySigned = false, bool allFromHeadersSigned = false)
     {
         return new DkimVerificationResult(status, reason, failure)
         {
@@ -376,6 +391,7 @@ public sealed class DkimVerifier
             Testing = key?.Record?.IsTesting ?? false,
             BodyLengthLimited = sig.BodyLength is not null,
             BodyPartiallySigned = bodyPartiallySigned,
+            AllFromHeadersSigned = allFromHeadersSigned,
             HeaderCanonicalization = sig.Algorithm is null ? null : sig.HeaderRelaxed ? DkimCanonicalization.Relaxed : DkimCanonicalization.Simple,
             BodyCanonicalization = sig.Algorithm is null ? null : sig.BodyRelaxed ? DkimCanonicalization.Relaxed : DkimCanonicalization.Simple,
             SignedAt = ToTime(sig.Timestamp),
