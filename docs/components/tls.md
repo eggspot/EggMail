@@ -142,6 +142,7 @@ Every parser returns `false` instead of throwing; deterministic fuzz tests cover
 * No persistent `IMtaStsCache` (the host provides one; the in-memory cache is lost on restart, which only costs a refetch).
 * No revocation checking for PKIX (deliberate for MX delivery) and no OCSP stapling check.
 * Signature algorithms in DANE-TA chains are limited as described above.
+* DANE needs to know whether the MX answer was DNSSEC-authenticated (`mxRrsetAuthenticated`). `Mta.Dns.MxResolver`/`MxResolution` does not currently expose the AD bit of the MX answer, so the delivery layer has to obtain it (for example by querying MX through `IDnsResolver` and reading `DnsResponse.AuthenticatedData`) or the contract needs a small addition outside this component.
 * `mailto:` report delivery, report scheduling and the retry of failed HTTPS posts belong to the delivery/host layers.
 * Opportunistic sessions with no TLS-RPT-relevant policy are aggregated like any other; the caller decides whether to record domains without a TLS-RPT record.
 * No tests against real internet policies (the tests use fakes, generated certificates and loopback TLS only); plan.md's "tested against real policies" gate is still open.
