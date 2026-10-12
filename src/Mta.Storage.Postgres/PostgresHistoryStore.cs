@@ -277,7 +277,7 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore
         }
         catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
         {
-            throw PostgresErrors.Unavailable(ex);
+            throw rt.Unavailable(ex);
         }
 
         string? next = null;
@@ -358,7 +358,7 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore
         }
         catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
         {
-            throw PostgresErrors.Unavailable(ex);
+            throw rt.Unavailable(ex);
         }
     }
 
@@ -392,7 +392,7 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore
         }
         catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
         {
-            throw PostgresErrors.Unavailable(ex);
+            throw rt.Unavailable(ex);
         }
     }
 
@@ -416,7 +416,7 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore
         }
         catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
         {
-            throw PostgresErrors.Unavailable(ex);
+            throw rt.Unavailable(ex);
         }
     }
 }

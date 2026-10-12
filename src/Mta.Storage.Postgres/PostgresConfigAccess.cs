@@ -41,5 +41,14 @@ internal sealed class PostgresConfigAccess(NpgsqlDataSource dataSource, IStorage
         return result;
     }
 
-    public Exception? TranslateException(Exception exception) => PostgresErrors.Translate(exception);
+    public Exception? TranslateException(Exception exception)
+    {
+        Exception? translated = PostgresErrors.Translate(exception);
+        if (translated is not null)
+        {
+            dataSource.Clear(); // idle connections of a failed server are dead; do not hand them out again
+        }
+
+        return translated;
+    }
 }

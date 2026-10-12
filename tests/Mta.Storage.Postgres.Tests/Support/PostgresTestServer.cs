@@ -90,7 +90,8 @@ internal sealed class PostgresTestServer
     {
         await using var admin = new NpgsqlConnection(_adminConnectionString);
         await admin.OpenAsync();
-        await using var cmd = new NpgsqlCommand($"CREATE ROLE {name} {(login ? "LOGIN" : "NOLOGIN")}", admin);
+        // The password equals the name: ignored by the throwaway cluster (trust), needed by a server with password authentication (CI).
+        await using var cmd = new NpgsqlCommand($"CREATE ROLE {name} {(login ? "LOGIN" : "NOLOGIN")} PASSWORD '{name}'", admin);
         await cmd.ExecuteNonQueryAsync();
     }
 
@@ -110,7 +111,13 @@ internal sealed class PostgresTestServer
 
     public string ConnectionStringFor(string database, string user)
     {
-        var builder = new NpgsqlConnectionStringBuilder(_adminConnectionString) { Database = database, Username = user, Pooling = true, MaxPoolSize = 8 };
+        var builder = new NpgsqlConnectionStringBuilder(_adminConnectionString) { Database = database, Pooling = true, MaxPoolSize = 8 };
+        if (!string.Equals(builder.Username, user, StringComparison.Ordinal))
+        {
+            builder.Username = user;
+            builder.Password = user; // see CreateRoleAsync
+        }
+
         return builder.ConnectionString;
     }
 

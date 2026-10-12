@@ -22,7 +22,7 @@ internal sealed class PostgresMaintenance(PostgresRuntime rt, PostgresQueueStore
         }
         catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
         {
-            throw PostgresErrors.Unavailable(ex);
+            throw rt.Unavailable(ex);
         }
     }
 
@@ -307,7 +307,7 @@ internal sealed class PostgresMaintenance(PostgresRuntime rt, PostgresQueueStore
         {
             ready = false;
             warnings.Add("postgres_unavailable");
-            details["error"] = PostgresErrors.Unavailable(ex).Message;
+            details["error"] = rt.Unavailable(ex).Message;
         }
 
         if (rt.SingleRole)

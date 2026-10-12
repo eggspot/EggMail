@@ -120,7 +120,7 @@ public class MigrationTests : PgTestBase
 
         try
         {
-            string connection = Db.Server.ConnectionStringFor(name, "postgres");
+            string connection = Db.Server.ConnectionStringFor(name, new NpgsqlConnectionStringBuilder(Db.Server.AdminConnectionString).Username!);
             var starts = Enumerable.Range(0, 6).Select(_ => Task.Run(async () =>
             {
                 PostgresStorage s = PostgresStorage.Create(PgHarness.WithDatabase(Options, connection), Clock);

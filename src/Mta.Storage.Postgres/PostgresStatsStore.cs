@@ -61,7 +61,7 @@ internal sealed class PostgresStatsStore : IStatsStore
                 _rt.Aggregator.RestoreRecent(ring);
                 if (PostgresErrors.IsUnavailable(ex))
                 {
-                    throw PostgresErrors.Unavailable(ex);
+                    throw _rt.Unavailable(ex);
                 }
 
                 throw;
@@ -177,7 +177,7 @@ internal sealed class PostgresStatsStore : IStatsStore
         }
         catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
         {
-            throw PostgresErrors.Unavailable(ex);
+            throw _rt.Unavailable(ex);
         }
     }
 
@@ -200,7 +200,7 @@ internal sealed class PostgresStatsStore : IStatsStore
         }
         catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
         {
-            throw PostgresErrors.Unavailable(ex);
+            throw _rt.Unavailable(ex);
         }
     }
 }

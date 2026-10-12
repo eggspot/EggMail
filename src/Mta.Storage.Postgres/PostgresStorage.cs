@@ -112,7 +112,7 @@ public sealed class PostgresStorage : IStorage
         catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
         {
             await DisposeAsync().ConfigureAwait(false);
-            throw PostgresErrors.Unavailable(ex);
+            throw _rt.Unavailable(ex);
         }
         catch
         {
@@ -186,9 +186,6 @@ public sealed class PostgresStorage : IStorage
         }
 
         await _rt.Data.DisposeAsync().ConfigureAwait(false);
-        if (!_rt.SingleRole)
-        {
-            await _rt.Owner.DisposeAsync().ConfigureAwait(false);
-        }
+        await _rt.Owner.DisposeAsync().ConfigureAwait(false);
     }
 }

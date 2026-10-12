@@ -79,7 +79,7 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
         }
         catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
         {
-            throw PostgresErrors.Unavailable(ex);
+            throw rt.Unavailable(ex);
         }
 
         if (result.Status == IntakeStatus.Accepted)
@@ -115,21 +115,29 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
                 // The key check needs its own result, so this path uses an explicit transaction. A concurrent insert of the same
                 // key waits here for the first transaction to finish, then sees the row and falls through to the lookup.
                 tx = await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
-                await using (var upsert = new NpgsqlCommand(
-                    "INSERT INTO api_idempotency_key (tenant_id, idempotency_key, message_id, created_at, expires_at) VALUES ($1, $2, $3, $4, $5) " +
-                    "ON CONFLICT (tenant_id, idempotency_key) DO UPDATE SET message_id = excluded.message_id, created_at = excluded.created_at, expires_at = excluded.expires_at " +
-                    "WHERE api_idempotency_key.expires_at <= $6", connection, tx))
+                for (int attempt = 0; ; attempt++)
                 {
+                    await using var upsert = new NpgsqlCommand(
+                        "INSERT INTO api_idempotency_key (tenant_id, idempotency_key, message_id, created_at, expires_at) VALUES ($1, $2, $3, $4, $5) " +
+                        "ON CONFLICT (tenant_id, idempotency_key) DO UPDATE SET message_id = excluded.message_id, created_at = excluded.created_at, expires_at = excluded.expires_at " +
+                        "WHERE api_idempotency_key.expires_at <= $6", connection, tx);
                     upsert.Parameters.Uuid(m.TenantId).Text(key).Uuid(m.MessageId).Time(now).Time(now + rt.Options.Queue.IdempotencyKeyLifetime).Time(now);
-                    if (await upsert.ExecuteNonQueryAsync(ct).ConfigureAwait(false) == 0)
+                    if (await upsert.ExecuteNonQueryAsync(ct).ConfigureAwait(false) > 0)
                     {
-                        await using var get = new NpgsqlCommand("SELECT message_id FROM api_idempotency_key WHERE tenant_id = $1 AND idempotency_key = $2", connection, tx);
-                        get.Parameters.Uuid(m.TenantId).Text(key);
-                        if (await get.ExecuteScalarAsync(ct).ConfigureAwait(false) is Guid existing)
-                        {
-                            await tx.RollbackAsync(ct).ConfigureAwait(false);
-                            return new IntakeResult(IntakeStatus.DuplicateIdempotencyKey, existing);
-                        }
+                        break; // the key is ours
+                    }
+
+                    await using var get = new NpgsqlCommand("SELECT message_id FROM api_idempotency_key WHERE tenant_id = $1 AND idempotency_key = $2", connection, tx);
+                    get.Parameters.Uuid(m.TenantId).Text(key);
+                    if (await get.ExecuteScalarAsync(ct).ConfigureAwait(false) is Guid existing)
+                    {
+                        await tx.RollbackAsync(ct).ConfigureAwait(false);
+                        return new IntakeResult(IntakeStatus.DuplicateIdempotencyKey, existing);
+                    }
+
+                    if (attempt >= 2)
+                    {
+                        throw new StorageConflictException($"The idempotency key of message {m.MessageId} is being changed concurrently.");
                     }
                 }
             }
@@ -254,7 +262,7 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
         }
         catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
         {
-            throw PostgresErrors.Unavailable(ex);
+            throw rt.Unavailable(ex);
         }
     }
 
@@ -270,7 +278,7 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
         }
         catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
         {
-            throw PostgresErrors.Unavailable(ex);
+            throw rt.Unavailable(ex);
         }
     }
 
@@ -289,7 +297,7 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
         }
         catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
         {
-            throw PostgresErrors.Unavailable(ex);
+            throw rt.Unavailable(ex);
         }
 
         if (!result.Found)
@@ -336,7 +344,7 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
         int day = StorageTime.DayNumber(row.MessageId);
         DateTimeOffset now = rt.Clock.UtcNow;
         bool writeHistory = rt.IsFull && plan.Events.Count > 0 && history.MetadataWritable(day, now);
-        if (rt.IsFull && history.MetadataWritable(day, now))
+        if (writeHistory)
         {
             await rt.Partitions.EnsureDayAsync(day, force: false, ct).ConfigureAwait(false);
         }
@@ -490,7 +498,7 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
         }
         catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
         {
-            throw PostgresErrors.Unavailable(ex);
+            throw rt.Unavailable(ex);
         }
     }
 
@@ -527,7 +535,7 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
         }
         catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
         {
-            throw PostgresErrors.Unavailable(ex);
+            throw rt.Unavailable(ex);
         }
     }
 
@@ -571,7 +579,7 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
         }
         catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
         {
-            throw PostgresErrors.Unavailable(ex);
+            throw rt.Unavailable(ex);
         }
     }
 
@@ -615,7 +623,7 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
         }
         catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
         {
-            throw PostgresErrors.Unavailable(ex);
+            throw rt.Unavailable(ex);
         }
     }
 
@@ -638,7 +646,7 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
         }
         catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
         {
-            throw PostgresErrors.Unavailable(ex);
+            throw rt.Unavailable(ex);
         }
     }
 

@@ -41,7 +41,9 @@ internal sealed class PostgresRuntime
         SingleRole = string.Equals(runtime, owner, StringComparison.Ordinal);
 
         Data = BuildDataSource(runtime, pg, runtimePool: true);
-        Owner = SingleRole ? Data : BuildDataSource(owner, pg, runtimePool: false);
+        // Always its own small pool, even with one connection string: partition DDL and advisory-lock holders must never compete
+        // with request traffic for connections (a request that holds a runtime connection may need a partition created).
+        Owner = BuildDataSource(owner, pg, runtimePool: false);
         Partitions = new PostgresPartitions(Owner);
     }
 
@@ -58,7 +60,7 @@ internal sealed class PostgresRuntime
     /// <summary>Normal operation: claims, intake, history, statistics, configuration.</summary>
     public NpgsqlDataSource Data { get; }
 
-    /// <summary>Schema owner: migrations and partition DDL. The same object as <see cref="Data"/> when one connection string was given.</summary>
+    /// <summary>Schema owner: migrations, partition DDL and maintenance locks. A small pool of its own; it connects as the runtime role when only one connection string was given.</summary>
     public NpgsqlDataSource Owner { get; }
 
     public bool SingleRole { get; }
@@ -98,6 +100,17 @@ internal sealed class PostgresRuntime
         }
 
         return new NpgsqlDataSourceBuilder(builder.ConnectionString).Build();
+    }
+
+    /// <summary>
+    /// The exception to throw for an availability failure. It also discards the idle pooled connections: after the server went
+    /// away they are dead, and Npgsql only notices on first use, which would otherwise fail one request per pooled connection.
+    /// </summary>
+    public StorageUnavailableException Unavailable(Exception inner)
+    {
+        Data.Clear();
+        Owner.Clear();
+        return PostgresErrors.Unavailable(inner);
     }
 
     /// <summary>The enabled endpoints, refreshed whenever the config store reports a webhook endpoint change.</summary>

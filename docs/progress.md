@@ -25,7 +25,7 @@ Running status of the implementation, updated in every pull request. **Productio
 | Dashboard SPA (Preact + Vite) | merged (**not run in a real browser**) | 371 tests against a mock API |
 | Delivery engine: grouping, MX/relay routes, TLS policy, DKIM signing at delivery, VERP return path, retry/hold/expiry, DSN generation, quiesce | this PR | 13 end-to-end tests over loopback with in-memory storage |
 | SMTP ingest (AUTH, sender policy, submission service, bounce listener, bounce/complaint processing) | this PR | 8 loopback tests with MailKit |
-| PostgreSQL backend | in progress (parallel work) | |
+| PostgreSQL backend (EF Core + Npgsql: day partitions, `SKIP LOCKED` claim, owner/runtime roles, advisory-locked maintenance, outage handling) | this PR | 266 tests against a real PostgreSQL 18.6 and 16.13: the whole shared conformance suite, three-backend equivalence, multi-replica claims, partitions and interrupted detach, role-permission split, migrator, outages |
 | HTTP API (docs/api.md) | not started | |
 | Domain verification service (scheduler over the planner/checker and `VerificationSchedule`) | not started | |
 | Host composition root and `mta` CLI (`--healthcheck`, `migrate-db`, `admin create`, `migrate-storage`), Data Protection wiring, hosted services | not started | |
