@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Text;
 using Microsoft.Data.Sqlite;
 using Mta.Storage.Logic;
@@ -402,6 +401,4 @@ internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore
         using SqliteDataReader r = cmd.ExecuteReader();
         return ValueTask.FromResult<byte[]?>(r.Read() ? r.GetFieldValue<byte[]>(0) : null);
     }
-
-    internal static string Describe(int day) => day.ToString(CultureInfo.InvariantCulture);
 }

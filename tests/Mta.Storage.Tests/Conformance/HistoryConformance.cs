@@ -98,6 +98,18 @@ public abstract class HistoryConformance : StorageTestBase
     }
 
     [Fact]
+    public async Task Subject_search_treats_wildcards_literally()
+    {
+        var a = await AcceptAsync(Msg(subject: "100% sure_thing", received: Start));
+        await AcceptAsync(Msg(subject: "100 sureXthing", received: Start.AddSeconds(1)));
+        async Task<List<Guid>> Find(string text) => (await Storage.History.SearchAsync(new MessageQuery(SubjectContains: text), CancellationToken.None)).Items.Select(i => i.MessageId).ToList();
+        Assert.Equal([a.MessageId], await Find("100% sure"));
+        Assert.Equal([a.MessageId], await Find("sure_thing"));
+        Assert.Equal([a.MessageId], await Find("e_t"));
+        Assert.Empty(await Find("100\\"));
+    }
+
+    [Fact]
     public async Task Search_by_status_follows_the_delivery_outcome()
     {
         var ok = await AcceptAsync(Msg(to: ["ok@example.org"], received: Start));

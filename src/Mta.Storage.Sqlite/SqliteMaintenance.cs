@@ -33,7 +33,6 @@ internal sealed class SqliteMaintenance(SqliteRuntime rt, SqliteQueueStore queue
         now = StorageTime.Normalize(now);
         var reports = new List<MaintenanceReport>();
         RetentionOptions r = rt.Options.Retention;
-        SqliteOptions s = rt.Options.Sqlite;
         var touched = new HashSet<SqliteFileWriter>();
 
         async Task Job(string name, SqliteFileWriter writer, Func<Task<long>> body, string? detail = null)
@@ -141,7 +140,6 @@ internal sealed class SqliteMaintenance(SqliteRuntime rt, SqliteQueueStore queue
         }
 
         reports.Add(new MaintenanceReport("wal.checkpoint", TimeSpan.Zero, truncated, "PASSIVE after batches, TRUNCATE when idle"));
-        _ = s;
         return reports;
     }
 

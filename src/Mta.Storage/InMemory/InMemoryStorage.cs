@@ -13,7 +13,6 @@ public sealed class InMemoryStorage : IStorage
 {
     private readonly MemoryState _state;
     private readonly Timer? _flushTimer;
-    private bool _initialized;
     private int _disposed;
 
     public InMemoryStorage(StorageOptions options, IClock? clock = null, IMtaLog? log = null, TimeSpan? statsFlushInterval = null)
@@ -56,7 +55,6 @@ public sealed class InMemoryStorage : IStorage
 
     public Task InitializeAsync(CancellationToken cancellationToken)
     {
-        _initialized = true;
         return Task.CompletedTask;
     }
 
@@ -72,8 +70,6 @@ public sealed class InMemoryStorage : IStorage
             _state.FlushStats();
         }
     }
-
-    internal bool IsInitialized => _initialized;
 }
 
 internal sealed class MemoryState
