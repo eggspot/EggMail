@@ -1,7 +1,7 @@
 import type { ComponentChildren } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { useLocation } from 'preact-iso';
-import { applyTheme, getTheme, nextTheme, setTheme } from '../state/theme';
+import { getTheme, nextTheme, setTheme } from '../state/theme';
 import type { ThemeChoice } from '../state/theme';
 import { useApp } from '../state/app';
 import { WarningBanner } from './WarningBanner';
@@ -36,7 +36,6 @@ const THEME_LABEL: Record<ThemeChoice, string> = { system: 'System theme', light
 
 export function ThemeToggle() {
   const [theme, setThemeState] = useState<ThemeChoice>(getTheme());
-  useEffect(() => applyTheme(theme), []);
   return (
     <button
       type="button"
@@ -63,11 +62,11 @@ export function Layout({ children }: { children: ComponentChildren }) {
 
   // Move focus to the page content after a navigation so keyboard and screen reader users land on it.
   useEffect(() => {
-    setNavOpen(false);
     if (first.current) {
       first.current = false;
       return;
     }
+    setNavOpen(false);
     mainRef.current?.focus();
   }, [path]);
 
