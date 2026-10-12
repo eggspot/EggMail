@@ -411,13 +411,7 @@ internal static class ParameterParser
                 }
                 else
                 {
-                    int vs = pos;
-                    while (pos < s.Length && s[pos] != ';')
-                    {
-                        pos++;
-                    }
-
-                    value = s[vs..pos].Trim().ToString();
+                    value = ReadUnquotedValue(s, ref pos);
                 }
 
                 if (rawName.Length > 0)
@@ -439,6 +433,36 @@ internal static class ParameterParser
         }
 
         return fragments is null ? ParameterList.Empty : new ParameterList(Resolve(fragments, ref an));
+    }
+
+    /// <summary>Reads up to the next semicolon; a parenthesis preceded by white space starts a comment, which is dropped.</summary>
+    private static string ReadUnquotedValue(ReadOnlySpan<char> s, ref int pos)
+    {
+        int start = pos;
+        StringBuilder? sb = null;
+        int copyFrom = start;
+        while (pos < s.Length && s[pos] != ';')
+        {
+            if (s[pos] == '(' && pos > start && s[pos - 1] is ' ' or '\t')
+            {
+                sb ??= new StringBuilder();
+                sb.Append(s[copyFrom..pos]);
+                FieldScanner.SkipComment(s, ref pos);
+                copyFrom = pos;
+            }
+            else
+            {
+                pos++;
+            }
+        }
+
+        if (sb is null)
+        {
+            return s[start..pos].Trim().ToString();
+        }
+
+        sb.Append(s[copyFrom..pos]);
+        return sb.ToString().Trim();
     }
 
     private static Fragment MakeFragment(ReadOnlySpan<char> rawName, string value)
@@ -470,10 +494,10 @@ internal static class ParameterParser
                 return frag;
             }
         }
-        else if (!extended)
+        else
         {
-            frag.Name = baseName.ToString().ToLowerInvariant();
-            return frag;
+            // "name*": an extended value without section number.
+            extended = true;
         }
 
         frag.Name = baseName.ToString().ToLowerInvariant();

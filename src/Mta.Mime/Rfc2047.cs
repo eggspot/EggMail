@@ -500,7 +500,7 @@ public static class Rfc2047
             long qLen = 0;
             for (int k = 0; k < total; k++)
             {
-                qLen += IsQSafe(all[k]) ? 1 : 3;
+                qLen += IsQSafe(all[k]) || all[k] == (byte)' ' ? 1 : 3;
             }
 
             long bLen = (total + 2) / 3 * 4;

@@ -526,6 +526,7 @@ internal static class AddressParser
 
         if (atCount == 1)
         {
+            an |= MimeAnomaly.InvalidAddress; // recovered, but a display name without angle brackets is not valid syntax
             var name = new StringBuilder();
             for (int r = 0; r < runs.Count; r++)
             {
