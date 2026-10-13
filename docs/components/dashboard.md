@@ -143,3 +143,8 @@ Verification at the time of writing: `npm run lint` (tsc plus custom rules over 
 - The storage wizard has only been run against the mock engine; real timing, restarts mid-switch and the cutover patch format are unverified.
 - `npm audit signatures` and an OSV scan are not wired up (GitHub Actions is disabled for the repository, see open-questions.md); the lockfile is committed and `npm ci --ignore-scripts` is the supported install.
 - English only; no i18n. Bearer API keys are not used by the dashboard (cookie session only).
+
+
+## Real-browser smoke test (2026-10-13)
+
+`dashboard/scripts/browser-smoke.mjs` drives a headless Chrome (DevTools protocol, no extra packages) against a running server: it signs in as the administrator, visits every page and reports console errors, CSP violations and pages showing an error banner. It was run once against `mta serve` (SQLite backend, the production `dist/` served from `wwwroot`): the pages render under the strict CSP, sign-in works, with one tenant every page loads without errors. The first run found that an administrator on a fresh install (no tenant yet) saw an "X-Tenant-Id required" error on every tenant page; those pages now say "Create a tenant first" / "Choose a tenant". Not covered by the script: creating domains, sending, webhook and key flows, the storage switch wizard, accessibility with a screen reader, other browsers.
