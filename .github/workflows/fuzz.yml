@@ -11,6 +11,11 @@ name: fuzz
 # at the default; use the seconds_per_target input for a shorter manual run).
 
 on:
+  # TEMPORARY (remove before merge): GitHub does not register a workflow_dispatch workflow until its file is on the default branch, so
+  # `gh workflow run` cannot start this one from a feature branch. A push of this file to the feature branch runs it with a short budget.
+  push:
+    branches: [test/fuzzing-ci]
+    paths: ['.github/workflows/fuzz.yml']
   schedule:
     - cron: '23 3 * * 0'
   workflow_dispatch:
@@ -89,7 +94,7 @@ jobs:
       - name: Fuzz
         id: fuzz
         env:
-          SECONDS_PER_TARGET: ${{ github.event.inputs.seconds_per_target || '300' }}
+          SECONDS_PER_TARGET: ${{ github.event.inputs.seconds_per_target || (github.event_name == 'push' && '45') || '300' }}
           TARGETS: ${{ github.event.inputs.targets || 'all' }}
         run: |
           set -u
