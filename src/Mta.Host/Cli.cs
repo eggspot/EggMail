@@ -160,6 +160,7 @@ internal static class Cli
         builder.Services.AddHostedService<SmtpListenerService>();
         if (gate.Mode == StartupMode.Normal || gate.Mode == StartupMode.Draining)
         {
+            builder.Services.AddHostedService<RuntimeStateService>();   // before the services that produce the state: it stops after them
             builder.Services.AddHostedService<DeliveryService>();
             builder.Services.AddHostedService<WebhookService>();
             builder.Services.AddHostedService<CertificateService>();

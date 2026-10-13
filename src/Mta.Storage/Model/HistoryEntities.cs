@@ -27,6 +27,12 @@ public sealed class MessageIndexEntity
     /// <summary>Content was recorded at accept time (distinguishes Expired from NotRecorded).</summary>
     public bool ContentRecorded { get; set; }
     public bool RawRetained { get; set; }
+
+    /// <summary>The Message-ID header of the message, normalized by <c>MessageIdKey</c> (no angle brackets, lower case): how an asynchronous bounce finds its message. Null for messages stored before schema version 4.</summary>
+    public string? MessageIdHeader { get; set; }
+
+    /// <summary>The tags of the API send as a JSON array of strings; null when there are none.</summary>
+    public string? Tags { get; set; }
 }
 
 public sealed class MessageRecipientEntity
