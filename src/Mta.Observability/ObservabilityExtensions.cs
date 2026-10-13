@@ -25,8 +25,8 @@ public sealed class ObservabilityOptions
     public OtlpTransport OtlpTransport { get; init; } = OtlpTransport.Grpc;
 
     /// <summary>
-    /// Share of messages whose trace is exported. The sampler is a trace-id ratio and the trace id is the message id, so a message is either traced
-    /// in all of its spans (submission, queue wait, every delivery attempt, every webhook) or in none.
+    /// Share of messages whose trace is exported. The decision is made from the message id (<see cref="MessageTrace.SampleRatio"/>), so a message is
+    /// either traced in all of its spans (submission, queue wait, every delivery attempt, every webhook) or in none.
     /// </summary>
     public double TraceSampleRatio { get; init; } = 0.1;
 
@@ -55,6 +55,7 @@ public static class ObservabilityExtensions
             return services;
         }
 
+        MessageTrace.SampleRatio = options.TraceSampleRatio;
         var otel = services.AddOpenTelemetry().ConfigureResource(r => r.AddService(options.ServiceName, serviceVersion: options.ServiceVersion));
         otel.WithMetrics(m =>
         {
@@ -64,7 +65,7 @@ public static class ObservabilityExtensions
         otel.WithTracing(t =>
         {
             t.AddSource(MessageTrace.SourceName);
-            t.SetSampler(new TraceIdRatioBasedSampler(options.TraceSampleRatio));
+            t.SetSampler(new AlwaysOnSampler());   // the share of messages is decided before a span exists (MessageTrace.SampleRatio)
             t.AddOtlpExporter(o => Configure(o, options, "v1/traces"));
         });
         return services;

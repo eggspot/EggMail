@@ -84,4 +84,50 @@ public class MessageTraceTests
 
         Assert.Empty(stopped);
     }
+
+    [Fact]
+    public void The_sample_decision_comes_from_the_message_id_and_follows_the_ratio()
+    {
+        double before = MessageTrace.SampleRatio;
+        try
+        {
+            var ids = Enumerable.Range(0, 20_000).Select(_ => Ids.New()).ToList();
+
+            MessageTrace.SampleRatio = 1;
+            Assert.All(ids.Take(100), id => Assert.True(MessageTrace.IsSampled(id)));
+            MessageTrace.SampleRatio = 0;
+            Assert.All(ids.Take(100), id => Assert.False(MessageTrace.IsSampled(id)));
+
+            MessageTrace.SampleRatio = 0.1;
+            int sampled = ids.Count(MessageTrace.IsSampled);
+            Assert.InRange(sampled, 1700, 2300);   // 10 % of 20 000, well inside the binomial spread
+            Assert.Equal(sampled, ids.Count(MessageTrace.IsSampled));   // the same ids every time: a message is in all of its spans or in none
+
+            MessageTrace.SampleRatio = 7;   // out of range is clamped, not an error
+            Assert.Equal(1, MessageTrace.SampleRatio);
+        }
+        finally
+        {
+            MessageTrace.SampleRatio = before;
+        }
+    }
+
+    [Fact]
+    public void An_unsampled_message_creates_no_activity_even_with_a_listener()
+    {
+        var stopped = new List<Activity>();
+        double before = MessageTrace.SampleRatio;
+        MessageTrace.SampleRatio = 0;
+        try
+        {
+            using ActivityListener listener = Listen(stopped);
+            Assert.Null(MessageTrace.Start(MessageTrace.SubmitSpan, Ids.New()));
+        }
+        finally
+        {
+            MessageTrace.SampleRatio = before;
+        }
+
+        Assert.Empty(stopped);
+    }
 }

@@ -9,9 +9,10 @@ namespace Mta.Core;
 /// hex digits as the id in the SMTP <c>250 Queued as</c> reply, the API and the dashboard), and all spans share one deterministic parent span id
 /// (<see cref="RootContextOf"/>). A span emitted days later by a retry, or by another replica, therefore lands in the same trace as the submission
 /// even though the queue and the webhook outbox carry no trace context. Searching a tracing backend for the message id finds everything.</para>
-/// <para><b>Free when nobody listens.</b> Every entry point first asks <see cref="ActivitySource.HasListeners"/>; without an exporter (no
-/// <c>Observability:OtlpEndpoint</c>) nothing is computed and nothing is allocated. The OTLP trace sampler is a trace-id ratio, so the same message
-/// is sampled or dropped in all of its spans.</para>
+/// <para><b>Free when nobody listens, nearly free when the message is not sampled.</b> Every entry point first asks
+/// <see cref="ActivitySource.HasListeners"/>; without an exporter (no <c>Observability:OtlpEndpoint</c>) nothing is computed and nothing is
+/// allocated. With one, <see cref="SampleRatio"/> decides from the message id, a few arithmetic operations and no allocation, so the same message
+/// is sampled or dropped in all of its spans and an unsampled message creates no <see cref="Activity"/> at all.</para>
 /// </summary>
 public static class MessageTrace
 {
@@ -25,6 +26,38 @@ public static class MessageTrace
     public const string MessageIdTag = "mta.message.id";
 
     public static readonly ActivitySource Source = new(SourceName, "1.0.0");
+
+    private static double s_sampleRatio = 1;
+
+    /// <summary>
+    /// Share of messages that are traced (0 to 1), decided by the message id alone. The host sets it from <c>Observability:TraceSampleRatio</c>;
+    /// the exporter's own sampler then keeps everything it is given.
+    /// </summary>
+    public static double SampleRatio
+    {
+        get => Volatile.Read(ref s_sampleRatio);
+        set => Volatile.Write(ref s_sampleRatio, Math.Clamp(value, 0, 1));
+    }
+
+    /// <summary>True when the trace of <paramref name="messageId"/> is part of the sampled share: the 62 random bits of the id (the low half, without the variant bits) against the ratio.</summary>
+    public static bool IsSampled(Guid messageId)
+    {
+        double ratio = SampleRatio;
+        if (ratio >= 1)
+        {
+            return true;
+        }
+
+        if (ratio <= 0)
+        {
+            return false;
+        }
+
+        Span<byte> bytes = stackalloc byte[16];
+        messageId.TryWriteBytes(bytes, bigEndian: true, out _);
+        ulong random = System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(bytes[8..]) & 0x3FFF_FFFF_FFFF_FFFFUL;
+        return random < (ulong)(ratio * 0x4000_0000_0000_0000UL);
+    }
 
     /// <summary>True while a trace exporter (or any other listener) is attached.</summary>
     public static bool IsEnabled => Source.HasListeners();
@@ -50,7 +83,7 @@ public static class MessageTrace
     /// <summary>Starts a span in the trace of <paramref name="messageId"/>; null when nothing listens, the id is empty or the sampler dropped the trace.</summary>
     public static Activity? Start(string name, Guid messageId, ActivityKind kind = ActivityKind.Internal, DateTimeOffset startTime = default)
     {
-        if (messageId == Guid.Empty || !Source.HasListeners())
+        if (messageId == Guid.Empty || !Source.HasListeners() || !IsSampled(messageId))
         {
             return null;
         }
