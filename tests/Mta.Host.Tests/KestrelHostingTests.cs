@@ -1,6 +1,4 @@
-using System.Net;
 using System.Net.Http;
-using System.Net.Security;
 using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
@@ -8,57 +6,66 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
-using Microsoft.AspNetCore.Server.Kestrel.Https;
+using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using Mta.Host.Configuration;
 using Mta.Host.Hosting;
+using Mta.Smtp.Server;
 
 namespace Mta.Host.Tests;
 
 public class KestrelHostingTests
 {
-    [Fact]
-    public void Https_is_pinned_to_TLS_1_2_and_1_3()
+    private sealed class OneCertificate(X509Certificate2 certificate) : IServerCertificateProvider
     {
-        var options = new HttpsConnectionAdapterOptions();
-        Assert.Equal(SslProtocols.None, options.SslProtocols);   // the framework default would be whatever the operating system still allows
+        public string? RequestedName { get; private set; }
 
-        KestrelHosting.ConfigureHttps(options, _ => null);
-
-        Assert.Equal(SslProtocols.Tls12 | SslProtocols.Tls13, options.SslProtocols);
-        Assert.NotNull(options.ServerCertificateSelector);
+        public X509Certificate2? GetCertificate(string? serverName)
+        {
+            RequestedName = serverName;
+            return certificate;
+        }
     }
 
     [Fact]
-    public async Task The_configured_listener_serves_the_selected_certificate_over_TLS_1_2_and_TLS_1_3()
+    public void The_request_limit_never_undercuts_what_the_api_allows_for_a_send()
+    {
+        Assert.Equal(64L * 1024 * 1024, KestrelHosting.RequestBodyLimit(new ApiSection()));
+        Assert.Equal(100L * 1024 * 1024, KestrelHosting.RequestBodyLimit(new ApiSection { MaxSendBodyBytes = 100L * 1024 * 1024 }));
+    }
+
+    [Fact]
+    public async Task The_configured_listeners_serve_the_store_certificate_over_TLS_1_2_and_TLS_1_3_and_apply_the_body_limit()
     {
         using X509Certificate2 certificate = SelfSigned("localhost");
-        string? requestedName = null;
+        var provider = new OneCertificate(certificate);
+        var config = new MtaConfig
+        {
+            Dashboard = new DashboardSection { BindAddress = "127.0.0.1", HttpPort = 0, HttpsPort = 0, HttpsEnabled = true },
+            Api = new ApiSection { MaxSendBodyBytes = 100L * 1024 * 1024 },
+        };
         var builder = WebApplication.CreateBuilder();
         builder.Logging.ClearProviders();
-        builder.WebHost.ConfigureKestrel(k => k.Listen(IPAddress.Loopback, 0, l => l.UseHttps(https => KestrelHosting.ConfigureHttps(https, name =>
-        {
-            requestedName = name;
-            return certificate;
-        }))));
+        builder.WebHost.ConfigureKestrel(k => KestrelHosting.Configure(k, config, provider));
         await using WebApplication app = builder.Build();
         app.MapGet("/ping", () => "pong");
         await app.StartAsync();
         try
         {
-            string address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single().Replace("127.0.0.1", "localhost", StringComparison.Ordinal);   // a host name, so the client sends SNI
+            string https = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single(a => a.StartsWith("https:", StringComparison.Ordinal))
+                .Replace("127.0.0.1", "localhost", StringComparison.Ordinal);   // a host name, so the client sends SNI
             // The .NET TLS client has no TLS 1.3 on macOS (SecureTransport); the server side is what is under test.
             foreach (SslProtocols protocol in OperatingSystem.IsMacOS() ? new[] { SslProtocols.Tls12 } : new[] { SslProtocols.Tls12, SslProtocols.Tls13 })
             {
-                using var handler = new SocketsHttpHandler
-                {
-                    SslOptions = { EnabledSslProtocols = protocol, RemoteCertificateValidationCallback = (_, _, _, _) => true },
-                };
+                using var handler = new SocketsHttpHandler { SslOptions = { EnabledSslProtocols = protocol, RemoteCertificateValidationCallback = (_, _, _, _) => true } };
                 using var http = new HttpClient(handler);
-                Assert.Equal("pong", await http.GetStringAsync(address + "/ping"));
+                Assert.Equal("pong", await http.GetStringAsync(https + "/ping"));
             }
 
-            Assert.Equal("localhost", requestedName);
+            Assert.Equal("localhost", provider.RequestedName);
+            Assert.Equal(100L * 1024 * 1024, app.Services.GetRequiredService<IOptions<KestrelServerOptions>>().Value.Limits.MaxRequestBodySize);
         }
         finally
         {

@@ -242,6 +242,103 @@ public sealed class TlsRptCollector
         }
     }
 
+    /// <summary>
+    /// Removes and returns everything collected so far, including the current day (a delta since the last call). The host persists it and the report sender merges the persisted
+    /// pieces of a completed day (<see cref="Merge"/>); <see cref="Absorb"/> puts a delta back when persisting it failed.
+    /// </summary>
+    public IReadOnlyList<TlsRptDomainReportData> DrainAll()
+    {
+        lock (_gate)
+        {
+            var result = _buckets.Select(kv => ToReportData(kv.Key.Domain, kv.Key.Day, kv.Value)).ToList();
+            _buckets.Clear();
+            return result;
+        }
+    }
+
+    /// <summary>
+    /// Adds an aggregate (for example a delta that could not be persisted, or a persisted piece) to the collected data: counts add up exactly, the distinct lines stay within the bounds of
+    /// <see cref="TlsRptCollectorOptions"/> (the overflow is counted as dropped).
+    /// </summary>
+    public void Absorb(TlsRptDomainReportData data)
+    {
+        ArgumentNullException.ThrowIfNull(data);
+        lock (_gate)
+        {
+            if (!_buckets.TryGetValue((data.PolicyDomain, data.Day), out var bucket))
+            {
+                if (_buckets.Count >= _options.MaxDomainDays)
+                {
+                    Interlocked.Add(ref _dropped, data.Policies.Sum(p => p.SuccessCount + p.FailureCount));
+                    return;
+                }
+
+                bucket = new DomainBucket();
+                _buckets[(data.PolicyDomain, data.Day)] = bucket;
+            }
+
+            foreach (var aggregate in data.Policies)
+            {
+                string key = aggregate.Policy.Key;
+                if (!bucket.Policies.TryGetValue(key, out var policy))
+                {
+                    if (bucket.Policies.Count >= _options.MaxPoliciesPerDomain)
+                    {
+                        Interlocked.Add(ref _dropped, aggregate.SuccessCount + aggregate.FailureCount);
+                        continue;
+                    }
+
+                    policy = new PolicyBucket(aggregate.Policy);
+                    bucket.Policies[key] = policy;
+                }
+
+                policy.Success += aggregate.SuccessCount;
+                policy.Failure += aggregate.FailureCount;
+                policy.DroppedDetails += aggregate.DroppedFailureDetailCount;
+                foreach (var detail in aggregate.FailureDetails)
+                {
+                    var detailKey = new DetailKey(detail.ResultType, detail.SendingMtaIp, detail.ReceivingMxHostname, detail.ReceivingMxHelo, detail.ReceivingIp, detail.AdditionalInformation, detail.FailureReasonCode);
+                    if (policy.Details.TryGetValue(detailKey, out long count))
+                    {
+                        policy.Details[detailKey] = count + detail.FailedSessionCount;
+                    }
+                    else if (policy.Details.Count < _options.MaxFailureDetailsPerPolicy)
+                    {
+                        policy.Details[detailKey] = detail.FailedSessionCount;
+                    }
+                    else
+                    {
+                        policy.DroppedDetails += detail.FailedSessionCount;
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>Merges the pieces of one policy domain and UTC day (all must name the same domain and day) into one report's data.</summary>
+    public static TlsRptDomainReportData Merge(IReadOnlyList<TlsRptDomainReportData> pieces, TlsRptCollectorOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(pieces);
+        if (pieces.Count == 0)
+        {
+            throw new ArgumentException("There is nothing to merge.", nameof(pieces));
+        }
+
+        if (pieces.Any(p => p.PolicyDomain != pieces[0].PolicyDomain || p.Day != pieces[0].Day))
+        {
+            throw new ArgumentException("The pieces must belong to one policy domain and one day.", nameof(pieces));
+        }
+
+        var merger = new TlsRptCollector(options: options);
+        foreach (var piece in pieces)
+        {
+            merger.Absorb(piece);
+        }
+
+        var merged = merger.DrainAll();
+        return merged.Count == 1 ? merged[0] : new TlsRptDomainReportData(pieces[0].PolicyDomain, pieces[0].Day, []);
+    }
+
     /// <summary>Removes and returns the buckets of one UTC day.</summary>
     public IReadOnlyList<TlsRptDomainReportData> Drain(DateOnly day)
     {

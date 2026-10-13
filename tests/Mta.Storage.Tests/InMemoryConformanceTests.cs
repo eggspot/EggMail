@@ -63,6 +63,11 @@ public class InMemoryWebhookStatsOnly : WebhookConformance
     protected override Task<IStorage> CreateAsync(StorageOptions options) => Task.FromResult<IStorage>(new InMemoryStorage(options, Clock, null, TimeSpan.Zero));
 }
 
+public class InMemoryRuntimeState : RuntimeStateConformance
+{
+    protected override Task<IStorage> CreateAsync(StorageOptions options) => Task.FromResult<IStorage>(new InMemoryStorage(options, Clock, null, TimeSpan.Zero));
+}
+
 public class InMemoryConfig : ConfigConformance
 {
     protected override Task<IStorage> CreateAsync(StorageOptions options) => Task.FromResult<IStorage>(new InMemoryStorage(options, Clock, null, TimeSpan.Zero));

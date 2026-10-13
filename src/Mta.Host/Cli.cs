@@ -9,6 +9,7 @@ using Mta.Core;
 using Mta.Host.Configuration;
 using Mta.Host.Hosting;
 using Mta.Host.Switching;
+using Mta.Host.Tls;
 using Mta.Observability;
 using Mta.Storage;
 
@@ -163,6 +164,7 @@ internal static class Cli
         builder.Services.AddHostedService<SmtpListenerService>();
         if (gate.Mode == StartupMode.Normal || gate.Mode == StartupMode.Draining)
         {
+            builder.Services.AddHostedService<RuntimeStateService>();   // before the services that produce the state: it stops after them
             builder.Services.AddHostedService<DeliveryService>();
             builder.Services.AddHostedService<WebhookService>();
             builder.Services.AddHostedService<CertificateService>();
@@ -181,7 +183,7 @@ internal static class Cli
         ApiHosting.AddServices(builder, loaded, runtime);
         builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(45));
 
-        builder.WebHost.ConfigureKestrel(k => KestrelHosting.Configure(k, config, runtime.Certificates.GetCertificate));
+        builder.WebHost.ConfigureKestrel(k => KestrelHosting.Configure(k, config, runtime.Certificates));
 
         var app = builder.Build();
         DashboardHosting.Map(app);

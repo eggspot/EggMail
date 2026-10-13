@@ -56,8 +56,8 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore, 
     // Writes (called by PostgresQueueStore inside its transaction)
 
     private const string IndexInsert =
-        "INSERT INTO message_index (day, message_id, tenant_id, received_at, subject, envelope_from, recipient_count, final_count, delivered_count, failed_count, status, size, content_recorded, raw_retained) " +
-        "VALUES ($1, $2, $3, $4, $5, $6, $7, 0, 0, 0, 'queued', $8, $9, false)";
+        "INSERT INTO message_index (day, message_id, tenant_id, received_at, subject, envelope_from, recipient_count, final_count, delivered_count, failed_count, status, size, content_recorded, raw_retained, message_id_header, tags) " +
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, 0, 0, 0, 'queued', $8, $9, false, $10, $11)";
 
     private const string RecipientInsert =
         "INSERT INTO message_recipient (day, message_id, recipient) SELECT $1, $2, r FROM unnest($3) AS r ON CONFLICT DO NOTHING";
@@ -90,7 +90,7 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore, 
         NpgsqlBatchCommand index = batch.CreateBatchCommand();
         index.CommandText = IndexInsert;
         index.Parameters.Int(day).Uuid(m.MessageId).Uuid(m.TenantId).Time(m.ReceivedAt).Text(subject).Text(AddressText.Format(m.EnvelopeFrom))
-            .Int(m.Recipients.Count).Long(m.Raw.Length).Bool(content is not null);
+            .Int(m.Recipients.Count).Long(m.Raw.Length).Bool(content is not null).Text(MessageIdKey.Normalize(m.MessageIdHeader)).Text(StorageJson.SerializeTags(m.Tags));
         batch.BatchCommands.Add(index);
 
         NpgsqlBatchCommand recipients = batch.CreateBatchCommand();
@@ -213,6 +213,67 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore, 
         }
     }
 
+    private static IReadOnlyList<string>? TagsOf(string? json) => json is null ? null : StorageJson.DeserializeTags(json);
+
+    public async ValueTask<Guid?> AttachReportAsync(Guid tenantId, string messageIdHeader, AsyncReport report, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(report);
+        string? key = MessageIdKey.Normalize(messageIdHeader);
+        if (!rt.IsFull || key is null)
+        {
+            return null;
+        }
+
+        DateTimeOffset? floor = MetadataFloor(rt.Clock.UtcNow);
+        try
+        {
+            await using NpgsqlConnection c = await rt.Data.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            await using NpgsqlTransaction tx = await c.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            int day;
+            Guid messageId;
+            int recipients;
+            string status;
+            await using (var find = new NpgsqlCommand(
+                "SELECT day, message_id, recipient_count, status FROM message_index WHERE tenant_id = $1 AND message_id_header = $2 AND ($3::timestamptz IS NULL OR received_at > $3) " +
+                "ORDER BY day DESC, message_id DESC LIMIT 1 FOR UPDATE", c, tx))
+            {
+                find.Parameters.Uuid(tenantId).Text(key).Time(floor);
+                await using NpgsqlDataReader r = await find.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+                if (!await r.ReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    return null;
+                }
+
+                day = r.GetInt32(0);
+                messageId = r.GetGuid(1);
+                recipients = r.GetInt32(2);
+                status = r.GetString(3);
+            }
+
+            await using (var insert = new NpgsqlCommand(EventInsert, c, tx))
+            {
+                insert.Parameters.Int(day).Uuid(messageId).Uuid(EventIds.Next(report.At)).Uuid((Guid?)null).Uuid(tenantId).Small((int)report.Type).Time(report.At)
+                    .Text(report.Recipient).Int(report.SmtpCode).Text(report.EnhancedCode).Text(report.Message).Text(null).Text(null).Text(null);
+                await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            string next = MessageStatus.AfterReport(status, recipients, report.Type);
+            if (!string.Equals(next, status, StringComparison.Ordinal))
+            {
+                await using var update = new NpgsqlCommand("UPDATE message_index SET status = $1 WHERE day = $2 AND message_id = $3", c, tx);
+                update.Parameters.Text(next).Int(day).Uuid(messageId);
+                await update.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await tx.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return messageId;
+        }
+        catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
+        {
+            throw rt.Unavailable(ex);
+        }
+    }
+
     // Reads
 
     private DateTimeOffset? MetadataFloor(DateTimeOffset now) => rt.Options.Retention.MetadataDays > 0 ? StorageTime.Normalize(now.AddDays(-rt.Options.Retention.MetadataDays)) : null;
@@ -238,7 +299,7 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore, 
 
         DateTimeOffset now = rt.Clock.UtcNow;
         string? recipient = string.IsNullOrWhiteSpace(query.Recipient) ? null : query.Recipient.Trim().ToLowerInvariant();
-        var sql = new StringBuilder("SELECT m.day, m.message_id, m.tenant_id, m.received_at, m.subject, m.envelope_from, m.recipient_count, m.status, m.size FROM ");
+        var sql = new StringBuilder("SELECT m.day, m.message_id, m.tenant_id, m.received_at, m.subject, m.envelope_from, m.recipient_count, m.status, m.size, m.tags FROM ");
         sql.Append(recipient is null ? "message_index m" : "message_recipient r JOIN message_index m ON m.day = r.day AND m.message_id = r.message_id");
         sql.Append(" WHERE true");
         using var cmd = new NpgsqlCommand();
@@ -280,6 +341,11 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore, 
             Arg("m.status = $$", p => p.Text(query.Status.Trim().ToLowerInvariant()));
         }
 
+        if (!string.IsNullOrEmpty(query.Tag))
+        {
+            Arg("m.tags IS NOT NULL AND jsonb_exists(m.tags::jsonb, $$)", p => p.Text(query.Tag));
+        }
+
         if (query.From is { } from)
         {
             Arg("m.received_at >= $$", p => p.Time(from));
@@ -313,7 +379,7 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore, 
             while (await r.ReadAsync(cancellationToken).ConfigureAwait(false))
             {
                 keys.Add((r.GetInt32(0), r.GetGuid(1)));
-                items.Add(new MessageSummary(r.GetGuid(1), r.GetGuid(2), r.GetInstant(3), r.GetNullableString(4), r.GetString(5), r.GetInt32(6), r.GetString(7), r.GetInt64(8)));
+                items.Add(new MessageSummary(r.GetGuid(1), r.GetGuid(2), r.GetInstant(3), r.GetNullableString(4), r.GetString(5), r.GetInt32(6), r.GetString(7), r.GetInt64(8), TagsOf(r.GetNullableString(9))));
             }
         }
         catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
@@ -349,7 +415,7 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore, 
             bool contentRecorded, rawRetained;
             DateTimeOffset received;
             await using (var cmd = new NpgsqlCommand(
-                "SELECT message_id, tenant_id, received_at, subject, envelope_from, recipient_count, status, size, content_recorded, raw_retained FROM message_index " +
+                "SELECT message_id, tenant_id, received_at, subject, envelope_from, recipient_count, status, size, content_recorded, raw_retained, tags FROM message_index " +
                 "WHERE day = $1 AND message_id = $2 AND tenant_id = $3 AND ($4::timestamptz IS NULL OR received_at > $4)", c))
             {
                 cmd.Parameters.Int(day).Uuid(messageId).Uuid(tenantId).Time(MetadataFloor(now));
@@ -360,7 +426,7 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore, 
                 }
 
                 received = r.GetInstant(2);
-                summary = new MessageSummary(r.GetGuid(0), r.GetGuid(1), received, r.GetNullableString(3), r.GetString(4), r.GetInt32(5), r.GetString(6), r.GetInt64(7));
+                summary = new MessageSummary(r.GetGuid(0), r.GetGuid(1), received, r.GetNullableString(3), r.GetString(4), r.GetInt32(5), r.GetString(6), r.GetInt64(7), TagsOf(r.GetNullableString(10)));
                 contentRecorded = r.GetBoolean(8);
                 rawRetained = r.GetBoolean(9);
             }
