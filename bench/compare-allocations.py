@@ -4,7 +4,7 @@
   python3 bench/compare-allocations.py --baseline bench/baseline/allocations.json --micro micro.json --pipeline pipeline.json \
       [--summary summary.md] [--write-candidate candidate.json]
 
-Why allocations and not throughput: bytes allocated per operation do not depend on how loaded or fast the machine is (a shared 2-core CI
+Why allocations and not throughput: bytes allocated per operation do not depend on how loaded or fast the machine is (a shared CI
 runner makes throughput numbers meaningless, but not allocation counts), so a regression here is a real code change.
 
   micro.json     from `Mta.Bench.Pipeline --micro true --json`: bytes per call of each ingest step, measured on the calling thread. Exact and

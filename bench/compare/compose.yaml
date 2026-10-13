@@ -113,7 +113,7 @@ services:
     profiles: [kumomta]
 
 configs:
-  admin_password:
+  admin_password:            # a throw-away password for a bench instance on a private, unpublished network; override with BENCH_ADMIN_PASSWORD
     content: ${BENCH_ADMIN_PASSWORD:-bench-only-change-me-123}
 
 networks:

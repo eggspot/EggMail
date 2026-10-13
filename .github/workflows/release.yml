@@ -4,6 +4,9 @@ name: release
 #   - tag push vMAJOR.MINOR.PATCH[-pre]  -> v1.4.2, 1.4, latest (stable only) + GitHub Release
 #   - daily schedule                      -> nightly (only when main changed since the last nightly)
 #   - workflow_dispatch                   -> manual run of the current ref (published as nightly-<sha> unless a tag)
+# After the push the pushed digest is smoke-tested (deploy/smoke: docker run, PostgreSQL compose; tags and manual runs also the SQLite compose,
+# Unbound and Kubernetes checks) and the release assets are collected (per-platform digests, SBOMs, checksums); a tag then creates the
+# GitHub Release with the notes of its CHANGELOG.md section. A manual run publishes only nightly-<sha>: never a version tag, never latest.
 # Cost rules: one job on ubuntu-latest, cheapest checks first, tight timeout, never cancel a release mid-flight.
 
 on:

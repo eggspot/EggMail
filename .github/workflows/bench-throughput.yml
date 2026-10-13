@@ -5,7 +5,7 @@ name: bench-throughput
 #
 #   gh workflow run bench-throughput --ref <branch> [-f messages=30000 -f runs=3 -f postgres=true -f readytorun=true]
 #
-# A GitHub-hosted ubuntu-latest runner has 2 cores, shares its host with other jobs and runs the load generator, the server, the sink and
+# A GitHub-hosted ubuntu-latest runner has 2 to 4 cores (the process saw 4 on 2026-10-13; the label below is the fixed wording the owner asked for), shares its host with other jobs and runs the load generator, the server, the sink and
 # PostgreSQL on the same machine. The numbers are for trends and for catching order-of-magnitude mistakes, NOT for publication or for
 # comparing with other servers (docs/benchmarks.md, fairness rules). The summary says so in its first line.
 

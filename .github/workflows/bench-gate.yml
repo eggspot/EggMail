@@ -2,7 +2,7 @@ name: bench-gate
 
 # Allocation regression gate (docs/benchmarks.md, "Automation"): runs the pipeline harness and fails when allocation per message grows more
 # than the thresholds in bench/baseline/allocations.json. Allocation counts do not depend on how fast or loaded the machine is, which is why
-# a shared 2-core runner can gate on them (and cannot gate on throughput).
+# a shared runner can gate on them (and cannot gate on throughput).
 #
 # NOT run on pull requests (billed minutes): weekly on main when something changed, and on demand. Run it by hand on a branch that touches
 # the ingest path:  gh workflow run bench-gate --ref <branch>
