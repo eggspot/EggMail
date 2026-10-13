@@ -46,6 +46,7 @@ public sealed class DomainsApi(ApiAuthenticator auth, IStorage storage, ISecretP
         api.DeleteRoute("/domains/{id}", DeleteAsync);
         api.PostRoute("/domains/{id}/verify", VerifyAsync);
         api.PostRoute("/domains/{id}/dkim/rotate", RotateAsync);
+        api.DeleteRoute("/domains/{id}/dkim/rotate", CancelRotationAsync);
     }
 
     private IConfigStore Config => storage.Config;
@@ -166,23 +167,58 @@ public sealed class DomainsApi(ApiAuthenticator auth, IStorage storage, ISecretP
         ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.Domains).ConfigureAwait(false);
         CancellationToken ct = context.RequestAborted;
         DomainRecord domain = await FindOwnAsync(caller, id, ct).ConfigureAwait(false);
-        var keys = await Config.GetDkimKeysAsync(domain.Id, ct).ConfigureAwait(false);
-        if (keys.Any(k => !k.Active && k.RetiredAt is null))
+        // One rotation at a time per domain in this process (two requests would otherwise both pass the "nothing pending" check while a key is generated).
+        if (!verification.TryEnter(domain.Id))
         {
-            throw ApiException.Conflict("A key rotation is already in progress: publish the new DNS record; signing switches to the new key once it is found.");
+            throw ApiException.Conflict("A check or rotation of this domain is running; retry in a moment.");
         }
 
-        DateTimeOffset now = clock.UtcNow;
-        string selector = DomainVerificationService.NextSelector(keys, now);
-        // The new key does not sign until its record is published (the verification service switches); the current key keeps signing.
-        StoredDkimKey key = await DomainVerificationService.CreateKeyAsync(domain.Id, selector, protector, now, active: false).ConfigureAwait(false);
-        await Config.AddDkimKeyAsync(key, ct).ConfigureAwait(false);
-        // Look for the new record soon rather than at the (daily) cadence of a verified domain.
-        DateTimeOffset soon = verification.Schedule.FirstCheckAt(now);
-        if (domain.NextCheckAt is null || domain.NextCheckAt > soon)
+        try
         {
-            domain = domain with { NextCheckAt = soon };
-            await Config.UpsertDomainAsync(domain, ct).ConfigureAwait(false);
+            var keys = await Config.GetDkimKeysAsync(domain.Id, ct).ConfigureAwait(false);
+            if (keys.Any(k => !k.Active && k.RetiredAt is null))
+            {
+                throw ApiException.Conflict("A key rotation is already in progress: publish the new DNS record (signing switches to the new key once it is found) or cancel it with DELETE.");
+            }
+
+            DateTimeOffset now = clock.UtcNow;
+            string selector = DomainVerificationService.NextSelector(keys, now);
+            // The new key does not sign until its record is published (the verification service switches); the current key keeps signing.
+            StoredDkimKey key = await DomainVerificationService.CreateKeyAsync(domain.Id, selector, protector, now, active: false).ConfigureAwait(false);
+            await Config.AddDkimKeyAsync(key, ct).ConfigureAwait(false);
+
+            // Look for the new record soon rather than at the (daily) cadence of a verified domain. The row is read again so a check that finished meanwhile is not overwritten.
+            DomainRecord fresh = await Config.GetDomainAsync(domain.Id, ct).ConfigureAwait(false) ?? throw ApiException.NotFound("Domain not found.");
+            DateTimeOffset soon = verification.Schedule.FirstCheckAt(now);
+            if (fresh.NextCheckAt is null || fresh.NextCheckAt > soon)
+            {
+                fresh = fresh with { NextCheckAt = soon };
+                await Config.UpsertDomainAsync(fresh, ct).ConfigureAwait(false);
+            }
+
+            return ApiResults.Ok(await ToResponseAsync(fresh, ct).ConfigureAwait(false));
+        }
+        finally
+        {
+            verification.Leave(domain.Id);
+        }
+    }
+
+    /// <summary>Cancels a rotation that has not switched yet: the new key is deleted (its selector stays used, names are never reused).</summary>
+    private async Task<IResult> CancelRotationAsync(HttpContext context, string id)
+    {
+        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.Domains).ConfigureAwait(false);
+        CancellationToken ct = context.RequestAborted;
+        DomainRecord domain = await FindOwnAsync(caller, id, ct).ConfigureAwait(false);
+        var pending = (await Config.GetDkimKeysAsync(domain.Id, ct).ConfigureAwait(false)).Where(k => !k.Active && k.RetiredAt is null).ToList();
+        if (pending.Count == 0)
+        {
+            throw ApiException.NotFound("No key rotation is pending.");
+        }
+
+        foreach (StoredDkimKey key in pending)
+        {
+            await Config.DeletePendingDkimKeyAsync(domain.Id, key.Id, ct).ConfigureAwait(false);
         }
 
         return ApiResults.Ok(await ToResponseAsync(domain, ct).ConfigureAwait(false));

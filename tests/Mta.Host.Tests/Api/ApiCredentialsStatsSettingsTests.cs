@@ -7,6 +7,7 @@ using Mta.Storage;
 
 namespace Mta.Host.Tests.Api;
 
+[Collection("api")]
 public class ApiCredentialsTests : IAsyncLifetime
 {
     private ApiFixture _f = null!;
@@ -158,6 +159,7 @@ public class ApiCredentialsTests : IAsyncLifetime
     }
 }
 
+[Collection("api")]
 public class ApiStatsTests : IAsyncLifetime
 {
     private ApiFixture _f = null!;
@@ -284,6 +286,7 @@ public class ApiStatsTests : IAsyncLifetime
     }
 }
 
+[Collection("api")]
 public class ApiTenantSettingsTests : IAsyncLifetime
 {
     private ApiFixture _f = null!;

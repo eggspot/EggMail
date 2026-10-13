@@ -65,6 +65,10 @@ JSON body 1 MiB (sending endpoints 40 MiB), message 25 MiB, 50 recipients, 50 at
 
 - The automated tests run in process (TestHost). `mta serve` was smoke-tested on Kestrel by hand (curl); a reverse proxy, TLS in front of the API and a browser were not exercised, and the dashboard's own Vitest suite runs against its mock, not against this API.
 - Per-record DNS results are remembered in memory only (see api.md).
+- Domain verification and DKIM rotation are serialized per domain inside one process only. With several replicas two of them can check the same domain at once (a failure may be counted twice, so a verified domain can reach `temporary_failure` after one real failure) and two rotations can race; a lease (as the ACME renewal uses) would fix it.
+- Statistics queries load the rows of the range (bounded by the range limits and the storage series cap) before the row cap and the `domain` filter apply.
+- Behind a reverse proxy set `ASPNETCORE_FORWARDEDHEADERS_ENABLED=true` (the built-in switch of the ASP.NET Core host) so client addresses are seen; there is no EggMail setting for it.
+- A domain name can be registered by one tenant only, first come first served, with no proof of ownership beyond the DNS records the owner must publish; there is no admin transfer.
 - Global settings are stored but the runtime does not apply them at startup yet (it reads deployment configuration only); `mta admin create` is not written (`DashboardAccounts` is what it will call).
 - `tags` are validated but not stored. `recipient_suppressed` is reserved.
 - No audit log of administrative actions, no per-tenant request rate limit (only the failed-login throttle, the verify limit and the send byte budget), no API for creating dashboard users (use `DashboardAccounts`).

@@ -127,7 +127,12 @@ public sealed class AcmeRenewalService
         ArgumentNullException.ThrowIfNull(domains);
         var wanted = domains.Select(d => d.Trim().ToLowerInvariant()).Distinct().OrderBy(d => d, StringComparer.Ordinal).ToList();
         var configured = _options.Domains.Select(d => d.ToLowerInvariant()).OrderBy(d => d, StringComparer.Ordinal).ToList();
-        string name = wanted.SequenceEqual(configured) ? _options.CertificateName : "acme:" + wanted[0];
+        // One name per set of names: a different set must never replace the row of another. The first name is for people, the hash tells sets apart.
+        string name = wanted.SequenceEqual(configured)
+            ? _options.CertificateName
+            : wanted.Count == 1
+                ? "acme:" + wanted[0]
+                : "acme:" + wanted[0] + "+" + Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(string.Join('\n', wanted))))[..8];
         return await RenewAsync(name, wanted, force: true, ct).ConfigureAwait(false);
     }
 

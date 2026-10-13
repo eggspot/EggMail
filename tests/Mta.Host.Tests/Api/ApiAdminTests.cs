@@ -11,6 +11,7 @@ using Mta.Storage;
 
 namespace Mta.Host.Tests.Api;
 
+[Collection("api")]
 public class ApiAdminTests : IAsyncLifetime
 {
     private ApiFixture _f = null!;
@@ -475,6 +476,7 @@ public class ApiAdminTests : IAsyncLifetime
 }
 
 /// <summary>ACME requests through the real requester and renewal service, with a fake certificate authority.</summary>
+[Collection("api")]
 public class ApiAcmeTests : IAsyncLifetime
 {
     private sealed class FakeAuthority(TestClock clock) : IAcmeOrderRunner
@@ -550,13 +552,13 @@ public class ApiAcmeTests : IAsyncLifetime
         Reply list = await _admin.GetAsync("/api/v1/admin/certificates");
         JsonElement cert = Assert.Single(list.Json.EnumerateArray());
         Assert.Equal("acme", cert.GetProperty("source").GetString());
-        Assert.Equal("acme:shop.example.com", cert.GetProperty("name").GetString());
+        Assert.StartsWith("acme:shop.example.com+", cert.GetProperty("name").GetString()); // several names: a short hash of the set follows
         Assert.Equal(["shop.example.com", "www.shop.example.com"], cert.GetProperty("san").EnumerateArray().Select(s => s.GetString()!));
         Assert.True(cert.GetProperty("active").GetBoolean());
 
         Reply renewals = await _admin.GetAsync("/api/v1/admin/certificates/acme");
         Assert.Equal("issued", renewals.Json[0].GetProperty("status").GetString());
-        Assert.Equal("acme:shop.example.com", renewals.Json[0].GetProperty("certificateName").GetString());
+        Assert.StartsWith("acme:shop.example.com+", renewals.Json[0].GetProperty("certificateName").GetString());
     }
 
     [Fact]
@@ -587,6 +589,19 @@ public class ApiAcmeTests : IAsyncLifetime
         Assert.Equal(4, _authority.Orders.Count);
         Assert.Equal(["mx.egg.test", "shop.example.com"], _authority.Orders.Skip(2).Select(o => o.Domains[0]).Order(StringComparer.Ordinal));
         Assert.Equal(2, (await _f.Storage.Config.GetCertificatesAsync(default)).Count(c => c.Active));
+    }
+
+    [Fact]
+    public async Task Different_sets_of_names_never_replace_each_other()
+    {
+        var requester = (AcmeCertificateRequester)_f.Get<IAcmeCertificateRequester>();
+        await _admin.PostAsync("/api/v1/admin/certificates/acme", new { domains = new[] { "a.example.com", "b.example.com" } });
+        await requester.Current;
+        await _admin.PostAsync("/api/v1/admin/certificates/acme", new { domains = new[] { "a.example.com", "c.example.com" } });
+        await requester.Current;
+        var certs = await _f.Storage.Config.GetCertificatesAsync(default);
+        Assert.Equal(2, certs.Count(c => c.Active));
+        Assert.Equal(2, certs.Select(c => c.Name).Distinct().Count());
     }
 
     [Fact]

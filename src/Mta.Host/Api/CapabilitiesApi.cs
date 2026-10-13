@@ -129,6 +129,11 @@ public sealed class CapabilitiesService
             }
 
             HealthReport report = await _health.CheckAsync(ct).ConfigureAwait(false);
+            // A contributor that threw is reported with the exception text; unauthenticated callers must not see it (host names, paths, user names).
+            report = report with
+            {
+                Warnings = report.Warnings.Select(w => w.Code.EndsWith("_check_failed", StringComparison.Ordinal) ? new HealthWarning(w.Code, "A health check failed; see the server log.") : w).ToList(),
+            };
             _cached = (_clock.Timestamp, report);
             return report;
         }

@@ -8,6 +8,7 @@ using Mta.Storage;
 
 namespace Mta.Host.Tests.Api;
 
+[Collection("api")]
 public class ApiMessagesTests : IAsyncLifetime
 {
     private ApiFixture _f = null!;

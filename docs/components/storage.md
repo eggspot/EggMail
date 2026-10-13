@@ -113,7 +113,8 @@ All additive; the shared conformance suites cover them on both backends.
 - **Idempotency fingerprint:** `AcceptedMessage.IdempotencyFingerprint` is stored with the key in `api_idempotency_key.fingerprint` (new nullable column) and returned by `IntakeResult.IdempotencyFingerprint` on a duplicate, so the API can answer `409 idempotency_conflict` when the same key arrives with a different body. A provider that does not store it returns null and the API then treats a duplicate as a safe retry.
 - `IWebhookOutbox.EnqueueForEndpointAsync(tenantId, endpointId, draft, now)` queues one event for one enabled endpoint regardless of its subscriptions (the "send test event" action). It is a **default interface member that throws `NotSupportedException`**, so a provider written before it compiles unchanged; the API answers 503 `not_ready` until the provider overrides it.
 - `IMessageRecipientLookup` (optional interface on `IHistoryStore`): recipients of several messages in one call, so message lists can show them without loading content. Providers without it show lists without recipients.
-- SQLite `SchemaVersion` stays 1 (nothing is released yet): a `config.db` or `queue.db` created before these additions lacks the new tables and column and must be recreated.
+- `IConfigStore.DeletePendingDkimKeyAsync(domainId, keyId)` (cancels a DKIM rotation: only a key that never signed can be deleted).
+- Schema upgrades: SQLite `SchemaVersion` is 2 and a version 1 file is upgraded in place (`config.db` gets the two tables, `queue.db` the `fingerprint` column; tested by taking a current file back to version 1); PostgreSQL has migration `V002__dashboard_users_idempotency_fingerprint.sql`. The PostgreSQL provider implements `EnqueueForEndpointAsync`, `IMessageRecipientLookup` and the fingerprint.
 
 ## PostgreSQL backend (`Mta.Storage.Postgres`)
 

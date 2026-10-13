@@ -378,7 +378,11 @@ internal sealed class ApiClient(HttpClient http)
         if (body is not null)
         {
             request.Content = new StringContent(body, Encoding.UTF8);
-            request.Content.Headers.ContentType = contentType is null ? null : new MediaTypeHeaderValue(contentType);
+            request.Content.Headers.ContentType = null;
+            if (contentType is not null)
+            {
+                request.Content.Headers.TryAddWithoutValidation("Content-Type", contentType);
+            }
         }
 
         if (Bearer is not null)

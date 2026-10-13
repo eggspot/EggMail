@@ -204,6 +204,9 @@ public interface IConfigStore
     ValueTask AddDkimKeyAsync(DkimKeyRecord key, CancellationToken ct);
     ValueTask SetActiveDkimKeyAsync(Guid domainId, Guid keyId, DateTimeOffset at, CancellationToken ct);
 
+    /// <summary>Deletes a key that never signed (not active, never retired: a rotation that was cancelled). False for any other key or an unknown id.</summary>
+    ValueTask<bool> DeletePendingDkimKeyAsync(Guid domainId, Guid keyId, CancellationToken ct);
+
     // Suppressions
     ValueTask<bool> IsSuppressedAsync(Guid tenantId, string address, CancellationToken ct);
     ValueTask AddSuppressionAsync(SuppressionRecord suppression, CancellationToken ct);

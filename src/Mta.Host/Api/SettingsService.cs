@@ -21,7 +21,7 @@ public sealed record SettingDefinition(
     string Description,
     IReadOnlyList<string>? Options = null,
     long Min = 0,
-    long Max = long.MaxValue,
+    long Max = int.MaxValue,
     string? ConfigKey = null,
     bool DeploymentOnly = false,
     bool AdminOnly = false,
@@ -333,7 +333,7 @@ public sealed class SettingsService
             case SettingKind.Number:
                 if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt64(out long n) || n < d.Min || n > d.Max)
                 {
-                    problem = d.Max == long.MaxValue ? $"Enter a whole number, {d.Min} or greater." : $"Enter a whole number from {d.Min} to {d.Max}.";
+                    problem = d.Max == int.MaxValue ? $"Enter a whole number, {d.Min} or greater." : $"Enter a whole number from {d.Min} to {d.Max}.";
                 }
 
                 break;

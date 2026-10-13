@@ -8,6 +8,7 @@ using Mta.Webhooks;
 
 namespace Mta.Host.Tests.Api;
 
+[Collection("api")]
 public class ApiSuppressionsTests : IAsyncLifetime
 {
     private ApiFixture _f = null!;
@@ -124,6 +125,7 @@ public class ApiSuppressionsTests : IAsyncLifetime
     }
 }
 
+[Collection("api")]
 public class ApiWebhooksTests : IAsyncLifetime
 {
     private ApiFixture _f = null!;

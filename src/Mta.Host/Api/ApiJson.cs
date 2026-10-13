@@ -106,8 +106,8 @@ public static class ApiJson
             throw ApiException.Validation("$", "A JSON object body is required.");
         }
 
-        string? contentType = request.ContentType;
-        if (contentType is null || !(contentType.StartsWith("application/json", StringComparison.OrdinalIgnoreCase) || contentType.Contains("+json", StringComparison.OrdinalIgnoreCase)))
+        if (!System.Net.Http.Headers.MediaTypeHeaderValue.TryParse(request.ContentType, out var mediaType) || mediaType.MediaType is not { } type
+            || !(type.Equals("application/json", StringComparison.OrdinalIgnoreCase) || type.EndsWith("+json", StringComparison.OrdinalIgnoreCase)))
         {
             throw new ApiException(StatusCodes.Status415UnsupportedMediaType, ApiCodes.UnsupportedMediaType, "The request body must be application/json.");
         }

@@ -373,6 +373,14 @@ internal sealed class InMemoryConfigStore : IConfigStore
         return default;
     }
 
+    public ValueTask<bool> DeletePendingDkimKeyAsync(Guid domainId, Guid keyId, CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            return R(_dkim.TryGetValue(keyId, out var k) && k.DomainId == domainId && !k.Active && k.RetiredAt is null && _dkim.Remove(keyId));
+        }
+    }
+
     public ValueTask SetActiveDkimKeyAsync(Guid domainId, Guid keyId, DateTimeOffset at, CancellationToken ct)
     {
         lock (_gate)

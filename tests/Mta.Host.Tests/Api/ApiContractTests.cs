@@ -17,6 +17,7 @@ namespace Mta.Host.Tests.Api;
 /// calls (<c>dashboard/src/api/endpoints.ts</c>) with realistic data and check each response against the TypeScript type the SPA expects, and check that
 /// every request member the SPA sends is one the API accepts.
 /// </summary>
+[Collection("api")]
 public class ApiContractTests : IAsyncLifetime
 {
     private sealed class DashboardEngine : IStorageSwitchService

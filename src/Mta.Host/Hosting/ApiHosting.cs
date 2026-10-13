@@ -58,6 +58,10 @@ public static class ApiHosting
                 log.Write(MtaLogLevel.Information, "startup", $"Created the first dashboard administrator '{config.Dashboard.BootstrapAdminUser}'.");
             }
         }
+        catch (StorageConflictException)
+        {
+            // Another replica created the administrator at the same moment.
+        }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
         {
             log.Write(MtaLogLevel.Error, "startup", "The bootstrap administrator could not be created (Dashboard:BootstrapAdminPasswordFile): " + ex.Message);

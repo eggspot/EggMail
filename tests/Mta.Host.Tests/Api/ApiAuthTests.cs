@@ -4,6 +4,7 @@ using Mta.Storage;
 
 namespace Mta.Host.Tests.Api;
 
+[Collection("api")]
 public class ApiAuthTests : IAsyncLifetime
 {
     private ApiFixture _f = null!;
@@ -199,21 +200,28 @@ public class ApiAuthTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task A_successful_login_clears_the_failure_count()
+    public async Task A_successful_login_clears_the_failure_count_of_that_user()
     {
         ApiClient c = _f.NewClient();
+        c.RemoteIp = "198.51.100.20";
         for (int i = 0; i < 4; i++)
         {
             await c.PostAsync("/api/v1/session", new { user = "alice", password = "bad" });
         }
 
         Assert.Equal(HttpStatusCode.OK, (await c.SignInAsync("alice", ApiFixture.Password)).Status);
+
+        // The user's count was cleared; other addresses start from zero for alice.
         for (int i = 0; i < 4; i++)
         {
-            await c.PostAsync("/api/v1/session", new { user = "alice", password = "bad" });
+            ApiClient other = _f.NewClient();
+            other.RemoteIp = "198.51.100." + (30 + i);
+            await other.PostAsync("/api/v1/session", new { user = "alice", password = "bad" });
         }
 
-        Assert.Equal(HttpStatusCode.OK, (await _f.NewClient().PostAsync("/api/v1/session", new { user = "alice", password = ApiFixture.Password })).Status);
+        ApiClient fresh = _f.NewClient();
+        fresh.RemoteIp = "198.51.100.40";
+        Assert.Equal(HttpStatusCode.OK, (await fresh.PostAsync("/api/v1/session", new { user = "alice", password = ApiFixture.Password })).Status);
     }
 
     [Fact]

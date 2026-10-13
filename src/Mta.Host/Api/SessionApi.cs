@@ -54,7 +54,7 @@ public sealed class SessionApi(SessionService sessions, ApiAuthenticator auth, A
     {
         // Signing out is idempotent: no session (or an expired one) is still a success, but a live session needs its CSRF token.
         byte[]? hash = null;
-        if (context.Request.Cookies.ContainsKey(options.SessionCookieName) && string.IsNullOrEmpty(context.Request.Headers.Authorization.ToString()))
+        if (context.Request.Cookies.TryGetValue(options.SessionCookieName, out string? cookie) && !string.IsNullOrEmpty(cookie) && string.IsNullOrEmpty(context.Request.Headers.Authorization.ToString()))
         {
             try
             {
@@ -62,7 +62,11 @@ public sealed class SessionApi(SessionService sessions, ApiAuthenticator auth, A
             }
             catch (ApiException ex) when (ex.Status == StatusCodes.Status401Unauthorized)
             {
-                hash = null;
+                hash = null; // no live session: nothing to end
+            }
+            catch (ApiException ex) when (ex.Code == ApiCodes.TenantDisabled)
+            {
+                hash = SessionService.HashSecret(cookie); // the CSRF check passed before the tenant was looked at: a suspended tenant's user can still sign out
             }
         }
 

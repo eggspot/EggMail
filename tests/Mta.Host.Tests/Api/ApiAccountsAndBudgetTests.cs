@@ -6,6 +6,7 @@ using Mta.Storage;
 
 namespace Mta.Host.Tests.Api;
 
+[Collection("api")]
 public class ApiAccountsTests : IAsyncLifetime
 {
     private ApiFixture _f = null!;
@@ -73,6 +74,7 @@ public class ApiAccountsTests : IAsyncLifetime
     }
 }
 
+[Collection("api")]
 public class ApiHostingTests : IAsyncLifetime
 {
     private ApiFixture _f = null!;
@@ -146,6 +148,7 @@ public class ApiHostingTests : IAsyncLifetime
     }
 }
 
+[Collection("api")]
 public class SendBudgetTests
 {
     private static DefaultHttpContext Request(long length) => new() { Request = { ContentLength = length } };

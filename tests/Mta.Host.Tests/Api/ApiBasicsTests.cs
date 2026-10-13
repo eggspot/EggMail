@@ -8,6 +8,7 @@ using Mta.Storage;
 namespace Mta.Host.Tests.Api;
 
 /// <summary>Error shapes, request limits, capabilities and the operational endpoints.</summary>
+[Collection("api")]
 public class ApiBasicsTests : IAsyncLifetime
 {
     private ApiFixture _f = null!;

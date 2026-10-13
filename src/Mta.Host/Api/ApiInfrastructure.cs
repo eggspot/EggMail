@@ -54,6 +54,9 @@ public sealed record ListResponse<T>(IReadOnlyList<T> Items, [property: System.T
 /// </summary>
 public sealed class ApiEndpointFilter(ILogger<ApiEndpointFilter> logger) : IEndpointFilter
 {
+    /// <summary>The request path for log lines: the decoded path may carry CR/LF, which would forge log entries in plain-text sinks.</summary>
+    private static string SafePath(HttpContext context) => string.Concat((context.Request.Path.Value ?? "").Select(c => char.IsControl(c) ? '?' : c));
+
     public async ValueTask<object?> InvokeAsync(EndpointFilterInvocationContext invocation, EndpointFilterDelegate next)
     {
         HttpContext context = invocation.HttpContext;
@@ -72,13 +75,25 @@ public sealed class ApiEndpointFilter(ILogger<ApiEndpointFilter> logger) : IEndp
         {
             return new ProblemResult(ApiException.Conflict("The change conflicts with existing data."));
         }
+        catch (StorageUnavailableException ex)
+        {
+            logger.LogWarning("Storage unavailable in {Method} {Path} ({RequestId}): {Message}", context.Request.Method, SafePath(context), RequestIds.Of(context), ex.Message);
+            return new ProblemResult(ApiException.NotReady("The storage backend is not available."));
+        }
+        catch (BadHttpRequestException ex)
+        {
+            // An aborted or malformed request body or header block: the client's problem, not a server error.
+            return new ProblemResult(ex.StatusCode == StatusCodes.Status413PayloadTooLarge
+                ? new ApiException(StatusCodes.Status413PayloadTooLarge, ApiCodes.PayloadTooLarge, "The request body is too large.")
+                : ApiException.Validation("$", "The request could not be read."));
+        }
         catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
         {
             return Results.Empty;
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Unhandled error in {Method} {Path} ({RequestId})", context.Request.Method, context.Request.Path.Value, RequestIds.Of(context));
+            logger.LogError(ex, "Unhandled error in {Method} {Path} ({RequestId})", context.Request.Method, SafePath(context), RequestIds.Of(context));
             return new ProblemResult(new ApiException(StatusCodes.Status500InternalServerError, ApiCodes.ServerError, "An internal error occurred. Quote the request_id when reporting it."));
         }
     }
@@ -134,9 +149,10 @@ public sealed class QueryReader(HttpRequest request, ValidationErrors errors)
             return null;
         }
 
-        if (!DateTimeOffset.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out DateTimeOffset value))
+        if (!DateTimeOffset.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out DateTimeOffset value)
+            || value.Year is < 2000 or > 2100)
         {
-            errors.Add(name, "Not a valid ISO 8601 timestamp.");
+            errors.Add(name, "Not a valid ISO 8601 timestamp between the years 2000 and 2100.");
             return null;
         }
 

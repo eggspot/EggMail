@@ -310,6 +310,30 @@ public abstract class ConfigConformance : StorageTestBase
     }
 
     [Fact]
+    public async Task Only_a_pending_dkim_key_can_be_deleted()
+    {
+        var d = NewDomain("cancel.example");
+        await C.UpsertDomainAsync(d, Ct);
+        DkimKeyRecord K(string selector, bool active) => new(Ids.New(), d.Id, selector, [1], "P", Clock.UtcNow, active, null);
+        var signing = K("s1", true);
+        var pending = K("s2", false);
+        await C.AddDkimKeyAsync(signing, Ct);
+        await C.AddDkimKeyAsync(pending, Ct);
+
+        Assert.False(await C.DeletePendingDkimKeyAsync(d.Id, signing.Id, Ct), "the signing key stays");
+        Assert.False(await C.DeletePendingDkimKeyAsync(Ids.New(), pending.Id, Ct), "wrong domain");
+        Assert.True(await C.DeletePendingDkimKeyAsync(d.Id, pending.Id, Ct));
+        Assert.False(await C.DeletePendingDkimKeyAsync(d.Id, pending.Id, Ct), "already gone");
+        Assert.Equal(["s1"], (await C.GetDkimKeysAsync(d.Id, Ct)).Select(k => k.Selector));
+
+        // A retired key (it signed once) is not "pending" either.
+        var next = K("s3", false);
+        await C.AddDkimKeyAsync(next, Ct);
+        await C.SetActiveDkimKeyAsync(d.Id, next.Id, Clock.UtcNow.AddHours(1), Ct);
+        Assert.False(await C.DeletePendingDkimKeyAsync(d.Id, signing.Id, Ct));
+    }
+
+    [Fact]
     public async Task Deleting_a_domain_removes_its_dkim_keys()
     {
         var d = NewDomain("gone.example");

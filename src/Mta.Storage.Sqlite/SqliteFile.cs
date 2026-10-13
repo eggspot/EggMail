@@ -16,8 +16,11 @@ internal enum SqliteFileKind
 /// <summary>One SQLite database file (queue.db, stats.db, config.db, history.db): its settings, connections, schema and integrity.</summary>
 internal sealed class SqliteFile
 {
-    /// <summary>Bumped when a schema change needs a migration step (stored in <c>PRAGMA user_version</c>).</summary>
-    public const int SchemaVersion = 1;
+    /// <summary>
+    /// Bumped when a schema change needs a migration step (stored in <c>PRAGMA user_version</c>). Version 2 added the dashboard user and
+    /// session tables (config.db) and <c>api_idempotency_key.fingerprint</c> (queue.db); <see cref="UpgradeFromV1"/> applies them to a version 1 file.
+    /// </summary>
+    public const int SchemaVersion = 2;
 
     private readonly SqliteOptions _options;
     private readonly Func<string> _createScript;
@@ -158,6 +161,12 @@ internal sealed class SqliteFile
             return;
         }
 
+        if (version == 1)
+        {
+            UpgradeFromV1(connection);
+            return;
+        }
+
         if (!IsEmptyDatabase(connection))
         {
             throw new InvalidOperationException($"{FileName} contains tables but no schema version; refusing to modify an unknown database.");
@@ -169,6 +178,51 @@ internal sealed class SqliteFile
         {
             cmd.Transaction = tx;
             cmd.CommandText = script;
+            cmd.ExecuteNonQuery();
+        }
+
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText = "PRAGMA user_version=" + SchemaVersion.ToString(CultureInfo.InvariantCulture);
+            cmd.ExecuteNonQuery();
+        }
+
+        tx.Commit();
+    }
+
+    /// <summary>Version 1 to 2: adds what the HTTP API introduced, taking the statements from the generated schema so they cannot drift from the model.</summary>
+    private void UpgradeFromV1(SqliteConnection connection)
+    {
+        string script = ApplyWithoutRowId(_createScript(), WithoutRowIdTables);
+        var statements = new List<string>();
+        if (Kind == SqliteFileKind.Config)
+        {
+            foreach (string table in new[] { "dashboard_user", "dashboard_session" })
+            {
+                statements.Add(Regex.Match(script, "CREATE TABLE \"" + table + "\" \\(.*?\\r?\\n\\);", RegexOptions.Singleline).Value);
+                foreach (Match index in Regex.Matches(script, "CREATE (?:UNIQUE )?INDEX \"[^\"]+\" ON \"" + table + "\" [^;]*;"))
+                {
+                    statements.Add(index.Value);
+                }
+            }
+        }
+        else if (Kind == SqliteFileKind.Queue)
+        {
+            statements.Add("ALTER TABLE \"api_idempotency_key\" ADD COLUMN \"fingerprint\" TEXT NULL;");
+        }
+
+        if (statements.Any(string.IsNullOrEmpty))
+        {
+            throw new InvalidOperationException($"Could not derive the version 2 upgrade of {FileName} from the generated schema script.");
+        }
+
+        using var tx = connection.BeginTransaction();
+        foreach (string statement in statements)
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = statement;
             cmd.ExecuteNonQuery();
         }
 

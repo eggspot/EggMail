@@ -131,6 +131,12 @@ public sealed partial class CredentialsApi(ApiAuthenticator auth, IStorage stora
     {
         ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.Keys).ConfigureAwait(false);
         CancellationToken ct = context.RequestAborted;
+        if (!caller.HasScope(ApiScopes.Send))
+        {
+            // An SMTP credential sends mail; a key may not hand out a capability it does not have itself.
+            throw ApiException.Forbidden("Creating SMTP credentials needs the 'send' scope as well as 'keys'.");
+        }
+
         CreateSmtpCredentialRequest body = await ApiJson.ReadBodyAsync<CreateSmtpCredentialRequest>(context, options.MaxBodyBytes).ConfigureAwait(false);
         string username = body.Username?.Trim() ?? "";
         if (!UsernamePattern().IsMatch(username))

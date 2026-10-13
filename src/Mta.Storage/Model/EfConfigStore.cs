@@ -273,6 +273,9 @@ public sealed class EfConfigStore<TContext>(IConfigDbAccess<TContext> db) : ICon
         }, ct).ConfigureAwait(false);
     }
 
+    public async ValueTask<bool> DeletePendingDkimKeyAsync(Guid domainId, Guid keyId, CancellationToken ct) =>
+        await Write(c => c.DkimKeys.Where(k => k.Id == keyId && k.DomainId == domainId && !k.Active && k.RetiredAt == null).ExecuteDelete() > 0, ct).ConfigureAwait(false);
+
     // Suppressions
 
     public async ValueTask<bool> IsSuppressedAsync(Guid tenantId, string address, CancellationToken ct)

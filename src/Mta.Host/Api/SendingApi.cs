@@ -162,6 +162,12 @@ public static class MessageComposer
             {
                 foreach (var (name, value) in headers)
                 {
+                    if (value is null)
+                    {
+                        errors.Add("headers", $"Header '{Printable(name)}' needs a text value.");
+                        continue;
+                    }
+
                     try
                     {
                         builder.AddHeader(name, value);
@@ -185,8 +191,14 @@ public static class MessageComposer
             {
                 for (int i = 0; i < attachments.Count; i++)
                 {
-                    AttachmentRequest a = attachments[i];
+                    AttachmentRequest? a = attachments[i];
                     string at = $"attachments[{i}]";
+                    if (a is null)
+                    {
+                        errors.Add(at, "An attachment object is required.");
+                        continue;
+                    }
+
                     if (string.IsNullOrWhiteSpace(a.Filename) || a.Filename.Length > 255)
                     {
                         errors.Add(at + ".filename", "A file name of 1 to 255 characters is required.");

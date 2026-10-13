@@ -350,11 +350,19 @@ public sealed partial class AdminApi(
                 try
                 {
                     chain.ImportFromPem(body.CertificatePem);
-                    if (chain.Count == 0)
-                    {
-                        throw ApiException.Validation("certificatePem", "No PEM certificate found.");
-                    }
+                }
+                catch (Exception ex) when (ex is CryptographicException or ArgumentException)
+                {
+                    throw ApiException.Validation("certificatePem", "The text is not a PEM certificate chain.");
+                }
 
+                if (chain.Count == 0)
+                {
+                    throw ApiException.Validation("certificatePem", "No PEM certificate found.");
+                }
+
+                try
+                {
                     leafWithKey = X509Certificate2.CreateFromPem(chain[0].ExportCertificatePem(), body.PrivateKeyPem);
                 }
                 catch (Exception ex) when (ex is CryptographicException or ArgumentException)
