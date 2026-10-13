@@ -11,7 +11,7 @@ using StoredDkimKey = Mta.Storage.DkimKeyRecord;
 
 namespace Mta.Host.Api;
 
-/// <summary>What the last check found for one record (kept in memory; the next scheduled check refreshes it).</summary>
+/// <summary>What the last check found for one record (persisted per record in the config store; the next check replaces it).</summary>
 public sealed record RecordCheckSnapshot(DomainRecordStatus Status, string? Found);
 
 /// <summary>The outcome of the last check of a domain: per record, keyed by <c>type|host</c>.</summary>
@@ -25,6 +25,9 @@ public sealed record DomainCheckSnapshot(DateTimeOffset CheckedAt, IReadOnlyDict
 /// and the same check for "Verify now". A check looks the planned records up in DNS (<see cref="DomainChecker"/>), applies the result to the
 /// state machine (<see cref="VerificationSchedule.Apply"/>: Pending, Verifying, Verified, TemporaryFailure, Failed, and pausing sending after the
 /// grace period), persists it, and switches signing to a rotated DKIM key once that key's record is published.
+/// <para>The per-record result of each check is persisted (<see cref="IRuntimeStateStore.ReplaceDomainRecordChecksAsync"/>), so after a restart or on another replica a
+/// domain shows what was really found. A check, and a DKIM rotation, run under a lease of the config store (<see cref="TryLockAsync"/>), so replicas never check or rotate the same
+/// domain at the same time.</para>
 /// <para>Only records of the key that signs are <i>required</i>; a rotation's new key, and a retired key during its 7-day grace, are checked as advice
 /// so publishing the next key late (or removing the old one) never degrades a verified domain.</para>
 /// </summary>
@@ -37,8 +40,11 @@ public sealed class DomainVerificationService : BackgroundService
     private readonly ApiOptions _options;
     private readonly IClock _clock;
     private readonly ILogger<DomainVerificationService> _logger;
-    private readonly ConcurrentDictionary<Guid, DomainCheckSnapshot> _snapshots = new();
     private readonly HashSet<Guid> _inFlight = [];
+    private readonly string _owner = "domain-verification-" + Guid.NewGuid().ToString("N");
+
+    /// <summary>How long a check or rotation holds its lease; a replica that dies mid-check frees the domain after this.</summary>
+    public static readonly TimeSpan LockDuration = TimeSpan.FromMinutes(2);
 
     public DomainVerificationService(
         IStorage storage,
@@ -94,13 +100,21 @@ public sealed class DomainVerificationService : BackgroundService
         int checkedCount = 0;
         await Parallel.ForEachAsync(due, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, _options.VerificationMaxParallel), CancellationToken = ct }, async (domain, token) =>
         {
-            if (!TryEnter(domain.Id))
-            {
-                return;
-            }
-
             try
             {
+                await using IAsyncDisposable? held = await TryLockAsync(domain.Id, token).ConfigureAwait(false);
+                if (held is null)
+                {
+                    return;   // being checked by this process or another replica
+                }
+
+                // The list was read before the lock: another replica may have checked the domain meanwhile (and moved its next check on).
+                DomainRecord? current = await Config.GetDomainAsync(domain.Id, token).ConfigureAwait(false);
+                if (current is null || current.NextCheckAt is not { } next || next > _clock.UtcNow)
+                {
+                    return;
+                }
+
                 if (await CheckAsync(domain.Id, token).ConfigureAwait(false) is not null)
                 {
                     Interlocked.Increment(ref checkedCount);
@@ -110,24 +124,44 @@ public sealed class DomainVerificationService : BackgroundService
             {
                 _logger.LogError(ex, "Verification of domain {Domain} failed", domain.Name);
             }
-            finally
-            {
-                Leave(domain.Id);
-            }
         }).ConfigureAwait(false);
         return checkedCount;
     }
 
-    /// <summary>Reserves the right to check a domain; false if a check of it is already running (concurrent "Verify now" clicks).</summary>
-    public bool TryEnter(Guid domainId)
+    /// <summary>
+    /// Reserves the right to check or rotate a domain, in this process (concurrent "Verify now" clicks) and across replicas (a lease of the config store, so two replicas never
+    /// check or rotate the same domain at once). Null when someone else holds it. Disposing the result releases both.
+    /// </summary>
+    public async ValueTask<IAsyncDisposable?> TryLockAsync(Guid domainId, CancellationToken ct)
     {
         lock (_inFlight)
         {
-            return _inFlight.Add(domainId);
+            if (!_inFlight.Add(domainId))
+            {
+                return null;
+            }
         }
+
+        try
+        {
+            if (await Config.TryAcquireLeaseAsync(LeaseName(domainId), _owner, LockDuration, _clock.UtcNow, ct).ConfigureAwait(false) is null)
+            {
+                Leave(domainId);
+                return null;
+            }
+        }
+        catch
+        {
+            Leave(domainId);
+            throw;
+        }
+
+        return new DomainLock(this, domainId);
     }
 
-    public void Leave(Guid domainId)
+    private static string LeaseName(Guid domainId) => "domain-verification:" + domainId.ToString("N");
+
+    private void Leave(Guid domainId)
     {
         lock (_inFlight)
         {
@@ -135,9 +169,53 @@ public sealed class DomainVerificationService : BackgroundService
         }
     }
 
-    public DomainCheckSnapshot? GetSnapshot(Guid domainId) => _snapshots.TryGetValue(domainId, out var s) ? s : null;
+    private sealed class DomainLock(DomainVerificationService owner, Guid domainId) : IAsyncDisposable
+    {
+        public async ValueTask DisposeAsync()
+        {
+            try
+            {
+                await owner.Config.ReleaseLeaseAsync(LeaseName(domainId), owner._owner, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                owner._logger.LogWarning(ex, "Could not release the lease of domain {DomainId}; it expires on its own", domainId);
+            }
+            finally
+            {
+                owner.Leave(domainId);
+            }
+        }
+    }
 
-    public void Forget(Guid domainId) => _snapshots.TryRemove(domainId, out _);
+    /// <summary>The per-record results of the last check of a domain, or null if it was never checked (or only before results were persisted).</summary>
+    public async ValueTask<DomainCheckSnapshot?> GetSnapshotAsync(Guid domainId, CancellationToken ct)
+    {
+        var rows = await Config.GetDomainRecordChecksAsync(domainId, ct).ConfigureAwait(false);
+        if (rows.Count == 0)
+        {
+            return null;
+        }
+
+        return new DomainCheckSnapshot(rows.Max(r => r.CheckedAt), rows.ToDictionary(r => r.RecordKey, r => new RecordCheckSnapshot(ParseStatus(r.Status), r.Found), StringComparer.Ordinal));
+    }
+
+    /// <summary>The status word of the API (and of the stored check result) for a record status.</summary>
+    public static string StatusWord(DomainRecordStatus status) => status switch
+    {
+        DomainRecordStatus.Ok => "ok",
+        DomainRecordStatus.Missing => "missing",
+        DomainRecordStatus.Invalid => "invalid",
+        _ => "pending",
+    };
+
+    private static DomainRecordStatus ParseStatus(string word) => word switch
+    {
+        "ok" => DomainRecordStatus.Ok,
+        "missing" => DomainRecordStatus.Missing,
+        "invalid" => DomainRecordStatus.Invalid,
+        _ => DomainRecordStatus.Pending,
+    };
 
     /// <summary>The DKIM keys that must currently be published: the signing key, a pending (rotated-in) key, and retired keys during their grace.</summary>
     public IReadOnlyList<StoredDkimKey> PublishedKeys(IReadOnlyList<StoredDkimKey> keys, DateTimeOffset now) =>
@@ -209,14 +287,7 @@ public sealed class DomainVerificationService : BackgroundService
             await ActivateRotatedKeyAsync(updated, keys, result, now, ct).ConfigureAwait(false);
         }
 
-        if (_snapshots.Count > 10_000)
-        {
-            _snapshots.Clear();
-        }
-
-        _snapshots[domainId] = new DomainCheckSnapshot(
-            now,
-            result.Records.ToDictionary(r => DomainCheckSnapshot.KeyOf(r.Expected.Type, r.Expected.Host), r => new RecordCheckSnapshot(r.Status, r.Found)));
+        await PersistRecordChecksAsync(domainId, result, now, ct).ConfigureAwait(false);
 
         if (updated.Status != fresh.Status)
         {
@@ -224,6 +295,27 @@ public sealed class DomainVerificationService : BackgroundService
         }
 
         return updated;
+    }
+
+    /// <summary>
+    /// Stores what the check found for each record. After a DNS outage a record the check could not look up keeps its previous result (an outage never changes the state),
+    /// so only a record that was really looked up replaces what was known.
+    /// </summary>
+    private async Task PersistRecordChecksAsync(Guid domainId, DomainCheckResult result, DateTimeOffset now, CancellationToken ct)
+    {
+        IReadOnlyDictionary<string, DomainRecordCheckRecord> previous = result.Result == VerificationCheckResult.DnsTemporaryFailure
+            ? (await Config.GetDomainRecordChecksAsync(domainId, ct).ConfigureAwait(false)).ToDictionary(r => r.RecordKey, StringComparer.Ordinal)
+            : new Dictionary<string, DomainRecordCheckRecord>();
+        var rows = new List<DomainRecordCheckRecord>(result.Records.Count);
+        foreach (DomainRecordCheck r in result.Records)
+        {
+            string key = DomainCheckSnapshot.KeyOf(r.Expected.Type, r.Expected.Host);
+            rows.Add(r.Status == DomainRecordStatus.Pending && previous.TryGetValue(key, out DomainRecordCheckRecord? known)
+                ? known
+                : new DomainRecordCheckRecord(domainId, key, StatusWord(r.Status), r.Found, now));
+        }
+
+        await Config.ReplaceDomainRecordChecksAsync(domainId, rows, ct).ConfigureAwait(false);
     }
 
     /// <summary>Switches signing to the newest rotated-in key whose DNS record was found (design section 8: publish N+1, verify, switch, keep N for 7 days).</summary>

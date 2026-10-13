@@ -135,7 +135,6 @@ public sealed class DomainsApi(ApiAuthenticator auth, IStorage storage, ISecretP
         DomainRecord domain = await FindOwnAsync(caller, id, context.RequestAborted).ConfigureAwait(false);
         await Config.DeleteDomainAsync(domain.Id, context.RequestAborted).ConfigureAwait(false);
         Mta.Host.Submission.DomainChangeSignal.Bump();
-        verification.Forget(domain.Id);
         return ApiResults.NoContent();
     }
 
@@ -149,20 +148,14 @@ public sealed class DomainsApi(ApiAuthenticator auth, IStorage storage, ISecretP
             throw ApiException.RateLimited("Verify now is limited to once per 30 seconds per domain.", retryAfter);
         }
 
-        if (!verification.TryEnter(domain.Id))
+        await using IAsyncDisposable? held = await verification.TryLockAsync(domain.Id, ct).ConfigureAwait(false);
+        if (held is null)
         {
             throw ApiException.RateLimited("A check of this domain is already running.", TimeSpan.FromSeconds(5));
         }
 
-        try
-        {
-            DomainRecord? updated = await verification.CheckAsync(domain.Id, ct).ConfigureAwait(false) ?? throw ApiException.NotFound("Domain not found.");
-            return ApiResults.Ok(await ToResponseAsync(updated, ct).ConfigureAwait(false));
-        }
-        finally
-        {
-            verification.Leave(domain.Id);
-        }
+        DomainRecord? updated = await verification.CheckAsync(domain.Id, ct).ConfigureAwait(false) ?? throw ApiException.NotFound("Domain not found.");
+        return ApiResults.Ok(await ToResponseAsync(updated, ct).ConfigureAwait(false));
     }
 
     private async Task<IResult> RotateAsync(HttpContext context, string id)
@@ -170,42 +163,36 @@ public sealed class DomainsApi(ApiAuthenticator auth, IStorage storage, ISecretP
         ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.Domains).ConfigureAwait(false);
         CancellationToken ct = context.RequestAborted;
         DomainRecord domain = await FindOwnAsync(caller, id, ct).ConfigureAwait(false);
-        // One rotation at a time per domain in this process (two requests would otherwise both pass the "nothing pending" check while a key is generated).
-        if (!verification.TryEnter(domain.Id))
+        // One check or rotation at a time per domain across all replicas (two requests would otherwise both pass the "nothing pending" check while a key is generated).
+        await using IAsyncDisposable? held = await verification.TryLockAsync(domain.Id, ct).ConfigureAwait(false);
+        if (held is null)
         {
             throw ApiException.Conflict("A check or rotation of this domain is running; retry in a moment.");
         }
 
-        try
+        var keys = await Config.GetDkimKeysAsync(domain.Id, ct).ConfigureAwait(false);
+        if (keys.Any(k => !k.Active && k.RetiredAt is null))
         {
-            var keys = await Config.GetDkimKeysAsync(domain.Id, ct).ConfigureAwait(false);
-            if (keys.Any(k => !k.Active && k.RetiredAt is null))
-            {
-                throw ApiException.Conflict("A key rotation is already in progress: publish the new DNS record (signing switches to the new key once it is found) or cancel it with DELETE.");
-            }
-
-            DateTimeOffset now = clock.UtcNow;
-            string selector = DomainVerificationService.NextSelector(keys, now);
-            // The new key does not sign until its record is published (the verification service switches); the current key keeps signing.
-            StoredDkimKey key = await DomainVerificationService.CreateKeyAsync(domain.Id, selector, protector, now, active: false).ConfigureAwait(false);
-            await Config.AddDkimKeyAsync(key, ct).ConfigureAwait(false);
-
-            // Look for the new record soon rather than at the (daily) cadence of a verified domain. The row is read again so a check that finished meanwhile is not overwritten.
-            DomainRecord fresh = await Config.GetDomainAsync(domain.Id, ct).ConfigureAwait(false) ?? throw ApiException.NotFound("Domain not found.");
-            DateTimeOffset soon = verification.Schedule.FirstCheckAt(now);
-            if (fresh.NextCheckAt is null || fresh.NextCheckAt > soon)
-            {
-                fresh = fresh with { NextCheckAt = soon };
-                await Config.UpsertDomainAsync(fresh, ct).ConfigureAwait(false);
-                Mta.Host.Submission.DomainChangeSignal.Bump();
-            }
-
-            return ApiResults.Ok(await ToResponseAsync(fresh, ct).ConfigureAwait(false));
+            throw ApiException.Conflict("A key rotation is already in progress: publish the new DNS record (signing switches to the new key once it is found) or cancel it with DELETE.");
         }
-        finally
+
+        DateTimeOffset now = clock.UtcNow;
+        string selector = DomainVerificationService.NextSelector(keys, now);
+        // The new key does not sign until its record is published (the verification service switches); the current key keeps signing.
+        StoredDkimKey key = await DomainVerificationService.CreateKeyAsync(domain.Id, selector, protector, now, active: false).ConfigureAwait(false);
+        await Config.AddDkimKeyAsync(key, ct).ConfigureAwait(false);
+
+        // Look for the new record soon rather than at the (daily) cadence of a verified domain. The row is read again so a check that finished meanwhile is not overwritten.
+        DomainRecord fresh = await Config.GetDomainAsync(domain.Id, ct).ConfigureAwait(false) ?? throw ApiException.NotFound("Domain not found.");
+        DateTimeOffset soon = verification.Schedule.FirstCheckAt(now);
+        if (fresh.NextCheckAt is null || fresh.NextCheckAt > soon)
         {
-            verification.Leave(domain.Id);
+            fresh = fresh with { NextCheckAt = soon };
+            await Config.UpsertDomainAsync(fresh, ct).ConfigureAwait(false);
+            Mta.Host.Submission.DomainChangeSignal.Bump();
         }
+
+        return ApiResults.Ok(await ToResponseAsync(fresh, ct).ConfigureAwait(false));
     }
 
     /// <summary>Cancels a rotation that has not switched yet: the new key is deleted (its selector stays used, names are never reused).</summary>
@@ -235,7 +222,7 @@ public sealed class DomainsApi(ApiAuthenticator auth, IStorage storage, ISecretP
         var keys = await Config.GetDkimKeysAsync(domain.Id, ct).ConfigureAwait(false);
         DateTimeOffset now = clock.UtcNow;
         var plan = verification.PlanRecords(domain, keys, now);
-        DomainCheckSnapshot? snapshot = verification.GetSnapshot(domain.Id);
+        DomainCheckSnapshot? snapshot = await verification.GetSnapshotAsync(domain.Id, ct).ConfigureAwait(false);
         var records = plan.Select(r => ToRecordResponse(domain, r, snapshot)).ToList();
 
         var ordered = keys.OrderBy(k => k.CreatedAt).ThenBy(k => k.Id).ToList();
@@ -256,18 +243,12 @@ public sealed class DomainsApi(ApiAuthenticator auth, IStorage storage, ISecretP
         string? found = null;
         if (snapshot is not null && snapshot.Records.TryGetValue(DomainCheckSnapshot.KeyOf(record.Type, record.Host), out RecordCheckSnapshot? seen))
         {
-            status = seen.Status switch
-            {
-                DomainRecordStatus.Ok => "ok",
-                DomainRecordStatus.Missing => "missing",
-                DomainRecordStatus.Invalid => "invalid",
-                _ => "pending",
-            };
+            status = DomainVerificationService.StatusWord(seen.Status);
             found = seen.Found;
         }
         else
         {
-            // Nothing is known about this record yet (restart, other replica, or not checked): a verified domain implies its required records.
+            // Nothing is known about this record yet (never checked, or last checked before check results were persisted): a verified domain implies its required records.
             status = record.Required && domain.Status == DomainStatus.Verified ? "ok" : "pending";
         }
 

@@ -9,7 +9,7 @@ using Mta.Storage;
 
 namespace Mta.Host.Api;
 
-public sealed record MessageSummaryResponse(Guid Id, DateTimeOffset ReceivedAt, string Subject, string From, IReadOnlyList<string> Recipients, int RecipientCount, string Status, long Size);
+public sealed record MessageSummaryResponse(Guid Id, DateTimeOffset ReceivedAt, string Subject, string From, IReadOnlyList<string> Recipients, int RecipientCount, string Status, long Size, IReadOnlyList<string> Tags);
 
 public sealed record AttachmentResponse(string Filename, [property: JsonPropertyName("content_type")] string? ContentType, long Size, [property: JsonPropertyName("content_id")] string? ContentId);
 
@@ -31,7 +31,8 @@ public sealed record MessageDetailResponse(
     string Status,
     long Size,
     MessageContentResponse Content,
-    bool RawRetained);
+    bool RawRetained,
+    IReadOnlyList<string> Tags);
 
 public sealed record TlsResponse(
     bool Used,
@@ -92,6 +93,7 @@ public sealed class MessagesApi(ApiAuthenticator auth, IStorage storage, Submiss
             Sender: q.String("sender", 320),
             SubjectContains: q.String("subject", 200),
             Status: q.String("status", 32),
+            Tag: q.String("tag", 64),
             From: q.Timestamp("from"),
             To: q.Timestamp("to"),
             Limit: q.Int("limit", 50, 1, 200),
@@ -115,7 +117,7 @@ public sealed class MessagesApi(ApiAuthenticator auth, IStorage storage, Submiss
         }
 
         var items = page.Items.Select(i => new MessageSummaryResponse(
-            i.MessageId, i.ReceivedAt, i.Subject ?? "", i.EnvelopeFrom, recipients.TryGetValue(i.MessageId, out var r) ? r : [], i.RecipientCount, i.Status ?? "queued", i.Size)).ToList();
+            i.MessageId, i.ReceivedAt, i.Subject ?? "", i.EnvelopeFrom, recipients.TryGetValue(i.MessageId, out var r) ? r : [], i.RecipientCount, i.Status ?? "queued", i.Size, i.Tags ?? [])).ToList();
         return ApiResults.Ok(new ListResponse<MessageSummaryResponse>(items, page.NextCursor));
     }
 
@@ -126,7 +128,7 @@ public sealed class MessagesApi(ApiAuthenticator auth, IStorage storage, Submiss
         MessageDetail detail = await storage.History.GetAsync(caller.TenantId, ParseMessageId(id), context.RequestAborted).ConfigureAwait(false) ?? throw NotFound();
         MessageSummary s = detail.Summary;
         return ApiResults.Ok(new MessageDetailResponse(
-            s.MessageId, s.TenantId, s.ReceivedAt, s.Subject ?? detail.Content?.Subject ?? "", s.EnvelopeFrom, detail.Recipients, s.RecipientCount, s.Status ?? "queued", s.Size, ContentOf(detail), detail.RawRetained));
+            s.MessageId, s.TenantId, s.ReceivedAt, s.Subject ?? detail.Content?.Subject ?? "", s.EnvelopeFrom, detail.Recipients, s.RecipientCount, s.Status ?? "queued", s.Size, ContentOf(detail), detail.RawRetained, s.Tags ?? []));
     }
 
     private static MessageContentResponse ContentOf(MessageDetail detail) => detail.ContentState switch
