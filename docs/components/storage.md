@@ -17,7 +17,7 @@ The model is four parts. On SQLite each part is its own context and its own file
 
 | Part (context, SQLite file) | Tables |
 |---|---|
-| config (`ConfigDbContext`, `config.db`) | `tenant`, `api_key`, `smtp_credential`, `domain`, `dkim_key`, `suppression`, `webhook_endpoint`, `setting`, `tls_policy`, `relay_route`, `certificate`, `acme_account`, `acme_renewal`, `lease`, `switch_state`, `data_protection_key` (`IDataProtectionKeyContext`) |
+| config (`ConfigDbContext`, `config.db`) | `tenant`, `api_key`, `smtp_credential`, `dashboard_user`, `dashboard_session`, `domain`, `dkim_key`, `suppression`, `webhook_endpoint`, `setting`, `tls_policy`, `relay_route`, `certificate`, `acme_account`, `acme_renewal`, `lease`, `switch_state`, `data_protection_key` (`IDataProtectionKeyContext`) |
 | queue (`QueueDbContext`, `queue.db`) | `delivery_queue` (one row per recipient), `message_spool` (verbatim raw message, freed with the last recipient), `webhook_outbox`, `api_idempotency_key` |
 | stats (`StatsDbContext`, `stats.db`) | `stat_aggregate` (hourly and daily rows in one table, `WITHOUT ROWID`), `stat_meta` (rollup watermark), `recent_event` (the bounded ring), `webhook_attempt` |
 | history (`HistoryDbContext`, `history.db`, only with `History:Mode=Full`) | `message_index`, `message_recipient`, `message_event` (`WITHOUT ROWID`, keyed with a leading `day`), `message_content`, `message_raw_retained` |
@@ -103,6 +103,18 @@ Idempotent, safe to call repeatedly. In order: flush statistics; metadata retent
 ## Contract additions (all documented in the PR)
 
 `StorageBackend.InMemory`; `QueueOptions.IdempotencyKeyLifetime` (24 h); `SqliteOptions` tuning knobs (`RetentionDeleteBatchSize`, `RetentionDeletePause`, `BusyTimeout`, `JournalSizeLimitBytes`, `StatsFlushInterval`); `StorageConflictException`; `StorageUnavailableException` (PostgreSQL only: the database cannot be reached, answer 451); `PostgresOptions` tuning knobs (`StatsFlushInterval`, `RetentionDeleteBatchSize`, `RetentionDeletePause`, `CommandTimeoutSeconds`); `IConfigDbAccess<T>.TranslateException` (default: none; lets a provider map connectivity failures for the shared config store); `DeliveryAttempt.CountAttempt` (uncounted holds); store-assigned `CertificateRecord.Version`; defined semantics for the settled gaps: `EventTypes` containing `*` subscribes to all, suppression addresses and slugs are lower-cased, settings with `TenantId == null` are global, `QueryAsync` is `[from, to)`.
+
+### Additions for the HTTP API ([api.md](../api.md), [components/api.md](api.md))
+
+All additive; the shared conformance suites cover them on both backends.
+
+- **Dashboard users and sessions** (`DashboardUser`, `DashboardSession`, `DashboardRole`; tables `dashboard_user`, `dashboard_session`; ten `IConfigStore` methods). User names are unique case-insensitively (stored lower-case). A session row stores only the SHA-256 digest of the cookie secret, the user, the CSRF token and created / last-seen / expires. `EfConfigStore` reaches the two tables with `Set<T>()`, so `IConfigDbSets` is unchanged and a provider that implements it needs no new `DbSet` property. `DeleteDashboardUserAsync` removes the user's sessions.
+- `IConfigStore.DeleteSmtpCredentialAsync(tenantId, id)` (tenant-checked).
+- **Idempotency fingerprint:** `AcceptedMessage.IdempotencyFingerprint` is stored with the key in `api_idempotency_key.fingerprint` (new nullable column) and returned by `IntakeResult.IdempotencyFingerprint` on a duplicate, so the API can answer `409 idempotency_conflict` when the same key arrives with a different body. A provider that does not store it returns null and the API then treats a duplicate as a safe retry.
+- `IWebhookOutbox.EnqueueForEndpointAsync(tenantId, endpointId, draft, now)` queues one event for one enabled endpoint regardless of its subscriptions (the "send test event" action). It is a **default interface member that throws `NotSupportedException`**, so a provider written before it compiles unchanged; the API answers 503 `not_ready` until the provider overrides it.
+- `IMessageRecipientLookup` (optional interface on `IHistoryStore`): recipients of several messages in one call, so message lists can show them without loading content. Providers without it show lists without recipients.
+- `IConfigStore.DeletePendingDkimKeyAsync(domainId, keyId)` (cancels a DKIM rotation: only a key that never signed can be deleted).
+- Schema upgrades: SQLite `SchemaVersion` is 2 and a version 1 file is upgraded in place (`config.db` gets the two tables, `queue.db` the `fingerprint` column; tested by taking a current file back to version 1); PostgreSQL has migration `V002__dashboard_users_idempotency_fingerprint.sql`. The PostgreSQL provider implements `EnqueueForEndpointAsync`, `IMessageRecipientLookup` and the fingerprint.
 
 ## PostgreSQL backend (`Mta.Storage.Postgres`)
 

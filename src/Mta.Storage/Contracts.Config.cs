@@ -66,6 +66,25 @@ public sealed record WebhookEndpointRecord(
     DateTimeOffset CreatedAt,
     DateTimeOffset? FailingSince);
 
+/// <summary>Role of a dashboard user (docs/api.md): admins see every tenant, tenant users exactly one.</summary>
+public enum DashboardRole : byte
+{
+    Tenant = 0,
+    Admin,
+}
+
+/// <summary>
+/// A person who signs in to the dashboard with a password (HTTP API session cookie). <see cref="TenantId"/> is required for
+/// <see cref="DashboardRole.Tenant"/> users and null for admins. User names are unique case-insensitively (stored lower-case).
+/// </summary>
+public sealed record DashboardUser(Guid Id, string UserName, string PasswordHash, DashboardRole Role, Guid? TenantId, bool Enabled, DateTimeOffset CreatedAt);
+
+/// <summary>
+/// A server-side dashboard session. The browser holds a random secret; only its SHA-256 digest (<see cref="IdHash"/>) is stored, so a
+/// leaked database cannot be used to take over sessions. <see cref="CsrfToken"/> is the synchronizer token for cookie-authenticated mutations.
+/// </summary>
+public sealed record DashboardSession(byte[] IdHash, Guid UserId, string CsrfToken, DateTimeOffset CreatedAt, DateTimeOffset LastSeenAt, DateTimeOffset ExpiresAt);
+
 public sealed record SettingRecord(string Key, Guid? TenantId, string ValueJson, DateTimeOffset UpdatedAt);
 
 public enum TlsLevel : byte
@@ -143,6 +162,36 @@ public interface IConfigStore
     ValueTask UpsertSmtpCredentialAsync(SmtpCredential credential, CancellationToken ct);
     ValueTask<IReadOnlyList<SmtpCredential>> GetSmtpCredentialsAsync(Guid tenantId, CancellationToken ct);
 
+    /// <summary>Deletes a credential of <paramref name="tenantId"/>; false when there is none with that id for that tenant.</summary>
+    ValueTask<bool> DeleteSmtpCredentialAsync(Guid tenantId, Guid credentialId, CancellationToken ct);
+
+    // Dashboard users and sessions (HTTP API sign-in)
+    ValueTask<IReadOnlyList<DashboardUser>> GetDashboardUsersAsync(CancellationToken ct);
+    ValueTask<DashboardUser?> GetDashboardUserAsync(Guid id, CancellationToken ct);
+
+    /// <summary>Finds a user by user name (case-insensitive).</summary>
+    ValueTask<DashboardUser?> FindDashboardUserAsync(string userName, CancellationToken ct);
+
+    /// <summary>Inserts or replaces a user. A user name already used by another user raises <see cref="StorageConflictException"/>.</summary>
+    ValueTask UpsertDashboardUserAsync(DashboardUser user, CancellationToken ct);
+
+    /// <summary>Deletes a user and all their sessions.</summary>
+    ValueTask<bool> DeleteDashboardUserAsync(Guid id, CancellationToken ct);
+
+    ValueTask AddDashboardSessionAsync(DashboardSession session, CancellationToken ct);
+    ValueTask<DashboardSession?> FindDashboardSessionAsync(byte[] idHash, CancellationToken ct);
+
+    /// <summary>Records activity (<see cref="DashboardSession.LastSeenAt"/>).</summary>
+    ValueTask TouchDashboardSessionAsync(byte[] idHash, DateTimeOffset lastSeenAt, CancellationToken ct);
+
+    ValueTask<bool> DeleteDashboardSessionAsync(byte[] idHash, CancellationToken ct);
+
+    /// <summary>Signs a user out everywhere (password change, user disabled).</summary>
+    ValueTask<int> DeleteDashboardSessionsOfUserAsync(Guid userId, CancellationToken ct);
+
+    /// <summary>Removes sessions whose <see cref="DashboardSession.ExpiresAt"/> is not after <paramref name="now"/>.</summary>
+    ValueTask<int> DeleteExpiredDashboardSessionsAsync(DateTimeOffset now, CancellationToken ct);
+
     // Domains and DKIM
     ValueTask<IReadOnlyList<DomainRecord>> GetDomainsAsync(Guid? tenantId, CancellationToken ct);
     ValueTask<DomainRecord?> GetDomainAsync(Guid domainId, CancellationToken ct);
@@ -154,6 +203,9 @@ public interface IConfigStore
     ValueTask<IReadOnlyList<DkimKeyRecord>> GetDkimKeysAsync(Guid domainId, CancellationToken ct);
     ValueTask AddDkimKeyAsync(DkimKeyRecord key, CancellationToken ct);
     ValueTask SetActiveDkimKeyAsync(Guid domainId, Guid keyId, DateTimeOffset at, CancellationToken ct);
+
+    /// <summary>Deletes a key that never signed (not active, never retired: a rotation that was cancelled). False for any other key or an unknown id.</summary>
+    ValueTask<bool> DeletePendingDkimKeyAsync(Guid domainId, Guid keyId, CancellationToken ct);
 
     // Suppressions
     ValueTask<bool> IsSuppressedAsync(Guid tenantId, string address, CancellationToken ct);

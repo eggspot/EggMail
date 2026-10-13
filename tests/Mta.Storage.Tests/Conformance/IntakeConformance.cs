@@ -114,6 +114,59 @@ public abstract class IntakeConformance : StorageTestBase
     }
 
     [Fact]
+    public async Task Idempotency_duplicate_reports_the_fingerprint_stored_with_the_original_request()
+    {
+        AcceptedMessage first = WithFingerprint(Msg(idempotencyKey: "fp"), "sha256:aaa");
+        Assert.Equal(IntakeStatus.Accepted, (await Storage.Intake.AcceptAsync(first, CancellationToken.None)).Status);
+
+        IntakeResult same = await Storage.Intake.AcceptAsync(WithFingerprint(Msg(idempotencyKey: "fp"), "sha256:aaa"), CancellationToken.None);
+        Assert.Equal(IntakeStatus.DuplicateIdempotencyKey, same.Status);
+        Assert.Equal("sha256:aaa", same.IdempotencyFingerprint);
+
+        // Key reuse with another body: still a duplicate that creates nothing, and the caller sees the original fingerprint to compare.
+        IntakeResult other = await Storage.Intake.AcceptAsync(WithFingerprint(Msg(idempotencyKey: "fp"), "sha256:bbb"), CancellationToken.None);
+        Assert.Equal(IntakeStatus.DuplicateIdempotencyKey, other.Status);
+        Assert.Equal(first.MessageId, other.MessageId);
+        Assert.Equal("sha256:aaa", other.IdempotencyFingerprint);
+        Assert.Single(await ClaimAsync());
+    }
+
+    [Fact]
+    public async Task Idempotency_duplicate_without_a_stored_fingerprint_reports_null()
+    {
+        await AcceptAsync(Msg(idempotencyKey: "nofp"));
+        IntakeResult dup = await Storage.Intake.AcceptAsync(WithFingerprint(Msg(idempotencyKey: "nofp"), "sha256:ccc"), CancellationToken.None);
+        Assert.Equal(IntakeStatus.DuplicateIdempotencyKey, dup.Status);
+        Assert.Null(dup.IdempotencyFingerprint);
+    }
+
+    [Fact]
+    public async Task Idempotency_fingerprint_is_replaced_when_an_expired_key_is_reused()
+    {
+        await AcceptAsync(WithFingerprint(Msg(idempotencyKey: "old"), "sha256:old"));
+        Clock.Advance(TimeSpan.FromHours(25));
+        await AcceptAsync(WithFingerprint(Msg(idempotencyKey: "old"), "sha256:new"));
+        IntakeResult dup = await Storage.Intake.AcceptAsync(Msg(idempotencyKey: "old"), CancellationToken.None);
+        Assert.Equal("sha256:new", dup.IdempotencyFingerprint);
+    }
+
+    private static AcceptedMessage WithFingerprint(AcceptedMessage m, string fingerprint) => new()
+    {
+        MessageId = m.MessageId,
+        TenantId = m.TenantId,
+        Source = m.Source,
+        EnvelopeFrom = m.EnvelopeFrom,
+        Recipients = m.Recipients,
+        Raw = m.Raw,
+        ReceivedAt = m.ReceivedAt,
+        ExpiresAt = m.ExpiresAt,
+        IdempotencyKey = m.IdempotencyKey,
+        IdempotencyFingerprint = fingerprint,
+        Content = m.Content,
+        SendingDomain = m.SendingDomain,
+    };
+
+    [Fact]
     public async Task Idempotency_keys_are_unique_per_tenant()
     {
         Assert.Equal(IntakeStatus.Accepted, (await Storage.Intake.AcceptAsync(Msg(tenant: TenantA, idempotencyKey: "same"), CancellationToken.None)).Status);

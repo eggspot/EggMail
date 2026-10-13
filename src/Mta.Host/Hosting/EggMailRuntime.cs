@@ -132,7 +132,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
         var delivery = new DeliveryEngine(new DeliveryProcessor(services, deliveryOptions, new DsnService(storage, clock, deliveryOptions)), services, deliveryOptions);
         engine = delivery;
 
-        var webhooks = new WebhookDispatcher(storage.Webhooks, storage.Config, secrets, config.Webhooks, clock, log);
+        var webhooks = new WebhookDispatcher(storage.Webhooks, storage.Config, secrets, config.Webhooks, clock, log, new EndpointDisabledNotifier(storage, clock, log));
 
         TlsReportSender? reports = collector is null
             ? null
