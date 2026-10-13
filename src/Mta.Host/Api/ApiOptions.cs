@@ -27,6 +27,12 @@ public sealed class ApiOptions
     /// <summary>Most recipients (To, Cc and Bcc together) of one message; reported by capabilities.</summary>
     public int MaxRecipients { get; set; } = 50;
 
+    /// <summary>
+    /// Bytes of send-request bodies the server holds in memory at once (a message is copied several times while it is decoded, composed and queued). A request that
+    /// would exceed it is answered 429 with <c>Retry-After</c>. Default 512 MiB.
+    /// </summary>
+    public long MaxInFlightSendBytes { get; set; } = 512L * 1024 * 1024;
+
     public int MaxAttachments { get; set; } = 50;
     public int MaxCustomHeaders { get; set; } = 50;
     public int MaxTags { get; set; } = 10;

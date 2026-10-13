@@ -111,16 +111,18 @@ public sealed class DomainsApi(ApiAuthenticator auth, IStorage storage, ISecretP
             LastError: null);
         StoredDkimKey key = await DomainVerificationService.CreateKeyAsync(domain.Id, DomainVerificationService.NextSelector([], now), protector, now, active: true).ConfigureAwait(false);
 
+        // The key goes in first: a domain without a key would verify without DKIM if the process died in between. An orphan key is harmless.
+        await Config.AddDkimKeyAsync(key, ct).ConfigureAwait(false);
         try
         {
             await Config.UpsertDomainAsync(domain, ct).ConfigureAwait(false);
         }
         catch (StorageConflictException)
         {
+            await Config.DeleteDomainAsync(domain.Id, CancellationToken.None).ConfigureAwait(false); // removes the orphan key
             throw ApiException.Validation("name", "This domain is already registered.");
         }
 
-        await Config.AddDkimKeyAsync(key, ct).ConfigureAwait(false);
         return ApiResults.Created("/api/v1/domains/" + ApiJson.Id(domain.Id), await ToResponseAsync(domain, ct).ConfigureAwait(false));
     }
 

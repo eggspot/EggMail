@@ -224,12 +224,8 @@ internal sealed class ApiFixture : IAsyncDisposable
         return domain;
     }
 
-    public async Task<DashboardUser> AddUserAsync(string name, DashboardRole role, Guid? tenantId)
-    {
-        var user = new DashboardUser(Ids.New(Clock.UtcNow), name, PasswordHasher.Hash(Password, 1000), role, tenantId, true, Clock.UtcNow);
-        await Storage.Config.UpsertDashboardUserAsync(user, default).ConfigureAwait(false);
-        return user;
-    }
+    public async Task<DashboardUser> AddUserAsync(string name, DashboardRole role, Guid? tenantId) =>
+        await DashboardAccounts.CreateAsync(Storage.Config, Clock, name, Password, role, tenantId, default, hashIterations: 1000).ConfigureAwait(false);
 
     /// <summary>Creates an API key for the tenant and returns the token (shown once in real life).</summary>
     public async Task<string> AddKeyAsync(Guid tenantId, params string[] scopes)

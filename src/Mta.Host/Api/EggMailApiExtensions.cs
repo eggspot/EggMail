@@ -53,6 +53,7 @@ public static class EggMailApiExtensions
 
         services.TryAddSingleton<CapabilitiesApi>();
         services.TryAddSingleton<SessionApi>();
+        services.TryAddSingleton<SendBudget>();
         services.TryAddSingleton<SendingApi>();
         services.TryAddSingleton<MessagesApi>();
         services.TryAddSingleton<DomainsApi>();

@@ -186,8 +186,10 @@ public sealed class CapabilitiesApi(CapabilitiesService capabilities, ApiOptions
             return Task.FromResult(Results.NotFound());
         }
 
+        // A request that went through a proxy (forwarded headers still present: the host did not translate them) is never "inside the network".
         IPAddress? remote = context.Connection.RemoteIpAddress;
-        if (remote is null || !options.MetricsAllowedNetworks.Any(n => n.Contains(remote)))
+        if (remote is null || context.Request.Headers.ContainsKey("X-Forwarded-For") || context.Request.Headers.ContainsKey("Forwarded")
+            || !options.MetricsAllowedNetworks.Any(n => n.Contains(remote)))
         {
             return Task.FromResult(Results.StatusCode(StatusCodes.Status403Forbidden));
         }

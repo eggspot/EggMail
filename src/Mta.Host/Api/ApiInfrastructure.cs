@@ -59,6 +59,7 @@ public sealed class ApiEndpointFilter(ILogger<ApiEndpointFilter> logger) : IEndp
         HttpContext context = invocation.HttpContext;
         context.Response.Headers["X-Request-Id"] = RequestIds.Of(context);
         context.Response.Headers.CacheControl = "no-store";
+        context.Response.Headers.XContentTypeOptions = "nosniff";
         try
         {
             return await next(invocation).ConfigureAwait(false);

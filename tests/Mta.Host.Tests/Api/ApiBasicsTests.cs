@@ -222,6 +222,24 @@ public class ApiBasicsTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Metrics_are_refused_when_the_request_came_through_a_proxy()
+    {
+        ApiClient local = _f.NewClient();
+        local.RemoteIp = "127.0.0.1";
+        Assert.Equal(HttpStatusCode.Forbidden, (await local.GetAsync("/metrics", ("X-Forwarded-For", "203.0.113.50"))).Status);
+        Assert.Equal(HttpStatusCode.Forbidden, (await local.GetAsync("/metrics", ("Forwarded", "for=203.0.113.50"))).Status);
+    }
+
+    [Fact]
+    public async Task Api_responses_forbid_content_sniffing()
+    {
+        Reply ok = await _f.NewClient().GetAsync("/api/v1/capabilities");
+        Assert.Equal("nosniff", ok.Header("X-Content-Type-Options"));
+        Reply problem = await _f.NewClient().GetAsync("/api/v1/domains");
+        Assert.Equal("nosniff", problem.Header("X-Content-Type-Options"));
+    }
+
+    [Fact]
     public async Task Metrics_can_be_switched_off()
     {
         await using ApiFixture f = await ApiFixture.StartAsync(new ApiFixtureOptions { ConfigureApi = o => o.MetricsEnabled = false });

@@ -349,8 +349,36 @@ public static class SubmissionErrors
     }
 }
 
+/// <summary>Bounds the memory held by send requests in flight: each reserves its declared body size (or the maximum when it is not declared) for its duration.</summary>
+public sealed class SendBudget(ApiOptions options)
+{
+    private long _inFlight;
+
+    public long InFlightBytes => Interlocked.Read(ref _inFlight);
+
+    /// <summary>Reserves memory for a request, or throws 429. Dispose the lease when the request is done.</summary>
+    public Lease Reserve(HttpContext context)
+    {
+        long wanted = Math.Min(context.Request.ContentLength ?? options.MaxSendBodyBytes, options.MaxSendBodyBytes);
+        // A single request larger than the whole budget is still allowed on an idle server (the budget is configurable below the body limit).
+        long now = Interlocked.Add(ref _inFlight, wanted);
+        if (now > options.MaxInFlightSendBytes && now != wanted)
+        {
+            Interlocked.Add(ref _inFlight, -wanted);
+            throw ApiException.RateLimited("The server is busy accepting other messages. Retry shortly.", TimeSpan.FromSeconds(1));
+        }
+
+        return new Lease(this, wanted);
+    }
+
+    public readonly struct Lease(SendBudget budget, long bytes) : IDisposable
+    {
+        public void Dispose() => Interlocked.Add(ref budget._inFlight, -bytes);
+    }
+}
+
 /// <summary>The sending endpoints; both go through <see cref="SubmissionService"/>, the one path into the queue.</summary>
-public sealed class SendingApi(ApiAuthenticator auth, SubmissionService submission, ApiOptions options, IClock clock, StorageOptions storageOptions)
+public sealed class SendingApi(ApiAuthenticator auth, SubmissionService submission, ApiOptions options, IClock clock, StorageOptions storageOptions, SendBudget budget)
 {
     public void Map(RouteGroupBuilder api)
     {
@@ -362,6 +390,7 @@ public sealed class SendingApi(ApiAuthenticator auth, SubmissionService submissi
     {
         ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.Send).ConfigureAwait(false);
         string? key = IdempotencyKeyOf(context);
+        using SendBudget.Lease lease = budget.Reserve(context);
         (SendRequest body, string digest) = await ApiJson.ReadBodyWithDigestAsync<SendRequest>(context, options.MaxSendBodyBytes).ConfigureAwait(false);
         ComposedMessage composed = MessageComposer.Compose(body, options, clock);
         return await SubmitAsync(context, caller, composed, key, "messages\n" + digest, body.StoreAttachments).ConfigureAwait(false);
@@ -371,6 +400,7 @@ public sealed class SendingApi(ApiAuthenticator auth, SubmissionService submissi
     {
         ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.Send).ConfigureAwait(false);
         string? key = IdempotencyKeyOf(context);
+        using SendBudget.Lease lease = budget.Reserve(context);
         (SendRawRequest body, string digest) = await ApiJson.ReadBodyWithDigestAsync<SendRawRequest>(context, options.MaxSendBodyBytes).ConfigureAwait(false);
         var errors = new ValidationErrors();
         if (body.Raw is null || body.Raw.Length == 0)
