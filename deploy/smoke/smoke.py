@@ -38,7 +38,10 @@ class DnsStub:
     """A minimal authoritative-looking UDP/TCP DNS server over an in-memory table: TXT, MX and A records, NOERROR+empty for
     known names of other types, NXDOMAIN for unknown names."""
 
-    def __init__(self, port):
+    def __init__(self, port, bind="0.0.0.0"):
+        # Bind to the address the instance is told to use (--host-ip), not to 0.0.0.0: a UDP reply from a wildcard-bound socket on a host
+        # with several addresses leaves from the address of the outgoing interface (the Docker bridge), the resolver in the container then
+        # sees an answer from an address it did not ask and drops it.
         self.records = {}  # (name, type) -> list of rdata (bytes)
         self.names = set()
         self.queries = 0
@@ -46,8 +49,8 @@ class DnsStub:
         self._port = port
         self._udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._udp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._udp.bind(("0.0.0.0", port))
-        self._tcp = socketserver.ThreadingTCPServer(("0.0.0.0", port), self._tcp_handler(), bind_and_activate=False)
+        self._udp.bind((bind, port))
+        self._tcp = socketserver.ThreadingTCPServer((bind, port), self._tcp_handler(), bind_and_activate=False)
         self._tcp.allow_reuse_address = True
         self._tcp.daemon_threads = True
         self._tcp.server_bind()
@@ -278,7 +281,7 @@ def main():
     parser.add_argument("--stop-after", choices=["signin"], help="stop successfully after this step (a quick check that the bootstrap administrator works)")
     args = parser.parse_args()
 
-    dns = DnsStub(args.dns_port)
+    dns = DnsStub(args.dns_port, args.host_ip)
     dns.add_mx(RCPT_DOMAIN, 10, SINK_HOST)
     dns.add_a(SINK_HOST, args.host_ip)
     sink = SmtpSink(args.sink_port)
@@ -321,13 +324,17 @@ def main():
             fail("unexpected required CNAME (is Delivery:BounceDomain set?): %s" % record)
 
     def verified():
-        code, d, _ = api.call("POST", "/api/v1/domains/%s/verify" % domain["id"], expect=(200, 429))
+        try:
+            code, d, _ = api.call("POST", "/api/v1/domains/%s/verify" % domain["id"], expect=(200, 429))
+        except (socket.timeout, TimeoutError, urllib.error.URLError) as error:
+            print("   verify call did not finish (%s); the stub has answered %d queries so far" % (error, dns.queries), flush=True)
+            return None
         if code == 429:  # "Verify now" is limited to once per 30 s per domain; the scheduled check also counts
             time.sleep(10)
             return None
         return d if d["status"] == "verified" else None
 
-    domain = wait_for("the domain to verify", verified, args.timeout, interval=2)
+    domain = wait_for("the domain to verify (the DNS stub answered %d queries)" % dns.queries, verified, args.timeout, interval=2)
     print("   domain %s is %s (DNS stub answered %d queries)" % (domain["name"], domain["status"], dns.queries), flush=True)
 
     step("SMTP credential")
