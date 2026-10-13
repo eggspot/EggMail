@@ -43,4 +43,37 @@ public class PostgresReadOnlyConfigTests
     {
         Assert.Contains(Load((key, value)).Errors, e => e.Contains(key, StringComparison.Ordinal));
     }
+
+    [Theory]
+    [InlineData("Host=db;Database=x")]
+    [InlineData("Host=db;Username=")]
+    public void A_read_only_connection_string_must_name_its_user(string connection)
+    {
+        Assert.Contains(Load(("Storage:Postgres:ReadOnlyConnectionString", connection)).Errors, e => e.Contains("Username", StringComparison.Ordinal));
+        Assert.Empty(Load(("Storage:Postgres:ReadOnlyConnectionString", "Host=db;Username=ro")).Errors);
+    }
+
+    [Fact]
+    public void A_backend_switch_carries_the_read_only_connection_to_the_target_so_it_is_not_silently_dropped()
+    {
+        var target = new Mta.Storage.StorageOptions
+        {
+            Backend = Mta.Storage.StorageBackend.Postgres,
+            Postgres = new Mta.Storage.PostgresOptions
+            {
+                RuntimeConnectionString = "Host=db;Username=rt",
+                ReadOnlyConnectionString = "Host=db;Username=ro;Password=secret",
+                ReadOnlyStatementTimeoutSeconds = 3,
+            },
+        };
+
+        var pointer = Mta.Host.Switching.SwitchActivator.PointerFor(target);
+
+        var readOnly = Assert.Single(pointer, p => p.Key == "Storage:Postgres:ReadOnlyConnectionString");
+        Assert.Equal("Host=db;Username=ro;Password=secret", readOnly.Value);
+        Assert.True(readOnly.Secret);   // never printed in a patch or a log
+        Assert.Equal("3", Assert.Single(pointer, p => p.Key == "Storage:Postgres:ReadOnlyStatementTimeoutSeconds").Value);
+        Assert.DoesNotContain(Mta.Host.Switching.SwitchActivator.PointerFor(new Mta.Storage.StorageOptions { Backend = Mta.Storage.StorageBackend.Postgres, Postgres = new Mta.Storage.PostgresOptions { RuntimeConnectionString = "Host=db;Username=rt" } }),
+            p => p.Key.Contains("ReadOnly", StringComparison.Ordinal));
+    }
 }

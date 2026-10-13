@@ -300,6 +300,21 @@ public static class ConfigLoader
             errors.Add("Storage:Postgres:RuntimeConnectionString is required when Storage:Backend=Postgres.");
         }
 
+        if (!string.IsNullOrWhiteSpace(c.Storage.Postgres.ReadOnlyConnectionString))
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(new Npgsql.NpgsqlConnectionStringBuilder(c.Storage.Postgres.ReadOnlyConnectionString).Username))
+                {
+                    errors.Add("Storage:Postgres:ReadOnlyConnectionString must name the role to connect as (Username=...).");
+                }
+            }
+            catch (ArgumentException)
+            {
+                errors.Add("Storage:Postgres:ReadOnlyConnectionString is not a valid connection string.");
+            }
+        }
+
         foreach (var (name, value) in new[]
         {
             ("Storage:Postgres:ReadOnlyStatementTimeoutSeconds", c.Storage.Postgres.ReadOnlyStatementTimeoutSeconds),

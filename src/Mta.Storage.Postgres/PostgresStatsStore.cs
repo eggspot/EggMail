@@ -175,6 +175,10 @@ internal sealed class PostgresStatsStore : IStatsStore
 
             return rows;
         }
+        catch (Exception ex) when (PostgresErrors.IsStatementTimeout(ex, cancellationToken))
+        {
+            throw new StorageQueryTimeoutException("The read-only query ran past statement_timeout (Postgres:ReadOnlyStatementTimeoutSeconds).", ex);
+        }
         catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
         {
             throw _rt.Unavailable(ex);
@@ -197,6 +201,10 @@ internal sealed class PostgresStatsStore : IStatsStore
             }
 
             return list;
+        }
+        catch (Exception ex) when (PostgresErrors.IsStatementTimeout(ex, cancellationToken))
+        {
+            throw new StorageQueryTimeoutException("The read-only query ran past statement_timeout (Postgres:ReadOnlyStatementTimeoutSeconds).", ex);
         }
         catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
         {

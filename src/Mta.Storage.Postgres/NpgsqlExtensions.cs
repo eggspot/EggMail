@@ -16,7 +16,7 @@ internal static class PostgresErrors
 
     /// <summary>
     /// True when the failure means the server cannot be reached or refuses work right now (down, restarting, shutting down,
-    /// out of connections, network or pool timeout, or a statement stopped by <c>statement_timeout</c>, 57014, as on the read-only dashboard role). These become <see cref="StorageUnavailableException"/> so the SMTP layer
+    /// out of connections, network or pool timeout). These become <see cref="StorageUnavailableException"/> so the SMTP layer
     /// can answer 451; everything else (constraints, bugs, bad SQL) keeps its own type.
     /// </summary>
     public static bool IsUnavailable(Exception exception)
@@ -28,13 +28,44 @@ internal static class PostgresErrors
                 case PostgresException pg:
                     return pg.SqlState is { } state
                         && (state.StartsWith("08", StringComparison.Ordinal)
-                            || state is "53300" or "53400" or "57014" or "57P01" or "57P02" or "57P03" or "58000" or "58030");
+                            || state is "53300" or "53400" or "57P01" or "57P02" or "57P03" or "58000" or "58030");
                 case SocketException:
                 case IOException:
                 case TimeoutException:
                     return true;
                 case NpgsqlException n when n.IsTransient:
                     return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// True when the server stopped a statement because it ran past <c>statement_timeout</c> (SQLSTATE 57014, as on the read-only role). A statement the <i>caller</i> cancelled
+    /// (a cancelled token, a closed request) is also reported by the server as 57014 but surfaces as an <see cref="OperationCanceledException"/>: that is the caller's decision
+    /// and stays one, it is neither a timeout nor an outage.
+    /// </summary>
+    public static bool IsStatementTimeout(Exception exception, CancellationToken cancellationToken = default)
+    {
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return false;
+        }
+
+        for (Exception? e = exception; e is not null; e = e.InnerException)
+        {
+            if (e is OperationCanceledException)
+            {
+                return false;
+            }
+        }
+
+        for (Exception? e = exception; e is not null; e = e.InnerException)
+        {
+            if (e is PostgresException { SqlState: "57014" })
+            {
+                return true;
             }
         }
 

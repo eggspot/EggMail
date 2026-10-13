@@ -100,7 +100,17 @@ public sealed class PostgresStorage : IStorage
                 string? runtimeRole = _rt.SingleRole ? null : _rt.RuntimeRole;
                 await using NpgsqlConnection owner = await _rt.Owner.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
                 await using var cmd = new NpgsqlCommand(PostgresMigrator.GenerateScript(runtimeRole, _rt.ReadOnlyRoleToGrant), owner) { CommandTimeout = 300 };
-                await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                }
+                catch (PostgresException ex) when (ex.SqlState == "42704" && _rt.ReadOnlyRoleToGrant is { } missing)
+                {
+                    // undefined_object: the GRANT names a role that does not exist
+                    throw new InvalidOperationException(
+                        $"The migration could not grant the read-only role '{missing}' (Postgres:ReadOnlyConnectionString): it does not exist ({ex.MessageText}). " +
+                        $"Create it first, as a login role (CREATE ROLE {missing} LOGIN PASSWORD '...'), or remove Postgres:ReadOnlyConnectionString.", ex);
+                }
             }
 
             int version = await PostgresMigrator.GetDatabaseVersionAsync(_rt.Data, cancellationToken).ConfigureAwait(false);

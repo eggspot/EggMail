@@ -80,6 +80,11 @@ public sealed class ApiEndpointFilter(ILogger<ApiEndpointFilter> logger) : IEndp
             // A backend switch closed this instance: senders retry (Retry-After) against the new backend or after a rollback.
             return new ProblemResult(ApiException.NotReady(ex.Message));
         }
+        catch (StorageQueryTimeoutException ex)
+        {
+            logger.LogWarning("Read query timed out in {Method} {Path} ({RequestId}): {Message}", context.Request.Method, SafePath(context), RequestIds.Of(context), ex.Message);
+            return new ProblemResult(ApiException.QueryTooSlow("The query took too long and was stopped. Narrow it (a shorter time range, more filters) and try again."));
+        }
         catch (StorageUnavailableException ex)
         {
             logger.LogWarning("Storage unavailable in {Method} {Path} ({RequestId}): {Message}", context.Request.Method, SafePath(context), RequestIds.Of(context), ex.Message);

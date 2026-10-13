@@ -47,6 +47,10 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore, 
 
             return result;
         }
+        catch (Exception ex) when (PostgresErrors.IsStatementTimeout(ex, cancellationToken))
+        {
+            throw new StorageQueryTimeoutException("The read-only query ran past statement_timeout (Postgres:ReadOnlyStatementTimeoutSeconds).", ex);
+        }
         catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
         {
             throw rt.Unavailable(ex);
@@ -382,6 +386,10 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore, 
                 items.Add(new MessageSummary(r.GetGuid(1), r.GetGuid(2), r.GetInstant(3), r.GetNullableString(4), r.GetString(5), r.GetInt32(6), r.GetString(7), r.GetInt64(8), TagsOf(r.GetNullableString(9))));
             }
         }
+        catch (Exception ex) when (PostgresErrors.IsStatementTimeout(ex, cancellationToken))
+        {
+            throw new StorageQueryTimeoutException("The read-only query ran past statement_timeout (Postgres:ReadOnlyStatementTimeoutSeconds).", ex);
+        }
         catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
         {
             throw rt.Unavailable(ex);
@@ -463,6 +471,10 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore, 
 
             return new MessageDetail(summary, content, state, recipients, rawRetained && contentInRetention);
         }
+        catch (Exception ex) when (PostgresErrors.IsStatementTimeout(ex, cancellationToken))
+        {
+            throw new StorageQueryTimeoutException("The read-only query ran past statement_timeout (Postgres:ReadOnlyStatementTimeoutSeconds).", ex);
+        }
         catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
         {
             throw rt.Unavailable(ex);
@@ -497,6 +509,10 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore, 
 
             return list;
         }
+        catch (Exception ex) when (PostgresErrors.IsStatementTimeout(ex, cancellationToken))
+        {
+            throw new StorageQueryTimeoutException("The read-only query ran past statement_timeout (Postgres:ReadOnlyStatementTimeoutSeconds).", ex);
+        }
         catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
         {
             throw rt.Unavailable(ex);
@@ -520,6 +536,10 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore, 
             cmd.Parameters.Int(StorageTime.DayNumber(messageId)).Uuid(messageId).Uuid(tenantId).Time(ContentFloor(now));
             await using NpgsqlDataReader r = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
             return await r.ReadAsync(cancellationToken).ConfigureAwait(false) ? r.GetFieldValue<byte[]>(0) : null;
+        }
+        catch (Exception ex) when (PostgresErrors.IsStatementTimeout(ex, cancellationToken))
+        {
+            throw new StorageQueryTimeoutException("The read-only query ran past statement_timeout (Postgres:ReadOnlyStatementTimeoutSeconds).", ex);
         }
         catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
         {

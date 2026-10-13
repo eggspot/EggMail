@@ -50,6 +50,10 @@ internal sealed class PostgresRuntime
         if (!string.IsNullOrWhiteSpace(pg.ReadOnlyConnectionString))
         {
             ReadOnlyRole = new NpgsqlConnectionStringBuilder(pg.ReadOnlyConnectionString).Username;
+            if (string.IsNullOrWhiteSpace(ReadOnlyRole))
+            {
+                throw new ArgumentException("Postgres:ReadOnlyConnectionString must name the role to connect as (Username=...): the migration grants that role its SELECT privileges.");
+            }
             Reader = BuildReaderDataSource(pg.ReadOnlyConnectionString, pg);
             SeparateReader = true;
         }
@@ -127,7 +131,7 @@ internal sealed class PostgresRuntime
         // Startup options, not SET: they are the session defaults, so the connection reset when a connection returns to the pool (DISCARD ALL) keeps them.
         // A pooler in front of the database must pass the "options" startup parameter (PgBouncer: ignore_startup_parameters = options); the role can also carry the same settings (ALTER ROLE ... SET).
         string timeouts = string.Create(System.Globalization.CultureInfo.InvariantCulture,
-            $"-c statement_timeout={pg.ReadOnlyStatementTimeoutSeconds * 1000} -c idle_in_transaction_session_timeout={pg.ReadOnlyIdleInTransactionTimeoutSeconds * 1000}");
+            $"-c statement_timeout={pg.ReadOnlyStatementTimeoutSeconds * 1000} -c idle_in_transaction_session_timeout={pg.ReadOnlyIdleInTransactionTimeoutSeconds * 1000} -c default_transaction_read_only=on");
         builder.Options = string.IsNullOrWhiteSpace(builder.Options) ? timeouts : builder.Options + " " + timeouts;
         return new NpgsqlDataSourceBuilder(builder.ConnectionString).Build();
     }

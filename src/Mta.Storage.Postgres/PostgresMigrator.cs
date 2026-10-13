@@ -59,6 +59,14 @@ public static class PostgresMigrator
     /// </summary>
     public static string GenerateScript(string? runtimeRole = null, string? readOnlyRole = null)
     {
+        foreach (string? role in new[] { runtimeRole, readOnlyRole })
+        {
+            if (role is not null && role.Contains("$eggmail_migrate$", StringComparison.Ordinal))
+            {
+                throw new ArgumentException("A role name must not contain the script's dollar-quote tag.", nameof(runtimeRole));
+            }
+        }
+
         var sb = new StringBuilder();
         sb.AppendLine("-- EggMail schema migration. Idempotent: safe to run repeatedly and from several nodes at once.");
         sb.AppendLine("-- Run as the schema owner role.");
