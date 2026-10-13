@@ -161,6 +161,7 @@ internal static class Cli
             builder.Services.AddHostedService<CertificateService>();
             builder.Services.AddHostedService<MaintenanceService>();
             builder.Services.AddHostedService<TlsReportService>();
+            builder.Services.AddHostedService<BackupService>();
             builder.Services.AddHostedService(_ => new SwitchStateWatcher(runtime, switchControl, TimeSpan.FromSeconds(5)));
         }
         else

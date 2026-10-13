@@ -58,6 +58,9 @@ public sealed class SubmissionOptions
     public long MaxMessageBytes { get; init; } = 25 * 1024 * 1024;
 
     public int MaxRecipients { get; init; } = 100;
+
+    /// <summary>How long a tenant's domain list is reused for the sender check.</summary>
+    public TimeSpan DomainCacheTtl { get; init; } = TimeSpan.FromSeconds(5);
 }
 
 /// <summary>
@@ -71,6 +74,7 @@ public sealed class SubmissionService
     private readonly SenderPolicy _policy;
     private readonly StorageOptions _storageOptions;
     private readonly SubmissionOptions _options;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, (IReadOnlyList<DomainRecord> Domains, long ExpiresAt)> _domainCache = new();
 
     public SubmissionService(IStorage storage, IClock clock, SenderPolicy policy, StorageOptions storageOptions, SubmissionOptions? options = null)
     {
@@ -106,7 +110,7 @@ public sealed class SubmissionService
             return new SubmissionResult(SubmissionStatus.Invalid, Guid.Empty, Detail: fromProblem);
         }
 
-        var domains = await _storage.Config.GetDomainsAsync(request.Tenant.Id, ct).ConfigureAwait(false);
+        var domains = await GetDomainsAsync(request.Tenant.Id, ct).ConfigureAwait(false);
         var decision = _policy.Evaluate(request.Tenant, request.EnvelopeFrom, fromDomain, domains);
         if (!decision.IsAllowed)
         {
@@ -126,19 +130,12 @@ public sealed class SubmissionService
             editor.Prepend(HeaderNames.Date, MimeDate.Format(now));
         }
 
-        byte[] edited = editor.ToArray();
-        byte[] raw;
-        if (request.ReceivedHeader.IsEmpty)
+        if (!request.ReceivedHeader.IsEmpty)
         {
-            raw = edited;
-        }
-        else
-        {
-            raw = new byte[request.ReceivedHeader.Length + edited.Length];
-            request.ReceivedHeader.CopyTo(raw);
-            edited.CopyTo(raw.AsSpan(request.ReceivedHeader.Length));
+            editor.PrependRaw(request.ReceivedHeader.Span);   // last: each prepended field goes above the earlier ones, and Received belongs at the very top
         }
 
+        byte[] raw = editor.ToArray();
         var content = ExtractContent(raw);
         var messageId = Ids.New(now);
         var accepted = new AcceptedMessage
@@ -162,6 +159,23 @@ public sealed class SubmissionService
 
         var result = await _storage.Intake.AcceptAsync(accepted, ct).ConfigureAwait(false);
         return new SubmissionResult(result.Status == IntakeStatus.Accepted ? SubmissionStatus.Accepted : SubmissionStatus.Duplicate, result.MessageId);
+    }
+
+    /// <summary>
+    /// The tenant's domains, cached briefly: the sender check runs for every message and the list changes rarely. A domain that is added,
+    /// verified or paused takes effect within <see cref="SubmissionOptions.DomainCacheTtl"/>.
+    /// </summary>
+    private async ValueTask<IReadOnlyList<DomainRecord>> GetDomainsAsync(Guid tenantId, CancellationToken ct)
+    {
+        long now = _clock.Timestamp;
+        if (_domainCache.TryGetValue(tenantId, out var cached) && now < cached.ExpiresAt)
+        {
+            return cached.Domains;
+        }
+
+        var domains = await _storage.Config.GetDomainsAsync(tenantId, ct).ConfigureAwait(false);
+        _domainCache[tenantId] = (domains, now + (long)(_options.DomainCacheTtl.TotalSeconds * System.Diagnostics.Stopwatch.Frequency));
+        return domains;
     }
 
     private MessageContent? ExtractContent(byte[] raw)
