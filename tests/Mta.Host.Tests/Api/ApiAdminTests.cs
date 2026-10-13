@@ -171,6 +171,51 @@ public class ApiAdminTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Every_global_setting_is_applied_at_the_next_start_and_none_claims_to_be_live()
+    {
+        // The API says so for every editable global setting...
+        Reply listed = await _admin.GetAsync("/api/v1/admin/settings");
+        foreach (JsonElement item in listed["items"].EnumerateArray().Where(i => !i.GetProperty("locked").GetBoolean()))
+        {
+            Assert.True(item.GetProperty("requiresRestart").GetBoolean(), item.GetProperty("key").GetString() + " would have to be applied live, which no component supports");
+        }
+
+        // ...and the stored values really are what the next start reads (the stored-settings layer under the deployment layers).
+        var values = new Dictionary<string, object>
+        {
+            ["History:Mode"] = "StatsOnly",
+            ["Retention:MetadataDays"] = 12,
+            ["Webhooks:OutboxRetentionDays"] = 4,
+            ["Webhooks:AttemptLogDays"] = 5,
+            ["Stats:HourlyRetentionDays"] = 6,
+            ["Stats:DailyRetentionDays"] = 7,
+            ["Content:StoreAttachments"] = true,
+            ["Content:AllowAttachmentStorage"] = false,
+            ["Queue:MaxLifetimeDays"] = 3,
+            ["Sending:GlobalPerHour"] = 11,
+            ["Sending:GlobalPerDay"] = 22,
+            ["Sending:TenantPerHour"] = 33,
+            ["Sending:TenantPerDay"] = 44,
+            ["Sending:DomainPerHour"] = 55,
+            ["Sending:DomainPerDay"] = 66,
+            ["Sending:WarmupEnabled"] = true,
+        };
+        Assert.Equal(HttpStatusCode.OK, (await _admin.PutAsync("/api/v1/admin/settings", new { values })).Status);
+
+        var stored = await Mta.Host.Configuration.StoredSettings.LoadAsync(_f.Storage.Config, default);
+        var loaded = Mta.Host.Configuration.ConfigLoader.Load(Mta.Host.Configuration.ConfigLoader.Build([], dataDirectoryHint: Path.GetTempPath(), storedSettings: stored));
+        Assert.True(loaded.IsValid, string.Join("; ", loaded.Errors));
+        var c = loaded.Config;
+        Assert.Equal(HistoryMode.StatsOnly, c.Storage.History.Mode);
+        Assert.Equal((12, 4, 5, 6, 7), (c.Storage.Retention.MetadataDays, c.Storage.Retention.WebhookOutboxDays, c.Storage.Retention.WebhookAttemptLogDays, c.Storage.Retention.StatsHourlyDays, c.Storage.Retention.StatsDailyDays));
+        Assert.True(c.Storage.Content.StoreAttachments);
+        Assert.False(c.Storage.Content.AllowAttachmentStorage);
+        Assert.Equal(TimeSpan.FromDays(3), c.Storage.Queue.MaxLifetime);
+        Assert.Equal((11L, 22L, 33L, 44L, 55L, 66L), (c.Sending.GlobalPerHour, c.Sending.GlobalPerDay, c.Sending.TenantPerHour, c.Sending.TenantPerDay, c.Sending.DomainPerHour, c.Sending.DomainPerDay));
+        Assert.True(c.Sending.WarmupEnabled);
+    }
+
+    [Fact]
     public async Task Invalid_or_locked_global_settings_are_refused_as_a_whole()
     {
         Reply r = await _admin.PutAsync("/api/v1/admin/settings", new { values = new Dictionary<string, object>

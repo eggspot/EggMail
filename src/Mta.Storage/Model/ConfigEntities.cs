@@ -207,6 +207,58 @@ public sealed class AcmeRenewalEntity
     public string? AriJson { get; set; }
 }
 
+/// <summary>The last DNS check result of one expected record of a domain (<c>domain_record_check</c>); the whole set of a domain is replaced by each check.</summary>
+public sealed class DomainRecordCheckEntity
+{
+    public Guid DomainId { get; set; }
+
+    /// <summary><c>TYPE|host</c>, upper-case type and lower-case host.</summary>
+    public string RecordKey { get; set; } = "";
+
+    /// <summary>The record status word of the API: ok, missing, invalid or pending.</summary>
+    public string Status { get; set; } = "";
+    public string? Found { get; set; }
+    public DateTimeOffset CheckedAt { get; set; }
+}
+
+/// <summary>
+/// One flush of the TLS-RPT collector for one policy domain and UTC day (<c>tls_rpt_bucket</c>): an append-only journal, so replicas and
+/// restarts never overwrite each other. The report sender merges the rows of a completed day and deletes them once the report is sent.
+/// </summary>
+public sealed class TlsRptBucketEntity
+{
+    public Guid Id { get; set; }
+
+    /// <summary>Days since 1970-01-01 (UTC) the sessions belong to.</summary>
+    public int Day { get; set; }
+    public string PolicyDomain { get; set; } = "";
+
+    /// <summary>The aggregate of the flush (JSON of the policies with their counts and failure lines).</summary>
+    public string DataJson { get; set; } = "";
+
+    /// <summary>How many times sending the merged report has failed so far.</summary>
+    public int Attempts { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+}
+
+/// <summary>A sending counter of one scope in one hour or day window (<c>sending_counter</c>); the value is the sum of what every replica flushed.</summary>
+public sealed class SendingCounterEntity
+{
+    /// <summary>0 global, 1 tenant, 2 sending domain.</summary>
+    public byte Scope { get; set; }
+    public Guid TenantId { get; set; }
+
+    /// <summary>The sending domain for scope 2, otherwise empty (part of the key, so never null).</summary>
+    public string Domain { get; set; } = "";
+
+    /// <summary>0 hour, 1 day.</summary>
+    public byte WindowKind { get; set; }
+
+    /// <summary>Hours (or days) since the Unix epoch.</summary>
+    public long WindowIndex { get; set; }
+    public long Count { get; set; }
+}
+
 public sealed class LeaseEntity
 {
     public string Name { get; set; } = "";

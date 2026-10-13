@@ -72,6 +72,7 @@ export interface MessageSummary {
   recipientCount?: number;
   status: MessageStatus;
   size: number;
+  tags?: string[];
 }
 
 export interface AttachmentInfo {
