@@ -37,6 +37,8 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
         "INSERT INTO webhook_outbox (id, endpoint_id, tenant_id, event_type, event_id, payload_json, attempt, next_attempt_at, state, lease_owner, lease_until, created_at, finished_at) " +
         "SELECT d.id, d.ep, $1, d.type, d.eid, d.payload, 0, $2, 0, NULL, 'epoch'::timestamptz, $2, NULL FROM unnest($3, $4, $5, $6, $7) AS d(id, ep, type, eid, payload)";
 
+    public bool MayHaveSubscribers(Guid tenantId, string eventType) => rt.AnyWebhookSubscriber(tenantId, eventType) ?? true;
+
     // Intake
 
     public async ValueTask<IntakeResult> AcceptAsync(AcceptedMessage message, CancellationToken cancellationToken)

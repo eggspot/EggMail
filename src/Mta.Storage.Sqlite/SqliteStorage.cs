@@ -258,6 +258,7 @@ public sealed class SqliteStorage : IStorage
 
         foreach (SqliteFile f in _rt.Files.Where(f => f is not null).ToList())
         {
+            f.ReadSessions.Close();   // the storage is gone: later reads still work but keep no connection open
             f.ClearPool();
         }
     }

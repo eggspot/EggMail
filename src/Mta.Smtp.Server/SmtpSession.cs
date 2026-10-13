@@ -31,6 +31,7 @@ internal sealed class SmtpSession
     // Open transaction.
     private MailFromInfo? _mail;
     private readonly List<EmailAddress> _recipients = [];
+    private readonly ReceivedHeaderBuilder _received = new();
 
     public SmtpSession(SmtpServer server, Socket socket, SmtpListenerOptions listener, CancellationToken stopping)
     {
@@ -129,6 +130,7 @@ internal sealed class SmtpSession
 
     private void Write(SmtpReply reply) => reply.WriteTo(_transport.Output, Enhanced);
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask FlushAsync()
     {
         var result = await _transport.Output.FlushAsync(CancellationToken.None).ConfigureAwait(false);
@@ -138,6 +140,7 @@ internal sealed class SmtpSession
         }
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask ReplyAsync(SmtpReply reply)
     {
         Write(reply);
@@ -147,6 +150,7 @@ internal sealed class SmtpSession
     // ---------------------------------------------------------------- reading helpers
 
     /// <summary>Reads more data from the client; throws <see cref="TimeoutException"/> if nothing arrives in time.</summary>
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<ReadResult> ReadAsync(TimeSpan timeout)
     {
         var reader = _transport.Input;
@@ -288,6 +292,7 @@ internal sealed class SmtpSession
     };
 
     /// <summary>Sends an error reply and counts it. Returns true if the session must close (too many errors).</summary>
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<bool> ErrorAsync(SmtpReply reply)
     {
         SmtpMetrics.ProtocolErrors.Add(1);
@@ -302,6 +307,7 @@ internal sealed class SmtpSession
         return false;
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask DispatchAsync(SmtpCommand cmd)
     {
         switch (cmd.Verb)
@@ -406,6 +412,7 @@ internal sealed class SmtpSession
         Write(new SmtpReply(250, null, BuildCapabilities().ToEhloLines(greeting)));
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask HandleStartTlsAsync()
     {
         if (_options.Certificates is null)
@@ -462,6 +469,7 @@ internal sealed class SmtpSession
         return true;
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask HandleMailAsync(SmtpCommand cmd)
     {
         if (cmd.Mail.Size is long declared && declared > _options.MaxMessageSize)
@@ -500,6 +508,7 @@ internal sealed class SmtpSession
         }
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask HandleRcptAsync(SmtpCommand cmd)
     {
         var reply = await _handler.OnRcptToAsync(_ctx, _mail!, cmd.Path, cmd.Rcpt, _stopping).ConfigureAwait(false);
@@ -515,6 +524,7 @@ internal sealed class SmtpSession
         }
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask HandleAuthAsync(SmtpCommand cmd)
     {
         string mech = cmd.Argument!;
@@ -586,6 +596,7 @@ internal sealed class SmtpSession
         }
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask AuthFailedAsync(SmtpReply reply, bool count)
     {
         if (count)
@@ -601,6 +612,7 @@ internal sealed class SmtpSession
     }
 
     /// <summary>Sends a 334 challenge and reads the client's response line. Returns null (after replying) on cancel/errors.</summary>
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<string?> ChallengeAsync(string challenge)
     {
         Write(SmtpReply.Create(334, null, challenge));
@@ -654,6 +666,7 @@ internal sealed class SmtpSession
 
     // ---------------------------------------------------------------- message data
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask HandleDataAsync()
     {
         Write(SmtpReplies.StartData);
@@ -661,7 +674,7 @@ internal sealed class SmtpSession
 
         var scanner = new DataScanner(_options.RejectNulInData);
         using var message = new MessageBuffer();
-        var discard = new CountingNullWriter();
+        CountingNullWriter? discard = null;
         long reserved = 0;
         bool tooLarge = false, noMemory = false;
         long started = _server.Clock.Timestamp;
@@ -698,7 +711,7 @@ internal sealed class SmtpSession
             long consumedTotal = 0;
             foreach (var segment in buffer)
             {
-                IBufferWriter<byte> sink = (tooLarge || noMemory) ? discard : message;
+                IBufferWriter<byte> sink = (tooLarge || noMemory) ? (discard ??= new CountingNullWriter()) : message;
                 status = scanner.Scan(segment.Span, sink, out int used);
                 consumedTotal += used;
                 if (!(tooLarge || noMemory))
@@ -792,6 +805,7 @@ internal sealed class SmtpSession
         }
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask HandleBdatAsync(SmtpCommand cmd)
     {
         _state.OnChunkingStarted();
@@ -916,6 +930,7 @@ internal sealed class SmtpSession
     }
 
     /// <summary>Reads the next command during a BDAT sequence. Returns the BDAT command, or null if the sequence ended (RSET/QUIT/error).</summary>
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<SmtpCommand?> ReadNextBdatAsync()
     {
         while (true)
@@ -983,13 +998,15 @@ internal sealed class SmtpSession
         }
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask CompleteMessageAsync(MessageBuffer body)
     {
         long t0 = _server.Clock.Timestamp;
         var mail = _mail!;
         var now = _server.Clock.UtcNow;
-        string tag = Ids.ToCompact(Ids.New())[..16];
-        byte[] received = ReceivedHeader.Build(_ctx, _options.Hostname, _recipients.Count == 1 ? _recipients[0].ToString() : null, tag, now);
+        Span<byte> compactId = stackalloc byte[32];
+        Ids.New().TryFormat(compactId, out _, "N");
+        byte[] received = _received.Build(_ctx, _options.Hostname, _recipients.Count == 1 ? _recipients[0].ToString() : null, compactId[..16], now);
         var message = new SmtpMessage
         {
             Session = _ctx,

@@ -82,8 +82,19 @@ public static class MessageContentExtractor
     public static ExtractedContent Extract(ReadOnlyMemory<byte> raw, int maxBodyBytes = DefaultMaxStoredBodyBytes, MimeLimits? limits = null)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(maxBodyBytes);
-        limits ??= MimeLimits.Default;
-        var message = MimeMessage.Parse(raw, limits);
+        return Extract(MimeMessage.Parse(raw, limits ?? MimeLimits.Default), maxBodyBytes);
+    }
+
+    /// <summary>
+    /// Extracts the content of a message that was already parsed (parse once, use many times: the submission path checks the sender,
+    /// repairs the headers and extracts the history content from one parse). The result is identical to
+    /// <see cref="Extract(ReadOnlyMemory{byte}, int, MimeLimits?)"/> on <see cref="MimeMessage.Raw"/> with the limits the message was parsed with.
+    /// </summary>
+    public static ExtractedContent Extract(MimeMessage message, int maxBodyBytes = DefaultMaxStoredBodyBytes)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        ArgumentOutOfRangeException.ThrowIfNegative(maxBodyBytes);
+        var limits = message.Limits;
         var an = message.Anomalies;
 
         string? subject = null;
@@ -98,48 +109,56 @@ public static class MessageContentExtractor
         string? html = null;
         bool textTruncated = false;
         bool htmlTruncated = false;
-        var attachments = new List<AttachmentInfo>();
+        List<AttachmentInfo>? attachments = null;
 
-        var stack = new Stack<MimePart>();
-        stack.Push(message.Root);
-        while (stack.Count > 0)
+        // A single-part message (the common case) needs neither a stack nor an attachment list.
+        Stack<MimePart>? stack = null;
+        var part = message.Root;
+        while (true)
         {
-            var part = stack.Pop();
             if (part.IsMultipart)
             {
+                stack ??= new Stack<MimePart>();
                 for (int i = part.Children.Count - 1; i >= 0; i--)
                 {
                     stack.Push(part.Children[i]);
                 }
-
-                continue;
-            }
-
-            var ct = part.ContentType;
-            bool markedAttachment = part.Disposition is { IsAttachment: true };
-            if (!markedAttachment && ct.IsText && ct.MediaSubtype == "plain" && text is null)
-            {
-                text = ReadText(part, maxBodyBytes, ref an, out textTruncated);
-            }
-            else if (!markedAttachment && ct.IsText && ct.MediaSubtype == "html" && html is null)
-            {
-                html = ReadText(part, maxBodyBytes, ref an, out htmlTruncated);
             }
             else
             {
-                string? contentId = part.ContentId;
-                bool inline = part.Disposition is { IsInline: true } || (contentId is not null && !markedAttachment);
-                string? fileName = part.FileName;
-                attachments.Add(new AttachmentInfo(
-                    fileName is null ? null : SanitizeLine(fileName, out _),
-                    ct.MimeType,
-                    part.GetDecodedLength(),
-                    contentId,
-                    inline));
+                var ct = part.ContentType;
+                bool markedAttachment = part.Disposition is { IsAttachment: true };
+                if (!markedAttachment && ct.IsText && ct.MediaSubtype == "plain" && text is null)
+                {
+                    text = ReadText(part, maxBodyBytes, ref an, out textTruncated);
+                }
+                else if (!markedAttachment && ct.IsText && ct.MediaSubtype == "html" && html is null)
+                {
+                    html = ReadText(part, maxBodyBytes, ref an, out htmlTruncated);
+                }
+                else
+                {
+                    string? contentId = part.ContentId;
+                    bool inline = part.Disposition is { IsInline: true } || (contentId is not null && !markedAttachment);
+                    string? fileName = part.FileName;
+                    (attachments ??= []).Add(new AttachmentInfo(
+                        fileName is null ? null : SanitizeLine(fileName, out _),
+                        ct.MimeType,
+                        part.GetDecodedLength(),
+                        contentId,
+                        inline));
+                }
             }
+
+            if (stack is null || stack.Count == 0)
+            {
+                break;
+            }
+
+            part = stack.Pop();
         }
 
-        return new ExtractedContent(subject, text, html, attachments, textTruncated, htmlTruncated, subjectTruncated, an);
+        return new ExtractedContent(subject, text, html, (IReadOnlyList<AttachmentInfo>?)attachments ?? [], textTruncated, htmlTruncated, subjectTruncated, an);
     }
 
     private static string ReadText(MimePart part, int maxBodyBytes, ref MimeAnomaly an, out bool truncated)

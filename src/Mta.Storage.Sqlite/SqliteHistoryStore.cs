@@ -93,6 +93,7 @@ internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore, IMes
 
     // Writes
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     internal async ValueTask RecordAcceptedAsync(AcceptedMessage message, CancellationToken cancellationToken)
     {
         MessageContent? content = ContentRules.ShouldRecord(rt.Options, message) ? ContentRules.Prepare(rt.Options, message.Content!) : null;
@@ -106,15 +107,15 @@ internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore, IMes
         int day = StorageTime.DayNumber(m.MessageId);
         long received = StorageTime.ToUnixMs(m.ReceivedAt);
         ctx.Command(HistorySql.IndexInsert)
-            .Set(0, day).Set(1, m.MessageId).Set(2, m.TenantId).Set(3, received).Set(4, s.Subject).Set(5, AddressText.Format(m.EnvelopeFrom))
+            .Set(0, day).Set(1, m.MessageId).Set(2, m.TenantId).Set(3, received).Set(4, s.Subject).SetAddress(5, m.EnvelopeFrom)
             .Set(6, m.Recipients.Count).Set(7, (long)m.Raw.Length).Set(8, s.Content is null ? 0 : 1)
             .Set(9, MessageIdKey.Normalize(m.MessageIdHeader)).Set(10, StorageJson.SerializeTags(m.Tags))
             .ExecuteNonQuery();
 
-        SqliteCommand rcpt = ctx.Command(HistorySql.RecipientInsert).Set(0, day).Set(1, m.MessageId);
+        PreparedCommand rcpt = ctx.Command(HistorySql.RecipientInsert).Set(0, day).Set(1, m.MessageId);
         foreach (AcceptedRecipient r in m.Recipients)
         {
-            rcpt.Set(2, AddressText.Format(r.Address).ToLowerInvariant()).ExecuteNonQuery();
+            rcpt.SetAddress(2, r.Address, lowerCase: true).ExecuteNonQuery();
         }
 
         if (s.Content is { } c)
@@ -126,12 +127,13 @@ internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore, IMes
         }
 
         ctx.Command(HistorySql.EventInsert)
-            .Set(0, day).Set(1, m.MessageId).Set(2, s.EventId).Set(3, null).Set(4, m.TenantId).Set(5, (long)MessageEventType.Queued).Set(6, received)
-            .Set(7, null).Set(8, null).Set(9, null).Set(10, null).Set(11, null).Set(12, null).Set(13, null)
+            .Set(0, day).Set(1, m.MessageId).Set(2, s.EventId).SetNull(3).Set(4, m.TenantId).Set(5, (long)MessageEventType.Queued).Set(6, received)
+            .SetNull(7).SetNull(8).SetNull(9).SetNull(10).SetNull(11).SetNull(12).SetNull(13)
             .ExecuteNonQuery();
         return 0;
     };
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     internal async ValueTask ApplyAttemptAsync(AttemptPlan plan, Guid messageId, Guid tenantId, bool rawRetained, CancellationToken cancellationToken) =>
         await rt.HistoryWriter!.SubmitAsync(new ApplyAttemptState(plan, messageId, tenantId, rawRetained, rt.Options.Content.Retain), ApplyAttempt, cancellationToken).ConfigureAwait(false);
 
@@ -139,7 +141,7 @@ internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore, IMes
     {
         int day = StorageTime.DayNumber(s.MessageId);
         AttemptPlan plan = s.Plan;
-        SqliteCommand insert = ctx.Command(HistorySql.EventInsert);
+        PreparedCommand insert = ctx.Command(HistorySql.EventInsert);
         foreach (MessageEvent e in plan.Events)
         {
             insert.Set(0, day).Set(1, s.MessageId).Set(2, e.EventId).Set(3, e.DeliveryId).Set(4, e.TenantId).Set(5, (long)e.Type).Set(6, StorageTime.ToUnixMs(e.At))
@@ -151,7 +153,7 @@ internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore, IMes
         {
             int recipients, final, delivered, failed;
             string status;
-            using (SqliteDataReader r = ctx.Command(HistorySql.IndexCounts)
+            using (RawReader r = ctx.Command(HistorySql.IndexCounts)
                 .Set(0, plan.IsFinal ? 1 : 0).Set(1, plan.Delivered ? 1 : 0).Set(2, plan.Failed ? 1 : 0).Set(3, day).Set(4, s.MessageId).ExecuteReader())
             {
                 if (!r.Read())
@@ -187,6 +189,7 @@ internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore, IMes
         return 0;
     };
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     internal async ValueTask RetainRawAsync(Guid messageId, Guid tenantId, byte[] raw, DateTimeOffset at, CancellationToken cancellationToken) =>
         await rt.HistoryWriter!.SubmitAsync((messageId, tenantId, raw, StorageTime.ToUnixMs(at)), static (ctx, s) =>
         {
@@ -217,7 +220,7 @@ internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore, IMes
         Guid messageId;
         int recipients;
         string status;
-        using (SqliteDataReader r = ctx.Command(HistorySql.IndexFindByHeader).Set(0, s.Tenant).Set(1, s.Key).Set(2, s.Floor).ExecuteReader())
+        using (RawReader r = ctx.Command(HistorySql.IndexFindByHeader).Set(0, s.Tenant).Set(1, s.Key).Set(2, s.Floor).ExecuteReader())
         {
             if (!r.Read())
             {
@@ -232,8 +235,8 @@ internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore, IMes
 
         AsyncReport e = s.Report;
         ctx.Command(HistorySql.EventInsert)
-            .Set(0, day).Set(1, messageId).Set(2, s.EventId).Set(3, null).Set(4, s.Tenant).Set(5, (long)e.Type).Set(6, StorageTime.ToUnixMs(e.At))
-            .Set(7, e.Recipient).Set(8, e.SmtpCode).Set(9, e.EnhancedCode).Set(10, e.Message).Set(11, null).Set(12, null).Set(13, null)
+            .Set(0, day).Set(1, messageId).Set(2, s.EventId).SetNull(3).Set(4, s.Tenant).Set(5, (long)e.Type).Set(6, StorageTime.ToUnixMs(e.At))
+            .Set(7, e.Recipient).Set(8, e.SmtpCode).Set(9, e.EnhancedCode).Set(10, e.Message).SetNull(11).SetNull(12).SetNull(13)
             .ExecuteNonQuery();
         string next = MessageStatus.AfterReport(status, recipients, e.Type);
         if (!string.Equals(next, status, StringComparison.Ordinal))
