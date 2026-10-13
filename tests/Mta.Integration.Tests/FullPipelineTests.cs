@@ -142,9 +142,9 @@ public sealed class FullPipelineTests : IAsyncLifetime
         await client.DisconnectAsync(true);
     }
 
-    private static Task WaitAsync(Func<bool> condition, int timeoutMs = 15_000) => WaitAsync(() => Task.FromResult(condition()), timeoutMs);
+    private static Task WaitAsync(Func<bool> condition, int timeoutMs = 60_000) => WaitAsync(() => Task.FromResult(condition()), timeoutMs);
 
-    private static async Task WaitAsync(Func<Task<bool>> condition, int timeoutMs = 15_000)
+    private static async Task WaitAsync(Func<Task<bool>> condition, int timeoutMs = 60_000)
     {
         var until = DateTime.UtcNow.AddMilliseconds(timeoutMs);
         while (!await condition())

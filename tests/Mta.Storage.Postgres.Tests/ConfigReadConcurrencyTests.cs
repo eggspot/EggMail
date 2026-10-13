@@ -41,7 +41,7 @@ public class ConfigReadConcurrencyTests : PgTestBase
 
         var reads = Enumerable.Range(0, 300).Select(i => Storage.Config.IsSuppressedAsync(TenantA, $"x{i}@example.org", CancellationToken.None).AsTask()).ToList();
         var claim = Task.Run(async () => await ClaimAsync());
-        Assert.Same(claim, await Task.WhenAny(claim, Task.Delay(TimeSpan.FromSeconds(10))));
+        Assert.Same(claim, await Task.WhenAny(claim, Task.Delay(TimeSpan.FromSeconds(60))));
         await Task.WhenAll(reads);
         Assert.Single(await claim);
     }

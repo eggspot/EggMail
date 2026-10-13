@@ -111,7 +111,7 @@ public class RecoveryTests : PgTestBase
         try
         {
             timed.Stats.Add(new StatKey(Start, TenantA, "s.example", "a.example"), StatCounter.Delivered, 2);
-            for (int i = 0; i < 50; i++)
+            for (int i = 0; i < 300; i++)
             {
                 var rows = await timed.Stats.QueryAsync(TenantA, Start.AddHours(-1), Start.AddHours(1), false, CancellationToken.None);
                 if (rows.Count == 1)

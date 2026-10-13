@@ -146,12 +146,23 @@ public class BundleTests : IDisposable
             await w.CompleteAsync(default);
         }
 
-        long before = GC.GetTotalMemory(true);
+        // Streaming is asserted on object lifetime, not on process memory deltas: GC.GetTotalMemory is process-wide, so
+        // it also counts whatever other tests running in parallel allocate and retain. If the reader kept the rows it
+        // yielded (a list, a buffer), the early rows would still be reachable after the whole file was consumed.
         var reader = await BundleReader.OpenAsync(_dir, default);
         long n = 0;
-        await foreach (var _ in reader.ReadNdjsonAsync<Row>("history/events.ndjson", default)) { n++; }
+        var early = new List<WeakReference>();
+        await foreach (var row in reader.ReadNdjsonAsync<Row>("history/events.ndjson", default))
+        {
+            if (n < 100) { early.Add(new WeakReference(row)); }
+            n++;
+        }
+
         Assert.Equal(100_000, n);
-        Assert.True(GC.GetTotalMemory(true) - before < 50_000_000);
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+        Assert.Equal(0, early.Count(w => w.IsAlive));
         Assert.True((await reader.VerifyAsync(default)).Ok);
     }
 

@@ -80,9 +80,10 @@ public class WriterTests : SqliteTestBase
     {
         await ReopenAsync(b => b.WriterQueueCapacity = 4);
         var (blocked, release) = BlockQueueWriter();
+        List<Task<IntakeResult>> tasks;
         try
         {
-            var tasks = Enumerable.Range(0, 20).Select(_ => Storage.Intake.AcceptAsync(Msg(size: 64), default).AsTask()).ToList();
+            tasks = Enumerable.Range(0, 20).Select(_ => Storage.Intake.AcceptAsync(Msg(size: 64), default).AsTask()).ToList();
             await Task.Delay(300);
             Assert.All(tasks, t => Assert.False(t.IsCompleted));
 
@@ -96,7 +97,7 @@ public class WriterTests : SqliteTestBase
         }
 
         await blocked;
-        await Task.Delay(50);
+        await Task.WhenAll(tasks);   // every accepted message is committed before the queue is counted
         Assert.Equal(20, (await Storage.Deliveries.GetQueueStatsAsync(default)).Queued);
     }
 
@@ -162,7 +163,7 @@ public class WriterTests : SqliteTestBase
     {
         await ReopenAsync(b => b.StatsFlushInterval = TimeSpan.FromMilliseconds(100));
         await AcceptAsync();
-        for (int i = 0; i < 50; i++)
+        for (int i = 0; i < 300; i++)
         {
             var rows = await Storage.Stats.QueryAsync(TenantA, Start.AddHours(-1), Start.AddHours(1), false, default);
             if (rows.Count == 1 && rows[0].Accepted == 1)

@@ -288,18 +288,20 @@ public class MtaStsPolicyStoreTests
         var rig = new Rig();
         rig.Txt("v1");
         var gate = new TaskCompletionSource();
+        var entered = new TaskCompletionSource();
         int calls = 0;
         var parsed = FakePolicyFetcher.Ok(Body());
         var slow = new SlowFetcher(async () =>
         {
             Interlocked.Increment(ref calls);
+            entered.TrySetResult();
             await gate.Task;
             return parsed;
         });
         var store = new MtaStsPolicyStore(rig.Dns, slow, new InMemoryMtaStsCache(rig.Clock), rig.Clock);
 
         var tasks = Enumerable.Range(0, 10).Select(_ => store.GetPolicyAsync(Domain).AsTask()).ToArray();
-        await Task.Delay(100);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(60));   // the one shared fetch is under way and holds the gate
         gate.SetResult();
         var results = await Task.WhenAll(tasks);
 
@@ -314,8 +316,10 @@ public class MtaStsPolicyStoreTests
         rig.Txt("v1");
         var gate = new TaskCompletionSource();
         var parsed = FakePolicyFetcher.Ok(Body());
+        var entered = new TaskCompletionSource();
         var slow = new SlowFetcher(async () =>
         {
+            entered.TrySetResult();
             await gate.Task;
             return parsed;
         });
@@ -323,7 +327,7 @@ public class MtaStsPolicyStoreTests
 
         using var cts = new CancellationTokenSource();
         var cancelled = store.GetPolicyAsync(Domain, cts.Token).AsTask();
-        await Task.Delay(50);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(60));
         cts.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cancelled);
 
