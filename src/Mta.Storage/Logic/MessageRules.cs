@@ -15,6 +15,18 @@ public static class MessageStatus
     public const string Expired = "expired";
     public const string Suppressed = "suppressed";
     public const string Cancelled = "cancelled";
+    public const string Complained = "complained";
+
+    /// <summary>
+    /// The status after an asynchronous report attached to an already final message: a bounce that arrives after a recipient was accepted makes a delivered
+    /// message bounced (one recipient) or partial (several); a complaint makes a delivered or partial message complained. Anything else keeps its status.
+    /// </summary>
+    public static string AfterReport(string current, int recipientCount, MessageEventType type) => type switch
+    {
+        MessageEventType.Bounced when current == Delivered => recipientCount <= 1 ? Bounced : Partial,
+        MessageEventType.Complained when current is Delivered or Partial => Complained,
+        _ => current,
+    };
 
     /// <summary>The status after a deferral or a final event for one recipient.</summary>
     /// <param name="current">Status before the event.</param>
@@ -147,6 +159,38 @@ public static class StorageJson
 
     public static TlsInfo? DeserializeTls(string? json) =>
         string.IsNullOrEmpty(json) ? null : JsonSerializer.Deserialize(json, StorageJsonContext.Default.TlsInfo);
+
+    /// <summary>The <c>tags</c> column: a JSON array, or null when there are no tags.</summary>
+    public static string? SerializeTags(IReadOnlyList<string>? tags) => tags is { Count: > 0 } ? SerializeStrings(tags) : null;
+
+    /// <summary>The tags of a stored column value (empty for null).</summary>
+    public static IReadOnlyList<string> DeserializeTags(string? json) => DeserializeStrings(json);
+}
+
+/// <summary>
+/// The form in which a <c>Message-ID</c> header is stored and looked up: without angle brackets and white space, lower case. A returned bounce quotes the
+/// header of the original message, and some servers fold or re-case it, so both sides are normalized the same way.
+/// </summary>
+public static class MessageIdKey
+{
+    public const int MaxLength = 998;
+
+    /// <summary>The key for a header value, or null when it is empty or longer than <see cref="MaxLength"/>.</summary>
+    public static string? Normalize(string? headerValue)
+    {
+        if (headerValue is null)
+        {
+            return null;
+        }
+
+        string v = headerValue.Trim();
+        if (v.Length >= 2 && v[0] == '<' && v[^1] == '>')
+        {
+            v = v[1..^1].Trim();
+        }
+
+        return v.Length is 0 or > MaxLength ? null : v.ToLowerInvariant();
+    }
 }
 
 /// <summary>Opaque pagination cursors.</summary>
