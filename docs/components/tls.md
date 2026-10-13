@@ -4,6 +4,8 @@
 
 It is part of the hand-written, BCL-only stack ([design.md §2.1](../design.md#21-build-boundary)): no package references (enforced by `tests/Mta.ArchitectureTests`). It references `Mta.Core` (`IClock`, `Ids`) and `Mta.Dns` (`IDnsResolver`, `TxtRecord`, `TlsaRecord`, `DnsResponse.AuthenticatedData`) and uses only BCL types: `HttpClient`, `System.Security.Cryptography.X509Certificates`, `System.Formats.Asn1`, `System.Text.Json`, `System.IO.Compression`.
 
+The certificates EggMail serves itself (ACME, the certificate store, hot reload) are a separate component: [acme.md](acme.md).
+
 The library never opens SMTP connections and never sends mail. The delivery layer calls it before connecting (policy), during the TLS handshake (certificate validation), and after each attempt (recording, reporting).
 
 ## Namespaces and main types

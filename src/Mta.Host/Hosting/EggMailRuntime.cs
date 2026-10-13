@@ -49,7 +49,8 @@ public sealed class EggMailRuntime : IAsyncDisposable
 
     private readonly List<IAsyncDisposable> _owned = [];
 
-    public static async Task<EggMailRuntime> CreateAsync(MtaConfig config, IStorage storage, IClock clock, IMtaLog log, CancellationToken ct, IDnsResolver? dnsOverride = null)
+    public static async Task<EggMailRuntime> CreateAsync(MtaConfig config, IStorage storage, IClock clock, IMtaLog log, CancellationToken ct, IDnsResolver? dnsOverride = null,
+        IAcmeOrderRunner? acmeRunnerOverride = null, IDnsChallengeProvider? acmeDnsOverride = null)
     {
         var secrets = Mta.Host.Secrets.SecretsFactory.Create(config.Secrets, storage.Config);
         if (config.Secrets.KeyProtection == KeyProtectionMode.None)
@@ -141,8 +142,13 @@ public sealed class EggMailRuntime : IAsyncDisposable
         AcmeRenewalService? acme = null;
         if (config.Acme.Enabled)
         {
-            string token = config.Acme.CloudflareApiToken ?? (config.Acme.CloudflareApiTokenFile is { } f ? File.ReadAllText(f).Trim() : throw new InvalidOperationException("Acme:CloudflareApiToken or Acme:CloudflareApiTokenFile is required."));
-            acme = new AcmeRenewalService(storage.Config, secrets, new CertesOrderRunner(), new CloudflareDnsChallengeProvider(new HttpClient(), token), config.Acme, clock, log);
+            if (acmeDnsOverride is null)
+            {
+                string token = config.Acme.CloudflareApiToken ?? (config.Acme.CloudflareApiTokenFile is { } f ? File.ReadAllText(f).Trim() : throw new InvalidOperationException("Acme:CloudflareApiToken or Acme:CloudflareApiTokenFile is required."));
+                acmeDnsOverride = new CloudflareDnsChallengeProvider(new HttpClient(), token);
+            }
+
+            acme = new AcmeRenewalService(storage.Config, secrets, acmeRunnerOverride ?? new CertesOrderRunner(), acmeDnsOverride, config.Acme, clock, log);
         }
 
         var runtime = new EggMailRuntime
