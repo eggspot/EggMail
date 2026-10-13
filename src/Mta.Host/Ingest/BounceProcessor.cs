@@ -29,6 +29,9 @@ public enum BounceOutcome
 /// Handles mail that arrives on the bounce listener. The recipient is a signed VERP address; only its token (tenant, domain, age)
 /// is trusted for correlation. What the body says decides what happens to the addresses it names: a permanent failure that the reply
 /// classifier attributes to the recipient suppresses it, a complaint suppresses it as a complaint, and both are published as webhooks.
+/// <para>With per-message history (<c>History:Mode=Full</c>) the bounce or complaint is also attached to the message it is about: the returned headers carry the original
+/// <c>Message-ID</c>, which is looked up among the message history of the tenant named by the verified token (<see cref="IHistoryStore.AttachReportAsync"/>). The message id found
+/// goes into the webhook payload. With <c>StatsOnly</c> no per-message record is stored, so nothing is attached.</para>
 /// </summary>
 public sealed class BounceProcessor
 {
@@ -41,9 +44,11 @@ public sealed class BounceProcessor
     private readonly IClock _clock;
     private readonly ReplyClassifier _classifier;
     private readonly IMtaLog _log;
+    private readonly IHistoryStore? _history;
 
-    public BounceProcessor(VerpCodec verp, IConfigStore config, IStatsStore stats, IWebhookPublisher webhooks, IClock clock, IMtaLog? log = null, ReplyClassifier? classifier = null)
+    public BounceProcessor(VerpCodec verp, IConfigStore config, IStatsStore stats, IWebhookPublisher webhooks, IClock clock, IMtaLog? log = null, ReplyClassifier? classifier = null, IHistoryStore? history = null)
     {
+        _history = history;
         _verp = verp;
         _config = config;
         _stats = stats;
@@ -102,7 +107,8 @@ public sealed class BounceProcessor
                 await _config.AddSuppressionAsync(new SuppressionRecord(tenant.Id, parsed.ToString().ToLowerInvariant(), SuppressionReason.HardBounce, "async-bounce", now, null), ct).ConfigureAwait(false);
             }
 
-            var draft = WebhookEventFactory.ForInboundReport(WebhookEventFactory.Bounced, now, parsed.ToString(), report.OriginalMessageId, r.Status, r.DiagnosticCode, null);
+            Guid? messageId = await AttachAsync(tenant.Id, report.OriginalMessageId, new AsyncReport(MessageEventType.Bounced, now, parsed.ToString().ToLowerInvariant(), code == 0 ? null : code, r.Status, r.DiagnosticCode), ct).ConfigureAwait(false);
+            var draft = WebhookEventFactory.ForInboundReport(WebhookEventFactory.Bounced, now, parsed.ToString(), report.OriginalMessageId, r.Status, r.DiagnosticCode, null, messageId);
             await _webhooks.PublishAsync(tenant.Id, draft, now, ct).ConfigureAwait(false);
             _stats.Add(new StatKey(HourStart(now), tenant.Id, string.Empty, parsed.Domain.ToLowerInvariant()), StatCounter.HardBounce);
         }
@@ -122,9 +128,29 @@ public sealed class BounceProcessor
             await _config.AddSuppressionAsync(new SuppressionRecord(tenant.Id, parsed.ToString().ToLowerInvariant(), SuppressionReason.Complaint, "feedback-loop", now, null), ct).ConfigureAwait(false);
         }
 
-        var draft = WebhookEventFactory.ForInboundReport(WebhookEventFactory.Complained, now, parsed.ToString(), report.OriginalMessageId, null, null, report.FeedbackType);
+        Guid? messageId = await AttachAsync(tenant.Id, report.OriginalMessageId, new AsyncReport(MessageEventType.Complained, now, parsed.ToString().ToLowerInvariant(), null, null, report.FeedbackType), ct).ConfigureAwait(false);
+        var draft = WebhookEventFactory.ForInboundReport(WebhookEventFactory.Complained, now, parsed.ToString(), report.OriginalMessageId, null, null, report.FeedbackType, messageId);
         await _webhooks.PublishAsync(tenant.Id, draft, now, ct).ConfigureAwait(false);
         _stats.Add(new StatKey(HourStart(now), tenant.Id, string.Empty, parsed.Domain.ToLowerInvariant()), StatCounter.Complained);
+    }
+
+    /// <summary>Attaches the report to the message's history. Never fails the bounce handling: a history problem is logged and the suppression and webhook still happen.</summary>
+    private async Task<Guid?> AttachAsync(Guid tenantId, string? originalMessageId, AsyncReport report, CancellationToken ct)
+    {
+        if (_history is null || string.IsNullOrWhiteSpace(originalMessageId))
+        {
+            return null;
+        }
+
+        try
+        {
+            return await _history.AttachReportAsync(tenantId, originalMessageId, report, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _log.Write(MtaLogLevel.Warning, "bounce", "could not attach an asynchronous report to the message history", ex);
+            return null;
+        }
     }
 
     private static DateTimeOffset HourStart(DateTimeOffset t) => new(t.Year, t.Month, t.Day, t.Hour, 0, 0, TimeSpan.Zero);

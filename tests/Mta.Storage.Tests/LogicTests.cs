@@ -154,6 +154,17 @@ public class StatsEngineTests
 public class LogicTests
 {
     [Theory]
+    [InlineData("<Abc@Example.COM>", "abc@example.com")]
+    [InlineData("  <abc@example.com>  ", "abc@example.com")]
+    [InlineData("abc@example.com", "abc@example.com")]
+    [InlineData("<abc@example.com> (a comment)", "abc@example.com")]
+    [InlineData("<abc\r\n @example.com>", "abc@example.com")]
+    [InlineData("<>", null)]
+    [InlineData("   ", null)]
+    [InlineData(null, null)]
+    public void Message_id_keys_ignore_brackets_case_comments_and_folding(string? header, string? key) => Assert.Equal(key, MessageIdKey.Normalize(header));
+
+    [Theory]
     [InlineData("ReturnPathHost", "return_path_host")]
     [InlineData("Id", "id")]
     [InlineData("SmtpCode", "smtp_code")]

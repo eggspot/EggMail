@@ -80,9 +80,10 @@ public class WriterTests : SqliteTestBase
     {
         await ReopenAsync(b => b.WriterQueueCapacity = 4);
         var (blocked, release) = BlockQueueWriter();
+        List<Task<IntakeResult>> tasks;
         try
         {
-            var tasks = Enumerable.Range(0, 20).Select(_ => Storage.Intake.AcceptAsync(Msg(size: 64), default).AsTask()).ToList();
+            tasks = Enumerable.Range(0, 20).Select(_ => Storage.Intake.AcceptAsync(Msg(size: 64), default).AsTask()).ToList();
             await Task.Delay(300);
             Assert.All(tasks, t => Assert.False(t.IsCompleted));
 
@@ -96,7 +97,7 @@ public class WriterTests : SqliteTestBase
         }
 
         await blocked;
-        await Task.Delay(50);
+        await Task.WhenAll(tasks);   // every caller that was held back is accepted once the writer is free again
         Assert.Equal(20, (await Storage.Deliveries.GetQueueStatsAsync(default)).Queued);
     }
 
