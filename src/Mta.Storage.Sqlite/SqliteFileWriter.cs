@@ -17,50 +17,36 @@ internal sealed class Stmt(string sql, params string[] parameters)
 /// <summary>What a command can touch while it runs on the writer thread.</summary>
 internal sealed class WriterContext(SqliteConnection connection)
 {
-    private readonly Dictionary<Stmt, SqliteCommand> _commands = [];
+    private readonly Dictionary<Stmt, PreparedCommand> _commands = [];
 
     public SqliteConnection Connection { get; } = connection;
 
     /// <summary>The open batch transaction, or null for an exclusive (non-transactional) command.</summary>
     public SqliteTransaction? Transaction { get; set; }
 
-    /// <summary>Returns the cached prepared command for a statement, joined to the current transaction.</summary>
-    public SqliteCommand Command(Stmt stmt)
+    /// <summary>
+    /// Returns the statement prepared on the writer's connection (cached per statement). It runs on that connection, so it takes part in the
+    /// open batch transaction by itself.
+    /// </summary>
+    public PreparedCommand Command(Stmt stmt)
     {
-        if (!_commands.TryGetValue(stmt, out SqliteCommand? cmd))
+        if (!_commands.TryGetValue(stmt, out PreparedCommand? cmd))
         {
-            cmd = Connection.CreateCommand();
-            cmd.CommandText = stmt.Sql;
-            foreach (string p in stmt.Parameters)
-            {
-                cmd.Parameters.Add(new SqliteParameter(p, null));
-            }
-
+            cmd = new PreparedCommand(Connection.Handle ?? throw new InvalidOperationException("The writer connection is not open."), stmt);
             _commands[stmt] = cmd;
         }
 
-        cmd.Transaction = Transaction;
         return cmd;
     }
 
     public void Dispose()
     {
-        foreach (SqliteCommand c in _commands.Values)
+        foreach (PreparedCommand c in _commands.Values)
         {
             c.Dispose();
         }
 
         _commands.Clear();
-    }
-}
-
-internal static class SqliteCommandExtensions
-{
-    /// <summary>Sets parameter <paramref name="index"/> (null becomes SQL NULL) and returns the command for chaining.</summary>
-    public static SqliteCommand Set(this SqliteCommand command, int index, object? value)
-    {
-        command.Parameters[index].Value = value ?? DBNull.Value;
-        return command;
     }
 }
 

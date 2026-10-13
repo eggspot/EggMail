@@ -17,9 +17,14 @@ namespace Mta.Mime;
 public sealed class MessageHeaderEditor
 {
     private readonly ReadOnlyMemory<byte> _message;
-    private readonly List<byte[]> _prepended = [];
-    private readonly List<byte[]> _appended = [];
-    private readonly List<Rule> _rules = [];
+
+    // Created on first use: most edits touch one or two things, and an editor is created for every submitted message. The first prepended
+    // field lives in the editor itself (the usual edit adds exactly one, the Received field); only further ones need a list.
+    private ReadOnlyMemory<byte> _firstPrepended;
+    private bool _hasFirstPrepended;
+    private List<ReadOnlyMemory<byte>>? _morePrepended;
+    private List<ReadOnlyMemory<byte>>? _appended;
+    private List<Rule>? _rules;
 
     private sealed class Rule(string name)
     {
@@ -37,7 +42,7 @@ public sealed class MessageHeaderEditor
     /// <exception cref="HeaderInjectionException">Name or value contains CR, LF, NUL or other control characters (or non-ASCII when not allowed).</exception>
     public MessageHeaderEditor Prepend(string name, string value, bool allowUtf8 = false)
     {
-        _prepended.Add(Format(name, value, allowUtf8));
+        AddPrepended(Format(name, value, allowUtf8));
         return this;
     }
 
@@ -50,14 +55,37 @@ public sealed class MessageHeaderEditor
     public MessageHeaderEditor PrependRaw(ReadOnlySpan<byte> field)
     {
         ValidateRawField(field);
-        _prepended.Add(field.ToArray());
+        AddPrepended(field.ToArray());
         return this;
+    }
+
+    /// <summary>
+    /// Like <see cref="PrependRaw(ReadOnlySpan{byte})"/> but keeps a reference to <paramref name="field"/> instead of copying it: the memory must
+    /// stay unchanged until the edited message has been produced (<see cref="ToArray"/> / <see cref="WriteTo"/>).
+    /// </summary>
+    public MessageHeaderEditor PrependRawWithoutCopy(ReadOnlyMemory<byte> field)
+    {
+        ValidateRawField(field.Span);
+        AddPrepended(field);
+        return this;
+    }
+
+    private void AddPrepended(ReadOnlyMemory<byte> field)
+    {
+        if (!_hasFirstPrepended)
+        {
+            _firstPrepended = field;
+            _hasFirstPrepended = true;
+            return;
+        }
+
+        (_morePrepended ??= []).Add(field);
     }
 
     /// <summary>Adds <c>name: value</c> after the last current header (just before the empty line).</summary>
     public MessageHeaderEditor Append(string name, string value, bool allowUtf8 = false)
     {
-        _appended.Add(Format(name, value, allowUtf8));
+        (_appended ??= []).Add(Format(name, value, allowUtf8));
         return this;
     }
 
@@ -65,7 +93,7 @@ public sealed class MessageHeaderEditor
     public MessageHeaderEditor AppendRaw(ReadOnlySpan<byte> field)
     {
         ValidateRawField(field);
-        _appended.Add(field.ToArray());
+        (_appended ??= []).Add(field.ToArray());
         return this;
     }
 
@@ -156,14 +184,26 @@ public sealed class MessageHeaderEditor
         ArgumentNullException.ThrowIfNull(writer);
         var data = _message.Span;
         long total = 0;
-        for (int i = _prepended.Count - 1; i >= 0; i--)
+        // Each prepended field goes above the earlier ones: the last one added is written first.
+        if (_morePrepended is { } more)
         {
-            total += Put(writer, _prepended[i]);
+            for (int i = more.Count - 1; i >= 0; i--)
+            {
+                total += Put(writer, more[i].Span);
+            }
         }
 
-        foreach (var r in _rules)
+        if (_hasFirstPrepended)
         {
-            r.Emitted = false;
+            total += Put(writer, _firstPrepended.Span);
+        }
+
+        if (_rules is { } rules)
+        {
+            foreach (var r in rules)
+            {
+                r.Emitted = false;
+            }
         }
 
         int pos = 0;
@@ -200,17 +240,23 @@ public sealed class MessageHeaderEditor
             blockEnd = next;
         }
 
-        foreach (var r in _rules)
+        if (_rules is { } pending)
         {
-            if (r.Replacement is not null && !r.Emitted)
+            foreach (var r in pending)
             {
-                total += Put(writer, r.Replacement);
+                if (r.Replacement is not null && !r.Emitted)
+                {
+                    total += Put(writer, r.Replacement);
+                }
             }
         }
 
-        foreach (var a in _appended)
+        if (_appended is { } appended)
         {
-            total += Put(writer, a);
+            foreach (var a in appended)
+            {
+                total += Put(writer, a.Span);
+            }
         }
 
         if (separator)
@@ -240,7 +286,8 @@ public sealed class MessageHeaderEditor
     private Rule GetRule(string name)
     {
         HeaderValidator.ValidateName(name);
-        foreach (var r in _rules)
+        var rules = _rules ??= [];
+        foreach (var r in rules)
         {
             if (string.Equals(r.Name, name, StringComparison.OrdinalIgnoreCase))
             {
@@ -249,13 +296,18 @@ public sealed class MessageHeaderEditor
         }
 
         var rule = new Rule(name);
-        _rules.Add(rule);
+        rules.Add(rule);
         return rule;
     }
 
     private Rule? FindRule(ReadOnlySpan<byte> name)
     {
-        foreach (var r in _rules)
+        if (_rules is not { } rules)
+        {
+            return null;
+        }
+
+        foreach (var r in rules)
         {
             if (System.Text.Ascii.EqualsIgnoreCase(name, r.Name))
             {
@@ -276,11 +328,35 @@ public sealed class MessageHeaderEditor
         return bytes.Length;
     }
 
+    [ThreadStatic]
+    private static StringBuilder? t_formatBuilder;
+
     private static byte[] Format(string name, string value, bool allowUtf8)
     {
-        var sb = new StringBuilder(name.Length + value.Length + 8);
-        HeaderFolder.AppendField(sb, name, value, allowUtf8);
-        return Encoding.UTF8.GetBytes(sb.ToString());
+        // A per-thread builder and a pooled char buffer: the only allocation left is the exactly sized result.
+        var sb = t_formatBuilder ?? new StringBuilder(256);
+        t_formatBuilder = null;
+        sb.Clear();
+        char[]? chars = null;
+        try
+        {
+            HeaderFolder.AppendField(sb, name, value, allowUtf8);
+            chars = ArrayPool<char>.Shared.Rent(sb.Length);
+            sb.CopyTo(0, chars, 0, sb.Length);
+            return Encoding.UTF8.GetBytes(chars, 0, sb.Length);
+        }
+        finally
+        {
+            if (chars is not null)
+            {
+                ArrayPool<char>.Shared.Return(chars);
+            }
+
+            if (sb.Capacity <= 4096)
+            {
+                t_formatBuilder = sb;
+            }
+        }
     }
 
     private static void ValidateRawField(ReadOnlySpan<byte> field)
