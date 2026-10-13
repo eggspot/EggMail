@@ -128,8 +128,11 @@ public sealed class DeliveryProcessor
             await AttemptAsync(first, pending, results, ct).ConfigureAwait(false);
         }
 
+        Trace($"group {first.MessageId:N}/{first.RecipientDomain}: {results.Count} result(s), reporting bounces");
         await ReportBouncesAsync(results, ct).ConfigureAwait(false);
+        Trace($"group {first.MessageId:N}/{first.RecipientDomain}: recording");
         await RecordAsync(results, CancellationToken.None).ConfigureAwait(false);
+        Trace($"group {first.MessageId:N}/{first.RecipientDomain}: recorded");
     }
 
     private async Task AttemptAsync(ClaimedDelivery first, List<ClaimedDelivery> pending, List<Result> results, CancellationToken ct)
@@ -500,13 +503,17 @@ public sealed class DeliveryProcessor
     {
         long started = Stopwatch.GetTimestamp();
         PooledConnection? pooled = null;
+        long seq = Interlocked.Increment(ref _attemptSequence);
+        Trace($"#{seq} connect {target.Host} [{target.Address}]:{target.Port}");
         try
         {
             pooled = await _s.Pool.RentAsync(target, ct).ConfigureAwait(false);
             var tlsSession = pooled.Connection.TlsSession;
+            Trace($"#{seq} send {envelope.Recipients.Count} recipient(s) via {target.Host}");
             try
             {
                 var send = await pooled.Connection.SendAsync(envelope, message, ct).ConfigureAwait(false);
+                Trace($"#{seq} sent via {target.Host}: delivered={send.Delivered} stage={send.Stage} endOfData={send.EndOfDataSent}");
                 return new AttemptResult
                 {
                     Route = Bucket(send),
@@ -524,6 +531,7 @@ public sealed class DeliveryProcessor
             }
             catch (SmtpConnectionException ex)
             {
+                Trace($"#{seq} connection failed at {ex.Stage}: {ex.Message}");
                 pooled.Discard();
                 return Dropped(ex, tlsSession, started);
             }
@@ -590,6 +598,16 @@ public sealed class DeliveryProcessor
             {
                 await pooled.DisposeAsync().ConfigureAwait(false);
             }
+        }
+    }
+
+    private long _attemptSequence;
+
+    private void Trace(string message)
+    {
+        if (_s.Log.IsEnabled(MtaLogLevel.Debug))
+        {
+            _s.Log.Write(MtaLogLevel.Debug, Source, message);
         }
     }
 

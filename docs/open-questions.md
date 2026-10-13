@@ -41,6 +41,8 @@ Note on the license: the Unlicense / CC0 public-domain dedication is the only mo
 ## Owner action items
 
 - **Funding:** enable and get approved for **GitHub Sponsors for the eggspot organization**; choose a payout route (bank account in a supported region, or a fiscal host); add other platforms to `.github/FUNDING.yml` if wanted; review the policy draft. Until Sponsors is enabled, the README badge and the `FUNDING.yml` button point at a profile that does not exist yet. Steps in [funding.md](funding.md).
+- **Security reporting:** enable *Private vulnerability reporting* for the repository (Settings, Code security); [SECURITY.md](../SECURITY.md) and `/.well-known/security.txt` point reporters at it. Decide who receives the reports.
+- **Actions:** the organization disables GitHub Actions for this repository, so no CI or release workflow has ever run; allow Actions for `eggspot/EggMail` (Settings, Actions), then the written workflows can be verified.
 - **Release:** after the first image publish, set the `ghcr.io/eggspot/eggmail` package to public once, by hand ([release.md](release.md)).
 
 ## Questions still open in the sources

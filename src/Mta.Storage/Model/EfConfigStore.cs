@@ -17,6 +17,12 @@ public interface IConfigDbAccess<TContext> where TContext : DbContext, IConfigDb
     /// must call <c>SaveChanges</c> itself and may run more than once when a batch is retried, so it must be repeatable.
     /// </summary>
     ValueTask<T> WriteAsync<T>(Func<TContext, T> work, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Lets a provider turn its own connectivity failures into <see cref="StorageUnavailableException"/> (the store applies
+    /// it to every read and write). Return null to leave the exception alone; the default changes nothing.
+    /// </summary>
+    Exception? TranslateException(Exception exception) => null;
 }
 
 /// <summary>
@@ -36,8 +42,15 @@ public sealed class EfConfigStore<TContext>(IConfigDbAccess<TContext> db) : ICon
     // Reads are short synchronous queries on a fresh no-tracking context (SQLite has no real async I/O).
     private ValueTask<T> Read<T>(Func<TContext, T> query)
     {
-        using TContext ctx = db.CreateReadContext();
-        return ValueTask.FromResult(query(ctx));
+        try
+        {
+            using TContext ctx = db.CreateReadContext();
+            return ValueTask.FromResult(query(ctx));
+        }
+        catch (Exception ex) when (db.TranslateException(ex) is { } translated)
+        {
+            throw translated;
+        }
     }
 
     private async ValueTask Write(Action<TContext> work, CancellationToken ct) =>
@@ -53,9 +66,13 @@ public sealed class EfConfigStore<TContext>(IConfigDbAccess<TContext> db) : ICon
         {
             return await db.WriteAsync(work, ct).ConfigureAwait(false);
         }
-        catch (DbUpdateException ex)
+        catch (DbUpdateException ex) when (db.TranslateException(ex) is null)
         {
             throw new StorageConflictException("A configuration write violated a constraint: " + (ex.InnerException?.Message ?? ex.Message), ex);
+        }
+        catch (Exception ex) when (db.TranslateException(ex) is { } translated)
+        {
+            throw translated;
         }
     }
 

@@ -28,6 +28,11 @@ internal static class DashboardHosting
         });
 
         app.MapGet("/healthz", () => Results.Text("ok"));
+        app.MapGet("/.well-known/security.txt", () => Results.Text(
+            "Contact: https://github.com/eggspot/EggMail/security/advisories/new\n" +
+            "Expires: " + DateTimeOffset.UtcNow.AddDays(180).ToString("yyyy-MM-dd'T'00:00:00'Z'", System.Globalization.CultureInfo.InvariantCulture) + "\n" +
+            "Policy: https://github.com/eggspot/EggMail/blob/main/SECURITY.md\n" +
+            "Preferred-Languages: en\n"));
 
         if (Directory.Exists(Path.Combine(app.Environment.ContentRootPath, "wwwroot")))
         {

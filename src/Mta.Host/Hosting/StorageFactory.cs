@@ -1,5 +1,6 @@
 using Mta.Core;
 using Mta.Storage;
+using Mta.Storage.Postgres;
 using Mta.Storage.Sqlite;
 
 namespace Mta.Host.Hosting;
@@ -10,7 +11,7 @@ public static class StorageFactory
     public static IStorage Create(StorageOptions options, IClock clock, IMtaLog log) => options.Backend switch
     {
         StorageBackend.Sqlite => SqliteStorage.Create(options, clock, log),
-        StorageBackend.Postgres => throw new NotSupportedException("The PostgreSQL backend is not available in this build."),
+        StorageBackend.Postgres => PostgresStorage.Create(options, clock, log),
         _ => throw new ArgumentOutOfRangeException(nameof(options)),
     };
 }
