@@ -17,7 +17,7 @@ internal enum SqliteFileKind
 internal sealed class SqliteFile
 {
     /// <summary>Bumped when a schema change needs a migration step (stored in <c>PRAGMA user_version</c>).</summary>
-    public const int SchemaVersion = 2;
+    public const int SchemaVersion = Model.StorageModel.SchemaVersion;
 
     private readonly SqliteOptions _options;
     private readonly Func<string> _createScript;

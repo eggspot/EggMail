@@ -27,7 +27,76 @@ public sealed class BundleWriter : IDisposable
         }
     }
 
+    private BundleWriter(string root, BundleManifest manifest, bool append)
+    {
+        _root = root;
+        _manifest = manifest;
+        _files.AddRange(manifest.Files);
+        _ = append;
+    }
+
+    /// <summary>
+    /// Reopens a bundle whose manifest is already written to add files to it (the resumable history export). The manifest stays
+    /// consistent on disk: it is only ever replaced atomically by <see cref="CheckpointAsync"/>.
+    /// </summary>
+    public static async Task<BundleWriter> OpenForAppendAsync(string rootDirectory, CancellationToken ct)
+    {
+        string root = Path.GetFullPath(rootDirectory);
+        string manifestPath = Path.Combine(root, "manifest.json");
+        if (!File.Exists(manifestPath))
+        {
+            throw new BundleException($"'{root}' is not a bundle (manifest.json is missing).");
+        }
+
+        BundleManifest? manifest;
+        await using (var s = File.OpenRead(manifestPath))
+        {
+            manifest = await JsonSerializer.DeserializeAsync<BundleManifest>(s, BundleManifest.Json, ct).ConfigureAwait(false);
+        }
+
+        return new BundleWriter(root, manifest ?? throw new BundleException("manifest.json is empty."), append: true);
+    }
+
     public string Root => _root;
+
+    public BundleManifest Manifest => _manifest;
+
+    /// <summary>Opens a file of NDJSON lines that a table already serialized and records it with its table and chunk metadata.</summary>
+    public LineFileWriter OpenLines(string relativePath, string table, string? chunkFrom = null, string? chunkTo = null) =>
+        new(this, relativePath, table, chunkFrom, chunkTo);
+
+    /// <summary>Opens a body pack: the raw messages of one row chunk, in row order.</summary>
+    public BodyPackWriter OpenBodies(string relativePath, string table, string? chunkFrom = null, string? chunkTo = null) =>
+        new(this, relativePath, table, chunkFrom, chunkTo);
+
+    /// <summary>Deletes files under <paramref name="prefix"/> that the manifest does not list (leftovers of an interrupted export).</summary>
+    public int DeleteUnlistedUnder(string prefix)
+    {
+        string dir = Path.Combine(_root, prefix);
+        if (!Directory.Exists(dir))
+        {
+            return 0;
+        }
+
+        HashSet<string> listed;
+        lock (_files)
+        {
+            listed = _files.Select(f => f.Path).ToHashSet(StringComparer.Ordinal);
+        }
+
+        int n = 0;
+        foreach (string file in Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories))
+        {
+            string rel = Path.GetRelativePath(_root, file).Replace('\\', '/');
+            if (!listed.Contains(rel))
+            {
+                File.Delete(file);
+                n++;
+            }
+        }
+
+        return n;
+    }
 
     /// <summary>Opens an NDJSON file for writing rows of type <typeparamref name="T"/>.</summary>
     public NdjsonFileWriter<T> OpenNdjson<T>(string relativePath, JsonSerializerOptions? options = null, string? chunkFrom = null, string? chunkTo = null) =>
@@ -54,7 +123,7 @@ public sealed class BundleWriter : IDisposable
         return full;
     }
 
-    internal void Register(string relativePath, byte[] sha256, long bytes, long rows, string? chunkFrom, string? chunkTo)
+    internal void Register(string relativePath, byte[] sha256, long bytes, long rows, string? chunkFrom, string? chunkTo, string? table = null, string? kind = null)
     {
         lock (_files)
         {
@@ -66,6 +135,8 @@ public sealed class BundleWriter : IDisposable
                 Rows = rows,
                 ChunkFrom = chunkFrom,
                 ChunkTo = chunkTo,
+                Table = table,
+                Kind = kind,
             });
         }
     }
@@ -76,7 +147,7 @@ public sealed class BundleWriter : IDisposable
         string full = ResolvePath(relativePath);
         await using var s = File.OpenRead(full);
         byte[] hash = await SHA256.HashDataAsync(s, ct).ConfigureAwait(false);
-        Register(relativePath, hash, new FileInfo(full).Length, 0, null, null);
+        Register(relativePath, hash, new FileInfo(full).Length, 0, null, null, null, "secrets");
     }
 
     /// <summary>Writes <c>manifest.json</c>. The bundle is complete only after this call.</summary>
@@ -87,13 +158,25 @@ public sealed class BundleWriter : IDisposable
             throw new InvalidOperationException("Bundle already completed.");
         }
 
+        await CheckpointAsync(ct).ConfigureAwait(false);
+        _completed = true;
+    }
+
+    /// <summary>
+    /// Writes <c>manifest.json</c> atomically (temporary file, then replace), so a reader or a restart always sees a manifest
+    /// that lists exactly the files that are complete. Used between history days.
+    /// </summary>
+    public async Task CheckpointAsync(CancellationToken ct)
+    {
         lock (_files)
         {
             _manifest.Files = _files.OrderBy(f => f.Path, StringComparer.Ordinal).ToList();
         }
 
-        await File.WriteAllTextAsync(Path.Combine(_root, "manifest.json"), JsonSerializer.Serialize(_manifest, BundleManifest.Json), new UTF8Encoding(false), ct).ConfigureAwait(false);
-        _completed = true;
+        string path = Path.Combine(_root, "manifest.json");
+        string temp = path + ".tmp";
+        await File.WriteAllTextAsync(temp, JsonSerializer.Serialize(_manifest, BundleManifest.Json), new UTF8Encoding(false), ct).ConfigureAwait(false);
+        File.Move(temp, path, overwrite: true);
     }
 
     public void Dispose()

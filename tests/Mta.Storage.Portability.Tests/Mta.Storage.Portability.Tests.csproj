@@ -9,6 +9,13 @@
     <PackageReference Include="xunit.runner.visualstudio" />
   </ItemGroup>
   <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="..\..\src\Mta.Storage.Portability\Mta.Storage.Portability.csproj" />
+    <ProjectReference Include="..\..\src\Mta.Storage.Sqlite\Mta.Storage.Sqlite.csproj" />
+    <ProjectReference Include="..\..\src\Mta.Delivery\Mta.Delivery.csproj" />
+    <ProjectReference Include="..\..\src\Mta.Smtp.Server\Mta.Smtp.Server.csproj" />
+    <ProjectReference Include="..\Mta.Storage.Tests\Mta.Storage.Tests.csproj" />
   </ItemGroup>
 </Project>

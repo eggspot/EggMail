@@ -116,9 +116,24 @@ public static class TransferTables
         CanonicalExcludes = [nameof(WebhookAttemptEntity.Seq)],
     });
 
+    // A row moves queued: nobody holds a lease on it in the target (the source released them when it quiesced).
+    private static void ClearLease(QueuedDeliveryEntity x)
+    {
+        x.LeaseOwner = null;
+        x.LeaseUntil = DateTimeOffset.UnixEpoch;
+    }
+
+    private static void ClearLease(WebhookOutboxEntity x)
+    {
+        x.LeaseOwner = null;
+        x.LeaseUntil = DateTimeOffset.UnixEpoch;
+    }
+
     public static readonly TransferTable<QueuedDeliveryEntity> Deliveries = new("delivery_queue", TransferPart.Queue, new()
     {
         Order = q => q.OrderBy(x => x.Id),
+        PrepareExport = ClearLease,
+        PrepareImport = ClearLease,
         Hold = new TransferHold<QueuedDeliveryEntity>
         {
             Property = nameof(QueuedDeliveryEntity.TransferSwitchId),
@@ -138,6 +153,8 @@ public static class TransferTables
     public static readonly TransferTable<WebhookOutboxEntity> WebhookOutbox = new("webhook_outbox", TransferPart.Queue, new()
     {
         Order = q => q.OrderBy(x => x.Id),
+        PrepareExport = ClearLease,
+        PrepareImport = ClearLease,
         Hold = new TransferHold<WebhookOutboxEntity>
         {
             Property = nameof(WebhookOutboxEntity.TransferSwitchId),

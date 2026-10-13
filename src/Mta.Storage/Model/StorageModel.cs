@@ -39,6 +39,12 @@ public sealed class NoModelHooks : IStorageModelHooks
 public static class StorageModel
 {
     /// <summary>
+    /// The version of the persisted schema (SQLite <c>PRAGMA user_version</c>), recorded in switch bundles. Version 2 added the
+    /// backend switch hold column and the <c>transfer_chunk_*</c> progress tables.
+    /// </summary>
+    public const int SchemaVersion = 2;
+
+    /// <summary>
     /// Entity annotation requesting a <c>WITHOUT ROWID</c> table on SQLite (small rows whose primary key is the
     /// clustered order, used for range deletes by leading day). Other providers ignore it.
     /// </summary>
