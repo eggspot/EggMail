@@ -17,7 +17,7 @@ The model is four parts. On SQLite each part is its own context and its own file
 
 | Part (context, SQLite file) | Tables |
 |---|---|
-| config (`ConfigDbContext`, `config.db`) | `tenant`, `api_key`, `smtp_credential`, `dashboard_user`, `dashboard_session`, `domain`, `dkim_key`, `suppression`, `webhook_endpoint`, `setting`, `tls_policy`, `relay_route`, `certificate`, `acme_account`, `acme_renewal`, `lease`, `switch_state`, `data_protection_key` (`IDataProtectionKeyContext`) |
+| config (`ConfigDbContext`, `config.db`) | `tenant`, `api_key`, `smtp_credential`, `dashboard_user`, `dashboard_session`, `domain`, `dkim_key`, `suppression`, `webhook_endpoint`, `setting`, `tls_policy`, `relay_route`, `certificate`, `acme_account`, `acme_renewal`, `domain_record_check`, `tls_rpt_bucket`, `sending_counter`, `lease`, `switch_state`, `data_protection_key` (`IDataProtectionKeyContext`) |
 | queue (`QueueDbContext`, `queue.db`) | `delivery_queue` (one row per recipient), `message_spool` (verbatim raw message, freed with the last recipient), `webhook_outbox`, `api_idempotency_key` |
 | stats (`StatsDbContext`, `stats.db`) | `stat_aggregate` (hourly and daily rows in one table, `WITHOUT ROWID`), `stat_meta` (rollup watermark), `recent_event` (the bounded ring), `webhook_attempt` |
 | history (`HistoryDbContext`, `history.db`, only with `History:Mode=Full`) | `message_index`, `message_recipient`, `message_event` (`WITHOUT ROWID`, keyed with a leading `day`), `message_content`, `message_raw_retained` |
@@ -41,7 +41,7 @@ Under `Sqlite:DataDirectory`: `queue.db`, `stats.db`, `config.db`, and `history.
 | `busy_timeout` | `Sqlite:BusyTimeout` (5 s) | wait for a lock before `SQLITE_BUSY` |
 | `journal_size_limit` | `Sqlite:JournalSizeLimitBytes` (64 MiB) | the WAL is truncated to at most this after a checkpoint |
 | `cache_size` | 16 MiB (writer only) | page cache of the writer connection |
-| `user_version` | 3 | schema version; versions 1 and 2 are upgraded in place (2: dashboard tables and fingerprint; 3: backend switch column and tables), a newer version is refused, an unversioned database with tables is refused |
+| `user_version` | 4 | schema version; versions 1 to 3 are upgraded in place, one step per version, each idempotent (2: dashboard tables and fingerprint; 3: backend switch column and tables; 4: persisted runtime state tables in `config.db`, `message_id_header` and `tags` on `message_index` in `history.db`), a newer version is refused, an unversioned database with tables is refused |
 
 `Cache=Shared` is never used. Reads use separate short pooled connections (the only exception is the in-memory queue, whose reads run on its writer). Every connection of a file is private; WAL means readers see a committed snapshot.
 
@@ -102,7 +102,25 @@ Idempotent, safe to call repeatedly. In order: flush statistics; metadata retent
 
 ## Backend switch support
 
-Every backend implements `IStorage.Transfer` (`IStorageTransfer`): streaming export of the 28 tables that move, idempotent chunked import with progress records, the persisted switch state with the gate behind it (a fenced source and an unactivated target refuse accept, claims and maintenance), and the transfer marks. The model gained `delivery_queue.transfer_switch_id`, `webhook_outbox.transfer_switch_id` and the four `transfer_chunk_*` tables (SQLite schema version 3 with in-place upgrades from 1 and 2; PostgreSQL migration `V003__backend_switch.sql`). A provider adds `ITransferDbAccess` (a read context, a write transaction, and for day-partitioned history `PrepareHistoryDaysAsync`) and must exclude held rows in its claim SQL and consult the gate; `TransferConformance` checks all of it. Details in [switch.md](switch.md).
+Every backend implements `IStorage.Transfer` (`IStorageTransfer`): streaming export of the 31 tables that move, idempotent chunked import with progress records, the persisted switch state with the gate behind it (a fenced source and an unactivated target refuse accept, claims and maintenance), and the transfer marks. The model gained `delivery_queue.transfer_switch_id`, `webhook_outbox.transfer_switch_id` and the four `transfer_chunk_*` tables (SQLite schema version 3 with in-place upgrades from 1 and 2; PostgreSQL migration `V003__backend_switch.sql`). Schema version 4 added three config tables to the registry (`domain_record_check`, `tls_rpt_bucket`, `sending_counter`; see "Persisted runtime state") and two columns to `message_index`; a bundle written before it imports into a version 4 target unchanged (the manifest names the tables it holds, the new columns are null). A provider adds `ITransferDbAccess` (a read context, a write transaction, and for day-partitioned history `PrepareHistoryDaysAsync`) and must exclude held rows in its claim SQL and consult the gate; `TransferConformance` checks all of it. Details in [switch.md](switch.md).
+
+## Persisted runtime state (schema version 4)
+
+State the process used to keep in memory only, and what an asynchronous bounce needs to find its message. Everything below is additive, exists on all three backends with the same observable behavior (shared conformance suites: `RuntimeStateConformance`, `HistoryConformance`, `StatsOnlyHistoryConformance`), and is created by SQLite `user_version` 4 (in-place upgrade from 1 to 3) and PostgreSQL `V004__persisted_runtime_state.sql`.
+
+| Table (part) | What it holds | Writer |
+|---|---|---|
+| `domain_record_check` (config) | the result of the last DNS check of each record a domain must publish: `(domain_id, record_key = "TYPE\|host")` to `status` (ok, missing, invalid, pending), what was `found`, `checked_at`. The set of a domain is replaced by each check and deleted with the domain | `DomainVerificationService` after each check |
+| `tls_rpt_bucket` (config) | an append-only journal of TLS-RPT collector flushes: one row per flush, policy domain and UTC day, with the aggregate as JSON and the number of failed attempts to send that day's report | `TlsReportJournal` (every minute and at shutdown); the report sender merges the rows of a completed day and deletes them once the report is sent |
+| `sending_counter` (config) | the hourly and daily counters behind the sending caps and the warm-up: `(scope, tenant_id, domain, window_kind, window_index)` to `count`; the value is the sum of what every replica flushed | `SendingCounterPersistence` (write-behind, every 10 s and at shutdown) |
+| `message_index.message_id_header` (history) | the normalized `Message-ID` header of the message (no angle brackets, lower case), indexed with the tenant, so a returned bounce finds the message | intake, `History:Mode=Full` only |
+| `message_index.tags` (history) | the tags of an API send as a JSON array; null when there are none | intake, `History:Mode=Full` only |
+
+These sit on the config store (`IRuntimeStateStore`, which `IConfigStore` extends): one EF implementation shared by SQLite and PostgreSQL, one in-memory implementation, writes through the config writer on SQLite and through the advisory-locked transaction on PostgreSQL, so the read-modify-write of a counter is atomic across replicas. DESIGN-DECIDED (decision 55): the tables live in the config part, not the stats part, because the stats writer batches in memory and is lossy by design while these rows are tiny, written in batches (a few rows every 10 s, so even `Sqlite:ConfigSyncMode=Full` costs one fsync per flush), and must move with the switch bundle (which the config part always does). `domain_record_check`, `tls_rpt_bucket` and `sending_counter` are in `TransferTables`; the lease table still does not move.
+
+**Contract.** `IRuntimeStateStore`: `GetDomainRecordChecksAsync` / `ReplaceDomainRecordChecksAsync`; `AddTlsRptBucketsAsync` / `GetTlsRptBucketsAsync(beforeDay, max)` / `ReplaceTlsRptBucketsAsync(removeIds, replacement)`; `GetSendingCountersAsync(minHourIndex, minDayIndex)` / `AddSendingCountersAsync(deltas, pruneBeforeHour, pruneBeforeDay)` (a delta is added to the stored total, never below zero, a negative delta never creates a row, windows older than the previous hour and day are pruned by the next write). `IHistoryStore.AttachReportAsync(tenantId, messageIdHeader, AsyncReport)` appends a `bounced` or `complained` event to the newest message of the tenant with that `Message-ID` and moves the status (`MessageStatus.AfterReport`: a delivered message becomes `bounced`, or `partial` when it had several recipients; a delivered or partial message with a complaint becomes `complained`; anything else keeps its status). It returns the message id, or null when history is not recorded (`StatsOnly`: nothing per message is stored, so nothing is attached), the message is unknown, belongs to another tenant or is past `Retention:MetadataDays`. `MessageSummary.Tags`, `MessageQuery.Tag` (exact match of one whole tag: `json_each` on SQLite, `jsonb_exists` on PostgreSQL), `AcceptedMessage.MessageIdHeader` and `AcceptedMessage.Tags`.
+
+**Crash windows.** Counters and TLS-RPT counts are written behind: a crash loses what was counted since the last flush (at most 10 s of sending counters, at most a minute of TLS-RPT counts); a graceful stop, a switch quiesce and the next start lose nothing. A TLS-RPT report that was sent but not yet deleted is sent again after a crash (at-least-once). An asynchronous report is attached after the suppression and the webhook are decided; a failure to attach is logged and never fails the bounce handling. Repeated delivery of one DSN adds one event per delivery (no de-duplication; the bounce listener always answers 250, so remotes do not retry).
 
 ## Contract additions (all documented in the PR)
 
@@ -136,6 +154,8 @@ All additive; the shared conformance suites cover them on both backends.
 | `PostgresConfigAccess` | Plugs the provider-neutral `EfConfigStore<PostgresDbContext>` into PostgreSQL |
 
 ### Roles and connection strings
+
+The settings below are named by the option they set (`PostgresOptions.*`); in deployment configuration they are `Storage:Postgres:<name>` (for example `Storage:Postgres:RuntimeConnectionString`, `Storage:Postgres:PartitionsAheadDays`, `Storage:Postgres:CommandTimeoutSeconds`), `AutoMigrate` is `Mail:Database:Migrate` (`Auto` or `Never`), and the SQLite tuning knobs are `Sqlite:StatsFlushInterval`, `Sqlite:RetentionDeleteBatchSize` and `Sqlite:RetentionDeletePause` ([operations.md](../operations.md) lists every key).
 
 | Setting | Role | Used for |
 |---|---|---|

@@ -36,19 +36,28 @@ public static class ApiHosting
             SourceKeysProtectedAtRest = config.Secrets.KeyProtection != KeyProtectionMode.None,
             QuiesceTimeout = TimeSpan.FromSeconds(Math.Max(1, config.Switch.QuiesceTimeoutSeconds)),
         };
-        Microsoft.Extensions.Configuration.IConfiguration source = loaded.Source ?? new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build();
-        services.AddSingleton<Mta.Host.Switching.ISwitchTargetResolver>(new Mta.Host.Switching.ConfiguredSwitchTargetResolver(source));
-        if (source is Microsoft.Extensions.Configuration.IConfigurationRoot root)
-        {
-            services.AddSingleton<Mta.Storage.Portability.ISwitchActivator>(new Mta.Host.Switching.SwitchActivator(root, ConfigLoader.ResolveBootstrapPath()));
-        }
-
+        AddSwitchTargetServices(services, loaded);
         services.AddSingleton<IStorageSwitchService>(sp => new Mta.Host.Switching.StorageSwitchService(
             runtime.Storage, config.Storage, runtime.Secrets, runtime.Clock,
             sp.GetRequiredService<Mta.Host.Switching.ISwitchTargetResolver>(),
             sp.GetService<Mta.Storage.Portability.ISwitchActivator>(),
             sp.GetService<Mta.Storage.Portability.ISwitchHostControl>(),
             options));
+    }
+
+    /// <summary>
+    /// Registers what the switch needs from the layered configuration: the resolver that turns a request into a target (<c>SwitchTarget:*</c>) and the
+    /// activator that rewrites the bootstrap file. Both need <see cref="LoadedConfig.Source"/>; a <see cref="LoadedConfig"/> built without it has neither
+    /// and the dashboard's switch flow cannot find a target.
+    /// </summary>
+    public static void AddSwitchTargetServices(IServiceCollection services, LoadedConfig loaded)
+    {
+        Microsoft.Extensions.Configuration.IConfiguration source = loaded.Source ?? new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build();
+        services.AddSingleton<Mta.Host.Switching.ISwitchTargetResolver>(new Mta.Host.Switching.ConfiguredSwitchTargetResolver(source));
+        if (source is Microsoft.Extensions.Configuration.IConfigurationRoot root)
+        {
+            services.AddSingleton<Mta.Storage.Portability.ISwitchActivator>(new Mta.Host.Switching.SwitchActivator(root, ConfigLoader.ResolveBootstrapPath()));
+        }
     }
 
     public static void Map(WebApplication app, EggMailRuntime runtime)

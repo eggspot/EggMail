@@ -97,7 +97,7 @@ public class WriterTests : SqliteTestBase
         }
 
         await blocked;
-        await Task.WhenAll(tasks);   // every accepted message is committed before the queue is counted
+        await Task.WhenAll(tasks);   // every caller that was held back is accepted once the writer is free again
         Assert.Equal(20, (await Storage.Deliveries.GetQueueStatsAsync(default)).Queued);
     }
 

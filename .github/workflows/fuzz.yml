@@ -11,11 +11,6 @@ name: fuzz
 # at the default; use the seconds_per_target input for a shorter manual run).
 
 on:
-  # TEMPORARY (remove before merge): GitHub does not register a workflow_dispatch workflow until its file is on the default branch, so
-  # `gh workflow run` cannot start this one from a feature branch. A push of this file to the feature branch runs it with a short budget.
-  push:
-    branches: [test/fuzzing-ci]
-    paths: ['.github/workflows/fuzz.yml', 'fuzz/**']
   schedule:
     - cron: '23 3 * * 0'
   workflow_dispatch:
@@ -100,9 +95,9 @@ jobs:
       - name: Fuzz
         id: fuzz
         env:
-          SECONDS_PER_TARGET: ${{ github.event.inputs.seconds_per_target || (github.event_name == 'push' && '45') || '300' }}
+          SECONDS_PER_TARGET: ${{ github.event.inputs.seconds_per_target || '300' }}
           TARGETS: ${{ github.event.inputs.targets || 'all' }}
-          SELFTEST: ${{ github.event.inputs.selftest || (github.event_name == 'push' && 'hang') || 'none' }}
+          SELFTEST: ${{ github.event.inputs.selftest || 'none' }}
         run: |
           set -u
           harness="$RUNNER_TEMP/fuzz/Mta.Fuzz.Harness.dll"
@@ -163,11 +158,11 @@ jobs:
               result="FINDING"
               # Reproduce each finding once with the plain harness so the stack trace is in the log.
               for f in findings/$t/crash-* findings/$t/timeout-* findings/$t/oom-*; do
-                [ -f "$f" ] && { echo "--- replay $f"; timeout 120 dotnet "$harness" replay "$t" "$f" || true; }
+                [ -f "$f" ] && { echo "--- replay $f"; timeout 20 dotnet "$harness" replay "$t" "$f" || true; }
               done
               if [ "$found" -eq 0 ] && [ -s "findings/$t/last-input" ]; then
                 echo "no artifact was written (the fuzzed process died); the last input is findings/$t/last-input"
-                timeout 120 dotnet "$harness" replay "$t" "findings/$t/last-input" || true
+                timeout 20 dotnet "$harness" replay "$t" "findings/$t/last-input" || true
               fi
             else
               result="clean"
