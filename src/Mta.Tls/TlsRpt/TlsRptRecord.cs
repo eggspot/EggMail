@@ -155,7 +155,7 @@ public static class TlsRptRecordParser
             && parsed.Scheme == Uri.UriSchemeHttps
             && string.IsNullOrEmpty(parsed.UserInfo)
             && string.IsNullOrEmpty(parsed.Fragment)
-            && DnsNames.TryNormalizeHost(parsed.IdnHost, out string host)
+            && TryGetAsciiHost(parsed, out string host)
             && host.Contains('.'))
         {
             endpoint = new TlsRptEndpoint(TlsRptEndpointKind.Https, parsed.AbsoluteUri, null);
@@ -163,6 +163,23 @@ public static class TlsRptRecordParser
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// <see cref="Uri.IdnHost"/> throws <see cref="UriFormatException"/> for a host that is not valid IDNA (found by the fuzzer: a
+    /// Latin-1 byte inside the host of a published record). The record comes from DNS, so this must be a refusal, not an exception.
+    /// </summary>
+    private static bool TryGetAsciiHost(Uri uri, out string host)
+    {
+        try
+        {
+            return DnsNames.TryNormalizeHost(uri.IdnHost, out host);
+        }
+        catch (UriFormatException)
+        {
+            host = string.Empty;
+            return false;
+        }
     }
 
     private static bool IsValidMailbox(string address)

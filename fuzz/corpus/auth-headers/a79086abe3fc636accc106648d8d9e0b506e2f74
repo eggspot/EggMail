@@ -1,0 +1,1 @@
+mx.example.com 1; dkim=fail reason="signature did not verify" header.i=@example.com (comment (nested)); arc=pass smtp.remote-ip=192.0.2.1

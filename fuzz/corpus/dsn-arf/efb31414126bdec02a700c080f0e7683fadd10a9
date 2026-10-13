@@ -1,0 +1,24 @@
+From: fbl@isp.example
+To: b+token@bounce.example.com
+Content-Type: multipart/report; report-type=feedback-report; boundary=B
+
+--B
+Content-Type: text/plain
+
+spam complaint
+--B
+Content-Type: message/feedback-report
+
+Feedback-Type: abuse
+User-Agent: Example/1.0
+Version: 1
+Original-Rcpt-To: <victim@example.net>
+Source-IP: 192.0.2.55
+
+--B
+Content-Type: message/rfc822
+
+Message-ID: <abc@example.com>
+
+body
+--B--

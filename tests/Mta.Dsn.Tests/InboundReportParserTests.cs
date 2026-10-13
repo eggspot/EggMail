@@ -149,4 +149,22 @@ public class InboundReportParserTests
         Assert.True(r.DiagnosticCode!.Length <= 1024);
         Assert.DoesNotContain('\u0007', r.DiagnosticCode);
     }
+
+    [Fact]
+    public void Control_characters_in_every_extracted_field_are_removed()
+    {
+        // Found by the fuzzer: a lone CR survives the line splitting and used to reach Action, Final-Recipient, Remote-MTA and Reporting-MTA.
+        string raw = "Content-Type: multipart/report; report-type=delivery-status; boundary=\"B\"\n\n--B\nContent-Type: message/delivery-status\n\n"
+            + "Reporting-MTA: dns; mx\rinjected\n\n"
+            + "Final-Recipient: rfc822; a\r@x.example\nOriginal-Recipient: rfc822; o\u0001@x.example\nAction: fa\riled\nStatus: 5.1.1\nRemote-MTA: dns; r\u007f.example\n--B--\n";
+        var report = InboundReportParser.Parse(Bytes(raw));
+        var r = Assert.Single(report.Recipients);
+        static bool HasControl(string? s) => s is not null && s.Any(char.IsControl);
+        Assert.False(HasControl(report.ReportingMta));
+        Assert.False(HasControl(r.FinalRecipient));
+        Assert.False(HasControl(r.OriginalRecipient));
+        Assert.False(HasControl(r.Action));
+        Assert.False(HasControl(r.RemoteMta));
+        Assert.Equal("fa", r.Action);   // the action ends at the first blank, which the control character became
+    }
 }
