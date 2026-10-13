@@ -70,6 +70,7 @@ export const api = {
   deleteDomain: (id: string) => http.del<void>(`/api/v1/domains/${enc(id)}`),
   verifyDomain: (id: string) => http.post<Domain>(`/api/v1/domains/${enc(id)}/verify`),
   rotateDkim: (id: string) => http.post<Domain>(`/api/v1/domains/${enc(id)}/dkim/rotate`),
+  cancelDkimRotation: (id: string) => http.del<Domain>(`/api/v1/domains/${enc(id)}/dkim/rotate`),
 
   // ---- suppressions ----
   suppressions: (cursor?: string, limit = 50) => http.get<Page<Suppression>>('/api/v1/suppressions', { cursor, limit }),

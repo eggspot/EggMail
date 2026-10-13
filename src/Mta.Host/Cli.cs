@@ -19,8 +19,7 @@ internal static class Cli
 {
     public static async Task<int> RunAsync(string[] args)
     {
-        string command = args.FirstOrDefault(a => !a.StartsWith("--", StringComparison.Ordinal) || a is "--healthcheck" or "--version") ?? "serve";
-        string[] rest = args.Where(a => a != command).ToArray();
+        (string command, string[] rest) = SplitCommand(args);
         switch (command)
         {
             case "--version":
@@ -40,6 +39,16 @@ internal static class Cli
                 Console.Error.WriteLine($"Unknown command '{command}'. Commands: serve (default), migrate-db, migrate-storage, admin, --healthcheck, --version.");
                 return 64;
         }
+    }
+
+    /// <summary>
+    /// The command is the first argument that is not an option; only that one argument is taken out. (Removing every argument equal to the
+    /// command name also removed option values: <c>admin create --role admin</c> lost its <c>admin</c>.)
+    /// </summary>
+    internal static (string Command, string[] Arguments) SplitCommand(string[] args)
+    {
+        int index = Array.FindIndex(args, a => !a.StartsWith("--", StringComparison.Ordinal) || a is "--healthcheck" or "--version");
+        return index < 0 ? ("serve", args) : (args[index], args.Where((_, i) => i != index).ToArray());
     }
 
     private static LoadedConfig? Load(string[] args)

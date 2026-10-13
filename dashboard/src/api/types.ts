@@ -183,6 +183,15 @@ export interface DnsRecord {
   expected?: string;
 }
 
+/** One DKIM key of a domain: `active` keys sign; a key that is neither active nor retired is a pending rotation (published as advice, not signing yet). */
+export interface DkimKeyInfo {
+  selector: string;
+  publicKey: string;
+  active: boolean;
+  createdAt: string;
+  retiredAt?: string | null;
+}
+
 export interface Domain {
   id: string;
   name: string;
@@ -192,7 +201,10 @@ export interface Domain {
   nextCheckAt?: string | null;
   lastError?: string | null;
   records: DnsRecord[];
-  dkim: { selector: string; publicKey: string; active: boolean; createdAt: string };
+  /** The newest key (which may be a pending rotation). */
+  dkim: DkimKeyInfo;
+  /** Every key, oldest first. Absent in older servers and fixtures. */
+  dkimKeys?: DkimKeyInfo[];
 }
 
 // ---- suppressions ----

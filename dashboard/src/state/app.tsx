@@ -25,6 +25,8 @@ export interface AppContextValue {
   logout: () => Promise<void>;
   retry: () => void;
   refreshCapabilities: () => Promise<void>;
+  /** Admin only: reloads the tenant list behind the header picker (after a tenant was created, renamed or suspended). `select` also acts on that tenant. */
+  refreshTenants: (select?: string) => Promise<void>;
 }
 
 const defaultValue: AppContextValue = {
@@ -41,6 +43,7 @@ const defaultValue: AppContextValue = {
   logout: async () => {},
   retry: () => {},
   refreshCapabilities: async () => {},
+  refreshTenants: async () => {},
 };
 
 export const AppContext = createContext<AppContextValue>(defaultValue);
@@ -83,6 +86,18 @@ export function AppProvider({ children }: { children: ComponentChildren }) {
       applyTenant(pick ? pick.id : null);
     },
     [applyTenant],
+  );
+
+  const refreshTenants = useCallback(
+    async (select?: string) => {
+      const list = await api.tenants();
+      setTenants(list);
+      const current = list.find((t) => t.id === (select ?? tenantId));
+      // Keep acting on the same tenant; the first tenant of a fresh install is chosen by itself.
+      if (select && current) applyTenant(current.id);
+      else if (!current && list[0]) applyTenant(list[0].id);
+    },
+    [applyTenant, tenantId],
   );
 
   const refreshCapabilities = useCallback(async () => {
@@ -187,8 +202,9 @@ export function AppProvider({ children }: { children: ComponentChildren }) {
       logout,
       retry: () => setAttempt((n) => n + 1),
       refreshCapabilities,
+      refreshTenants,
     }),
-    [status, me, capabilities, offlineError, tenants, tenantId, applyTenant, login, logout, refreshCapabilities],
+    [status, me, capabilities, offlineError, tenants, tenantId, applyTenant, login, logout, refreshCapabilities, refreshTenants],
   );
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
