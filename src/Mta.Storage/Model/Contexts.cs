@@ -50,8 +50,18 @@ public interface IHistoryDbSets
     DbSet<RetainedRawEntity> RetainedRaw { get; }
 }
 
-public class ConfigDbContext(DbContextOptions<ConfigDbContext> options, IStorageModelHooks hooks) : DbContext(options), IConfigDbSets
+/// <summary>A config context that can be pooled: EF's pool constructs contexts from their options alone, so the hooks come from the options.</summary>
+public sealed class ConfigReadContext(DbContextOptions<ConfigReadContext> options) : ConfigDbContext(options);
+
+public class ConfigDbContext : DbContext, IConfigDbSets
 {
+    private readonly IStorageModelHooks _hooks;
+
+    public ConfigDbContext(DbContextOptions<ConfigDbContext> options, IStorageModelHooks hooks) : base(options) => _hooks = hooks;
+
+    /// <summary>For derived (pooled) contexts: the hooks travel in the options (<see cref="ModelHooksOptionsExtensions.UseModelHooks{TContext}"/>).</summary>
+    protected ConfigDbContext(DbContextOptions options) : base(options) => _hooks = options.HooksOf();
+
     public DbSet<TenantEntity> Tenants => Set<TenantEntity>();
     public DbSet<ApiKeyEntity> ApiKeys => Set<ApiKeyEntity>();
     public DbSet<SmtpCredentialEntity> SmtpCredentials => Set<SmtpCredentialEntity>();
@@ -69,12 +79,12 @@ public class ConfigDbContext(DbContextOptions<ConfigDbContext> options, IStorage
     public DbSet<SwitchStateEntity> SwitchStates => Set<SwitchStateEntity>();
     public DbSet<DataProtectionKey> DataProtectionKeys => Set<DataProtectionKey>();
 
-    protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder) => hooks.ConfigureConventions(configurationBuilder);
+    protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder) => _hooks.ConfigureConventions(configurationBuilder);
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         StorageModel.ConfigureConfig(modelBuilder);
-        hooks.OnModelBuilt(modelBuilder);
+        _hooks.OnModelBuilt(modelBuilder);
     }
 }
 

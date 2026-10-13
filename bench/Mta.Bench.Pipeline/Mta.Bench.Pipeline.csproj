@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>Mta.Bench.Pipeline</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Mta.Host\Mta.Host.csproj" />
+    <ProjectReference Include="..\..\src\Mta.Tools\Mta.Tools.csproj" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+</Project>
