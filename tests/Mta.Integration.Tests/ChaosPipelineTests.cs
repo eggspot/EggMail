@@ -200,11 +200,12 @@ internal sealed class FlakyProxy : IAsyncDisposable
 /// recipient reaches exactly one final state, nothing that was reported delivered is missing at the remote, nothing is delivered
 /// twice, and every hard bounce is reported back to the sender.
 /// </summary>
-public sealed class ChaosPipelineTests : IAsyncLifetime
+public abstract class ChaosPipelineTests : IAsyncLifetime
 {
     private static readonly Guid TenantId = Guid.Parse("a0000000-0000-7000-8000-000000000001");
 
-    private readonly string _dir = Directory.CreateTempSubdirectory("eggmail-chaos-").FullName;
+    protected readonly string Dir = Directory.CreateTempSubdirectory("eggmail-chaos-").FullName;
+    protected bool Unavailable;
     private readonly CancellationTokenSource _stop = new();
     private ChaosInternet _internet = null!;
     private readonly RecordingLog _log = new();
@@ -215,8 +216,23 @@ public sealed class ChaosPipelineTests : IAsyncLifetime
     private int _submissionPort;
     private int _seed;
 
+    /// <summary>The backend under test.</summary>
+    protected abstract StorageOptions StorageOptionsFor();
+
+    protected abstract IStorage CreateStorage(StorageOptions options);
+
+    protected virtual Task PrepareAsync() => Task.CompletedTask;
+
+    protected virtual Task CleanupAsync() => Task.CompletedTask;
+
     public async Task InitializeAsync()
     {
+        await PrepareAsync();
+        if (Unavailable)
+        {
+            return;
+        }
+
         _seed = int.TryParse(Environment.GetEnvironmentVariable("EGGMAIL_CHAOS_SEED"), out int s) ? s : Environment.TickCount;
         _internet = new ChaosInternet(_seed, _log);
         _remote = new SmtpServer(new SmtpServerOptions
@@ -237,7 +253,7 @@ public sealed class ChaosPipelineTests : IAsyncLifetime
         var config = new MtaConfig
         {
             Hostname = "egg.test",
-            Storage = new StorageOptions { Sqlite = new SqliteOptions { DataDirectory = _dir } },
+            Storage = StorageOptionsFor(),
             Smtp = new SmtpSection { Listeners = new Dictionary<string, ListenerSection> { ["submission"] = new() { Port = 0, BindAddress = "127.0.0.1", Mode = ListenerMode.StartTls, AuthRequired = true } } },
             Delivery = new DeliverySection
             {
@@ -246,7 +262,7 @@ public sealed class ChaosPipelineTests : IAsyncLifetime
                 Throttle = new ThrottleSection { MaxConnections = 16, InitialConnections = 16, MaxMessagesPerMinute = 600_000, InitialMessagesPerMinute = 600_000, MaxMessagesPerConnection = 1000 },
             },
         };
-        var storage = SqliteStorage.Create(config.Storage);
+        var storage = CreateStorage(config.Storage);
         await storage.InitializeAsync(default);
         _runtime = await EggMailRuntime.CreateAsync(config, storage, SystemClock.Instance, _log, default, dns);
 
@@ -261,6 +277,11 @@ public sealed class ChaosPipelineTests : IAsyncLifetime
 
     public async Task DisposeAsync()
     {
+        if (Unavailable)
+        {
+            return;
+        }
+
         await _stop.CancelAsync();
         try { await _engine; } catch (OperationCanceledException) { }
         await _runtime.SmtpServer.StopAsync(TimeSpan.FromSeconds(2));
@@ -268,12 +289,18 @@ public sealed class ChaosPipelineTests : IAsyncLifetime
         await _remote.DisposeAsync();
         await _runtime.DisposeAsync();
         await _runtime.Storage.DisposeAsync();
-        Directory.Delete(_dir, recursive: true);
+        await CleanupAsync();
+        Directory.Delete(Dir, recursive: true);
     }
 
     [Fact]
     public async Task Every_recipient_reaches_exactly_one_final_state_and_nothing_is_lost_or_duplicated()
     {
+        if (Unavailable)
+        {
+            return;   // no PostgreSQL on this machine (CI provides one)
+        }
+
         int messages = int.TryParse(Environment.GetEnvironmentVariable("EGGMAIL_CHAOS_MESSAGES"), out int m) ? m : 150;
         var rng = new Random(_seed + 1);
         var plan = new List<(string Subject, string[] Recipients)>();
@@ -314,7 +341,14 @@ public sealed class ChaosPipelineTests : IAsyncLifetime
 
             await client.DisconnectAsync(true);
         })).ToArray();
-        await Task.WhenAll(senders);
+        try
+        {
+            await Task.WhenAll(senders);
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException($"submission failed (seed {_seed}): {ex.Message}\n" + string.Join('\n', _log.Lines.Where(l => l.Contains(" Error ") || l.Contains(" Warning ")).Take(20)), ex);
+        }
 
         // Wait for the queue (including the bounce messages it generates) to drain.
         var deadline = DateTime.UtcNow.AddSeconds(90);
@@ -416,4 +450,43 @@ public sealed class ChaosPipelineTests : IAsyncLifetime
             Assert.True(await _runtime.Storage.Config.IsSuppressedAsync(TenantId, address, default), $"{address} was not suppressed{context}");
         }
     }
+}
+
+public sealed class ChaosPipelineOnSqlite : ChaosPipelineTests
+{
+    protected override StorageOptions StorageOptionsFor() => new() { Sqlite = new SqliteOptions { DataDirectory = Dir } };
+
+    protected override IStorage CreateStorage(StorageOptions options) => SqliteStorage.Create(options);
+}
+
+public sealed class ChaosPipelineOnPostgres : ChaosPipelineTests
+{
+    private Mta.Storage.Postgres.Tests.TestDatabase? _database;
+
+    protected override async Task PrepareAsync()
+    {
+        if (Mta.Storage.Postgres.Tests.PostgresTestServer.UnavailableReason is not null)
+        {
+            Unavailable = true;
+            return;
+        }
+
+        _database = await Mta.Storage.Postgres.Tests.PostgresTestServer.Instance.CreateDatabaseAsync();
+    }
+
+    protected override async Task CleanupAsync()
+    {
+        if (_database is not null)
+        {
+            await _database.DisposeAsync();
+        }
+    }
+
+    protected override StorageOptions StorageOptionsFor() => new()
+    {
+        Backend = StorageBackend.Postgres,
+        Postgres = new PostgresOptions { OwnerConnectionString = _database!.ConnectionString, RuntimeConnectionString = _database.ConnectionString },
+    };
+
+    protected override IStorage CreateStorage(StorageOptions options) => Mta.Storage.Postgres.PostgresStorage.Create(options);
 }
