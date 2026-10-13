@@ -89,6 +89,7 @@ internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore, IMes
 
     // Writes
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     internal async ValueTask RecordAcceptedAsync(AcceptedMessage message, CancellationToken cancellationToken)
     {
         MessageContent? content = ContentRules.ShouldRecord(rt.Options, message) ? ContentRules.Prepare(rt.Options, message.Content!) : null;
@@ -127,6 +128,7 @@ internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore, IMes
         return 0;
     };
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     internal async ValueTask ApplyAttemptAsync(AttemptPlan plan, Guid messageId, Guid tenantId, bool rawRetained, CancellationToken cancellationToken) =>
         await rt.HistoryWriter!.SubmitAsync(new ApplyAttemptState(plan, messageId, tenantId, rawRetained, rt.Options.Content.Retain), ApplyAttempt, cancellationToken).ConfigureAwait(false);
 
@@ -182,6 +184,7 @@ internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore, IMes
         return 0;
     };
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     internal async ValueTask RetainRawAsync(Guid messageId, Guid tenantId, byte[] raw, DateTimeOffset at, CancellationToken cancellationToken) =>
         await rt.HistoryWriter!.SubmitAsync((messageId, tenantId, raw, StorageTime.ToUnixMs(at)), static (ctx, s) =>
         {

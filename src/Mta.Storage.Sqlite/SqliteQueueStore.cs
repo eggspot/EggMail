@@ -247,6 +247,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
 
     // Claiming
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<IReadOnlyList<ClaimedDelivery>> ClaimAsync(string owner, int max, DateTimeOffset now, TimeSpan lease, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(owner);
@@ -259,6 +260,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
         return await rt.QueueWriter.SubmitAsync(state, ClaimNormal, cancellationToken).ConfigureAwait(false);
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<IReadOnlyList<ClaimedDelivery>> ClaimExpiredAsync(string owner, int max, DateTimeOffset now, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(owner);
@@ -341,6 +343,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
 
     // Recording attempts
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     public async ValueTask RecordAttemptAsync(DeliveryAttempt attempt, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(attempt);
@@ -406,6 +409,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
         }
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<(Guid Tenant, string Recipient, Guid MessageId)?> ReadDeliveryKeyAsync(Guid deliveryId) =>
         await rt.ReadAsync(rt.Queue, rt.QueueWriter, deliveryId, static (c, id) =>
         {
@@ -501,6 +505,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
     };
 
     /// <summary>Copies the spool's raw message to retained storage, then deletes the spool row. Returns whether the copy exists.</summary>
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     internal async ValueTask<bool> RetainAndFreeSpoolAsync(Guid messageId, Guid tenantId, DateTimeOffset at, CancellationToken cancellationToken)
     {
         byte[]? raw = await GetRawAsync(messageId, cancellationToken).ConfigureAwait(false);
@@ -516,17 +521,21 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
 
     // Leases
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<bool> ExtendLeaseAsync(Guid deliveryId, string owner, DateTimeOffset until, CancellationToken cancellationToken) =>
         await rt.QueueWriter.SubmitAsync((deliveryId, owner, StorageTime.ToUnixMs(until)), static (ctx, s) =>
             ctx.Command(QueueSql.ExtendLease).Set(0, s.deliveryId).Set(1, s.owner).Set(2, s.Item3).ExecuteNonQuery() > 0, cancellationToken).ConfigureAwait(false);
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<int> ReleaseExpiredLeasesAsync(DateTimeOffset now, CancellationToken cancellationToken) =>
         await rt.QueueWriter.SubmitAsync(StorageTime.ToUnixMs(now), static (ctx, ms) => ctx.Command(QueueSql.ReleaseExpired).Set(0, ms).ExecuteNonQuery(), cancellationToken).ConfigureAwait(false);
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<int> ReleaseOwnedLeasesAsync(string owner, CancellationToken cancellationToken) =>
         await rt.QueueWriter.SubmitAsync(owner, static (ctx, o) => ctx.Command(QueueSql.ReleaseOwned).Set(0, o).ExecuteNonQuery(), cancellationToken).ConfigureAwait(false);
 
     /// <summary>Startup: nothing can be in flight in a single-process backend, so every lease is cleared (delivery is at-least-once).</summary>
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     internal async ValueTask ClearAllLeasesAsync(CancellationToken cancellationToken) =>
         await rt.QueueWriter.SubmitAsync(0, static (ctx, _) =>
         {
@@ -534,6 +543,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
             return ctx.Command(QueueSql.ClearOutboxLeases).ExecuteNonQuery();
         }, cancellationToken).ConfigureAwait(false);
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<QueueStats> GetQueueStatsAsync(CancellationToken cancellationToken)
     {
         long nowMs = StorageTime.ToUnixMs(rt.Clock.UtcNow);
@@ -570,6 +580,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
 
     // Webhook outbox
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<IReadOnlyList<WebhookOutboxItem>> ClaimDueAsync(string owner, int max, DateTimeOffset now, TimeSpan lease, CancellationToken cancellationToken)
     {
         if (max <= 0 || rt.Fence.IsClosed)
@@ -603,6 +614,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
         }, cancellationToken).ConfigureAwait(false);
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     public async ValueTask CompleteAsync(Guid outboxId, WebhookAttemptRecord attempt, WebhookOutboxState newState, DateTimeOffset? nextAttemptAt, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(attempt);
@@ -628,6 +640,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
         await rt.StatsWriter.SubmitAsync((outboxId, owner.Value.Endpoint, owner.Value.Tenant, attempt), SqliteStatsStore.InsertWebhookAttempt, cancellationToken).ConfigureAwait(false);
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<IReadOnlyList<WebhookAttemptRecord>> GetAttemptsAsync(Guid tenantId, Guid endpointId, int max, CancellationToken cancellationToken) =>
         await rt.ReadAsync(rt.Stats, rt.StatsWriter, (tenantId, endpointId, max), static (c, s) =>
         {
@@ -648,6 +661,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
             return (IReadOnlyList<WebhookAttemptRecord>)list;
         }).ConfigureAwait(false);
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<int> EnqueueAsync(Guid tenantId, WebhookEventDraft draft, DateTimeOffset now, CancellationToken cancellationToken)
     {
         WebhookTarget[] targets = (await rt.GetWebhookTargetsAsync(cancellationToken).ConfigureAwait(false))
@@ -671,6 +685,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
         }, cancellationToken).ConfigureAwait(false);
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<Guid?> EnqueueForEndpointAsync(Guid tenantId, Guid endpointId, WebhookEventDraft draft, DateTimeOffset now, CancellationToken cancellationToken)
     {
         bool known = (await rt.GetWebhookTargetsAsync(cancellationToken).ConfigureAwait(false)).Any(t => t.TenantId == tenantId && t.EndpointId == endpointId);
@@ -688,6 +703,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
         }, cancellationToken).ConfigureAwait(false);
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<bool> ReplayAsync(Guid tenantId, Guid outboxId, DateTimeOffset now, CancellationToken cancellationToken) =>
         await rt.QueueWriter.SubmitAsync((outboxId, tenantId, StorageTime.ToUnixMs(now)), static (ctx, s) =>
             ctx.Command(QueueSql.OutboxReplay).Set(0, s.outboxId).Set(1, s.tenantId).Set(2, s.Item3).ExecuteNonQuery() > 0, cancellationToken).ConfigureAwait(false);
@@ -698,6 +714,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
     /// A crash between "mark spool row awaiting retention" and "delete spool row" leaves a spool row whose raw message may or
     /// may not have reached history.db. This copies it (idempotently) and deletes the spool row. Returns rows reconciled.
     /// </summary>
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     internal async ValueTask<int> ReconcileSpoolAsync(CancellationToken cancellationToken)
     {
         if (!rt.IsFull)

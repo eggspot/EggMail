@@ -57,6 +57,41 @@ public abstract class WebhookConformance : StorageTestBase
     }
 
     [Fact]
+    public async Task MayHaveSubscribers_never_says_no_while_an_enabled_endpoint_would_receive_the_event()
+    {
+        // The delivery path builds an event payload only when this is true, so a false here for a subscribed event would lose the event.
+        Guid narrow = await AddEndpointAsync(TenantB, true, "message.bounced");
+        Assert.True(Storage.Webhooks.MayHaveSubscribers(TenantA, "message.delivered"));    // "*"
+        Assert.True(Storage.Webhooks.MayHaveSubscribers(TenantA, "message.bounced"));
+        Assert.True(Storage.Webhooks.MayHaveSubscribers(TenantB, "message.bounced"));
+        Assert.NotEqual(Guid.Empty, narrow);
+    }
+
+    [Fact]
+    public async Task MayHaveSubscribers_notices_an_endpoint_that_is_added_after_the_list_was_loaded()
+    {
+        // Load the endpoint list through a fan-out that has nobody to deliver to for tenant B...
+        await AcceptAsync(Msg(tenant: TenantB, to: ["x@example.org"]));
+        foreach (var d in await ClaimAsync(max: 10, now: Clock.UtcNow.AddSeconds(1)))
+        {
+            await RecordAsync(d, DeliveryOutcome.Delivered, events: [Draft("message.delivered", "{}")]);
+        }
+
+        // ...then subscribe tenant B: the very next question must say yes, however the answer was cached before,
+        Guid added = await AddEndpointAsync(TenantB, true, "message.delivered");
+        Assert.True(Storage.Webhooks.MayHaveSubscribers(TenantB, "message.delivered"));
+
+        // and the next delivery of tenant B reaches the new endpoint.
+        await AcceptAsync(Msg(tenant: TenantB, to: ["y@example.org"]));
+        foreach (var d in await ClaimAsync(max: 10, now: Clock.UtcNow.AddSeconds(1)))
+        {
+            await RecordAsync(d, DeliveryOutcome.Delivered, events: [Draft("message.delivered", "{}")]);
+        }
+
+        Assert.Equal(added, Assert.Single(await ClaimDueAsync(), i => i.TenantId == TenantB).EndpointId);
+    }
+
+    [Fact]
     public async Task Claim_respects_max_due_time_and_leases()
     {
         await SeedAsync(3);

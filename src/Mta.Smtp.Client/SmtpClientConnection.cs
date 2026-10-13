@@ -159,7 +159,6 @@ public sealed class SmtpClientConnection : IAsyncDisposable
 
     // ------------------------------------------------------------ low-level I/O
 
-    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     /// <summary>The reusable timeout source for <paramref name="ct"/>, armed to fire after <paramref name="timeout"/>; call <see cref="DisarmTimeout"/> when the operation is over.</summary>
     private CancellationTokenSource ArmTimeout(CancellationToken ct, TimeSpan timeout)
     {
@@ -177,6 +176,7 @@ public sealed class SmtpClientConnection : IAsyncDisposable
 
     private static void DisarmTimeout(CancellationTokenSource cts) => cts.CancelAfter(Timeout.InfiniteTimeSpan);
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<SmtpReply> ReadReplyAsync(SmtpStage stage, TimeSpan timeout, CancellationToken ct)
     {
         var cts = ArmTimeout(ct, timeout);
@@ -259,6 +259,7 @@ public sealed class SmtpClientConnection : IAsyncDisposable
         return await FlushAndReadReplyAsync(stage, timeout, ct).ConfigureAwait(false);
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<SmtpReply> FlushAndReadReplyAsync(SmtpStage stage, TimeSpan timeout, CancellationToken ct)
     {
         await FlushAsync(stage, ct).ConfigureAwait(false);
