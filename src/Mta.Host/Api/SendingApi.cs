@@ -84,7 +84,7 @@ public sealed class SendRawRequest
 public sealed record SendResponse(Guid Id, string Status, int Recipients);
 
 /// <summary>A composed message ready for <see cref="SubmissionService"/>.</summary>
-public sealed record ComposedMessage(byte[] Raw, EmailAddress EnvelopeFrom, IReadOnlyList<EmailAddress> Recipients, bool SmtpUtf8);
+public sealed record ComposedMessage(byte[] Raw, EmailAddress EnvelopeFrom, IReadOnlyList<EmailAddress> Recipients, bool SmtpUtf8, IReadOnlyList<string>? Tags = null);
 
 /// <summary>Validates a <see cref="SendRequest"/> and composes it into an RFC 5322 message with <see cref="MessageBuilder"/>.</summary>
 public static class MessageComposer
@@ -264,7 +264,7 @@ public static class MessageComposer
         }
 
         var recipients = to.Concat(cc).Concat(bcc).Select(m => m.Address).ToList();
-        return new ComposedMessage(raw, from!.Address, recipients, international);
+        return new ComposedMessage(raw, from!.Address, recipients, international, request.Tags);
     }
 
     /// <summary>Parses the From and recipient addresses of a raw submission.</summary>
@@ -446,6 +446,7 @@ public sealed class SendingApi(ApiAuthenticator auth, SubmissionService submissi
             IdempotencyKey = idempotencyKey,
             IdempotencyFingerprint = idempotencyKey is null ? null : fingerprint,
             StoreAttachments = store,
+            Tags = message.Tags,
         }, context.RequestAborted).ConfigureAwait(false);
 
         if (!result.IsAccepted)

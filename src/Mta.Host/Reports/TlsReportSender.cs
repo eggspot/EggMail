@@ -8,16 +8,25 @@ namespace Mta.Host.Reports;
 /// <summary>
 /// Sends the daily TLS-RPT reports (RFC 8460) for the domains whose MTA-STS or DANE policy applied to our outbound sessions:
 /// looks up the domain's <c>_smtp._tls</c> record and sends to the first endpoint that accepts (HTTPS POST, or an e-mail queued
-/// through the normal delivery pipeline). A report that could not be delivered is kept in memory and retried on later runs
-/// (up to <see cref="MaxAttempts"/>); a restart loses pending reports, which is acceptable for aggregate statistics.
+/// through the normal delivery pipeline). The counters of completed days come from the persisted journal (<see cref="TlsReportJournal"/>),
+/// so a restart loses neither the counters nor a report that could not be delivered yet: a failed report keeps its (merged) counters and is
+/// retried on later runs (up to <see cref="MaxAttempts"/>). A run takes a lease of the config store, so with several replicas on one database
+/// each report is sent once.
 /// </summary>
 public sealed class TlsReportSender
 {
     public const int MaxAttempts = 6;
 
-    private sealed record Pending(TlsRptDomainReportData Data, int Attempts);
+    /// <summary>The most persisted counter pieces one run reads; the rest is handled by the next run.</summary>
+    private const int MaxBucketsPerRun = 20_000;
 
-    private readonly TlsRptCollector _collector;
+    private const string LeaseName = "tls-rpt-sender";
+
+    private static readonly TimeSpan LeaseDuration = TimeSpan.FromMinutes(10);
+
+    private readonly TlsReportJournal _journal;
+    private readonly IConfigStore _config;
+    private readonly string _owner = "tls-rpt-" + Guid.NewGuid().ToString("N");
     private readonly TlsRptRecordLookup _lookup;
     private readonly TlsRptHttpsSender _https;
     private readonly TlsRptReportBuilder _builder;
@@ -25,11 +34,11 @@ public sealed class TlsReportSender
     private readonly IClock _clock;
     private readonly string _hostname;
     private readonly IMtaLog _log;
-    private readonly List<Pending> _retry = [];
 
-    public TlsReportSender(TlsRptCollector collector, TlsRptRecordLookup lookup, TlsRptHttpsSender https, IMessageIntake intake, IClock clock, string hostname, string contact, IMtaLog? log = null)
+    public TlsReportSender(TlsReportJournal journal, IConfigStore config, TlsRptRecordLookup lookup, TlsRptHttpsSender https, IMessageIntake intake, IClock clock, string hostname, string contact, IMtaLog? log = null)
     {
-        _collector = collector;
+        _journal = journal;
+        _config = config;
         _lookup = lookup;
         _https = https;
         _intake = intake;
@@ -42,39 +51,55 @@ public sealed class TlsReportSender
     /// <summary>Sends the reports of every completed UTC day (and retries earlier failures). Returns the number of reports sent.</summary>
     public async Task<int> RunOnceAsync(CancellationToken ct)
     {
-        var work = _collector.DrainCompletedDays().Select(d => new Pending(d, 0)).Concat(Take()).ToList();
-        int sent = 0;
-        foreach (var item in work)
+        await _journal.FlushAsync(ct).ConfigureAwait(false);   // what the collector holds for the days that just ended
+        LeaseRecord? lease = await _config.TryAcquireLeaseAsync(LeaseName, _owner, LeaseDuration, _clock.UtcNow, ct).ConfigureAwait(false);
+        if (lease is null)
         {
-            SendResult result;
-            try
-            {
-                result = await SendAsync(item.Data, ct).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                _log.Write(MtaLogLevel.Warning, "tlsrpt", $"report for {item.Data.PolicyDomain} failed", ex);
-                result = SendResult.Failed;
-            }
-
-            if (result == SendResult.Sent)
-            {
-                sent++;
-            }
-            else if (result == SendResult.Failed && item.Attempts + 1 < MaxAttempts)
-            {
-                _retry.Add(item with { Attempts = item.Attempts + 1 });
-            }
+            return 0;   // another replica is sending
         }
 
-        return sent;
-    }
+        try
+        {
+            int sent = 0;
+            foreach (var item in await _journal.GetCompletedAsync(MaxBucketsPerRun, ct).ConfigureAwait(false))
+            {
+                // A long run (many domains, slow endpoints) keeps its lease; if it was lost anyway, stop rather than send what another replica now sends.
+                if (!await _config.RenewLeaseAsync(LeaseName, _owner, lease.FencingToken, LeaseDuration, _clock.UtcNow, ct).ConfigureAwait(false))
+                {
+                    _log.Write(MtaLogLevel.Warning, "tlsrpt", "lost the TLS-RPT sender lease; stopping this run");
+                    break;
+                }
 
-    private List<Pending> Take()
-    {
-        var items = _retry.ToList();
-        _retry.Clear();
-        return items;
+                SendResult result;
+                try
+                {
+                    result = await SendAsync(item.Data, ct).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _log.Write(MtaLogLevel.Warning, "tlsrpt", $"report for {item.Data.PolicyDomain} failed", ex);
+                    result = SendResult.Failed;
+                }
+
+                if (result == SendResult.Failed)
+                {
+                    await _journal.RetryLaterAsync(item, giveUp: item.Attempts + 1 >= MaxAttempts, ct).ConfigureAwait(false);
+                    continue;
+                }
+
+                await _journal.CompleteAsync(item, ct).ConfigureAwait(false);
+                if (result == SendResult.Sent)
+                {
+                    sent++;
+                }
+            }
+
+            return sent;
+        }
+        finally
+        {
+            await _config.ReleaseLeaseAsync(LeaseName, _owner, CancellationToken.None).ConfigureAwait(false);
+        }
     }
 
     private enum SendResult { Sent, NothingToSend, Failed }

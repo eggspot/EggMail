@@ -42,7 +42,7 @@ public interface IConfigDbAccess<TContext> where TContext : DbContext, IConfigDb
 /// <see cref="IConfigStore"/> over EF Core, shared by every relational provider (design §2.3: one implementation for
 /// both). Secrets arrive already protected. Uniqueness violations surface as <see cref="StorageConflictException"/>.
 /// </summary>
-public sealed class EfConfigStore<TContext>(IConfigDbAccess<TContext> db) : IConfigStore where TContext : DbContext, IConfigDbSets
+public sealed partial class EfConfigStore<TContext>(IConfigDbAccess<TContext> db) : IConfigStore where TContext : DbContext, IConfigDbSets
 {
     private long _webhookVersion;
 
@@ -256,6 +256,7 @@ public sealed class EfConfigStore<TContext>(IConfigDbAccess<TContext> db) : ICon
         await Write(c =>
         {
             c.DkimKeys.Where(k => k.DomainId == domainId).ExecuteDelete();
+            c.Set<DomainRecordCheckEntity>().Where(k => k.DomainId == domainId).ExecuteDelete();
             c.Domains.Where(d => d.Id == domainId).ExecuteDelete();
         }, ct).ConfigureAwait(false);
 

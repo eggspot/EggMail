@@ -58,6 +58,7 @@ public class SwitchFlowTests : SwitchTestBase
 
         await AssertSameAsync(source, target, includeHistory: !skipHistory);
         await AssertSecretsAsync(source, target);
+        await AssertRuntimeStateMovedAsync(source, target, seeded);
         if (skipHistory)
         {
             Assert.Empty(await ReadAsync<MessageIndexEntity>(target, TransferTables.MessageIndex));
@@ -74,6 +75,25 @@ public class SwitchFlowTests : SwitchTestBase
         SwitchStatus final = await engine.FinalizeAsync(deleteBundle: false, null, default);
         Assert.Equal(SwitchStates.Finalized, final.SourceState);
         Assert.True(Directory.Exists(BundleDir()));
+    }
+
+    /// <summary>The persisted runtime state carries over: the target shows the same check results, the same unsent TLS-RPT counters and the same sending counters.</summary>
+    private static async Task AssertRuntimeStateMovedAsync(TestStore source, TestStore target, Seed.Seeded seeded)
+    {
+        var checks = await target.Storage.Config.GetDomainRecordChecksAsync(seeded.DomainId, default);
+        Assert.Equal(["invalid", "missing", "ok"], checks.OrderBy(c => c.RecordKey, StringComparer.Ordinal).Select(c => c.Status).Order(StringComparer.Ordinal));
+        Assert.Equal(await source.Storage.Config.GetDomainRecordChecksAsync(seeded.DomainId, default), checks);
+
+        int tomorrow = (int)(DateTimeOffset.UtcNow.ToUnixTimeSeconds() / 86400) + 1;
+        var buckets = await target.Storage.Config.GetTlsRptBucketsAsync(tomorrow, 100, default);
+        Assert.Equal("partner.example", Assert.Single(buckets).PolicyDomain);
+        Assert.Equal(2, buckets[0].Attempts);
+        Assert.Equal(await source.Storage.Config.GetTlsRptBucketsAsync(tomorrow, 100, default), buckets);
+
+        long hour = DateTimeOffset.UtcNow.ToUnixTimeSeconds() / 3600;
+        var counters = await target.Storage.Config.GetSendingCountersAsync(hour - 1, hour / 24 - 1, default);
+        Assert.Equal([17L, 29L, 31L], counters.OrderBy(c => c.Scope).Select(c => c.Count));
+        Assert.Equal(await source.Storage.Config.GetSendingCountersAsync(hour - 1, hour / 24 - 1, default), counters);
     }
 
     [Theory]

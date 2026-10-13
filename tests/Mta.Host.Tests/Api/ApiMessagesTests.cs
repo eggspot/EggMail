@@ -31,6 +31,12 @@ public class ApiMessagesTests : IAsyncLifetime
         ["html"] = "<p>html body of " + subject + "</p>",
     };
 
+    private static Dictionary<string, object?> WithTags(Dictionary<string, object?> body, params string[] tags)
+    {
+        body["tags"] = tags;
+        return body;
+    }
+
     private async Task<string> SendAsync(ApiClient client, Dictionary<string, object?> body)
     {
         Reply r = await client.PostAsync("/api/v1/messages", body);
@@ -378,6 +384,42 @@ public class ApiMessagesTests : IAsyncLifetime
         var domain = (await _f.Storage.Config.FindDomainByNameAsync("example.com", default))!;
         await _f.Storage.Config.UpsertDomainAsync(domain with { SendingPaused = true }, default);
         (await _a.PostAsync($"/api/v1/messages/{id}/resend")).Problem(HttpStatusCode.Forbidden, "domain_not_verified");
+    }
+
+    [Fact]
+    public async Task Tags_given_at_send_time_are_stored_and_returned_by_the_list_the_detail_and_the_tag_filter()
+    {
+        string welcome = await SendAsync(_a, WithTags(Body("Welcome", "alex@gmail.test"), "welcome", "autumn", "welcome"));
+        _f.Clock.Advance(TimeSpan.FromMinutes(1));
+        string plain = await SendAsync(_a, Body("Plain", "alex@gmail.test"));
+        _f.Clock.Advance(TimeSpan.FromMinutes(1));
+        string other = await SendAsync(_a, WithTags(Body("Other", "pat@outlook.test"), "welcome-back"));
+
+        Reply detail = await _a.GetAsync("/api/v1/messages/" + welcome);
+        Assert.Equal(["welcome", "autumn"], detail["tags"].EnumerateArray().Select(t => t.GetString()!));   // a repeated tag is stored once
+        Assert.Equal(0, (await _a.GetAsync("/api/v1/messages/" + plain))["tags"].GetArrayLength());
+
+        Reply all = await _a.GetAsync("/api/v1/messages");
+        JsonElement[] items = all["items"].EnumerateArray().ToArray();
+        Assert.Equal([1, 0, 2], items.Select(i => i.GetProperty("tags").GetArrayLength()));
+        Assert.Equal(["welcome-back"], items[0].GetProperty("tags").EnumerateArray().Select(t => t.GetString()!));
+
+        Reply byTag = await _a.GetAsync("/api/v1/messages?tag=welcome");
+        Assert.Equal([welcome], byTag["items"].EnumerateArray().Select(i => i.GetProperty("id").GetString()!));   // whole tag, not welcome-back
+        Assert.Equal([other], (await _a.GetAsync("/api/v1/messages?tag=welcome-back"))["items"].EnumerateArray().Select(i => i.GetProperty("id").GetString()!));
+        Assert.Empty((await _a.GetAsync("/api/v1/messages?tag=nothing"))["items"].EnumerateArray());
+        Assert.Equal(HttpStatusCode.BadRequest, (await _a.GetAsync("/api/v1/messages?tag=" + new string('x', 65))).Status);
+    }
+
+    [Fact]
+    public async Task Tags_are_not_recorded_with_stats_only_history()
+    {
+        await using ApiFixture f = await ApiFixture.StartAsync(new ApiFixtureOptions { History = HistoryMode.StatsOnly });
+        ApiClient c = await f.KeyClientAsync(ApiFixture.TenantAId);
+        string id = await SendAsync(c, WithTags(Body("Tagged", "alex@gmail.test"), "welcome"));
+        (await c.GetAsync("/api/v1/messages/" + id)).Problem(HttpStatusCode.Gone, "history_not_recorded");
+        (await c.GetAsync("/api/v1/messages?tag=welcome")).Problem(HttpStatusCode.Gone, "history_not_recorded");
+        Assert.Empty((await f.Storage.History.SearchAsync(new MessageQuery(Tag: "welcome"), default)).Items);
     }
 
     [Fact]

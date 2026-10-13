@@ -151,6 +151,8 @@ public static class Seed
 
     public sealed record Seeded(Guid DomainId, Guid[] QueuedMessageIds, Guid[] QueuedDeliveryIds, string IdempotencyKey, Guid IdempotencyMessageId);
 
+    public const string CountedDomain = "example.com";
+
     public static async Task<Seeded> PopulateAsync(IStorage storage, ISecretProtector secrets, int queued = 6, int deliveredPerDay = 2, int days = 3)
     {
         DateTimeOffset now = DateTimeOffset.UtcNow;
@@ -174,6 +176,22 @@ public static class Seed
         await c.UpsertCertificateAsync(new CertificateRecord(Ids.New(), "default", ["mail.example.com"], now.AddDays(-1), now.AddDays(89), "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----", secrets.Protect("cert-private-key"u8, SecretPurposes.TlsPrivateKey), "acme", "AB:CD:EF", true, 0, now), default);
         await c.UpsertAcmeAccountAsync(new AcmeAccountRecord(Ids.New(), "https://acme.example/dir", "ops@example.com", secrets.Protect("acme-account-key"u8, SecretPurposes.AcmeAccountKey), "https://acme.example/acct/1", now), default);
         await c.UpsertAcmeRenewalAsync(new AcmeRenewalRecord("default", "pending", now, now.AddDays(60), 1, "challenge failed", "{\"token\":\"abc\"}", "{\"ari\":1}"), default);
+
+        // Persisted runtime state: the last check of each record of the domain, an unsent TLS-RPT counter piece, and the sending counters of the current windows.
+        await c.ReplaceDomainRecordChecksAsync(domainId, [
+            new DomainRecordCheckRecord(domainId, "TXT|egg1._domainkey.example.com", "ok", "v=DKIM1; k=rsa; p=PUBLICKEYBASE64", now),
+            new DomainRecordCheckRecord(domainId, "TXT|example.com", "invalid", "v=spf1 -all", now),
+            new DomainRecordCheckRecord(domainId, "TXT|_dmarc.example.com", "missing", null, now),
+        ], default);
+        await c.AddTlsRptBucketsAsync([new TlsRptBucketRecord(Ids.New(now), (int)(now.ToUnixTimeSeconds() / 86400) - 1, "partner.example", "{\"policyDomain\":\"partner.example\"}", 2, now)], default);
+        long hour = now.ToUnixTimeSeconds() / 3600;
+        long day = now.ToUnixTimeSeconds() / 86400;
+        await c.AddSendingCountersAsync([
+            new SendingCounterRecord(0, Guid.Empty, "", 0, hour, 17),
+            new SendingCounterRecord(1, TenantA, "", 1, day, 29),
+            new SendingCounterRecord(2, Guid.Empty, CountedDomain, 1, day, 31),
+        ], hour - 1, day - 1, default);
+
         Guid endpoint = Ids.New();
         await c.UpsertWebhookEndpointAsync(new WebhookEndpointRecord(endpoint, TenantA, "https://hooks.example.com/in", secrets.Protect("whsec_123"u8, SecretPurposes.WebhookSecret), ["*"], true, null, null, now, null), default);
 
@@ -249,6 +267,8 @@ public static class Seed
             Content = new MessageContent("Hello", "plain text", "<p>html</p>", [new AttachmentInfo("a.pdf", "application/pdf", 10, null)], false),
             RetainRaw = retainRaw,
             SendingDomain = "example.com",
+            MessageIdHeader = $"<{Guid.NewGuid():N}@example.com>",
+            Tags = ["seed", "tag \"quoted\""],
         };
     }
 

@@ -6,7 +6,7 @@ The implementation of [design §4.6](../design.md#46-switching-backends-manual-a
 
 | Piece | Where | What it does |
 |---|---|---|
-| Transfer contract | `Mta.Storage/Transfer` | `IStorageTransfer` (on `IStorage.Transfer`): stream every table as provider-neutral entity rows, apply a chunk idempotently, the switch state, the fence, transfer marks and activation holds. `TransferTables` is the registry of the 28 tables that move: adding a table to the bundle is one entry there |
+| Transfer contract | `Mta.Storage/Transfer` | `IStorageTransfer` (on `IStorage.Transfer`): stream every table as provider-neutral entity rows, apply a chunk idempotently, the switch state, the fence, transfer marks and activation holds. `TransferTables` is the registry of the 31 tables that move: adding a table to the bundle is one entry there |
 | EF implementation | `EfStorageTransfer` | Written once over the shared EF model for every relational provider. SQLite and PostgreSQL only supply `ITransferDbAccess` (how to get a read context and a write transaction) |
 | In-memory implementation | `MemoryTransfer` | The same contract straight over the in-memory dictionaries |
 | Bundle | `Mta.Storage.Portability` | Chunked NDJSON files, body packs, `manifest.json`, `secrets/` (see Bundle layout) |
@@ -35,10 +35,11 @@ The **gate** (`SwitchGate`) is derived from that row when a store is opened and 
 ## Bundle layout
 
 ```
-manifest.json                      format 1.1.0: switch id, source, effective settings, per-file SHA-256, per-table rows + checksum,
+manifest.json                      format 1.2.0: switch id, source, effective settings, per-file SHA-256, per-table rows + checksum,
                                    mode, history export progress, the protected digest key
 config/<table>.NNNNN.ndjson        tenants, domains, DKIM keys, API keys, SMTP credentials, suppressions, webhook endpoints, settings,
-                                   TLS policies, relay routes, certificates, ACME accounts and renewals
+                                   TLS policies, relay routes, certificates, ACME accounts and renewals, domain_record_check
+                                   (last DNS check results), tls_rpt_bucket (unsent TLS-RPT counters), sending_counter (hour/day windows)
 stats/<table>.NNNNN.ndjson         stat_aggregate, stat_meta, recent_event, webhook_attempt
 queue/<table>.NNNNN.ndjson         delivery_queue, message_spool, webhook_outbox, api_idempotency_key
 queue/message_spool.NNNNN.bodies   the raw messages of the chunk with the same stem (body pack: magic, then length + bytes per row)
@@ -46,7 +47,9 @@ history/<table>/<yyyy-MM-dd>.NNNNN.ndjson (+ .bodies for message_raw_retained)  
 secrets/bundle-cert.pfx, secrets/keyring/   the bundle's own Data Protection ring and its passphrase-protected certificate
 ```
 
-A chunk is closed after 5,000 rows or 32 MiB (`SwitchOptions`). The rows are the EF entities serialized with camelCase names, enum names and UTC millisecond timestamps; the hold column and the body column are not part of the row. Unknown members are ignored on read (forward compatibility inside a major version); `manifest.json` carries the format version `1.1.0`, readers accept any 1.x.
+A chunk is closed after 5,000 rows or 32 MiB (`SwitchOptions`). The rows are the EF entities serialized with camelCase names, enum names and UTC millisecond timestamps; the hold column and the body column are not part of the row. Unknown members are ignored on read (forward compatibility inside a major version); `manifest.json` carries the format version `1.2.0`, readers accept any 1.x. Format 1.2 (persisted runtime state, schema version 4) added the three config tables above and the `messageIdHeader` and `tags` members of `message_index`; a 1.1 bundle imports into a current target (the tables are absent from its manifest, the members null), and a bundle with the new tables is refused by a build that does not know them (`'name' is not a transferable table`), which is why the switch is meant to run between the same version on both sides.
+
+**What carries over of the runtime state (DESIGN-DECIDED, decision 55).** The last DNS check results, the unsent TLS-RPT counters and reports, and the sending counters of the current windows move with the config part: a switch must not show a verified domain's records as `pending`, lose the day's TLS report or reset the hour's and day's sending caps. The source process flushes its in-memory counters when it quiesces (`HostSwitchControl.QuiesceDeliveriesAsync` calls `EggMailRuntime.FlushRuntimeStateAsync` after the in-flight deliveries finished), so the bundle holds the last counts; the offline CLI (`mta migrate-storage`) has nothing in memory to flush. The sending counters are imported as an upsert (a value already in the target is replaced, not added to). Not carried: leases, and the in-memory state that is rebuilt by itself (throttles, circuit breakers, route health).
 
 **DESIGN-DECIDED: the bundle row is the EF entity** (the design says each store implements the export/import contract "over the provider-neutral EF model"). The consequence is that the bundle format follows the model: a change to a table is a bundle format change and must bump the format version. A test (`TransferConformance`) round-trips every table through its bundle form.
 
@@ -104,7 +107,7 @@ The source is the configured storage; the target is `--to` plus `SwitchTarget:*`
 
 ## Backend notes
 
-- **SQLite:** schema version 3 (upgrades from 1 and 2; the step to 3 adds the hold column and the four progress tables). Writes go through the file's writer thread (one chunk is one writer command); reads stream on pooled read connections. With `Sqlite:QueuePersistence=Memory` the queue part is read in pages on its writer.
+- **SQLite:** schema version 4 (upgrades from 1 to 3; the step to 3 adds the hold column and the four progress tables; the step to 4 adds the runtime state tables and the history index columns, none of which a bundle needs to know about: the three config tables are listed in the manifest like any other, and a bundle from before them imports with those tables simply absent). Writes go through the file's writer thread (one chunk is one writer command); reads stream on pooled read connections. With `Sqlite:QueuePersistence=Memory` the queue part is read in pages on its writer.
 - **PostgreSQL:** schema `V003__backend_switch.sql`; one transaction per chunk; `PostgresTransferAccess.PrepareHistoryDaysAsync` creates the day partitions an imported chunk needs, including days older than the application would create (tested with a 25-day-old message). The claim SQL excludes held rows; a replica that has not yet read the fence claims nothing because of the marks.
 - **In-memory:** full implementation, used by the conformance suite and as a source/target in the end-to-end tests.
 
