@@ -104,6 +104,10 @@ internal static class Cli
                     AutoMigrate = true,
                     MaxPoolSize = options.Postgres.MaxPoolSize,
                     PartitionsAheadDays = options.Postgres.PartitionsAheadDays,
+                    StatsFlushInterval = options.Postgres.StatsFlushInterval,
+                    RetentionDeleteBatchSize = options.Postgres.RetentionDeleteBatchSize,
+                    RetentionDeletePause = options.Postgres.RetentionDeletePause,
+                    CommandTimeoutSeconds = options.Postgres.CommandTimeoutSeconds,
                 },
             };
         }
@@ -179,17 +183,7 @@ internal static class Cli
         ApiHosting.AddServices(builder, loaded, runtime);
         builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(45));
 
-        builder.WebHost.ConfigureKestrel(k =>
-        {
-            var bind = System.Net.IPAddress.Parse(config.Dashboard.BindAddress);
-            k.Listen(bind, config.Dashboard.HttpPort);
-            if (config.Dashboard.HttpsEnabled)
-            {
-                k.Listen(bind, config.Dashboard.HttpsPort, l => l.UseCertificateStore(runtime.Certificates));
-            }
-
-            k.Limits.MaxRequestBodySize = 64L * 1024 * 1024;
-        });
+        builder.WebHost.ConfigureKestrel(k => KestrelHosting.Configure(k, config, runtime.Certificates));
 
         var app = builder.Build();
         DashboardHosting.Map(app);
