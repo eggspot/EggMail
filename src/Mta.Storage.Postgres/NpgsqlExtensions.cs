@@ -41,6 +41,20 @@ internal static class PostgresErrors
         return false;
     }
 
+    /// <summary>True when the failure shows that established connections broke (not a mere timeout).</summary>
+    public static bool IsBrokenConnection(Exception exception)
+    {
+        for (Exception? e = exception; e is not null; e = e.InnerException)
+        {
+            if (e is SocketException or IOException or PostgresException)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     public static StorageUnavailableException Unavailable(Exception inner) =>
         new("PostgreSQL is unavailable: " + Describe(inner), inner);
 

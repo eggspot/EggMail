@@ -35,6 +35,16 @@ public class UnitTests
     }
 
     [Fact]
+    public void Only_broken_connections_justify_discarding_the_pool_not_plain_timeouts()
+    {
+        Assert.True(PostgresErrors.IsBrokenConnection(new NpgsqlException("x", new IOException())));
+        Assert.True(PostgresErrors.IsBrokenConnection(new NpgsqlException("x", new SocketException())));
+        Assert.False(PostgresErrors.IsBrokenConnection(new NpgsqlException("Failed to connect", new TimeoutException("Timeout during connection attempt"))));
+        Assert.False(PostgresErrors.IsBrokenConnection(new TimeoutException()));
+        Assert.True(PostgresErrors.IsUnavailable(new NpgsqlException("Failed to connect", new TimeoutException())));
+    }
+
+    [Fact]
     public void Partition_names_carry_the_table_and_the_utc_day()
     {
         Assert.Equal("message_event_p20261012", PostgresPartitions.NameOf("message_event", 20738));

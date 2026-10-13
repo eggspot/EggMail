@@ -106,7 +106,7 @@ public sealed class PostgresStorage : IStorage
                     "Enable Postgres:AutoMigrate or apply PostgresMigrator.GenerateScript() as the owner role.");
             }
 
-            _rt.ConfigStore = new EfConfigStore<PostgresDbContext>(new PostgresConfigAccess(_rt.Data, PostgresModelHooks.Instance));
+            _rt.ConfigStore = new EfConfigStore<PostgresDbContext>(new PostgresConfigAccess(_rt.Data, PostgresModelHooks.Instance, _options.Postgres.MaxPoolSize));
             if (_rt.IsFull)
             {
                 int today = StorageTime.DayNumber(_rt.Clock.UtcNow);

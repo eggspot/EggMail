@@ -10,9 +10,15 @@ namespace Mta.Storage.Postgres;
 /// everything, so one transaction can span them (design §4.2). EF is used for the configuration store and as the
 /// schema's source of truth in tests; the hot paths use hand-written SQL on Npgsql (see <see cref="PostgresQueueStore"/>).
 /// </summary>
-public sealed class PostgresDbContext(DbContextOptions<PostgresDbContext> options, IStorageModelHooks hooks)
-    : DbContext(options), IConfigDbSets, IQueueDbSets, IStatsDbSets, IHistoryDbSets
+public class PostgresDbContext : DbContext, IConfigDbSets, IQueueDbSets, IStatsDbSets, IHistoryDbSets
 {
+    private readonly IStorageModelHooks _hooks;
+
+    public PostgresDbContext(DbContextOptions<PostgresDbContext> options, IStorageModelHooks hooks) : base(options) => _hooks = hooks;
+
+    /// <summary>For the pooled read context: the hooks travel in the options (<see cref="ModelHooksOptionsExtensions.UseModelHooks{TContext}"/>).</summary>
+    protected PostgresDbContext(DbContextOptions options) : base(options) => _hooks = options.HooksOf();
+
     public DbSet<TenantEntity> Tenants => Set<TenantEntity>();
     public DbSet<ApiKeyEntity> ApiKeys => Set<ApiKeyEntity>();
     public DbSet<SmtpCredentialEntity> SmtpCredentials => Set<SmtpCredentialEntity>();
@@ -46,11 +52,14 @@ public sealed class PostgresDbContext(DbContextOptions<PostgresDbContext> option
     public DbSet<MessageContentEntity> MessageContents => Set<MessageContentEntity>();
     public DbSet<RetainedRawEntity> RetainedRaw => Set<RetainedRawEntity>();
 
-    protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder) => hooks.ConfigureConventions(configurationBuilder);
+    protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder) => _hooks.ConfigureConventions(configurationBuilder);
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         StorageModel.ConfigureAll(modelBuilder);
-        hooks.OnModelBuilt(modelBuilder);
+        _hooks.OnModelBuilt(modelBuilder);
     }
 }
+
+/// <summary>A context EF can pool: EF builds pooled contexts from their options alone, so the hooks come from the options.</summary>
+public sealed class PostgresReadContext(DbContextOptions<PostgresReadContext> options) : PostgresDbContext(options);
