@@ -1,4 +1,4 @@
-# Storage (`Mta.Storage`, `Mta.Storage.Sqlite`)
+# Storage (`Mta.Storage`, `Mta.Storage.Sqlite`, `Mta.Storage.Postgres`)
 
 One storage model, three implementations behind `IStorage` (decision E: feature-identical backends):
 
@@ -6,12 +6,14 @@ One storage model, three implementations behind `IStorage` (decision E: feature-
 |---|---|
 | `Mta.Storage` | The contracts, the shared EF model split into four parts, the logic every backend shares (attempt planning, statistics bucketing and rollup, status rules, lease rules), the EF `IConfigStore`, and `InMemoryStorage` |
 | `Mta.Storage.Sqlite` | `SqliteStorage`: four database files, one group-commit writer per file |
+| `Mta.Storage.Postgres` | `PostgresStorage`: one database, one transaction across everything, day partitions, owner/runtime roles (see "PostgreSQL backend") |
 | `tests/Mta.Storage.Tests` | The conformance suite (abstract classes, one `CreateAsync(StorageOptions)` to plug a backend in) plus unit tests of the shared logic |
 | `tests/Mta.Storage.Sqlite.Tests` | The conformance suite against SQLite (history Full and StatsOnly, sync Off/Normal/Full, memory queue) plus SQLite-specific tests |
+| `tests/Mta.Storage.Postgres.Tests` | The conformance suite against a real PostgreSQL (throwaway cluster, or `EGGMAIL_TEST_POSTGRES`; skipped when neither exists) plus PostgreSQL-specific, outage and cross-backend equivalence tests |
 
 ## Entity overview
 
-The model is four parts. On SQLite each part is its own context and its own file; the PostgreSQL provider composes all four with `StorageModel.ConfigureAll` into one context (see below). Table and column names are snake_case; there are **no foreign keys** (references are soft so cross-file effects, imports and partial restores never depend on order). Secrets columns hold bytes already protected with Data Protection.
+The model is four parts. On SQLite each part is its own context and its own file; the PostgreSQL provider composes all four with `StorageModel.ConfigureAll` into one context (see "PostgreSQL backend"). Table and column names are snake_case; there are **no foreign keys** (references are soft so cross-file effects, imports and partial restores never depend on order). Secrets columns hold bytes already protected with Data Protection.
 
 | Part (context, SQLite file) | Tables |
 |---|---|
@@ -100,7 +102,7 @@ Idempotent, safe to call repeatedly. In order: flush statistics; metadata retent
 
 ## Contract additions (all documented in the PR)
 
-`StorageBackend.InMemory`; `QueueOptions.IdempotencyKeyLifetime` (24 h); `SqliteOptions` tuning knobs (`RetentionDeleteBatchSize`, `RetentionDeletePause`, `BusyTimeout`, `JournalSizeLimitBytes`, `StatsFlushInterval`); `StorageConflictException`; `DeliveryAttempt.CountAttempt` (uncounted holds); store-assigned `CertificateRecord.Version`; defined semantics for the settled gaps: `EventTypes` containing `*` subscribes to all, suppression addresses and slugs are lower-cased, settings with `TenantId == null` are global, `QueryAsync` is `[from, to)`.
+`StorageBackend.InMemory`; `QueueOptions.IdempotencyKeyLifetime` (24 h); `SqliteOptions` tuning knobs (`RetentionDeleteBatchSize`, `RetentionDeletePause`, `BusyTimeout`, `JournalSizeLimitBytes`, `StatsFlushInterval`); `StorageConflictException`; `StorageUnavailableException` (PostgreSQL only: the database cannot be reached, answer 451); `PostgresOptions` tuning knobs (`StatsFlushInterval`, `RetentionDeleteBatchSize`, `RetentionDeletePause`, `CommandTimeoutSeconds`); `IConfigDbAccess<T>.TranslateException` (default: none; lets a provider map connectivity failures for the shared config store); `DeliveryAttempt.CountAttempt` (uncounted holds); store-assigned `CertificateRecord.Version`; defined semantics for the settled gaps: `EventTypes` containing `*` subscribes to all, suppression addresses and slugs are lower-cased, settings with `TenantId == null` are global, `QueryAsync` is `[from, to)`.
 
 ### Additions for the HTTP API ([api.md](../api.md), [components/api.md](api.md))
 
@@ -113,14 +115,103 @@ All additive; the shared conformance suites cover them on both backends.
 - `IMessageRecipientLookup` (optional interface on `IHistoryStore`): recipients of several messages in one call, so message lists can show them without loading content. Providers without it show lists without recipients.
 - SQLite `SchemaVersion` stays 1 (nothing is released yet): a `config.db` or `queue.db` created before these additions lacks the new tables and column and must be recreated.
 
-## Extending to PostgreSQL
+## PostgreSQL backend (`Mta.Storage.Postgres`)
 
-The Postgres provider (later task) should:
+`PostgresStorage` implements the same `IStorage` with the same observable behaviour (decision E); it is the third implementation the conformance suite runs against, and a cross-backend test runs one scenario on InMemory, SQLite and PostgreSQL and compares the results line by line. What differs is only what the engine is: many replicas, one transaction across everything, day partitions, and a WAL that PostgreSQL syncs at commit.
 
-1. Define one context implementing `IConfigDbSets`, `IQueueDbSets`, `IStatsDbSets`, `IHistoryDbSets` and call `StorageModel.ConfigureAll` plus its own `IStorageModelHooks` (native `timestamptz`, `uuid`, `bytea`; day partitions for the history tables via `migrationBuilder.Sql` as design §4.3).
-2. Reuse `EfConfigStore<TContext>` by implementing `IConfigDbAccess<TContext>` (a context per call; atomic lease acquisition guarded by `pg_try_advisory_xact_lock`).
-3. Write provider-specific hot-path stores (claim with `FOR UPDATE SKIP LOCKED … RETURNING`, record attempt in one transaction) and reuse the shared logic classes: `AttemptPlanner`, `StatsAggregator`/`StatsBucketer`/`StatsRollup`, `MessageStatus`, `ContentRules`, `LeaseRules`, `RetentionCutoffs`, `Cursors`, `EventIds`.
-4. Run the conformance suite: derive the abstract classes in `Mta.Storage.Tests` (`IntakeConformance`, `DeliveryConformance`, `HistoryConformance`, `StatsOnlyHistoryConformance`, `StatsConformance`, `WebhookConformance`, `ConfigConformance`, `MaintenanceConformance`) and implement `CreateAsync(StorageOptions)` using the provided `Clock`. Tests that depend on text ordering use ASCII names/ids so a database collation does not change results.
+| Piece | What it is |
+|---|---|
+| `PostgresDbContext` | One EF context implementing the four `I*DbSets` interfaces, composed with `StorageModel.ConfigureAll` + `PostgresModelHooks` (`timestamptz` truncated to UTC milliseconds, `uuid`, `bytea`, text columns in the `"C"` collation so ordering is byte order exactly like SQLite's BINARY, independent of the database's own collation) |
+| `PostgresMigrator` + `Schema/V001__initial.sql` | Hand-written, versioned, idempotent migrations (below) |
+| `PostgresQueueStore` | Intake, claim, record attempt, leases, queue statistics, webhook outbox |
+| `PostgresHistoryStore` | History writes (called inside the queue transactions) and the reads (search, detail, events, retained raw) |
+| `PostgresStatsStore` | In-memory aggregation flushed with one `INSERT … ON CONFLICT DO UPDATE` per chunk, the ring, queries |
+| `PostgresPartitions` | Day partitions of the five history tables: create ahead, create on demand, `DETACH … CONCURRENTLY` + `DROP` |
+| `PostgresMaintenance` | The maintenance jobs, health, `BackupAsync` (returns `null`: use `pg_dump`/PITR) |
+| `PostgresConfigAccess` | Plugs the provider-neutral `EfConfigStore<PostgresDbContext>` into PostgreSQL |
+
+### Roles and connection strings
+
+| Setting | Role | Used for |
+|---|---|---|
+| `Postgres:OwnerConnectionString` | schema owner | the migrator, creating and dropping day partitions (DDL needs ownership), `ANALYZE` of the partitioned parents, and the advisory-lock holder connection of every maintenance job. A small pool of its own (4) |
+| `Postgres:RuntimeConnectionString` | runtime | everything else: `SELECT/INSERT/UPDATE/DELETE` only. Pool size `Postgres:MaxPoolSize` (32) |
+
+With one connection string given it serves both roles (health carries the warning `postgres_single_role` and the start-up log says so). With two, the migrator grants the runtime role `SELECT/INSERT/UPDATE/DELETE` on all tables and `USAGE` on sequences and sets `ALTER DEFAULT PRIVILEGES FOR ROLE <owner>` so partitions created later are covered; the runtime role cannot create, alter, drop or truncate anything (tested). A read-only role for dashboard queries (`statement_timeout`, `idle_in_transaction_session_timeout`, design §4.3) is a deployment step: grant it `SELECT` and point read-only tooling at it; the application does not use it yet.
+
+`Postgres:AutoMigrate` (default `true`): `InitializeAsync` runs the migration script on the owner connection. With `false`, `InitializeAsync` refuses a schema that is not at `PostgresMigrator.CurrentVersion`; produce the script with `PostgresMigrator.GenerateScript(runtimeRole)` (one `DO` block = one transaction, idempotent, takes `pg_advisory_xact_lock` first, so replicas starting together queue up and find the version already recorded) and apply it as the owner role (`psql -f`, or `mta migrate-db`, which migrates even with `Mail:Database:Migrate=Never` and needs the owner connection string).
+
+Npgsql defaults the data source adds unless the connection string already sets them: `Application Name=eggmail`, `Maximum Pool Size`, `Command Timeout` (`Postgres:CommandTimeoutSeconds`, 30), and auto-prepare of hot statements (`Max Auto Prepare=64`, after 2 uses; set `Max Auto Prepare=0` behind a pooler that does not support prepared statements).
+
+### Schema
+
+The schema is the shared model (same tables, snake_case, no foreign keys) frozen in `V001__initial.sql`: generated once from the EF model and then fixed, so a later model change cannot silently change what a fresh database gets. A test compares every table, column type and nullability of a migrated database with the model, so drift fails the build. `message_index`, `message_recipient`, `message_event`, `message_content` and `message_raw_retained` are `PARTITION BY RANGE (day)` (`day` = days since 1970 of the UUIDv7 message id, the first key column of each); `delivery_queue` and `webhook_outbox` get a lower `fillfactor` and aggressive autovacuum settings because their rows are updated on every claim and attempt. Partition names are `<table>_p<yyyyMMdd>`.
+
+### Queue (one transaction per change)
+
+- **Intake** is one implicit-transaction `NpgsqlBatch` (one round trip): spool row, delivery rows (`INSERT … SELECT FROM unnest(…)`), and, with `History:Mode=Full`, the index row, recipients, content and the `queued` event. With an idempotency key it is an explicit transaction that first does the key upsert; a concurrent insert of the same key waits on the unique index and then reads the winner (tested with three replicas). Statistics are counted in memory after the commit.
+- **Claim** is `UPDATE delivery_queue SET lease_owner, lease_until WHERE id IN (SELECT id … WHERE due_at <= now AND lease_until <= now AND expires_at > now ORDER BY due_at, id LIMIT n FOR UPDATE SKIP LOCKED) RETURNING …`: any number of workers on any number of replicas take disjoint rows without waiting for each other (tested: 12 workers on 3 replicas, 1,200 deliveries, no duplicates; and a claim that skips a row another session holds locked). A lease that is past is claimable again without counting an attempt. `ClaimExpired` is the same statement over `expires_at`. The webhook outbox claim has the same shape. Unlike SQLite (single process) a start does **not** clear leases: another replica's work is live; leases of dead workers simply expire (`queue.leases` in maintenance clears the stale owner names).
+- **Record attempt** is one transaction: lock the delivery row (`FOR UPDATE`, so a repeated report waits and finds it gone), then in one round trip the spool counter, the suppression upsert (hard bounce or complaint; it commits with the completion, so SQLite's "suppression first" ordering is unnecessary here), the queue row action and the webhook fan-out; when the last recipient is final the raw message is copied into `message_raw_retained` (if requested) and the spool row deleted in the same transaction; then the history events, the message status and the content lifecycle. `CountAttempt=false` holds touch the row's due time and lease only.
+- **History writes** use the same transaction, so there is no "queued without history" window. A write for a day whose partition is missing creates it (the owner connection, under an advisory lock) and retries once. History rows older than the metadata retention (and content older than the content retention) are not written at all; reads would hide them anyway.
+
+### Maintenance
+
+Each job runs under `pg_try_advisory_xact_lock(<job key>)` held by a dedicated owner connection inside an open transaction, while the work uses other connections: `DETACH PARTITION … CONCURRENTLY` cannot run inside a transaction block, and a session-level lock would break behind PgBouncer in transaction mode. (The holder transaction stays open for the duration of the job, so an `idle_in_transaction_session_timeout` on the owner role shorter than the longest job would release the lock early; the jobs are idempotent, so the worst case is two nodes doing the same work.) Calling `RunAsync` from several replicas runs each job once; the others report it as `skipped: another node is running this job`. Job names: `partitions.create`, `retention.metadata`, `retention.content`, `analyze.history`, `retention.webhook_outbox`, `retention.webhook_attempts`, `stats.rollup`, `stats.retention`, `idempotency.expired`, `queue.leases`.
+
+- **Partitions**: `partitions.create` makes yesterday..today+`Postgres:PartitionsAheadDays` (7). Retention drops whole partitions: metadata tables (`message_index/recipient/event`) before the metadata cutoff day, content tables (`message_content/raw_retained`) before the content cutoff day; `RowsAffected` is the number of rows that were in them (an exact `count(*)` of each partition just before the detach). An interrupted detach (`inhdetachpending`) is finished with `DETACH … FINALIZE` on the next run. If a `DEFAULT` partition exists (which forbids concurrent detach) the plain, briefly locking detach is used. `ANALYZE` of the partitioned parents runs after a run that dropped partitions (autovacuum never analyzes a partitioned parent).
+- **Everything else** (outbox and attempt-log retention, hourly retention, idempotency keys) is batched `DELETE … WHERE ctid IN (SELECT ctid … LIMIT n)` in separate short transactions (`Postgres:RetentionDeleteBatchSize` 5,000, `RetentionDeletePause` 20 ms). The rollup is the same SQL as SQLite (window-function ranking by volume, top-N, the rest as `other`), one transaction per day, with the watermark in `stat_meta`.
+- **Health** (`GetHealthAsync`) never throws for an outage: `Ready=false`, warning `postgres_unavailable` and the error in `details`. It also reports the server version, schema version (`postgres_schema_version_mismatch`), the role split, `postgres_partition_missing:<table>` when today's partition is absent, `postgres_read_only_replica`, `retention_unlimited:*` and `postgres_single_role`.
+
+### Statistics
+
+Identical aggregation to SQLite (`StatsAggregator`, `StatsBucketer`, `StatsRollup`): counters accumulate in memory and a timer (`Postgres:StatsFlushInterval`, 10 s), `FlushAsync` and dispose write them. The flush is one transaction: the existing series of each hour are re-read (so other replicas' series count and a rolled-back flush cannot leave a cache ahead of the table), the rows are sorted by key (two replicas flushing the same hour cannot deadlock) and written with `INSERT … SELECT FROM unnest(…) ON CONFLICT DO UPDATE SET c = c + excluded.c`; the recent-events ring is appended in order and trimmed to `History:RecentEvents`. The top-N is approximate across flushes and replicas of one hour, as on SQLite; the daily rollup re-ranks by real volume.
+
+### Configuration store
+
+`EfConfigStore<PostgresDbContext>` unchanged. `PostgresConfigAccess` opens a fresh no-tracking context per read and runs every write in a transaction that first takes `pg_advisory_xact_lock`, which makes the read-modify-write of a lease atomic across replicas (decision K; tested: ten rounds, two replicas asking at once, exactly one wins). Cached webhook endpoints are refreshed when this process changes them and at most every 5 s otherwise (another replica may have).
+
+### Outages
+
+Every public method turns a connectivity failure (down, restarting, shutting down, out of connections, network or pool timeout, SQLSTATE class 08, `57P01..03`, `53300`) into `StorageUnavailableException`, so the SMTP layer can answer `451`; constraint violations on intake stay `StorageConflictException`. Tested with a TCP proxy that is cut and restored: every operation reports unavailable while it is cut, health reports not ready, buffered statistics survive the failed flush, and the same storage works again afterwards without a restart. SQLite never raises it.
+
+### Testing
+
+`tests/Mta.Storage.Postgres.Tests` runs the whole shared conformance suite against PostgreSQL (the same abstract classes InMemory and SQLite run, both history modes, a fresh database per test copied from a migrated template) plus: concurrent claims across replicas, partition creation/retention/interrupted detach/advisory-lock guard, the runtime-role permission split, restart and lease recovery, the migrator (idempotent, concurrent, model agreement), outages, cursor paging equality with SQLite on the same data, and the three-backend equivalence scenario.
+
+The server comes from `EGGMAIL_TEST_POSTGRES` (a connection string to an existing server; CI provides one; only `eggmail_test_*` databases are created or dropped), otherwise from a throwaway cluster started from local binaries (`EGGMAIL_TEST_PG_BIN`, Homebrew, `/usr/lib/postgresql/*/bin` or `PATH`): `initdb` into a temp directory, a random free localhost port, trust authentication, no unix socket, `fsync` off. The test host owns the cluster: it is stopped by its own pid at exit, a small detached watchdog stops exactly that pid (and removes exactly that directory) if the host is killed without running exit handlers, and clusters left by a dead earlier run are cleaned at the next start. With neither available every test is reported as **skipped** with the reason (a small xUnit framework extension, because the conformance facts live in another assembly), not failed. `EGGMAIL_TEST_PG_DURABLE=1` keeps `fsync` on (the benchmarks set it).
+
+### Measured on PostgreSQL (one laptop, one run)
+
+`bench/Mta.Benchmarks/Storage/PostgresStorageBenchmarks.cs` (BenchmarkDotNet `ShortRun`: 3 warm-up and 3 measured iterations, **one launch, so the error bars are wide and every 100 KB cell is noisy**; not a release-quality benchmark). It starts the same throwaway cluster as the tests, but with the server's real durability (`fsync`, `full_page_writes` and `synchronous_commit` on) via `EGGMAIL_TEST_PG_DURABLE=1`; the "off" rows set `synchronous_commit=off` for the session (a crash can lose the last fraction of a second of commits, no corruption). One operation is one acknowledged `AcceptAsync` with `History:Mode=Full`: the spool row, the delivery row, the index row, the recipient row, the content row and the `queued` event commit in one transaction and one round trip. The benchmark client and the server share the machine.
+
+- Machine: Apple M4 (10 cores), macOS 26 (Darwin 25.6), local APFS SSD, .NET 10.0.12 arm64, PostgreSQL 18.6 (Homebrew) on 127.0.0.1, Npgsql 10.0.3. Server settings other than durability are the defaults except `shared_buffers=128MB`, `max_wal_size=2GB`.
+- Caveat as for SQLite: on macOS `fsync` does not force the drive's write cache to the platter (that needs `F_FULLFSYNC`), so the `synchronous_commit=on` rows are optimistic compared with Linux on a server SSD, and the difference between on and off is small here for that reason. Run the benchmark on the target hardware before quoting anything.
+- Messages per second = 1,000,000 / mean time per message; the 100 KB cells use the median because one iteration in each cell was an outlier (checkpoints).
+
+| Callers | `synchronous_commit` | 2 KB msgs/s | 100 KB msgs/s (median, noisy) | 2 KB mean | 100 KB median |
+|---:|---|---:|---:|---:|---:|
+| 1 | on | 6,300 | 2,400 | 159 us | 421 us |
+| 1 | off | 7,200 | 3,100 | 140 us | 325 us |
+| 8 | on | 22,600 | 5,400 | 44 us | 183 us |
+| 8 | off | 28,700 | 4,200 | 35 us | 239 us |
+| 64 | on | 21,600 | 3,000 | 46 us | 335 us |
+| 64 | off | 28,700 | 6,500 | 35 us | 153 us |
+
+Accept + claim (100 at once) + record `Delivered` for the same message (2 KB, 8 callers for the accept part): `synchronous_commit=on` 7,800 messages/s (129 us), off 9,300 messages/s (107 us). Allocation per message on the accept path was about 17 KB (the budget in docs/benchmarks.md is about 20 KB per database round trip); 35 KB for the whole accept-claim-record cycle.
+
+Reading the table: with one caller the cost is one round trip plus the commit; with 8 callers PostgreSQL's own commit grouping and the connection pool scale it about 4x and then it flattens at the CPU of one laptop shared by client and server. Compared with the SQLite table above, SQLite `Off`/`Normal` is faster for a single process (no network hop, no separate server process), and PostgreSQL with `synchronous_commit=on` is far faster than SQLite `Full` here for the reason above (the optimistic fsync) as well as group commit; the two must not be compared as engines, only as defaults on this machine, and the PostgreSQL numbers say nothing about a remote server (add the network round trip to every figure). Nothing here has been reproduced by anyone else.
+
+
+### Differences from SQLite that are characteristics, not features
+
+| | SQLite | PostgreSQL |
+|---|---|---|
+| Atomicity | per file; cross-file effects ordered and idempotent (table above) | one transaction across queue, history, outbox, suppressions; no crash windows except the in-memory statistics (about 10 s) |
+| Start-up | clears all leases (single process) | leaves leases alone (other replicas) |
+| Retention | batched `DELETE` + `incremental_vacuum` | `DETACH … CONCURRENTLY` + `DROP` of day partitions; `RowsAffected` counts the rows that were in them |
+| Backups | `BackupAsync` = `VACUUM INTO` | `BackupAsync` returns `null`: `pg_dump`, base backups, PITR |
+| Reads | synchronous on the caller's thread | asynchronous I/O (except configuration reads, below) |
+| Durability | `Sqlite:SyncMode` | `synchronous_commit` of the server (default on) |
 
 ## Known gaps
 
@@ -131,10 +222,16 @@ The Postgres provider (later task) should:
 - Config reads create a short-lived EF context per call (no pooled factory); config is a cold path.
 - Reads on file-backed databases run synchronously on the caller's thread (SQLite has no asynchronous I/O); long history searches should be called from a thread-pool context.
 - Search by subject is a `LIKE '%…%'` scan within the other filters; no full-text index.
-- Export/import (Portability), PostgreSQL, and the storage-pressure indicator UI are other tasks.
+- Export/import (Portability) and the storage-pressure indicator UI are other tasks.
+- PostgreSQL: verified against PostgreSQL 18.6 and 16.13 (Homebrew, local) only; not against a managed service, behind PgBouncer, over TLS, with a remote server or with real HA/failover. The minimum supported version (16) is the lowest tested; `DETACH … CONCURRENTLY` and `inhdetachpending` need 14+.
+- PostgreSQL: the maintenance partition DDL needs the owner credentials at runtime (or a `RuntimeConnectionString` that is the owner); a deployment that must keep the owner secret away from the application has to run `partitions.create` and retention from a separate maintenance process with the owner string. `mta migrate-db` migrates with whatever credentials the configuration holds; `PostgresMigrator.GenerateScript` is the script form for a DBA.
+- PostgreSQL: configuration reads (`EfConfigStore`) are synchronous on the caller's thread, like SQLite's (a cold path, but a stalled database blocks the caller until `Command Timeout`).
+- PostgreSQL: history rows older than the metadata retention are not written (SQLite writes then hides them); `RowsAffected` of the partition retention is an exact `count(*)` taken just before the drop, which costs a scan of each expiring partition.
+- PostgreSQL: recipient-domain top-N is approximate across flushes **and replicas** of one hour; the read-only role and `statement_timeout` for dashboard queries are deployment steps, not enforced by the application.
+- PostgreSQL: the per-message transaction takes about six round trips (lock row, one batch, spool free, history events, status, commit); a stored function could make it one, which was not measured or needed yet.
 - `Content:RetentionDays` applies to retained raw messages too (they are content-like); this is a design reading, not an owner decision.
 
-## Measured (unverified outside this machine)
+## Measured on SQLite (unverified outside this machine)
 
 Measured with `bench/Mta.Benchmarks/Storage/StorageBenchmarks.cs` (BenchmarkDotNet `ShortRun`: 3 warm-up and 3 measured iterations, **one launch, so the error bars are wide and several 100 KB cells are noisy**; raw numbers in the run output, not a release-quality benchmark). One operation is one acknowledged `AcceptAsync` with `History:Mode=Full` (queue transaction, then the history entry), one recipient, a fresh temp directory per cell.
 

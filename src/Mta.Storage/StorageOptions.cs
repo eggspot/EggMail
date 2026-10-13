@@ -122,9 +122,26 @@ public sealed class PostgresOptions
     public string? OwnerConnectionString { get; init; }
     public string? RuntimeConnectionString { get; init; }
 
-    /// <summary>Auto (migrate at start under EF's lock) or Never (use the migrate-db command).</summary>
+    /// <summary>Auto: <c>InitializeAsync</c> migrates the schema as the owner role (serialized across replicas by an advisory lock). Never: the schema must already be current; use <c>mta migrate-db</c> or the generated script.</summary>
     public bool AutoMigrate { get; init; } = true;
 
+    /// <summary>Maximum Npgsql pool size of the runtime connection (the owner connection has a small pool of its own).</summary>
     public int MaxPoolSize { get; init; } = 32;
+
+    /// <summary>How many days ahead the maintenance job creates history partitions.</summary>
     public int PartitionsAheadDays { get; init; } = 7;
+
+    // Additions (PostgreSQL tuning knobs; behaviour-neutral):
+
+    /// <summary>How often the statistics aggregate is flushed (design §4.5: about 10 s). <c>TimeSpan.Zero</c> disables the timer (tests).</summary>
+    public TimeSpan StatsFlushInterval { get; init; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>Rows per batched retention DELETE (tables that are not day partitioned).</summary>
+    public int RetentionDeleteBatchSize { get; init; } = 5000;
+
+    /// <summary>Pause between retention DELETE batches so intake and claims interleave with them.</summary>
+    public TimeSpan RetentionDeletePause { get; init; } = TimeSpan.FromMilliseconds(20);
+
+    /// <summary>Command timeout in seconds for hot-path statements (Npgsql default 30).</summary>
+    public int CommandTimeoutSeconds { get; init; } = 30;
 }

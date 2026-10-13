@@ -17,6 +17,7 @@ public sealed class MtaConfig
     public string Hostname { get; init; } = Environment.MachineName.ToLowerInvariant();
 
     public SmtpSection Smtp { get; init; } = new();
+    public BackupSection Backup { get; init; } = new();
     public DnsSection Dns { get; init; } = new();
     public StorageOptions Storage { get; init; } = new();
     public DeliverySection Delivery { get; init; } = new();
@@ -97,11 +98,32 @@ public sealed class DeliverySection
     public int MaxRecipientsPerTransaction { get; init; } = 100;
     public bool PreferChunking { get; init; }
 
+    /// <summary>Per-destination connection and rate limits (adaptive: they start low and grow while the destination keeps accepting).</summary>
+    public ThrottleSection Throttle { get; init; } = new();
+
+    /// <summary>Delays between retries after the 1st, 2nd, ... failed attempt; the last one repeats until the delivery expires. Empty keeps the built-in ladder (2 m, 5 m, 15 m, 30 m, 1 h, 2 h, 4 h).</summary>
+    public List<TimeSpan> RetryDelays { get; init; } = [];
+
     /// <summary>Destination port for direct MX delivery. Only change for lab setups; the Internet uses 25.</summary>
     public int RemotePort { get; init; } = 25;
 
     /// <summary>Allow MX hosts that resolve to loopback, private or other special-use addresses. Off in production (a hostile MX record must not aim us at the internal network); on for lab and test setups.</summary>
     public bool AllowPrivateMxAddresses { get; init; }
+}
+
+public sealed class BackupSection
+{
+    /// <summary>Scheduled consistent backups (<c>VACUUM INTO</c> per SQLite file, while running). PostgreSQL has no built-in backup here: use <c>pg_dump</c> or your platform's backups.</summary>
+    public bool Enabled { get; init; } = true;
+
+    /// <summary>Hours between backups (the first one runs shortly after start-up when none exists yet).</summary>
+    public double IntervalHours { get; init; } = 24;
+
+    /// <summary>How many of the newest backups to keep.</summary>
+    public int Keep { get; init; } = 3;
+
+    /// <summary>Where backups go; defaults to <c>backups</c> inside the SQLite data directory. Put it on a different disk than the data when you can.</summary>
+    public string? Directory { get; init; }
 }
 
 public sealed class DnsSection
@@ -114,6 +136,24 @@ public sealed class DnsSection
 
     /// <summary>Trust the AD bit of answers. Only safe when the configured resolver is local or otherwise trusted and validates DNSSEC.</summary>
     public bool TrustAuthenticatedData { get; init; }
+}
+
+public sealed class ThrottleSection
+{
+    /// <summary>Ceiling of concurrent connections to one destination domain.</summary>
+    public int MaxConnections { get; init; } = 20;
+
+    /// <summary>Ceiling of messages per minute to one destination domain.</summary>
+    public double MaxMessagesPerMinute { get; init; } = 600;
+
+    /// <summary>Messages sent over one connection before it is closed.</summary>
+    public int MaxMessagesPerConnection { get; init; } = 100;
+
+    /// <summary>Connections allowed at first, before the destination has shown it accepts more.</summary>
+    public int InitialConnections { get; init; } = 5;
+
+    /// <summary>Messages per minute allowed at first.</summary>
+    public double InitialMessagesPerMinute { get; init; } = 120;
 }
 
 public sealed class DashboardSection

@@ -9,6 +9,7 @@ using Mta.Core;
 using Mta.Host.Configuration;
 using Mta.Host.Hosting;
 using Mta.Observability;
+using Mta.Storage;
 
 namespace Mta.Host;
 
@@ -78,7 +79,30 @@ internal static class Cli
 
         using var factory = LoggerFactory.Create(b => b.AddJsonConsole());
         var log = new MtaLogAdapter(factory);
-        await using var storage = StorageFactory.Create(loaded.Config.Storage, SystemClock.Instance, log);
+        StorageOptions options = loaded.Config.Storage;
+        if (options.Backend == StorageBackend.Postgres && !options.Postgres.AutoMigrate)
+        {
+            // Mail:Database:Migrate=Never means the serving process does not migrate; this command is the one that does.
+            options = new StorageOptions
+            {
+                Backend = options.Backend,
+                History = options.History,
+                Retention = options.Retention,
+                Sqlite = options.Sqlite,
+                Content = options.Content,
+                Queue = options.Queue,
+                Postgres = new PostgresOptions
+                {
+                    OwnerConnectionString = options.Postgres.OwnerConnectionString,
+                    RuntimeConnectionString = options.Postgres.RuntimeConnectionString,
+                    AutoMigrate = true,
+                    MaxPoolSize = options.Postgres.MaxPoolSize,
+                    PartitionsAheadDays = options.Postgres.PartitionsAheadDays,
+                },
+            };
+        }
+
+        await using var storage = StorageFactory.Create(options, SystemClock.Instance, log);
         await storage.InitializeAsync(CancellationToken.None).ConfigureAwait(false);
         Console.WriteLine($"storage ready: backend {storage.Backend}, history {storage.HistoryMode}");
         return 0;
@@ -116,6 +140,7 @@ internal static class Cli
         builder.Services.AddHostedService<CertificateService>();
         builder.Services.AddHostedService<MaintenanceService>();
         builder.Services.AddHostedService<TlsReportService>();
+        builder.Services.AddHostedService<BackupService>();
         ApiHosting.AddServices(builder, loaded, runtime);
         builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(45));
 

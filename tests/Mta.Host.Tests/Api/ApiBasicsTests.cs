@@ -69,7 +69,7 @@ public class ApiBasicsTests : IAsyncLifetime
         string big = "{\"name\":\"" + new string('a', 4096) + ".test\"}";
         Reply r = await c.SendAsync(HttpMethod.Post, "/api/v1/domains", big);
         r.Problem(HttpStatusCode.RequestEntityTooLarge, "payload_too_large");
-        Assert.Empty(await _f.Storage.Config.GetDomainsAsync(ApiFixture.TenantAId, default).AsTask().ContinueWith(t => t.Result.Where(d => d.Name != "example.com").ToList()));
+        Assert.Equal(["example.com"], (await _f.Storage.Config.GetDomainsAsync(ApiFixture.TenantAId, default)).Select(d => d.Name)); // nothing was created
     }
 
     [Fact]
