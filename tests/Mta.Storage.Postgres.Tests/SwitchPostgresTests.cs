@@ -196,3 +196,36 @@ public class SwitchPostgresTests : SwitchTestBase
         await AssertSecretsAsync(source, target);
     }
 }
+
+/// <summary>Throughput of the switch to and from PostgreSQL; only runs with EGGMAIL_SWITCH_BENCH=1 (see SwitchThroughput).</summary>
+public class SwitchPostgresThroughputTests(Xunit.Abstractions.ITestOutputHelper output) : SwitchTestBase
+{
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Measure(bool fromPostgres)
+    {
+        if (!SwitchThroughput.Enabled)
+        {
+            return;
+        }
+
+        int n = SwitchThroughput.Messages;
+        TestStore pg = await NewPgAsync("pg");
+        TestStore lite = await NewStoreAsync(StoreKind.Sqlite, HistoryMode.Full, "lite");
+        TestStore source = fromPostgres ? pg : lite;
+        TestStore target = fromPostgres ? lite : pg;
+        await SwitchThroughput.SeedAsync(source.Storage, n, n);
+        StorageSwitchEngine engine = NewEngine(source, target, activator: new RecordingActivator(), options: new SwitchOptions());
+        await SwitchThroughput.RunAsync(engine, source, target, BundleDir(), output, fromPostgres ? "PostgreSQL to SQLite" : "SQLite to PostgreSQL");
+    }
+
+    private async Task<TestStore> NewPgAsync(string name)
+    {
+        var harness = new PgHarness();
+        var options = new StorageOptions { History = new HistoryOptions { Mode = HistoryMode.Full }, Content = new ContentOptions { StoreAttachments = true, AllowAttachmentStorage = true } };
+        IStorage storage = await harness.CreateAsync(options, SystemClock.Instance);
+        StorageOptions effective = PgHarness.WithDatabase(options, harness.Current!.ConnectionString);
+        return Track(await TestStore.WrapAsync(StoreKind.Postgres, storage, effective, Root, name, o => PostgresStorage.Create(o), new HarnessOwner(harness)));
+    }
+}

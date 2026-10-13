@@ -205,7 +205,7 @@ public sealed partial class StorageSwitchEngine
                     notes.Add("History was not exported; it stays in the read-only source.");
                 }
 
-                return new ExportResult(switchId, dir, rowsTotal, bytes, marked, writer.Manifest.Switch.HistoryComplete, notes);
+                return new ExportResult(switchId, dir, writer.Manifest.Tables.Sum(t => t.Rows), bytes, marked, writer.Manifest.Switch.HistoryComplete, notes);
             }
             finally
             {
