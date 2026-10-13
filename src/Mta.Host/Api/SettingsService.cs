@@ -60,6 +60,8 @@ public sealed class SettingsService
         new(StoreAttachmentsKey, SettingKind.Boolean, "Keep the raw message with its attachments after delivery so the message can be resent. Off by default; stored attachments use disk space. Needs the operator's Content:AllowAttachmentStorage switch."),
         new(WebhookAllowlistKey, SettingKind.String, "Comma separated networks (CIDR) your webhooks may call although they are internal addresses (SSRF allowlist). Only an administrator can change this.", AdminOnly: true),
         new("Smtp:MaxRecipients", SettingKind.Number, "Maximum recipients per message (fixed by the operator).", DeploymentOnly: true),
+        new("Sending:PerHour", SettingKind.Number, "Most messages this tenant may send per UTC hour (0 or unset: the operator's default). Only an administrator can change this.", AdminOnly: true, Max: long.MaxValue),
+        new("Sending:PerDay", SettingKind.Number, "Most messages this tenant may send per UTC day (0 or unset: the operator's default). Only an administrator can change this.", AdminOnly: true, Max: long.MaxValue),
     ];
 
     private readonly IStorage _storage;
@@ -88,6 +90,13 @@ public sealed class SettingsService
             new("Queue:MaxLifetimeDays", SettingKind.Number, "Days a message may stay queued before it expires.", Min: 1, Max: 30, ConfigKey: "Queue:MaxLifetime", RequiresRestart: true),
             new("Smtp:MaxMessageSize", SettingKind.Number, "Maximum message size in bytes (fixed by the deployment).", DeploymentOnly: true),
             new("Smtp:MaxRecipients", SettingKind.Number, "Maximum recipients per message (fixed by the deployment).", DeploymentOnly: true),
+            new("Sending:GlobalPerHour", SettingKind.Number, "Most messages the whole server sends per UTC hour (0 = unlimited).", RequiresRestart: true, Max: long.MaxValue),
+            new("Sending:GlobalPerDay", SettingKind.Number, "Most messages the whole server sends per UTC day (0 = unlimited).", RequiresRestart: true, Max: long.MaxValue),
+            new("Sending:TenantPerHour", SettingKind.Number, "Default cap per tenant and UTC hour (0 = unlimited).", RequiresRestart: true, Max: long.MaxValue),
+            new("Sending:TenantPerDay", SettingKind.Number, "Default cap per tenant and UTC day (0 = unlimited).", RequiresRestart: true, Max: long.MaxValue),
+            new("Sending:DomainPerHour", SettingKind.Number, "Default cap per sending domain and UTC hour (0 = unlimited).", RequiresRestart: true, Max: long.MaxValue),
+            new("Sending:DomainPerDay", SettingKind.Number, "Default cap per sending domain and UTC day (0 = unlimited).", RequiresRestart: true, Max: long.MaxValue),
+            new("Sending:WarmupEnabled", SettingKind.Boolean, "Limit each new sending domain by the warm-up ramp (50, 100, 200 ... messages per day).", RequiresRestart: true),
             new("Sqlite:SyncMode", SettingKind.Enum, "SQLite synchronous mode of the data files (fixed by the deployment).", ["Off", "Normal", "Full"], DeploymentOnly: true),
         ];
     }

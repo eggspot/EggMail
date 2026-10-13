@@ -152,3 +152,30 @@ internal sealed class BackupService(EggMailRuntime runtime) : BackgroundService
         }
     }
 }
+
+/// <summary>Keeps the sending caps (tenant overrides, warm-up) in step with the config store.</summary>
+internal sealed class SendingLimitsService(EggMailRuntime runtime) : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(30));
+        try
+        {
+            do
+            {
+                try
+                {
+                    await SendingConfigurator.RefreshAsync(runtime.Limits, runtime.Config.Sending, runtime.Storage.Config, stoppingToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    runtime.Log.Write(MtaLogLevel.Warning, "sending", "could not refresh sending limits", ex);
+                }
+            }
+            while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false));
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+}

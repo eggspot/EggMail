@@ -18,6 +18,7 @@ public sealed class MtaConfig
 
     public SmtpSection Smtp { get; init; } = new();
     public BackupSection Backup { get; init; } = new();
+    public SendingSection Sending { get; init; } = new();
     public DnsSection Dns { get; init; } = new();
     public StorageOptions Storage { get; init; } = new();
     public DeliverySection Delivery { get; init; } = new();
@@ -109,6 +110,27 @@ public sealed class DeliverySection
 
     /// <summary>Allow MX hosts that resolve to loopback, private or other special-use addresses. Off in production (a hostile MX record must not aim us at the internal network); on for lab and test setups.</summary>
     public bool AllowPrivateMxAddresses { get; init; }
+}
+
+/// <summary>
+/// Caps on how much mail may be sent per UTC hour and per UTC day (0 or unset = unlimited). A tenant can be given its own caps with the
+/// tenant settings <c>Sending:PerHour</c> and <c>Sending:PerDay</c>. Counters are in memory: a restart starts the current hour and day at zero.
+/// </summary>
+public sealed class SendingSection
+{
+    public long GlobalPerHour { get; init; }
+    public long GlobalPerDay { get; init; }
+
+    /// <summary>Default caps of every tenant that has no tenant setting.</summary>
+    public long TenantPerHour { get; init; }
+    public long TenantPerDay { get; init; }
+
+    /// <summary>Default caps of every sending domain.</summary>
+    public long DomainPerHour { get; init; }
+    public long DomainPerDay { get; init; }
+
+    /// <summary>Limit each sending domain by the warm-up ramp (50, 100, 200 ... messages per day) counted from the day the domain was added.</summary>
+    public bool WarmupEnabled { get; init; }
 }
 
 public sealed class BackupSection
