@@ -13,6 +13,8 @@ let postgres = null;
 let skipReason = '';
 base.beforeAll(async () => {
   postgres = await provisionPostgres();
+  // In CI a missing PostgreSQL is a broken job, not a reason to skip the switch tests.
+  if (!postgres && process.env.CI) throw new Error('CI provides EGGMAIL_TEST_POSTGRES, but psql or the server is not usable.');
   if (!postgres) skipReason = 'No PostgreSQL available: set EGGMAIL_TEST_POSTGRES or install initdb, postgres and psql (EGGMAIL_TEST_PG_BIN).';
 });
 base.afterAll(async () => {
