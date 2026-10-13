@@ -142,6 +142,7 @@ internal static class Cli
         builder.Services.AddHostedService<MaintenanceService>();
         builder.Services.AddHostedService<TlsReportService>();
         builder.Services.AddHostedService<BackupService>();
+        builder.Services.AddHostedService<SendingLimitsService>();
         ApiHosting.AddServices(builder, loaded, runtime);
         builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(45));
 

@@ -34,6 +34,7 @@ Running status of the implementation, updated in every pull request. **Productio
 | Scheduled SQLite backups with retention (`Backup:*`), operations guide | this PR | 3 backup tests (consistent copy opens, interval and retention, unrelated directories untouched) |
 | Pipeline benchmark harness (`bench/Mta.Bench.Pipeline`) with allocation sampler; first profile fixed two hot spots (domain query per message, extra copies) | this PR | development-time numbers only (noisy machine); allocation budget **not met** yet, see `docs/benchmarks.md` |
 | Stored settings layer (decision N layer 4): global settings from `/admin/settings` apply at the next start below every deployment layer; the storage is reopened when they change its options | this PR | 4 tests (filtering, precedence, reopen, invalid stored value ignored) |
+| Sending caps from configuration (`Sending:*`, tenant overrides `Sending:PerHour/PerDay`, optional domain warm-up from the day a domain was added), refreshed every 30 s | this PR | 2 tests; counters stay in memory (a restart resets the current hour/day) |
 | `mta admin create` and `mta migrate-storage` commands (`admin create` can now use `DashboardAccounts`; `migrate-storage` needs the switch engine) | not started | |
 | Backend switch engine (export/import, quiesce, fence, activation, rollback, history migration) | not started | |
 | DMARC aggregate report sending | not started | |

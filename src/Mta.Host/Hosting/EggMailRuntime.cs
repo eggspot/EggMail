@@ -105,7 +105,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
         var tls = new OutboundTlsPolicyResolver(mtaSts, new DaneTlsaLookup(dns));
         var pool = new SmtpConnectionPool(new SmtpClientOptions { HeloName = config.Delivery.HeloName ?? config.Hostname, PreferChunking = config.Delivery.PreferChunking }, clock);
         var routes = new RoutePlanner(new RouteHealth(clock));
-        var limits = new SendingLimits(clock);
+        var limits = new SendingLimits(clock, null, SendingConfigurator.OptionsFrom(config.Sending));
         var services = new DeliveryServices
         {
             Storage = storage,
