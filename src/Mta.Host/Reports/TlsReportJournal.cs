@@ -30,6 +30,11 @@ public sealed class TlsReportJournal
     /// <summary>Counters of a day older than this are dropped instead of reported: RFC 8460 reports are about the last 24 hours, and a report weeks late is of no use.</summary>
     public const int MaxReportAgeDays = 7;
 
+    /// <summary>
+    /// A day counts as completed this long after midnight UTC, so a replica that flushes the last counts of the day a little late does not cause a second report for it.
+    /// </summary>
+    public static readonly TimeSpan CompletionGrace = TimeSpan.FromMinutes(10);
+
     private static readonly int UnixEpochDayNumber = DateOnly.FromDateTime(DateTime.UnixEpoch).DayNumber;
 
     private readonly TlsRptCollector _collector;
@@ -91,8 +96,19 @@ public sealed class TlsReportJournal
     /// </summary>
     public async Task<IReadOnlyList<PendingTlsReport>> GetCompletedAsync(int maxBuckets, CancellationToken cancellationToken)
     {
-        int today = DayNumber(DateOnly.FromDateTime(_clock.UtcNow.UtcDateTime));
+        int today = DayNumber(DateOnly.FromDateTime((_clock.UtcNow - CompletionGrace).UtcDateTime));
         var rows = await _store.GetTlsRptBucketsAsync(today, maxBuckets, cancellationToken).ConfigureAwait(false);
+        if (rows.Count >= maxBuckets && rows.Count > 0)
+        {
+            // The read stopped at the limit, possibly in the middle of one domain and day: leave that group for the next run so a report is never sent in two halves.
+            var last = (rows[^1].Day, rows[^1].PolicyDomain);
+            var whole = rows.Where(r => (r.Day, r.PolicyDomain) != last).ToList();
+            if (whole.Count > 0)
+            {
+                rows = whole;
+            }
+        }
+
         var stale = rows.Where(r => r.Day < today - MaxReportAgeDays).Select(r => r.Id).ToList();
         if (stale.Count > 0)
         {

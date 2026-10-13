@@ -269,6 +269,47 @@ public class TlsReportSenderTests
     }
 
     [Fact]
+    public async Task A_read_that_stops_at_the_limit_never_hands_out_half_a_domain_and_day()
+    {
+        var clock = new FakeClock(new DateTimeOffset(2026, 10, 11, 12, 0, 0, TimeSpan.Zero));
+        await using var storage = await NewStorageAsync(clock);
+        var collector = new TlsRptCollector(clock);
+        var journal = new TlsReportJournal(collector, storage.Config, clock);
+        for (int piece = 0; piece < 3; piece++)
+        {
+            collector.RecordSuccess("a.example", Policy, "mx.a.example");
+            collector.RecordSuccess("b.example", Policy, "mx.b.example");
+            clock.Now = clock.Now.AddMinutes(1);
+            await journal.FlushAsync(default);
+        }
+
+        clock.Now = new DateTimeOffset(2026, 10, 12, 1, 0, 0, TimeSpan.Zero);
+        // Six pieces, a read of four: it would cut b.example in two, so only a.example (all three pieces) is returned.
+        var first = Assert.Single(await journal.GetCompletedAsync(4, default));
+        Assert.Equal(("a.example", 3L), (first.Data.PolicyDomain, first.Data.Policies.Sum(p => p.SuccessCount)));
+        await journal.CompleteAsync(first, default);
+        var second = Assert.Single(await journal.GetCompletedAsync(4, default));
+        Assert.Equal(("b.example", 3L), (second.Data.PolicyDomain, second.Data.Policies.Sum(p => p.SuccessCount)));
+        Assert.Equal(3, second.BucketIds.Count);
+    }
+
+    [Fact]
+    public async Task A_day_counts_as_completed_only_after_the_grace_period_so_a_late_flush_joins_the_same_report()
+    {
+        var clock = new FakeClock(new DateTimeOffset(2026, 10, 11, 23, 59, 0, TimeSpan.Zero));
+        await using var storage = await NewStorageAsync(clock);
+        var collector = new TlsRptCollector(clock);
+        var journal = new TlsReportJournal(collector, storage.Config, clock);
+        collector.RecordSuccess("a.example", Policy, "mx.a.example");
+        await journal.FlushAsync(default);
+
+        clock.Now = new DateTimeOffset(2026, 10, 12, 0, 5, 0, TimeSpan.Zero);
+        Assert.Empty(await journal.GetCompletedAsync(100, default));
+        clock.Now = clock.Now + TlsReportJournal.CompletionGrace;
+        Assert.Single(await journal.GetCompletedAsync(100, default));
+    }
+
+    [Fact]
     public async Task An_unreadable_counter_row_is_dropped_without_blocking_the_other_reports()
     {
         var clock = new FakeClock(new DateTimeOffset(2026, 10, 11, 12, 0, 0, TimeSpan.Zero));

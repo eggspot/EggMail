@@ -128,6 +128,31 @@ public class SendingCounterPersistenceTests
     }
 
     [Fact]
+    public async Task A_count_another_replica_posted_and_then_gave_back_is_taken_off_again()
+    {
+        var clock = new FakeClock(Start);
+        await using var storage = NewStorage(clock);
+        var b = new Process(storage.Config, clock, Caps(100, 100));
+        long hour = Start.ToUnixTimeSeconds() / 3600;
+        long day = Start.ToUnixTimeSeconds() / 86400;
+        // Another replica's flush caught a reservation that was rolled back a moment later: +3, then -3.
+        var phantom = new[] { new SendingCounterRecord(1, Tenant, "", 0, hour, 3), new SendingCounterRecord(1, Tenant, "", 1, day, 3) };
+        await storage.Config.AddSendingCountersAsync(phantom, 0, 0, default);
+        b.Limits.TryReserve(Tenant, null, 1);
+        await b.Persistence.FlushAsync(default);
+        Assert.Equal(4, Used(b, CounterScope.Tenant, CounterWindow.Hour));
+
+        await storage.Config.AddSendingCountersAsync([new SendingCounterRecord(1, Tenant, "", 0, hour, -3), new SendingCounterRecord(1, Tenant, "", 1, day, -3)], 0, 0, default);
+        await b.Persistence.FlushAsync(default);
+
+        Assert.Equal(1, Used(b, CounterScope.Tenant, CounterWindow.Hour));
+        Assert.Equal(1, Used(b, CounterScope.Tenant, CounterWindow.Day));
+        b.Limits.TryReserve(Tenant, null, 1);
+        await b.Persistence.FlushAsync(default);
+        Assert.Equal(2, (await storage.Config.GetSendingCountersAsync(hour, day, default)).Single(c => c.Scope == 1 && c.Window == 0).Count);
+    }
+
+    [Fact]
     public async Task A_failed_flush_keeps_its_change_for_the_next_one()
     {
         var clock = new FakeClock(Start);

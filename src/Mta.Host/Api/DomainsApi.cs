@@ -133,6 +133,13 @@ public sealed class DomainsApi(ApiAuthenticator auth, IStorage storage, ISecretP
     {
         ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.Domains).ConfigureAwait(false);
         DomainRecord domain = await FindOwnAsync(caller, id, context.RequestAborted).ConfigureAwait(false);
+        // Not while a check or rotation of the domain is running anywhere (it could write check results for a domain that is gone).
+        await using IAsyncDisposable? held = await verification.TryLockAsync(domain.Id, context.RequestAborted).ConfigureAwait(false);
+        if (held is null)
+        {
+            throw ApiException.Conflict("A check or rotation of this domain is running; retry in a moment.");
+        }
+
         await Config.DeleteDomainAsync(domain.Id, context.RequestAborted).ConfigureAwait(false);
         Mta.Host.Submission.DomainChangeSignal.Bump();
         return ApiResults.NoContent();

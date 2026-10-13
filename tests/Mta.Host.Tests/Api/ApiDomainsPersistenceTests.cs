@@ -153,6 +153,18 @@ public class ApiDomainsPersistenceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task A_domain_is_not_deleted_while_a_check_of_it_runs_on_another_replica()
+    {
+        var (id, _) = await CreateAsync();
+        Guid domainId = Guid.ParseExact(id, "N");
+        IAsyncDisposable? held = await _first.Get<DomainVerificationService>().TryLockAsync(domainId, default);
+        Assert.NotNull(held);
+        (await _a2.DeleteAsync($"/api/v1/domains/{id}")).Problem(HttpStatusCode.Conflict, "conflict");
+        await held!.DisposeAsync();
+        Assert.Equal(HttpStatusCode.NoContent, (await _a2.DeleteAsync($"/api/v1/domains/{id}")).Status);
+    }
+
+    [Fact]
     public async Task A_replica_that_died_holding_the_lock_frees_the_domain_when_the_lease_expires()
     {
         var (id, _) = await CreateAsync();

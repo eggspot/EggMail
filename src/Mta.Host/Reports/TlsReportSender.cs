@@ -22,6 +22,8 @@ public sealed class TlsReportSender
 
     private const string LeaseName = "tls-rpt-sender";
 
+    private static readonly TimeSpan LeaseDuration = TimeSpan.FromMinutes(10);
+
     private readonly TlsReportJournal _journal;
     private readonly IConfigStore _config;
     private readonly string _owner = "tls-rpt-" + Guid.NewGuid().ToString("N");
@@ -50,7 +52,8 @@ public sealed class TlsReportSender
     public async Task<int> RunOnceAsync(CancellationToken ct)
     {
         await _journal.FlushAsync(ct).ConfigureAwait(false);   // what the collector holds for the days that just ended
-        if (await _config.TryAcquireLeaseAsync(LeaseName, _owner, TimeSpan.FromMinutes(30), _clock.UtcNow, ct).ConfigureAwait(false) is null)
+        LeaseRecord? lease = await _config.TryAcquireLeaseAsync(LeaseName, _owner, LeaseDuration, _clock.UtcNow, ct).ConfigureAwait(false);
+        if (lease is null)
         {
             return 0;   // another replica is sending
         }
@@ -60,6 +63,13 @@ public sealed class TlsReportSender
             int sent = 0;
             foreach (var item in await _journal.GetCompletedAsync(MaxBucketsPerRun, ct).ConfigureAwait(false))
             {
+                // A long run (many domains, slow endpoints) keeps its lease; if it was lost anyway, stop rather than send what another replica now sends.
+                if (!await _config.RenewLeaseAsync(LeaseName, _owner, lease.FencingToken, LeaseDuration, _clock.UtcNow, ct).ConfigureAwait(false))
+                {
+                    _log.Write(MtaLogLevel.Warning, "tlsrpt", "lost the TLS-RPT sender lease; stopping this run");
+                    break;
+                }
+
                 SendResult result;
                 try
                 {

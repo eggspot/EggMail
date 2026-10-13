@@ -166,18 +166,28 @@ public sealed class InMemorySendingCounterStore : ISendingCounterStore
     }
 
     /// <summary>
-    /// Raises a counter to include what the persistent copy holds beyond what this process already knows of it: at start (the current window as it was before the restart) and after each
-    /// flush (what other replicas added). The part this process has not flushed yet stays on top; a persistent value below what is known changes nothing.
+    /// Moves a counter to include what the persistent copy holds beyond what this process already knows of it: at start (the current window as it was before the restart) and after each
+    /// flush (what other replicas added). The part this process has not flushed yet stays on top. A persistent value below what is known lowers the counter (another replica posted a
+    /// reservation it later gave back, for example a rolled-back multi-counter reservation that was flushed in between), but never below zero.
     /// </summary>
     internal void Absorb(in CounterKey key, long persistedTotal)
     {
         Counter counter = _counters.GetOrAdd(key, static _ => new Counter());
         long extra = persistedTotal - counter.Flushed;
-        if (extra > 0)
+        if (extra == 0)
         {
-            Interlocked.Add(ref counter.Value, extra);
-            counter.Flushed += extra;
+            return;
         }
+
+        long current;
+        long next;
+        do
+        {
+            current = Volatile.Read(ref counter.Value);
+            next = Math.Max(0, current + extra);
+        }
+        while (Interlocked.CompareExchange(ref counter.Value, next, current) != current);
+        counter.Flushed += extra;
     }
 
     /// <inheritdoc />
