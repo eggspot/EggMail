@@ -120,6 +120,24 @@ internal static class Pipeline
             Assert.True(editedHeaders.Body.Span.SequenceEqual(headers.Body.Span));
         }
 
+        // ---- 8BITMIME downgrade: either refused with a reason, untouched, or a 7-bit body of bounded size
+        var downgraded = new System.Buffers.ArrayBufferWriter<byte>();
+        var downgrade = EightBitDowngrader.Downgrade(memory, downgraded, limits);
+        switch (downgrade.Status)
+        {
+            case EightBitDowngradeStatus.NotNeeded:
+                Assert.Equal(0, downgraded.WrittenCount);
+                Assert.False(MessageInspector.HasEightBitBody(data));
+                break;
+            case EightBitDowngradeStatus.Impossible:
+                Assert.False(string.IsNullOrEmpty(downgrade.Reason));
+                break;
+            default:
+                Assert.False(MessageInspector.HasEightBitBody(downgraded.WrittenSpan));
+                Assert.True(downgraded.WrittenCount <= (4L * data.Length) + 4096);
+                break;
+        }
+
         // ---- line endings
         var normalized = LineEndings.ToCrlf(data);
         Assert.False(MessageInspector.ContainsBareLf(normalized));

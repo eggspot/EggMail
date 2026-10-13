@@ -27,6 +27,7 @@ All input is hostile. Every parser is bounded by `MimeLimits`, runs in time line
 * **SMTP server**: `HeaderList.FindBodyOffset` for a cheap split, `MessageInspector.Inspect` (bare CR/LF, NUL, 8-bit, line lengths) to decide reject/normalize and 8BITMIME/SMTPUTF8 handling, `MessageValidator.Validate` for policy, `MessageHeaderEditor` to prepend `Return-Path`/`Received` without touching the body.
 * **DKIM**: `MimeHeader.Raw` (exact bytes, no final CRLF), `GetUnfoldedValueBytes()`, order preserved; duplicates are all present for bottom-up selection. `MessageHeaderEditor.PrependRaw` inserts the pre-folded `DKIM-Signature`.
 * **DMARC**: `AddressList.Parse(headers[From])` -> `Mailbox.Domain` (lower-case A-label), `MultipleFromWithoutSender` and `InvalidFrom` issues.
+* **Delivery**: `MessageInspector.HasValidUtf8Headers` / `HasEightBitBody` decide SMTPUTF8 and BODY=8BITMIME per transaction; `EightBitDowngrader` produces the 7-bit form for servers without 8BITMIME (the result is then DKIM-signed).
 * **HTTP API / history**: `MessageBuilder` (compose), `MessageContentExtractor` (subject, text, html, attachment index, truncation flags).
 
 ## 8BITMIME downgrade
