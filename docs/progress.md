@@ -35,9 +35,9 @@ Running status of the implementation, updated in every pull request. **Productio
 | Pipeline benchmark harness (`bench/Mta.Bench.Pipeline`) with allocation sampler; first profile fixed two hot spots (domain query per message, extra copies) | this PR | development-time numbers only (noisy machine); allocation budget **not met** yet, see `docs/benchmarks.md` |
 | Stored settings layer (decision N layer 4): global settings from `/admin/settings` apply at the next start below every deployment layer; the storage is reopened when they change its options | this PR | 4 tests (filtering, precedence, reopen, invalid stored value ignored) |
 | Sending caps from configuration (`Sending:*`, tenant overrides `Sending:PerHour/PerDay`, optional domain warm-up from the day a domain was added), refreshed every 30 s | this PR | 2 tests; counters stay in memory (a restart resets the current hour/day) |
-| `mta admin create` and `mta migrate-storage` commands (`admin create` can now use `DashboardAccounts`; `migrate-storage` needs the switch engine) | not started | |
-| Backend switch engine (export/import, quiesce, fence, activation, rollback, history migration) | not started | |
+| `mta admin create` command (can now use `DashboardAccounts`) | not started | |
 | DMARC aggregate report sending | not started | |
+| Backend switch engine (export/import, drain/quiesce, fence, marks, activation gate, bootstrap/cutover-patch activation, rollback, resumable history migration, secrets re-protection) for in-memory, SQLite and PostgreSQL; startup gate; `mta migrate-storage` | this PR | transfer conformance on all backends, end-to-end switches InMemory/SQLite/PostgreSQL in both directions and both history modes, quiesce with a real delivery engine, tamper and resume tests, CLI flow, process-control tests; throughput measured ([components/switch.md](components/switch.md)); admin API endpoints (`/admin/storage/switch/*`) over the engine; **no dashboard flow yet; not applied to a real orchestrator** |
 | Soak, fuzz and benchmark gates; external security audit | not started | |
 
 ## Not verified / known gaps

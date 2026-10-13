@@ -41,6 +41,14 @@ public sealed class SmtpClientConnection : IAsyncDisposable
 
     public int TransactionsCompleted { get; private set; }
 
+    /// <summary>
+    /// True once the end of the message data of the current (or last) transaction has begun to be written: the <c>.</c> line after
+    /// <c>DATA</c>, or the <c>BDAT … LAST</c> chunk. From then on the server may accept the message even though we never see its reply,
+    /// so a transaction cancelled or lost in that state may be a duplicate when retried; before it, nothing can have been accepted.
+    /// Reset at the start of every transaction.
+    /// </summary>
+    public bool EndOfDataStarted { get; private set; }
+
     /// <summary>False once an I/O error or protocol violation occurred, or after QUIT.</summary>
     public bool IsReusable => !_broken && !_quit && _socket is { Connected: true };
 
@@ -376,6 +384,7 @@ public sealed class SmtpClientConnection : IAsyncDisposable
     public async ValueTask<SmtpSendResult> SendAsync(SmtpEnvelope envelope, ReadOnlyMemory<byte> message, CancellationToken cancellationToken = default)
     {
         ArgumentOutOfRangeException.ThrowIfZero(envelope.Recipients.Count);
+        EndOfDataStarted = false;
         var caps = Capabilities;
 
         if (caps.Size is > 0 && message.Length > caps.Size)
@@ -532,6 +541,7 @@ public sealed class SmtpClientConnection : IAsyncDisposable
             }
         }
 
+        EndOfDataStarted = true;
         stuffer.Complete(_writer);
         try
         {
@@ -572,6 +582,7 @@ public sealed class SmtpClientConnection : IAsyncDisposable
         {
             int take = Math.Min(chunk, message.Length - offset);
             bool last = offset + take >= message.Length;
+            EndOfDataStarted |= last;
             WriteLine($"BDAT {take}{(last ? " LAST" : "")}");
             _writer.Write(message.Span.Slice(offset, take));
             try

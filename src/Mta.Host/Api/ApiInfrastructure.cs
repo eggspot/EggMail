@@ -75,6 +75,11 @@ public sealed class ApiEndpointFilter(ILogger<ApiEndpointFilter> logger) : IEndp
         {
             return new ProblemResult(ApiException.Conflict("The change conflicts with existing data."));
         }
+        catch (Mta.Storage.Transfer.StorageFencedException ex)
+        {
+            // A backend switch closed this instance: senders retry (Retry-After) against the new backend or after a rollback.
+            return new ProblemResult(ApiException.NotReady(ex.Message));
+        }
         catch (StorageUnavailableException ex)
         {
             logger.LogWarning("Storage unavailable in {Method} {Path} ({RequestId}): {Message}", context.Request.Method, SafePath(context), RequestIds.Of(context), ex.Message);

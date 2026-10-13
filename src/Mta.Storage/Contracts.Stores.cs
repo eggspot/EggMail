@@ -18,6 +18,12 @@ public interface IStorage : IAsyncDisposable
     IWebhookOutbox Webhooks { get; }
     IStorageMaintenance Maintenance { get; }
 
+    /// <summary>
+    /// Export, import, fence and transfer marks for the backend switch (design §4.6). Null for a backend that has not
+    /// implemented it; the switch engine then refuses to use the backend as source or target.
+    /// </summary>
+    Transfer.IStorageTransfer? Transfer => null;
+
     /// <summary>Creates or migrates the schema, runs startup integrity checks (SQLite) and prepares writers.</summary>
     Task InitializeAsync(CancellationToken cancellationToken);
 }

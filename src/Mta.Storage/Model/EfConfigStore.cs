@@ -36,6 +36,9 @@ public sealed class EfConfigStore<TContext>(IConfigDbAccess<TContext> db) : ICon
     /// <summary>Incremented after every change to webhook endpoints; lets callers cache the endpoint list.</summary>
     public long WebhookEndpointVersion => Interlocked.Read(ref _webhookVersion);
 
+    /// <summary>Drops cached state after rows were written behind the store's back (a backend switch import).</summary>
+    public void NotifyExternalChange() => Interlocked.Increment(ref _webhookVersion);
+
     // Reads are short synchronous queries on a fresh no-tracking context (SQLite has no real async I/O).
     private ValueTask<T> Read<T>(Func<TContext, T> query)
     {

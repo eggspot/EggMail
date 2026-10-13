@@ -223,6 +223,9 @@ public sealed class SwitchSection
 {
     /// <summary>Seconds to wait for in-flight deliveries when quiescing (decision R).</summary>
     public int QuiesceTimeoutSeconds { get; init; } = 30;
+
+    /// <summary>Where the admin API writes switch bundles (a directory per switch); default <c>&lt;Sqlite:DataDirectory&gt;/switch</c> or the temp directory.</summary>
+    public string? BundleDirectory { get; init; }
 }
 
 /// <summary>

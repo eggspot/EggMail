@@ -13,6 +13,9 @@ public sealed class LoadedConfig
 
     public required IReadOnlyList<string> Errors { get; init; }
 
+    /// <summary>The layered configuration this was loaded from (the backend switch reads <c>SwitchTarget:*</c> and detects the layer that supplies a key).</summary>
+    public IConfiguration? Source { get; init; }
+
     public bool IsValid => Errors.Count == 0;
 }
 
@@ -21,11 +24,18 @@ public static class ConfigLoader
     public const string BootstrapFileName = "bootstrap.json";
 
     /// <summary>
+    /// Where the bootstrap file lives: in the data directory (the hint, else the <c>Sqlite__DataDirectory</c> environment variable,
+    /// else <c>/data</c>). It has to be findable before the storage is known, which is why it cannot depend on <c>Storage:*</c>.
+    /// </summary>
+    public static string ResolveBootstrapPath(string? dataDirectoryHint = null) =>
+        Path.Combine(dataDirectoryHint ?? Environment.GetEnvironmentVariable("Sqlite__DataDirectory") ?? "/data", BootstrapFileName);
+
+    /// <summary>
     /// Builds the layered configuration for the process: appsettings (if present), the bootstrap file in the data directory
     /// (storage pointer written by the backend switch), environment variables, then the command line (highest precedence).
     /// <paramref name="storedSettings"/> (the global settings kept in the config store) form the lowest layer, above the built-in defaults.
     /// </summary>
-    public static IConfigurationRoot Build(string[] args, string? dataDirectoryHint = null, string? appSettingsPath = null, IEnumerable<KeyValuePair<string, string?>>? storedSettings = null)
+    public static IConfigurationRoot Build(string[] args, string? dataDirectoryHint = null, string? appSettingsPath = null, IEnumerable<KeyValuePair<string, string?>>? storedSettings = null, string? bootstrapFileOverride = null)
     {
         var builder = new ConfigurationBuilder();
         if (storedSettings is not null)
@@ -38,9 +48,9 @@ public static class ConfigLoader
             builder.AddJsonFile(appSettingsPath, optional: true, reloadOnChange: false);
         }
 
-        string dataDir = dataDirectoryHint ?? Environment.GetEnvironmentVariable("Sqlite__DataDirectory") ?? "/data";
-        string bootstrap = Path.Combine(dataDir, BootstrapFileName);
-        if (File.Exists(bootstrap))
+        // The override lets the migrate-storage command read the pointer as it was before an activation rewrote the file ("" = no bootstrap file).
+        string bootstrap = bootstrapFileOverride ?? ResolveBootstrapPath(dataDirectoryHint);
+        if (bootstrap.Length > 0 && File.Exists(bootstrap))
         {
             builder.AddJsonFile(bootstrap, optional: true, reloadOnChange: false);
         }
@@ -102,7 +112,7 @@ public static class ConfigLoader
             }
         }
 
-        return new LoadedConfig { Config = cfg, LockedKeys = locked, Errors = errors };
+        return new LoadedConfig { Config = cfg, LockedKeys = locked, Errors = errors, Source = configuration };
     }
 
     /// <summary>

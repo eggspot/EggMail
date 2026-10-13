@@ -13,5 +13,6 @@
     <ProjectReference Include="..\..\src\Mta.Storage.Postgres\Mta.Storage.Postgres.csproj" />
     <ProjectReference Include="..\..\src\Mta.Storage.Sqlite\Mta.Storage.Sqlite.csproj" />
     <ProjectReference Include="..\Mta.Storage.Tests\Mta.Storage.Tests.csproj" />
+    <ProjectReference Include="..\Mta.Storage.Portability.Tests\Mta.Storage.Portability.Tests.csproj" />
   </ItemGroup>
 </Project>

@@ -16,6 +16,12 @@ internal sealed class PostgresMaintenance(PostgresRuntime rt, PostgresQueueStore
 {
     public async ValueTask<IReadOnlyList<MaintenanceReport>> RunAsync(DateTimeOffset now, CancellationToken ct)
     {
+        if (rt.Fence.IsClosed)
+        {
+            // A fenced source stays untouched until the switch is finalized or rolled back; a target is not live yet.
+            return [];
+        }
+
         try
         {
             return await RunCoreAsync(StorageTime.Normalize(now), ct).ConfigureAwait(false);

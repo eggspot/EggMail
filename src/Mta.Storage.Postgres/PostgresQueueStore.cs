@@ -25,12 +25,12 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
 
     private const string ClaimSql =
         "UPDATE delivery_queue SET lease_owner = $1, lease_until = $2 WHERE id IN (" +
-        "SELECT id FROM delivery_queue WHERE due_at <= $3 AND lease_until <= $3 AND expires_at > $3 ORDER BY due_at, id LIMIT $4 FOR UPDATE SKIP LOCKED) " +
+        "SELECT id FROM delivery_queue WHERE transfer_switch_id IS NULL AND due_at <= $3 AND lease_until <= $3 AND expires_at > $3 ORDER BY due_at, id LIMIT $4 FOR UPDATE SKIP LOCKED) " +
         "RETURNING " + ClaimColumns;
 
     private const string ClaimExpiredSql =
         "UPDATE delivery_queue SET lease_owner = $1, lease_until = $2 WHERE id IN (" +
-        "SELECT id FROM delivery_queue WHERE expires_at <= $3 AND lease_until <= $3 ORDER BY expires_at, id LIMIT $4 FOR UPDATE SKIP LOCKED) " +
+        "SELECT id FROM delivery_queue WHERE transfer_switch_id IS NULL AND expires_at <= $3 AND lease_until <= $3 ORDER BY expires_at, id LIMIT $4 FOR UPDATE SKIP LOCKED) " +
         "RETURNING " + ClaimColumns;
 
     private const string OutboxInsertSql =
@@ -52,6 +52,7 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
             throw new ArgumentException("MessageId must be a UUIDv7 (Ids.New) so the history day can be derived.", nameof(message));
         }
 
+        rt.Fence.ThrowIfClosed();
         DateTimeOffset now = rt.Clock.UtcNow;
         int day = StorageTime.DayNumber(message.MessageId);
         bool writeHistory = rt.IsFull && history.MetadataWritable(day, now);
@@ -232,13 +233,13 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
     public async ValueTask<IReadOnlyList<ClaimedDelivery>> ClaimAsync(string owner, int max, DateTimeOffset now, TimeSpan lease, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(owner);
-        return max <= 0 ? [] : await RunClaimAsync(ClaimSql, owner, max, now, lease, cancellationToken).ConfigureAwait(false);
+        return max <= 0 || rt.Fence.IsClosed ? [] : await RunClaimAsync(ClaimSql, owner, max, now, lease, cancellationToken).ConfigureAwait(false);
     }
 
     public async ValueTask<IReadOnlyList<ClaimedDelivery>> ClaimExpiredAsync(string owner, int max, DateTimeOffset now, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(owner);
-        return max <= 0 ? [] : await RunClaimAsync(ClaimExpiredSql, owner, max, now, ExpiredClaimLease, cancellationToken).ConfigureAwait(false);
+        return max <= 0 || rt.Fence.IsClosed ? [] : await RunClaimAsync(ClaimExpiredSql, owner, max, now, ExpiredClaimLease, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<IReadOnlyList<ClaimedDelivery>> RunClaimAsync(string sql, string owner, int max, DateTimeOffset now, TimeSpan lease, CancellationToken ct)
@@ -559,7 +560,7 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
 
     public async ValueTask<IReadOnlyList<WebhookOutboxItem>> ClaimDueAsync(string owner, int max, DateTimeOffset now, TimeSpan lease, CancellationToken cancellationToken)
     {
-        if (max <= 0)
+        if (max <= 0 || rt.Fence.IsClosed)
         {
             return [];
         }
@@ -569,7 +570,7 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
             await using NpgsqlConnection connection = await rt.Data.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
             await using var cmd = new NpgsqlCommand(
                 "UPDATE webhook_outbox SET lease_owner = $1, lease_until = $2 WHERE id IN (" +
-                "SELECT id FROM webhook_outbox WHERE state = 0 AND next_attempt_at <= $3 AND lease_until <= $3 ORDER BY next_attempt_at, id LIMIT $4 FOR UPDATE SKIP LOCKED) " +
+                "SELECT id FROM webhook_outbox WHERE transfer_switch_id IS NULL AND state = 0 AND next_attempt_at <= $3 AND lease_until <= $3 ORDER BY next_attempt_at, id LIMIT $4 FOR UPDATE SKIP LOCKED) " +
                 "RETURNING id, endpoint_id, tenant_id, event_type, event_id, payload_json, attempt, next_attempt_at, created_at", connection);
             cmd.Parameters.Text(owner).Time(now + lease).Time(now).Long(max);
             var rows = new List<WebhookOutboxItem>();

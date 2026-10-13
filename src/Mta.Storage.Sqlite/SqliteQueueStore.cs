@@ -31,13 +31,13 @@ internal static class QueueSql
 
     public static readonly Stmt Claim = new(
         "UPDATE delivery_queue SET lease_owner = @owner, lease_until = @until WHERE id IN (" +
-        "SELECT id FROM delivery_queue WHERE due_at <= @now AND lease_until <= @now AND expires_at > @now ORDER BY due_at, id LIMIT @max) " +
+        "SELECT id FROM delivery_queue WHERE transfer_switch_id IS NULL AND due_at <= @now AND lease_until <= @now AND expires_at > @now ORDER BY due_at, id LIMIT @max) " +
         "RETURNING " + ClaimColumns,
         "@owner", "@until", "@now", "@max");
 
     public static readonly Stmt ClaimExpired = new(
         "UPDATE delivery_queue SET lease_owner = @owner, lease_until = @until WHERE id IN (" +
-        "SELECT id FROM delivery_queue WHERE expires_at <= @now AND lease_until <= @now ORDER BY expires_at, id LIMIT @max) " +
+        "SELECT id FROM delivery_queue WHERE transfer_switch_id IS NULL AND expires_at <= @now AND lease_until <= @now ORDER BY expires_at, id LIMIT @max) " +
         "RETURNING " + ClaimColumns,
         "@owner", "@until", "@now", "@max");
 
@@ -91,7 +91,7 @@ internal static class QueueSql
 
     public static readonly Stmt OutboxClaim = new(
         "UPDATE webhook_outbox SET lease_owner = @owner, lease_until = @until WHERE id IN (" +
-        "SELECT id FROM webhook_outbox WHERE state = 0 AND next_attempt_at <= @now AND lease_until <= @now ORDER BY next_attempt_at, id LIMIT @max) " +
+        "SELECT id FROM webhook_outbox WHERE transfer_switch_id IS NULL AND state = 0 AND next_attempt_at <= @now AND lease_until <= @now ORDER BY next_attempt_at, id LIMIT @max) " +
         "RETURNING id, endpoint_id, tenant_id, event_type, event_id, payload_json, attempt, next_attempt_at, created_at",
         "@owner", "@until", "@now", "@max");
 
@@ -135,6 +135,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
             throw new ArgumentException("MessageId must be a UUIDv7 (Ids.New) so the history day can be derived.", nameof(message));
         }
 
+        rt.Fence.ThrowIfClosed();
         DateTimeOffset now = rt.Clock.UtcNow;
         var state = new AcceptState(message, StorageTime.ToUnixMs(now), StorageTime.ToUnixMs(now + rt.Options.Queue.IdempotencyKeyLifetime));
         IntakeResult result;
@@ -247,7 +248,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
     public async ValueTask<IReadOnlyList<ClaimedDelivery>> ClaimAsync(string owner, int max, DateTimeOffset now, TimeSpan lease, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(owner);
-        if (max <= 0)
+        if (max <= 0 || rt.Fence.IsClosed)
         {
             return [];
         }
@@ -259,7 +260,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
     public async ValueTask<IReadOnlyList<ClaimedDelivery>> ClaimExpiredAsync(string owner, int max, DateTimeOffset now, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(owner);
-        if (max <= 0)
+        if (max <= 0 || rt.Fence.IsClosed)
         {
             return [];
         }
@@ -545,7 +546,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
 
     public async ValueTask<IReadOnlyList<WebhookOutboxItem>> ClaimDueAsync(string owner, int max, DateTimeOffset now, TimeSpan lease, CancellationToken cancellationToken)
     {
-        if (max <= 0)
+        if (max <= 0 || rt.Fence.IsClosed)
         {
             return [];
         }

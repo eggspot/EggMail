@@ -278,7 +278,6 @@ public sealed class DeliveryProcessor
         public TlsFailure? TlsFailure { get; set; }
         public RemoteCertificateValidator? Validator { get; set; }
         public string? ReceivingIp { get; set; }
-        public bool WasConnected { get; set; }
         public bool Connected => Route is not (RouteAttemptResult.ConnectTimeout or RouteAttemptResult.ConnectRefused);
     }
 
@@ -527,7 +526,7 @@ public sealed class DeliveryProcessor
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 pooled.Discard();
-                return new AttemptResult { Route = RouteAttemptResult.ConnectionDropped, Aborted = true, WasConnected = true, Tls = tlsSession, Stage = ClientSmtpStage.Data, Duration = Stopwatch.GetElapsedTime(started) };
+                return new AttemptResult { Route = RouteAttemptResult.ConnectionDropped, Aborted = true, EndOfDataSent = pooled.Connection.EndOfDataStarted, Tls = tlsSession, Stage = ClientSmtpStage.Data, Duration = Stopwatch.GetElapsedTime(started) };
             }
             catch (SmtpConnectionException ex)
             {
@@ -680,7 +679,7 @@ public sealed class DeliveryProcessor
         {
             foreach (var d in pending)
             {
-                results.Add(Aborted(d, now, a.WasConnected));
+                results.Add(Aborted(d, now, a.EndOfDataSent));
             }
 
             return;

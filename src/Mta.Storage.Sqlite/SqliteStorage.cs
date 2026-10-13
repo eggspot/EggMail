@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Mta.Core;
 using Mta.Storage.Logic;
 using Mta.Storage.Model;
+using Mta.Storage.Transfer;
 
 namespace Mta.Storage.Sqlite;
 
@@ -32,6 +33,7 @@ public sealed class SqliteStorage : IStorage
     private int _initialized;
     private int _disposed;
     private SqliteMaintenance? _maintenance;
+    private EfStorageTransfer? _transfer;
 
     private SqliteStorage(StorageOptions options, IClock clock, IMtaLog log)
     {
@@ -64,6 +66,8 @@ public sealed class SqliteStorage : IStorage
     public IWebhookOutbox Webhooks => _queue;
 
     public IStorageMaintenance Maintenance => _maintenance ?? throw NotInitialized();
+
+    public IStorageTransfer Transfer => _transfer ?? throw NotInitialized();
 
     /// <summary>Quarantine events recorded at startup.</summary>
     public IReadOnlyList<QuarantineEvent> QuarantineEvents => _quarantine;
@@ -131,8 +135,19 @@ public sealed class SqliteStorage : IStorage
                 await w.StartAsync().ConfigureAwait(false);
             }
 
-            await _queue.ClearAllLeasesAsync(cancellationToken).ConfigureAwait(false);
-            await _queue.ReconcileSpoolAsync(cancellationToken).ConfigureAwait(false);
+            // A backend switch may have closed this store (a fenced source, a target that is not activated yet). The gate comes
+            // from the persisted state, so it holds after a restart; a closed store is left exactly as it is.
+            _rt.Fence.Apply(await _rt.ConfigStore.GetSwitchStateAsync(cancellationToken).ConfigureAwait(false));
+            _transfer = new EfStorageTransfer(new SqliteTransferAccess(_rt, hooks), _rt.ConfigStore, _rt.Fence, _rt.Clock);
+            if (_rt.Fence.IsClosed)
+            {
+                _rt.Log.Write(MtaLogLevel.Warning, "storage.sqlite", _rt.Fence.Reason!);
+            }
+            else
+            {
+                await _queue.ClearAllLeasesAsync(cancellationToken).ConfigureAwait(false);
+                await _queue.ReconcileSpoolAsync(cancellationToken).ConfigureAwait(false);
+            }
         }
         catch
         {

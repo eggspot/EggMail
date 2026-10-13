@@ -216,13 +216,17 @@ public class FilesAndPragmaTests : SqliteTestBase
             }
         }
 
-        // Turn the files back into what version 1 created.
-        Run("config.db", "DROP TABLE dashboard_session", "DROP TABLE dashboard_user", "PRAGMA user_version = 1");
-        Run("queue.db", "ALTER TABLE api_idempotency_key DROP COLUMN fingerprint", "PRAGMA user_version = 1");
+        // Turn the files back into what version 1 created (no API tables, no fingerprint, and none of the version 3 switch tables).
+        Run("config.db", "DROP TABLE dashboard_session", "DROP TABLE dashboard_user", "DROP TABLE transfer_chunk_config", "PRAGMA user_version = 1");
+        Run("queue.db", "ALTER TABLE api_idempotency_key DROP COLUMN fingerprint", "ALTER TABLE delivery_queue DROP COLUMN transfer_switch_id", "ALTER TABLE webhook_outbox DROP COLUMN transfer_switch_id", "DROP TABLE transfer_chunk_queue", "PRAGMA user_version = 1");
+        Run("stats.db", "DROP TABLE transfer_chunk_stats", "PRAGMA user_version = 1");
+        Run("history.db", "DROP TABLE transfer_chunk_history", "PRAGMA user_version = 1");
 
         await ReopenAsync();
         Assert.Equal(SqliteFile.SchemaVersion, ScalarLong(PathOf("config.db"), "PRAGMA user_version"));
         Assert.Equal(SqliteFile.SchemaVersion, ScalarLong(PathOf("queue.db"), "PRAGMA user_version"));
+        Assert.Equal(3, SqliteFile.SchemaVersion);
+        Assert.Equal(0, ScalarLong(PathOf("queue.db"), "SELECT count(*) FROM transfer_chunk_queue")); // the 1 to 2 to 3 path reached the switch tables too
 
         var user = new DashboardUser(Guid.NewGuid(), "Upgraded", "hash", DashboardRole.Admin, null, true, Clock.UtcNow);
         await Storage.Config.UpsertDashboardUserAsync(user, default);
@@ -253,6 +257,36 @@ public class FilesAndPragmaTests : SqliteTestBase
         }
 
         await Assert.ThrowsAnyAsync<InvalidOperationException>(async () => await ReopenAsync());
+    }
+
+    [Fact]
+    public async Task A_version_2_database_is_upgraded_with_the_backend_switch_columns_and_tables()
+    {
+        await AcceptAsync(Msg(to: ["a@example.org"]));
+        await Storage.DisposeAsync();
+
+        // Rebuild what version 2 files looked like: no transfer hold column, no progress tables (the API tables stay).
+        foreach (string file in new[] { "queue.db", "stats.db", "config.db", "history.db" })
+        {
+            string kind = file[..^3];
+            using var c = new SqliteConnection($"Data Source={PathOf(file)};Pooling=False");
+            c.Open();
+            using SqliteCommand cmd = c.CreateCommand();
+            cmd.CommandText = $"DROP TABLE transfer_chunk_{kind};" + (kind == "queue"
+                ? "ALTER TABLE delivery_queue DROP COLUMN transfer_switch_id; ALTER TABLE webhook_outbox DROP COLUMN transfer_switch_id;"
+                : "") + "PRAGMA user_version = 2";
+            cmd.ExecuteNonQuery();
+        }
+
+        await ReopenAsync();
+        foreach (string kind in new[] { "queue", "stats", "config", "history" })
+        {
+            Assert.Equal(SqliteFile.SchemaVersion, ScalarLong(PathOf(kind + ".db"), "PRAGMA user_version"));
+            Assert.Equal(0, ScalarLong(PathOf(kind + ".db"), $"SELECT count(*) FROM transfer_chunk_{kind}"));
+        }
+
+        Assert.Equal(1, ScalarLong(PathOf("queue.db"), "SELECT count(*) FROM delivery_queue WHERE transfer_switch_id IS NULL"));
+        Assert.Single(await ClaimAsync());
     }
 
     [Fact]

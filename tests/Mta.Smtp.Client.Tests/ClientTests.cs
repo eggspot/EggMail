@@ -315,4 +315,105 @@ public class ClientTests
         Assert.Equal(40, server.Handler.Messages.Count);
         Assert.True(server.Handler.Connections <= 40);
     }
+
+    /// <summary>A peer that answers normally up to the point where it stops answering: after RCPT, or after it has read the whole message.</summary>
+    private static ScriptedServer Peer(bool silentAtRcpt, bool bdat, TaskCompletionSource reached)
+    {
+        return new ScriptedServer(async c =>
+        {
+            await c.SendAsync("220 scripted ESMTP\r\n");
+            while (true)
+            {
+                string line = await c.ReadLineAsync();
+                string verb = line.Split(' ')[0].ToUpperInvariant();
+                switch (verb)
+                {
+                    case "EHLO":
+                        await c.SendAsync(bdat ? "250-scripted\r\n250 CHUNKING\r\n" : "250 scripted\r\n");
+                        break;
+                    case "MAIL":
+                        await c.SendAsync("250 ok\r\n");
+                        break;
+                    case "RCPT":
+                        if (silentAtRcpt)
+                        {
+                            reached.TrySetResult();
+                            await c.HoldOpenAsync(30_000);
+                            return;
+                        }
+
+                        await c.SendAsync("250 ok\r\n");
+                        break;
+                    case "DATA":
+                        await c.SendAsync("354 go\r\n");
+                        await c.ReadDataAsync();
+                        reached.TrySetResult(); // the whole message including the dot is in; the verdict never comes
+                        await c.HoldOpenAsync(30_000);
+                        return;
+                    case "BDAT":
+                        int size = int.Parse(line.Split(' ')[1], System.Globalization.CultureInfo.InvariantCulture);
+                        await c.ReadBytesAsync(size);
+                        if (line.EndsWith("LAST", StringComparison.OrdinalIgnoreCase))
+                        {
+                            reached.TrySetResult();
+                            await c.HoldOpenAsync(30_000);
+                            return;
+                        }
+
+                        await c.SendAsync("250 chunk\r\n");
+                        break;
+                    default:
+                        await c.SendAsync("250 ok\r\n");
+                        break;
+                }
+            }
+        });
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task EndOfDataStarted_is_false_when_cancelled_before_the_message_ends_and_true_when_waiting_for_the_verdict(bool bdat)
+    {
+        var options = new SmtpClientOptions { HeloName = "client.test", PreferChunking = bdat, BdatChunkSize = 1 << 20, CommandTimeout = TimeSpan.FromSeconds(20), EndOfDataTimeout = TimeSpan.FromSeconds(20), DataBlockTimeout = TimeSpan.FromSeconds(20) };
+
+        // Cancelled while the peer has not answered RCPT: nothing of the message was sent, so nothing can have been accepted.
+        var silent = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using (var peer = Peer(silentAtRcpt: true, bdat, silent))
+        {
+            await using var conn = await SmtpClientConnection.ConnectAsync(peer.Target(SmtpTlsPolicy.Disabled), options);
+            using var cts = new CancellationTokenSource();
+            Task<SmtpSendResult> send = conn.SendAsync(Env("r@dest.example"), Msg(), cts.Token).AsTask();
+            await silent.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            await cts.CancelAsync();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => send);
+            Assert.False(conn.EndOfDataStarted);
+        }
+
+        // Cancelled while waiting for the final reply: the server may have accepted the message.
+        var waiting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using (var peer = Peer(silentAtRcpt: false, bdat, waiting))
+        {
+            await using var conn = await SmtpClientConnection.ConnectAsync(peer.Target(SmtpTlsPolicy.Disabled), options);
+            using var cts = new CancellationTokenSource();
+            Task<SmtpSendResult> send = conn.SendAsync(Env("r@dest.example"), Msg(), cts.Token).AsTask();
+            await waiting.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            await cts.CancelAsync();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => send);
+            Assert.True(conn.EndOfDataStarted);
+        }
+    }
+
+    [Fact]
+    public async Task EndOfDataStarted_is_reset_for_every_transaction()
+    {
+        await using var server = new RealServer();
+        await using var conn = await SmtpClientConnection.ConnectAsync(server.Target(SmtpTlsPolicy.Disabled), Options);
+        Assert.False(conn.EndOfDataStarted);
+        Assert.True((await conn.SendAsync(Env("r@dest.example"), Msg())).Delivered);
+        Assert.True(conn.EndOfDataStarted);
+        var refused = await conn.SendAsync(Env("r@dest.example"), Msg("bare\nlf\r\n")); // refused locally before the end of data
+        Assert.Equal(LocalFailure.MalformedMessage, refused.LocalFailure);
+        Assert.False(conn.EndOfDataStarted);
+    }
 }

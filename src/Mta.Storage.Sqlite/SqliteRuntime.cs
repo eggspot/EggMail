@@ -2,6 +2,7 @@ using Microsoft.Data.Sqlite;
 using Mta.Core;
 using Mta.Storage.Logic;
 using Mta.Storage.Model;
+using Mta.Storage.Transfer;
 
 namespace Mta.Storage.Sqlite;
 
@@ -29,6 +30,9 @@ internal sealed class SqliteRuntime
     public IMtaLog Log { get; }
 
     public StatsAggregator Aggregator { get; }
+
+    /// <summary>The backend switch gate: closed on a fenced source and on a target that is not activated yet.</summary>
+    public SwitchGate Fence { get; } = new();
 
     public bool IsFull => Options.History.Mode == HistoryMode.Full;
 

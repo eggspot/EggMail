@@ -167,9 +167,46 @@ public class DeliveryEndToEndTests
 
         var events = await f.EventsAsync(id);
         Assert.Contains(events, e => e.Type == MessageEventType.AbortedBySwitch);
+        Assert.Contains(events, e => e.Type == MessageEventType.PossibleDuplicate); // aborted while waiting for the final reply
         var stats = await f.Storage.Deliveries.GetQueueStatsAsync(default);
         Assert.Equal(1, stats.Queued + stats.Deferred);
         Assert.Equal(0, stats.Leased);
+        Assert.True((await QueuedAsync(f)).PossibleDuplicate);
+    }
+
+    [Fact]
+    public async Task Quiesce_before_the_end_of_data_was_sent_requeues_without_the_possible_duplicate_flag()
+    {
+        await using var f = new DeliveryFixture();
+        var gate = new TaskCompletionSource();
+        var entered = new TaskCompletionSource();
+        f.Remote.OnRecipient = _ =>
+        {
+            entered.TrySetResult();
+            gate.Task.Wait(TimeSpan.FromSeconds(20)); // the peer sits on the RCPT reply: no part of the message has been sent
+            return null;
+        };
+        var id = await f.EnqueueAsync(["rcpt@dest.example"]);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        await f.Engine.QuiesceAsync(TimeSpan.FromMilliseconds(100), default);
+        gate.SetResult();
+
+        var events = await f.EventsAsync(id);
+        Assert.Contains(events, e => e.Type == MessageEventType.AbortedBySwitch);
+        Assert.DoesNotContain(events, e => e.Type == MessageEventType.PossibleDuplicate);
+        Assert.Empty(f.Remote.Messages);
+        Assert.False((await QueuedAsync(f)).PossibleDuplicate);
+    }
+
+    private static async Task<Mta.Storage.Model.QueuedDeliveryEntity> QueuedAsync(DeliveryFixture f)
+    {
+        await foreach (object row in f.Storage.Transfer!.ReadAsync(Mta.Storage.Transfer.TransferTables.Deliveries, Mta.Storage.Transfer.TransferRange.All, default))
+        {
+            return (Mta.Storage.Model.QueuedDeliveryEntity)row;
+        }
+
+        throw new InvalidOperationException("the delivery is gone");
     }
 }
 

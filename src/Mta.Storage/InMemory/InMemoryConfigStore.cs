@@ -1,5 +1,6 @@
 using Mta.Storage.Logic;
 using Mta.Storage.Model;
+using Mta.Storage.Transfer;
 
 namespace Mta.Storage.InMemory;
 
@@ -762,5 +763,110 @@ internal sealed class InMemoryConfigStore : IConfigStore
         }
 
         return default;
+    }
+    // Backend switch transfer (the config tables as entity rows)
+
+    private static List<object> Snapshot<T>(IEnumerable<T> rows) where T : class => rows.Select(r => TransferTable.Clone(r)).ToList();
+
+    /// <summary>The rows of a config table in key order (copies), without the Data Protection key ring.</summary>
+    internal List<object> ReadTransferTable(string table)
+    {
+        lock (_gate)
+        {
+            return table switch
+            {
+                "tenant" => Snapshot(_tenants.Values.OrderBy(x => x.Id)),
+                "api_key" => Snapshot(_apiKeys.Values.OrderBy(x => x.Id)),
+                "smtp_credential" => Snapshot(_smtp.Values.OrderBy(x => x.Id)),
+                "dashboard_user" => Snapshot(_dashboardUsers.Values.OrderBy(x => x.Id)),
+                "dashboard_session" => Snapshot(_dashboardSessions.OrderBy(x => Convert.ToHexString(x.IdHash), StringComparer.Ordinal)),
+                "domain" => Snapshot(_domains.Values.OrderBy(x => x.Id)),
+                "dkim_key" => Snapshot(_dkim.Values.OrderBy(x => x.Id)),
+                "suppression" => Snapshot(_suppressions.Values.OrderBy(x => x.TenantId).ThenBy(x => x.Address, StringComparer.Ordinal)),
+                "webhook_endpoint" => Snapshot(_endpoints.Values.OrderBy(x => x.Id)),
+                "setting" => Snapshot(_settings.Values.Where(x => !x.Key.StartsWith(TransferTables.DataProtectionSettingPrefix, StringComparison.Ordinal)).OrderBy(x => x.TenantId).ThenBy(x => x.Key, StringComparer.Ordinal)),
+                "tls_policy" => Snapshot(_tls.Values.OrderBy(x => x.Id)),
+                "relay_route" => Snapshot(_relays.Values.OrderBy(x => x.Id)),
+                "certificate" => Snapshot(_certs.Values.OrderBy(x => x.Id)),
+                "acme_account" => Snapshot(_acmeAccounts.Values.OrderBy(x => x.Id)),
+                "acme_renewal" => Snapshot(_renewals.Values.OrderBy(x => x.CertificateName, StringComparer.Ordinal)),
+                _ => throw new ArgumentOutOfRangeException(nameof(table), table, "not a config table"),
+            };
+        }
+    }
+
+    /// <summary>Adds rows imported from a bundle (a row with the same key is replaced).</summary>
+    internal void AddTransferRows(string table, IReadOnlyList<object> rows)
+    {
+        lock (_gate)
+        {
+            foreach (object row in rows)
+            {
+                switch (row)
+                {
+                    case TenantEntity x: _tenants[x.Id] = x; break;
+                    case ApiKeyEntity x: _apiKeys[x.Id] = x; break;
+                    case SmtpCredentialEntity x: _smtp[x.Id] = x; break;
+                    case DashboardUserEntity x: _dashboardUsers[x.Id] = x; break;
+                    case DashboardSessionEntity x:
+                        _dashboardSessions.RemoveAll(s => s.IdHash.AsSpan().SequenceEqual(x.IdHash));
+                        _dashboardSessions.Add(x);
+                        break;
+                    case DomainEntity x: _domains[x.Id] = x; break;
+                    case DkimKeyEntity x: _dkim[x.Id] = x; break;
+                    case SuppressionEntity x: _suppressions[(x.TenantId, x.Address)] = x; break;
+                    case WebhookEndpointEntity x: _endpoints[x.Id] = x; break;
+                    case SettingEntity x: _settings[(x.TenantId, x.Key)] = x; break;
+                    case TlsPolicyEntity x: _tls[x.Id] = x; break;
+                    case RelayRouteEntity x: _relays[x.Id] = x; break;
+                    case CertificateEntity x: _certs[x.Id] = x; break;
+                    case AcmeAccountEntity x: _acmeAccounts[x.Id] = x; break;
+                    case AcmeRenewalEntity x: _renewals[x.CertificateName] = x; break;
+                    default: throw new ArgumentOutOfRangeException(nameof(rows), table, "not a config row");
+                }
+            }
+        }
+    }
+
+    internal bool AnyTransferRows(string table) => ReadTransferTable(table).Count > 0;
+
+    internal void ClearTransferTable(string table)
+    {
+        lock (_gate)
+        {
+            switch (table)
+            {
+                case "tenant": _tenants.Clear(); break;
+                case "api_key": _apiKeys.Clear(); break;
+                case "smtp_credential": _smtp.Clear(); break;
+                case "dashboard_user": _dashboardUsers.Clear(); break;
+                case "dashboard_session": _dashboardSessions.Clear(); break;
+                case "domain": _domains.Clear(); break;
+                case "dkim_key": _dkim.Clear(); break;
+                case "suppression": _suppressions.Clear(); break;
+                case "webhook_endpoint": _endpoints.Clear(); break;
+                case "setting":
+                    foreach (var key in _settings.Keys.Where(k => !k.Item2.StartsWith(TransferTables.DataProtectionSettingPrefix, StringComparison.Ordinal)).ToList())
+                    {
+                        _settings.Remove(key);
+                    }
+
+                    break;
+                case "tls_policy": _tls.Clear(); break;
+                case "relay_route": _relays.Clear(); break;
+                case "certificate": _certs.Clear(); break;
+                case "acme_account": _acmeAccounts.Clear(); break;
+                case "acme_renewal": _renewals.Clear(); break;
+                default: throw new ArgumentOutOfRangeException(nameof(table), table, "not a config table");
+            }
+        }
+    }
+
+    internal void ClearSwitchState()
+    {
+        lock (_gate)
+        {
+            _switch = null;
+        }
     }
 }

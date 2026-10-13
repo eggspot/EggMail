@@ -22,7 +22,33 @@ public static class ApiHosting
             services.AddSingleton(acme);
         }
 
+        AddSwitchService(services, loaded, runtime);
         services.AddEggMailApi(loaded);
+    }
+
+    /// <summary>The backend switch behind <c>/admin/storage/switch</c>: the engine over the storage this process runs on.</summary>
+    private static void AddSwitchService(IServiceCollection services, LoadedConfig loaded, EggMailRuntime runtime)
+    {
+        MtaConfig config = loaded.Config;
+        var options = new Mta.Host.Switching.StorageSwitchServiceOptions
+        {
+            BundleDirectory = config.Switch.BundleDirectory,
+            SourceKeysProtectedAtRest = config.Secrets.KeyProtection != KeyProtectionMode.None,
+            QuiesceTimeout = TimeSpan.FromSeconds(Math.Max(1, config.Switch.QuiesceTimeoutSeconds)),
+        };
+        Microsoft.Extensions.Configuration.IConfiguration source = loaded.Source ?? new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build();
+        services.AddSingleton<Mta.Host.Switching.ISwitchTargetResolver>(new Mta.Host.Switching.ConfiguredSwitchTargetResolver(source));
+        if (source is Microsoft.Extensions.Configuration.IConfigurationRoot root)
+        {
+            services.AddSingleton<Mta.Storage.Portability.ISwitchActivator>(new Mta.Host.Switching.SwitchActivator(root, ConfigLoader.ResolveBootstrapPath()));
+        }
+
+        services.AddSingleton<IStorageSwitchService>(sp => new Mta.Host.Switching.StorageSwitchService(
+            runtime.Storage, config.Storage, runtime.Secrets, runtime.Clock,
+            sp.GetRequiredService<Mta.Host.Switching.ISwitchTargetResolver>(),
+            sp.GetService<Mta.Storage.Portability.ISwitchActivator>(),
+            sp.GetService<Mta.Storage.Portability.ISwitchHostControl>(),
+            options));
     }
 
     public static void Map(WebApplication app, EggMailRuntime runtime)

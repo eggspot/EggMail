@@ -1,6 +1,7 @@
 using Mta.Core;
 using Mta.Storage.Logic;
 using Mta.Storage.Model;
+using Mta.Storage.Transfer;
 
 namespace Mta.Storage.InMemory;
 
@@ -28,6 +29,7 @@ public sealed class InMemoryStorage : IStorage
         History = new MemoryHistory(_state);
         Webhooks = new MemoryWebhooks(_state);
         Maintenance = new MemoryMaintenance(_state);
+        Transfer = new MemoryTransfer(_state);
         TimeSpan interval = statsFlushInterval ?? TimeSpan.FromSeconds(10);
         if (interval > TimeSpan.Zero)
         {
@@ -53,6 +55,8 @@ public sealed class InMemoryStorage : IStorage
 
     public IStorageMaintenance Maintenance { get; }
 
+    public IStorageTransfer Transfer { get; }
+
     public Task InitializeAsync(CancellationToken cancellationToken)
     {
         return Task.CompletedTask;
@@ -75,6 +79,9 @@ public sealed class InMemoryStorage : IStorage
 internal sealed class MemoryState
 {
     public readonly object Gate = new();
+
+    /// <summary>The backend switch gate (fenced source, target not yet activated); see <see cref="SwitchGate"/>.</summary>
+    public readonly SwitchGate Fence = new();
     public readonly StorageOptions Options;
     public readonly IClock Clock;
     public readonly IMtaLog Log;
@@ -168,6 +175,7 @@ internal sealed class MemoryIntake(MemoryState s) : IMessageIntake
             throw new ArgumentException("MessageId must be a UUIDv7 (Ids.New) so the history day can be derived.", nameof(message));
         }
 
+        s.Fence.ThrowIfClosed();
         DateTimeOffset now = s.Clock.UtcNow;
         DateTimeOffset received = StorageTime.Normalize(message.ReceivedAt);
         lock (s.Gate)
@@ -304,11 +312,16 @@ internal sealed class MemoryDeliveries(MemoryState s) : IDeliveryStore
 
     public ValueTask<IReadOnlyList<ClaimedDelivery>> ClaimAsync(string owner, int max, DateTimeOffset now, TimeSpan lease, CancellationToken cancellationToken)
     {
+        if (s.Fence.IsClosed)
+        {
+            return ValueTask.FromResult<IReadOnlyList<ClaimedDelivery>>([]);
+        }
+
         now = StorageTime.Normalize(now);
         DateTimeOffset until = StorageTime.Normalize(now + lease);
         lock (s.Gate)
         {
-            var rows = s.Deliveries.Values.Where(d => d.DueAt <= now && d.LeaseUntil <= now && d.ExpiresAt > now).ToList();
+            var rows = s.Deliveries.Values.Where(d => d.TransferSwitchId is null && d.DueAt <= now && d.LeaseUntil <= now && d.ExpiresAt > now).ToList();
             rows.Sort(ByDue);
             var result = new List<ClaimedDelivery>();
             foreach (var d in rows.Take(Math.Max(0, max)))
@@ -324,11 +337,16 @@ internal sealed class MemoryDeliveries(MemoryState s) : IDeliveryStore
 
     public ValueTask<IReadOnlyList<ClaimedDelivery>> ClaimExpiredAsync(string owner, int max, DateTimeOffset now, CancellationToken cancellationToken)
     {
+        if (s.Fence.IsClosed)
+        {
+            return ValueTask.FromResult<IReadOnlyList<ClaimedDelivery>>([]);
+        }
+
         now = StorageTime.Normalize(now);
         DateTimeOffset until = StorageTime.Normalize(now + ExpiredClaimLease);
         lock (s.Gate)
         {
-            var rows = s.Deliveries.Values.Where(d => d.ExpiresAt <= now && d.LeaseUntil <= now).OrderBy(d => d.ExpiresAt).ThenBy(d => MemoryState.IdText(d.Id), StringComparer.Ordinal).Take(Math.Max(0, max)).ToList();
+            var rows = s.Deliveries.Values.Where(d => d.TransferSwitchId is null && d.ExpiresAt <= now && d.LeaseUntil <= now).OrderBy(d => d.ExpiresAt).ThenBy(d => MemoryState.IdText(d.Id), StringComparer.Ordinal).Take(Math.Max(0, max)).ToList();
             foreach (var d in rows)
             {
                 d.LeaseOwner = owner;
@@ -860,11 +878,16 @@ internal sealed class MemoryWebhooks(MemoryState s) : IWebhookOutbox
 {
     public ValueTask<IReadOnlyList<WebhookOutboxItem>> ClaimDueAsync(string owner, int max, DateTimeOffset now, TimeSpan lease, CancellationToken cancellationToken)
     {
+        if (s.Fence.IsClosed)
+        {
+            return ValueTask.FromResult<IReadOnlyList<WebhookOutboxItem>>([]);
+        }
+
         now = StorageTime.Normalize(now);
         DateTimeOffset until = StorageTime.Normalize(now + lease);
         lock (s.Gate)
         {
-            var rows = s.Outbox.Values.Where(o => o.State == WebhookOutboxState.Pending && o.NextAttemptAt <= now && o.LeaseUntil <= now)
+            var rows = s.Outbox.Values.Where(o => o.TransferSwitchId is null && o.State == WebhookOutboxState.Pending && o.NextAttemptAt <= now && o.LeaseUntil <= now)
                 .OrderBy(o => o.NextAttemptAt).ThenBy(o => MemoryState.IdText(o.Id), StringComparer.Ordinal).Take(Math.Max(0, max)).ToList();
             foreach (var o in rows)
             {
@@ -1023,6 +1046,12 @@ internal sealed class MemoryMaintenance(MemoryState s) : IStorageMaintenance
 {
     public ValueTask<IReadOnlyList<MaintenanceReport>> RunAsync(DateTimeOffset now, CancellationToken cancellationToken)
     {
+        if (s.Fence.IsClosed)
+        {
+            // A fenced source stays untouched until the switch is finalized or rolled back; a target is not live yet.
+            return ValueTask.FromResult<IReadOnlyList<MaintenanceReport>>([]);
+        }
+
         now = StorageTime.Normalize(now);
         var reports = new List<MaintenanceReport>();
         s.FlushStats();

@@ -41,7 +41,7 @@ Under `Sqlite:DataDirectory`: `queue.db`, `stats.db`, `config.db`, and `history.
 | `busy_timeout` | `Sqlite:BusyTimeout` (5 s) | wait for a lock before `SQLITE_BUSY` |
 | `journal_size_limit` | `Sqlite:JournalSizeLimitBytes` (64 MiB) | the WAL is truncated to at most this after a checkpoint |
 | `cache_size` | 16 MiB (writer only) | page cache of the writer connection |
-| `user_version` | 1 | schema version; a newer version is refused, an unversioned database with tables is refused |
+| `user_version` | 3 | schema version; versions 1 and 2 are upgraded in place (2: dashboard tables and fingerprint; 3: backend switch column and tables), a newer version is refused, an unversioned database with tables is refused |
 
 `Cache=Shared` is never used. Reads use separate short pooled connections (the only exception is the in-memory queue, whose reads run on its writer). Every connection of a file is private; WAL means readers see a committed snapshot.
 
@@ -99,6 +99,10 @@ Idempotent, safe to call repeatedly. In order: flush statistics; metadata retent
 **Statistics:** `Add` is a dictionary lookup and an interlocked add; the buffer is drained into `INSERT … ON CONFLICT DO UPDATE` upserts about every 10 s, on `FlushAsync` and on dispose. While writing, each (hour, tenant, sending domain) group admits the first `RecipientDomainTopNHourly` recipient domains (largest first within a flush) and buckets the rest as `other`; once an hour has `MaxSeriesPerHour` series new domains also go to `other`. This write-time top-N is approximate across flushes of one hour (documented gap); the daily rollup re-ranks by real volume. Reads see flushed data only. The recent-events ring keeps the newest `History:RecentEvents` outcome events (no content; no `queued` events).
 
 **Backup:** `BackupAsync(dir)` creates `dir/eggmail-backup-<utc>/` and runs `VACUUM INTO` per file on its own connection (a consistent snapshot while the writer keeps committing; the memory queue is skipped). Restoring is copying the files into a data directory.
+
+## Backend switch support
+
+Every backend implements `IStorage.Transfer` (`IStorageTransfer`): streaming export of the 28 tables that move, idempotent chunked import with progress records, the persisted switch state with the gate behind it (a fenced source and an unactivated target refuse accept, claims and maintenance), and the transfer marks. The model gained `delivery_queue.transfer_switch_id`, `webhook_outbox.transfer_switch_id` and the four `transfer_chunk_*` tables (SQLite schema version 3 with in-place upgrades from 1 and 2; PostgreSQL migration `V003__backend_switch.sql`). A provider adds `ITransferDbAccess` (a read context, a write transaction, and for day-partitioned history `PrepareHistoryDaysAsync`) and must exclude held rows in its claim SQL and consult the gate; `TransferConformance` checks all of it. Details in [switch.md](switch.md).
 
 ## Contract additions (all documented in the PR)
 
@@ -223,7 +227,7 @@ Reading the table: with one caller the cost is one round trip plus the commit; w
 - Config reads create a short-lived EF context per call (no pooled factory); config is a cold path.
 - Reads on file-backed databases run synchronously on the caller's thread (SQLite has no asynchronous I/O); long history searches should be called from a thread-pool context.
 - Search by subject is a `LIKE '%…%'` scan within the other filters; no full-text index.
-- Export/import (Portability) and the storage-pressure indicator UI are other tasks.
+- The storage-pressure indicator UI is another task (the export/import engine exists, see [switch.md](switch.md)).
 - PostgreSQL: verified against PostgreSQL 18.6 and 16.13 (Homebrew, local) only; not against a managed service, behind PgBouncer, over TLS, with a remote server or with real HA/failover. The minimum supported version (16) is the lowest tested; `DETACH … CONCURRENTLY` and `inhdetachpending` need 14+.
 - PostgreSQL: the maintenance partition DDL needs the owner credentials at runtime (or a `RuntimeConnectionString` that is the owner); a deployment that must keep the owner secret away from the application has to run `partitions.create` and retention from a separate maintenance process with the owner string. `mta migrate-db` migrates with whatever credentials the configuration holds; `PostgresMigrator.GenerateScript` is the script form for a DBA.
 - PostgreSQL: configuration reads (`EfConfigStore`) are synchronous on the caller's thread, like SQLite's (a cold path, but a stalled database blocks the caller until `Command Timeout`).
