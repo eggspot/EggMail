@@ -123,7 +123,13 @@ forward eggmail-pg 18081
 python3 "$here/smoke.py" --api http://127.0.0.1:18081 --admin-user admin --admin-password "$password" --expect-backend postgres --stop-after signin
 
 echo "-- Unbound sidecar: sigok answers with the AD flag; EggMail is configured to trust it"
-signed=$(kubectl -n eggmail-pg exec deploy/eggmail -c unbound -- drill -D sigok.verteiltesysteme.net @127.0.0.1 A)
+# Unbound has just started: its first validations (trust anchor, DNSKEY fetches) can answer SERVFAIL for a moment, so ask a few times.
+signed=""
+for _ in $(seq 1 10); do
+  signed=$(kubectl -n eggmail-pg exec deploy/eggmail -c unbound -- drill -D sigok.verteiltesysteme.net @127.0.0.1 A || true)
+  if echo "$signed" | grep -qE '^;; flags:.* ad[ ;]'; then break; fi
+  sleep 3
+done
 echo "$signed" | grep -E '^;; flags:.* ad[ ;]' >/dev/null || { echo "$signed"; echo "::error::no AD flag from the sidecar"; exit 1; }
 kubectl -n eggmail-pg get deploy/eggmail -o jsonpath='{.spec.template.spec.containers[?(@.name=="eggmail")].env[*].name}' | grep -q Dns__TrustAuthenticatedData
 echo "kubernetes smoke test passed"

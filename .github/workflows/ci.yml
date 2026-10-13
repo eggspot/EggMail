@@ -38,8 +38,18 @@ jobs:
           docker compose -f deploy/compose/compose.postgres.yaml config --quiet
           docker compose -f deploy/compose/compose.yaml -f deploy/compose/compose.unbound.yaml config --quiet
           docker compose -f deploy/compose/compose.postgres.yaml -f deploy/compose/compose.unbound.yaml -f deploy/smoke/compose.smoke.yaml config --quiet
+          docker compose -f bench/compare/compose.yaml --profile eggmail --profile postfix --profile kumomta --profile load config --quiet
+          docker compose -f bench/compare/compose.yaml -f bench/compare/compose.postfix-tmpfs.yaml --profile postfix config --quiet
           kustomize build deploy/kubernetes/sqlite > /dev/null
           kustomize build deploy/kubernetes/postgres > /dev/null
+          # the Unbound component on both variants (an overlay next to the others, because kustomize refuses paths outside its root)
+          for variant in sqlite postgres; do
+            overlay=$(mktemp -d -p deploy/kubernetes)
+            printf 'apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - ../%s\ncomponents:\n  - ../components/unbound\n' "$variant" > "$overlay/kustomization.yaml"
+            kustomize build "$overlay" > "$overlay/rendered.yaml"
+            grep -q 'name: unbound' "$overlay/rendered.yaml"
+            rm -r "$overlay"
+          done
       # A plain `docker run` instead of a service container so the server can take flags: several test projects run in
       # parallel against it and the default max_connections=100 ran out ("53300: too many clients"). fsync=off is fine for tests.
       - name: PostgreSQL 17 for the tests

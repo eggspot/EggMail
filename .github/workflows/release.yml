@@ -164,6 +164,21 @@ jobs:
           VERSION: ${{ steps.ver.outputs.version }}
         run: bash deploy/smoke/image.sh "${IMAGE}@${DIGEST}" "${VERSION%%-*}"
 
+      - name: Release assets (per-platform digests, SBOM files, checksums)
+        if: steps.gate.outputs.cache-hit != 'true'
+        timeout-minutes: 5
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: bash .github/scripts/release-assets.sh "${IMAGE}@${DIGEST}" release-assets
+
+      - name: Keep the release assets of a manual run for inspection
+        if: steps.gate.outputs.cache-hit != 'true' && github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-${{ github.sha }}
+          path: release-assets
+          retention-days: 3
+
       - name: Smoke test the PostgreSQL compose file (healthy, API reports postgres, SMTP submission, delivery)
         if: steps.gate.outputs.cache-hit != 'true'
         timeout-minutes: 8
@@ -187,21 +202,6 @@ jobs:
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: bash deploy/smoke/kubernetes.sh "${IMAGE}@${DIGEST}"
-
-      - name: Release assets (per-platform digests, SBOM files, checksums)
-        if: steps.gate.outputs.cache-hit != 'true'
-        timeout-minutes: 5
-        env:
-          DIGEST: ${{ steps.build.outputs.digest }}
-        run: bash .github/scripts/release-assets.sh "${IMAGE}@${DIGEST}" release-assets
-
-      - name: Keep the release assets of a manual run for inspection
-        if: steps.gate.outputs.cache-hit != 'true' && github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-assets-${{ github.sha }}
-          path: release-assets
-          retention-days: 3
 
       - name: Remember nightly build
         if: github.event_name == 'schedule' && steps.gate.outputs.cache-hit != 'true'
