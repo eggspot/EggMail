@@ -11,7 +11,7 @@ public sealed partial class EfConfigStore<TContext>
 
     public async ValueTask ReplaceDomainRecordChecksAsync(Guid domainId, IReadOnlyList<DomainRecordCheckRecord> checks, CancellationToken ct)
     {
-        var entities = checks.Select(x => (x with { DomainId = domainId }).ToEntity()).DistinctBy(x => x.RecordKey).ToList();
+        var entities = checks.Select(x => (x with { DomainId = domainId }).ToEntity()).Reverse().DistinctBy(x => x.RecordKey).Reverse().ToList();   // the last one of a key wins, as in the in-memory store
         await Write(c =>
         {
             c.Set<DomainRecordCheckEntity>().Where(x => x.DomainId == domainId).ExecuteDelete();

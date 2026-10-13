@@ -44,7 +44,7 @@ public sealed class DomainVerificationService : BackgroundService
     private readonly string _owner = "domain-verification-" + Guid.NewGuid().ToString("N");
 
     /// <summary>How long a check or rotation holds its lease; a replica that dies mid-check frees the domain after this.</summary>
-    public static readonly TimeSpan LockDuration = TimeSpan.FromMinutes(2);
+    public static readonly TimeSpan LockDuration = TimeSpan.FromMinutes(5);
 
     public DomainVerificationService(
         IStorage storage,

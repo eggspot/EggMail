@@ -139,7 +139,7 @@ public class ApiDomainsPersistenceTests : IAsyncLifetime
             (await _a2.PostAsync($"/api/v1/domains/{id}/dkim/rotate")).Problem(HttpStatusCode.Conflict, "conflict");
 
             // The scheduled pass of the other replica leaves it alone as well.
-            _first.Clock.Advance(TimeSpan.FromMinutes(1));   // the first check is due now (90 s after creation), the lease (2 min) still holds
+            _first.Clock.Advance(TimeSpan.FromMinutes(1));   // the first check is due now (90 s after creation), the lease (5 min) still holds
             Assert.Equal(0, await _second.Get<DomainVerificationService>().RunDueChecksAsync(default));
             Assert.Empty(await _first.Storage.Config.GetDomainRecordChecksAsync(domainId, default));
         }

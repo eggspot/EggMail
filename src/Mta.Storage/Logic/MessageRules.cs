@@ -184,11 +184,14 @@ public static class MessageIdKey
         }
 
         string v = headerValue.Trim();
-        if (v.Length >= 2 && v[0] == '<' && v[^1] == '>')
+        int open = v.IndexOf('<', StringComparison.Ordinal);
+        int close = open < 0 ? -1 : v.IndexOf('>', open + 1);
+        if (open >= 0 && close > open)
         {
-            v = v[1..^1].Trim();
+            v = v[(open + 1)..close];   // the first <id>, without a trailing comment or folding around it
         }
 
+        v = string.Concat(v.Where(c => !char.IsWhiteSpace(c)));   // an id has no white space; a folded header may have gained some
         return v.Length is 0 or > MaxLength ? null : v.ToLowerInvariant();
     }
 }

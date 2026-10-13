@@ -187,7 +187,7 @@ public sealed class InMemorySendingCounterStore : ISendingCounterStore
             next = Math.Max(0, current + extra);
         }
         while (Interlocked.CompareExchange(ref counter.Value, next, current) != current);
-        counter.Flushed += extra;
+        counter.Flushed += next - current;   // what was really applied (a downward correction is clamped at zero)
     }
 
     /// <inheritdoc />
