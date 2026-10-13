@@ -145,6 +145,8 @@ jobs:
       - name: Smoke test the pushed image
         if: steps.gate.outputs.cache-hit != 'true'
         run: |
+          # The image must ship ICU: the Unicode self-test fails (exit 71) in invariant globalization mode (design section 10).
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" self-test
           docker run -d --name smoke -p 8080:8080 "${IMAGE}@${{ steps.build.outputs.digest }}"
           for i in $(seq 1 30); do curl -fsS http://localhost:8080/healthz && break || sleep 2; done
           curl -fsS http://localhost:8080/api/v1/capabilities | tee capabilities.json

@@ -57,7 +57,7 @@ No file is created now. Single job, on `ubuntu-latest`, to keep billed minutes l
 8. **Compute tags and labels** (`docker/metadata-action`): the tag set above and the OCI labels, including `org.opencontainers.image.source`.
 9. **Build and push** `linux/amd64,linux/arm64` with `sbom: true`, `provenance: mode=max`, layer cache in the GitHub Actions cache (`cache-from`/`cache-to` of type `gha`). To avoid slow QEMU emulation, the .NET build stage should run on the build platform and publish for each target runtime identifier (cross-publishing); ReadyToRun cross-architecture compilation is **unverified**, with emulation or a native Arm runner as the fallback.
 10. **Attest** the pushed image digest (`attest` step above).
-11. **Smoke test** the pushed image: `docker run` it, check `--healthcheck`, and check the startup warning for `synchronous=OFF` is present; repeat for the Postgres compose example in CI only on releases.
+11. **Smoke test** the pushed image: `docker run` it, check `--healthcheck`, run `self-test` (the image must ship ICU), and check the startup warning for `synchronous=OFF` is present; repeat for the Postgres compose example in CI only on releases.
 12. **Create the GitHub Release** (stable tags only): notes, SBOMs, `checksums.txt`.
 13. **Post-publish check** (first release only, manual): set the package public, then `docker logout ghcr.io` and pull anonymously.
 

@@ -14,7 +14,7 @@ using Mta.Storage;
 
 namespace Mta.Host;
 
-/// <summary>The <c>mta</c> command line: <c>serve</c> (default), <c>--healthcheck</c>, <c>migrate-db</c>, <c>migrate-storage</c>, <c>--version</c>.</summary>
+/// <summary>The <c>mta</c> command line: <c>serve</c> (default), <c>--healthcheck</c>, <c>migrate-db</c>, <c>migrate-storage</c>, <c>admin</c>, <c>self-test</c>, <c>--version</c>.</summary>
 internal static class Cli
 {
     public static async Task<int> RunAsync(string[] args)
@@ -34,10 +34,12 @@ internal static class Cli
                 return await MigrateStorageCommand.RunAsync(rest, Console.Out, Console.Error).ConfigureAwait(false);
             case "admin":
                 return await AdminCommand.RunAsync(rest, Console.Out, Console.Error).ConfigureAwait(false);
+            case "self-test":
+                return SelfTest(rest);
             case "serve":
                 return await ServeAsync(rest).ConfigureAwait(false);
             default:
-                Console.Error.WriteLine($"Unknown command '{command}'. Commands: serve (default), migrate-db, migrate-storage, admin, --healthcheck, --version.");
+                Console.Error.WriteLine($"Unknown command '{command}'. Commands: serve (default), migrate-db, migrate-storage, admin, self-test, --healthcheck, --version.");
                 return 64;
         }
     }
@@ -56,6 +58,21 @@ internal static class Cli
         }
 
         return null;
+    }
+
+    /// <summary>Runs the startup Unicode self-test and reports the result (exit code 71 when it fails). Lets an operator check an image or host before deploying.</summary>
+    private static int SelfTest(string[] args)
+    {
+        _ = args;
+        UnicodeSelfTestResult result = UnicodeSelfTest.Run();
+        if (result.Passed)
+        {
+            Console.WriteLine(result.Describe());
+            return 0;
+        }
+
+        Console.Error.WriteLine(result.Describe());
+        return UnicodeSelfTest.FailedExitCode;
     }
 
     /// <summary>Liveness probe for container health checks: succeeds when the local HTTP endpoint answers /healthz.</summary>
@@ -127,6 +144,13 @@ internal static class Cli
         using var startupFactory = LoggerFactory.Create(b => b.AddJsonConsole());
         var startupLog = new MtaLogAdapter(startupFactory);
         var clock = SystemClock.Instance;
+
+        // Before anything is opened: an environment where IDN and normalization silently give wrong answers must not start (design section 10).
+        if (!UnicodeSelfTest.Enforce(loaded.Config.Startup.RequireUnicodeSupport, startupLog, Console.Error))
+        {
+            return UnicodeSelfTest.FailedExitCode;
+        }
+
         // One process owns a SQLite data directory (the offline migrate-storage commands take the same lock).
         using DataDirectoryLock? directoryLock = loaded.Config.Storage.Backend == StorageBackend.Sqlite ? DataDirectoryLock.Acquire(loaded.Config.Storage.Sqlite.DataDirectory) : null;
         var storage = StorageFactory.Create(loaded.Config.Storage, clock, startupLog);

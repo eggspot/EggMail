@@ -34,6 +34,7 @@ Settings come from (highest precedence first): command line, environment variabl
 | `Backup:Enabled`, `IntervalHours`, `Keep`, `Directory` | true, 24, 3, `<data>/backups` | Scheduled SQLite backups |
 | `Dashboard:HttpPort`, `HttpsPort`, `HttpsEnabled` | 8080, 8443, true | Dashboard / API listeners |
 | `Webhooks:*` | see `WebhookOptions` | Timeouts, SSRF allow-list, retention |
+| `Startup:RequireUnicodeSupport` | true | Refuse to start when the Unicode self-test fails (see "Unicode support" below); `false` only logs a warning |
 
 Default listeners (container ports, publish them as 587, 465, 2525 and 25):
 
@@ -64,6 +65,10 @@ To restore: stop EggMail, copy the files of one backup directory over the data d
 ## Monitoring
 
 `/healthz` (liveness), `/readyz` (readiness and warnings) and `/metrics` (Prometheus text, admin network only) are served by the HTTP layer *(the API pull request provides `/readyz` and `/metrics`; `/healthz` exists already)*. Meters: `Mta.Smtp.Server`, `Mta.Smtp.Client`, `Mta.Delivery` (attempts by outcome, holds, bounces, group duration), `Mta.Webhooks`, and storage meters. Alert on queue depth and oldest due delivery, repeated `deferred` outcomes to one domain, certificate expiry, the `sqlite_sync_off` warning being unintended, and failed backups.
+
+## Unicode support
+
+Internationalized domain names and Unicode normalization depend on ICU. In invariant globalization mode (`DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1`, `InvariantGlobalization=true`, or a host without `libicu`) .NET gives wrong answers for anything outside ASCII without any error: an upper case or decomposed IDN becomes the wrong A-label, so a sender domain no longer matches the one that was registered. At start `mta serve` therefore runs a self-test (A-labels of a precomposed, an upper case, a decomposed and a CJK name, U-label round trip, NFC normalization) and, if it fails, prints what was wrong and how to fix it and exits with code 71 before opening any storage. `mta self-test` runs the same test and prints the result (exit 0 or 71): use it to check an image or a host. The published image is the chiseled `-extra` variant with ICU. `Startup:RequireUnicodeSupport=false` starts anyway with a warning in the log (not recommended).
 
 ## Upgrades
 
