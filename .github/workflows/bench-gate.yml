@@ -10,6 +10,9 @@ name: bench-gate
 # in the same pull request (fill in "recordedOn").
 
 on:
+  push:   # TEMPORARY: registers the workflow from this branch (removed before the PR is ready)
+    branches: [feat/deploy-artifacts]
+    paths: [.github/workflows/bench-gate.yml]
   schedule:
     - cron: '41 4 * * 1'
   workflow_dispatch:

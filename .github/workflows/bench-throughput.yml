@@ -10,6 +10,9 @@ name: bench-throughput
 # comparing with other servers (docs/benchmarks.md, fairness rules). The summary says so in its first line.
 
 on:
+  push:   # TEMPORARY: registers the workflow from this branch (removed before the PR is ready)
+    branches: [feat/deploy-artifacts]
+    paths: [.github/workflows/bench-throughput.yml]
   workflow_dispatch:
     inputs:
       messages:
@@ -60,7 +63,7 @@ jobs:
         run: dotnet build bench/Mta.Bench.Pipeline -c Release
 
       - name: PostgreSQL 17 (default durability; the non-durable pair sets synchronous_commit=off per connection)
-        if: inputs.postgres
+        if: ${{ inputs.postgres || github.event_name == 'push' }}
         run: |
           docker run -d --name pg -p 5432:5432 -e POSTGRES_USER=eggmail -e POSTGRES_PASSWORD=eggmail -e POSTGRES_DB=postgres postgres:17
           for _ in $(seq 1 30); do if docker exec pg pg_isready -U eggmail; then break; fi; sleep 1; done
@@ -72,9 +75,9 @@ jobs:
 
       - name: Ingest runs
         env:
-          MESSAGES: ${{ inputs.messages }}
-          RUNS: ${{ inputs.runs }}
-          POSTGRES: ${{ inputs.postgres }}
+          MESSAGES: ${{ inputs.messages || '30000' }}
+          RUNS: ${{ inputs.runs || '3' }}
+          POSTGRES: ${{ (inputs.postgres || github.event_name == 'push') && 'true' || 'false' }}
         run: |
           set -euo pipefail
           mkdir -p results
@@ -110,7 +113,7 @@ jobs:
           fi
 
       - name: Start-up time and size, JIT versus ReadyToRun (linux-x64), and the linux-arm64 cross-publish
-        if: inputs.readytorun
+        if: ${{ inputs.readytorun || github.event_name == 'push' }}
         run: |
           set -euo pipefail
           for mode in false true; do
