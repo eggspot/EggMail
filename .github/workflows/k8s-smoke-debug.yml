@@ -1,0 +1,21 @@
+name: k8s-smoke-debug
+
+# TEMPORARY (removed before the pull request is ready): runs only the Kubernetes smoke test against an already published nightly-<sha> image,
+# so the kind part of the release workflow can be fixed without a full image build.
+on:
+  push:
+    branches: [feat/deploy-artifacts]
+    paths: [.github/workflows/k8s-smoke-debug.yml, deploy/smoke/kubernetes.sh, deploy/smoke/smoke.py, deploy/kubernetes/**]
+
+permissions:
+  contents: read
+
+jobs:
+  kind:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - run: bash deploy/smoke/kubernetes.sh ghcr.io/eggspot/eggmail:nightly-61a6ff5

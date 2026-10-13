@@ -130,6 +130,20 @@ for _ in $(seq 1 10); do
   if echo "$signed" | grep -qE '^;; flags:.* ad[ ;]'; then break; fi
   sleep 3
 done
-echo "$signed" | grep -E '^;; flags:.* ad[ ;]' >/dev/null || { echo "$signed"; echo "::error::no AD flag from the sidecar"; exit 1; }
+if ! echo "$signed" | grep -qE '^;; flags:.* ad[ ;]'; then
+  echo "$signed"
+  echo "::group::Unbound diagnostics"
+  kubectl -n eggmail-pg logs deploy/eggmail -c unbound --tail 40 || true
+  kubectl -n eggmail-pg exec deploy/eggmail -c unbound -- drill cloudflare.com @127.0.0.1 A || true
+  kubectl -n eggmail-pg exec deploy/eggmail -c unbound -- drill -D cloudflare.com @127.0.0.1 A || true
+  kubectl -n eggmail-pg get networkpolicy -o name || true
+  echo "-- the same query with the NetworkPolicies removed (is the policy the cause?)"
+  kubectl -n eggmail-pg delete networkpolicy --all || true
+  sleep 5
+  kubectl -n eggmail-pg exec deploy/eggmail -c unbound -- drill -D sigok.verteiltesysteme.net @127.0.0.1 A || true
+  echo "::endgroup::"
+  echo "::error::no AD flag from the sidecar"
+  exit 1
+fi
 kubectl -n eggmail-pg get deploy/eggmail -o jsonpath='{.spec.template.spec.containers[?(@.name=="eggmail")].env[*].name}' | grep -q Dns__TrustAuthenticatedData
 echo "kubernetes smoke test passed"
