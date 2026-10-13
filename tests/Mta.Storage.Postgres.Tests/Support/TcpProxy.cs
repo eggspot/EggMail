@@ -17,7 +17,11 @@ internal sealed class TcpProxy : IAsyncDisposable
 
     public TcpProxy(string targetHost, int targetPort)
     {
-        _target = new IPEndPoint(IPAddress.Parse(targetHost), targetPort);
+        // The connection string may name the server ("localhost" in CI), not give an address.
+        IPAddress address = IPAddress.TryParse(targetHost, out IPAddress? parsed)
+            ? parsed
+            : System.Net.Dns.GetHostAddresses(targetHost).OrderBy(a => a.AddressFamily == AddressFamily.InterNetwork ? 0 : 1).First();
+        _target = new IPEndPoint(address, targetPort);
         Port = Start(0);
     }
 

@@ -142,10 +142,12 @@ public sealed class FullPipelineTests : IAsyncLifetime
         await client.DisconnectAsync(true);
     }
 
-    private static async Task WaitAsync(Func<bool> condition, int timeoutMs = 15_000)
+    private static Task WaitAsync(Func<bool> condition, int timeoutMs = 15_000) => WaitAsync(() => Task.FromResult(condition()), timeoutMs);
+
+    private static async Task WaitAsync(Func<Task<bool>> condition, int timeoutMs = 15_000)
     {
         var until = DateTime.UtcNow.AddMilliseconds(timeoutMs);
-        while (!condition())
+        while (!await condition())
         {
             if (DateTime.UtcNow > until)
             {
@@ -203,7 +205,8 @@ public sealed class FullPipelineTests : IAsyncLifetime
         var dsn = _internet.Received.First(m => m.Recipients.Contains("news@example.org"));
         Assert.Equal(string.Empty, dsn.Sender);
         Assert.Contains("Final-Recipient: rfc822; gone@dest.example", Encoding.ASCII.GetString(dsn.Body));
-        Assert.True(await _runtime.Storage.Config.IsSuppressedAsync(TenantId, "gone@dest.example", default));
+        // The bounce is queued before the failed attempt (and with it the suppression) is recorded, so the bounce can arrive first.
+        await WaitAsync(async () => await _runtime.Storage.Config.IsSuppressedAsync(TenantId, "gone@dest.example", default));
 
         // A second message to the same address is not even attempted any more.
         int before = _internet.Received.Count;
