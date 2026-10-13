@@ -57,6 +57,19 @@ jobs:
           docker run -d --name pg -p 5432:5432 -e POSTGRES_USER=eggmail -e POSTGRES_PASSWORD=eggmail -e POSTGRES_DB=postgres postgres:17 \
             -c max_connections=600 -c fsync=off -c synchronous_commit=off -c full_page_writes=off
           for i in $(seq 1 30); do docker exec pg pg_isready -U eggmail && break || sleep 1; done
+      # Let's Encrypt's Pebble test CA and its challenge test server for the ACME integration tests (tests/Mta.Integration.Tests/Acme).
+      # Host networking so Pebble reaches the DNS server (:8053) of the challenge test server on 127.0.0.1. PEBBLE_VA_NOSLEEP drops the random
+      # 1-5 s validation delay, PEBBLE_WFE_NONCEREJECT=0 and PEBBLE_AUTHZREUSE=0 make the CA deterministic (no random bad nonces, no reused
+      # authorizations that would skip the challenge). Challenges are really validated (DNS-01 against pebble-challtestsrv): no PEBBLE_VA_ALWAYS_VALID.
+      - name: Pebble ACME test CA for the ACME tests
+        run: |
+          docker run -d --name challtestsrv --network host ghcr.io/letsencrypt/pebble-challtestsrv:2.10.1 \
+            -http01 "" -https01 "" -tlsalpn01 "" -doh ""
+          docker run -d --name pebble --network host -e PEBBLE_VA_NOSLEEP=1 -e PEBBLE_WFE_NONCEREJECT=0 -e PEBBLE_AUTHZREUSE=0 \
+            ghcr.io/letsencrypt/pebble:2.10.1 -config test/config/pebble-config.json -dnsserver 127.0.0.1:8053
+          docker cp pebble:/test/certs/pebble.minica.pem "$RUNNER_TEMP/pebble.minica.pem"
+          for i in $(seq 1 30); do curl -sf --cacert "$RUNNER_TEMP/pebble.minica.pem" https://localhost:14000/dir >/dev/null && break || sleep 1; done
+          curl -sf --cacert "$RUNNER_TEMP/pebble.minica.pem" https://localhost:14000/dir >/dev/null || { docker logs pebble; exit 1; }
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
@@ -70,6 +83,9 @@ jobs:
       - name: Build
         run: dotnet build EggMail.slnx -c Release --no-restore
       - name: Test
+        env:
+          EGGMAIL_TEST_ACME_DIRECTORY: https://localhost:14000/dir
+          EGGMAIL_TEST_ACME_CA_FILE: ${{ runner.temp }}/pebble.minica.pem
         run: dotnet test EggMail.slnx -c Release --no-build --logger "trx;LogFileName=test.trx" --results-directory TestResults
       - uses: actions/setup-node@v4
         with:
@@ -85,6 +101,9 @@ jobs:
           npm test
           npm run build
           npm run check-csp
+      - name: Pebble logs on failure
+        if: failure()
+        run: docker logs pebble 2>&1 | tail -200 || true
       - name: Upload test results on failure
         if: failure()
         uses: actions/upload-artifact@v4

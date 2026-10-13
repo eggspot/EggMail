@@ -16,6 +16,30 @@ dotnet test tests/Mta.Smtp.Server.Tests  # one project
 
 Postgres-backed tests read `EGGMAIL_TEST_POSTGRES` (a connection string to an existing server and a database the test user may create schemas in). Without it the tests start a throwaway cluster from the PostgreSQL binaries on `PATH` (`initdb`, `pg_ctl`), and are skipped when those are not installed.
 
+## ACME tests (Pebble)
+
+`tests/Mta.Integration.Tests/Acme` runs the certificate issuance and renewal flow against [Pebble](https://github.com/letsencrypt/pebble), Let's Encrypt's ACME test server, and `pebble-challtestsrv` (the DNS server Pebble validates DNS-01 against). They are **skipped** unless `EGGMAIL_TEST_ACME_DIRECTORY` is set. CI runs both as containers; locally, without Docker, use the release binaries from the Pebble releases page (pinned in CI to 2.10.1) and the test certificates in the Pebble source tree:
+
+```sh
+# 1. DNS-01 only: switch the other challenge servers off. Listens on :8053 (DNS) and :8055 (management).
+pebble-challtestsrv -http01 "" -https01 "" -tlsalpn01 "" -doh ""
+# 2. Pebble, from a checkout/tarball of the same release (it reads test/config and test/certs relative to the working directory).
+PEBBLE_VA_NOSLEEP=1 PEBBLE_WFE_NONCEREJECT=0 PEBBLE_AUTHZREUSE=0 pebble -config test/config/pebble-config.json -dnsserver 127.0.0.1:8053
+# 3. The tests.
+EGGMAIL_TEST_ACME_DIRECTORY=https://localhost:14000/dir \
+EGGMAIL_TEST_ACME_CA_FILE=<pebble checkout>/test/certs/pebble.minica.pem \
+  dotnet test tests/Mta.Integration.Tests --filter "FullyQualifiedName~Acme"
+```
+
+| Variable | Meaning |
+|---|---|
+| `EGGMAIL_TEST_ACME_DIRECTORY` | Pebble's directory URL. Required; unset skips the tests |
+| `EGGMAIL_TEST_ACME_CA_FILE` | PEM of the CA behind Pebble's own HTTPS certificate (`test/certs/pebble.minica.pem`). Unset: system trust |
+| `EGGMAIL_TEST_ACME_CHALLTESTSRV` | Management API of the challenge test server, default `http://localhost:8055` |
+| `EGGMAIL_TEST_ACME_MANAGEMENT` | Pebble's management API (issuing roots), default `https://<directory host>:15000` |
+
+Pebble knobs: `PEBBLE_VA_NOSLEEP=1` removes the random 1 to 5 s validation delay; `PEBBLE_WFE_NONCEREJECT=0` and `PEBBLE_AUTHZREUSE=0` make the CA deterministic (by default it rejects 5 % of nonces and reuses authorizations at random, which would skip the challenge). The tests also pass with `PEBBLE_WFE_NONCEREJECT=15` (the order is repeated on `badNonce`). Do not use `PEBBLE_VA_ALWAYS_VALID`: the tests rely on real validation. Pebble picks one of its certificate profiles (90 or 6 days) at random for each order; the tests derive the renewal schedule from the issued certificate. On macOS repeated runs can exhaust the ephemeral ports Pebble uses for its DNS queries ("can't assign requested address"); wait a minute between runs.
+
 ## Project map
 
 See [design.md §2.2](design.md#22-indicative-solution-layout). The assemblies `Mta.Core`, `Mta.Dns`, `Mta.Mime`, `Mta.Dkim`, `Mta.Auth`, `Mta.Dsn`, `Mta.Tls` and `Mta.Smtp.*` are **package-free** (decision 4): `tests/Mta.ArchitectureTests` fails the build if one of them gains a `PackageReference` or references a non-guarded project. Component notes live in `docs/components/`.
@@ -40,4 +64,4 @@ Defaults: SQLite backend in `Sqlite:DataDirectory` (default `/data`), SMTP on 55
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` builds and tests on Linux with a PostgreSQL 17 container and runs the dashboard checks; it must be green before a pull request is merged. `release.yml` publishes the image and smoke-tests it ([release.md](release.md)); `bench-gate.yml` (weekly allocation gate) and `bench-throughput.yml` (manual) are described in [benchmarks.md](benchmarks.md). The deployment smoke tests in `deploy/smoke/` need Docker and are meant for Actions, but `deploy/smoke/smoke.py` runs against a locally started `mta serve` too (see its docstring).
+`.github/workflows/ci.yml` builds and tests on Linux in one job with PostgreSQL 17 and Pebble (with its challenge test server) started by `docker run` before the tests, then checks the dashboard. Run `dotnet test EggMail.slnx` locally before pushing; without the environment variables above the PostgreSQL and ACME tests start a local cluster or are skipped. `release.yml` publishes the image and smoke-tests it ([release.md](release.md)); `bench-gate.yml` (weekly allocation gate) and `bench-throughput.yml` (manual) are described in [benchmarks.md](benchmarks.md). The deployment smoke tests in `deploy/smoke/` need Docker and are meant for Actions, but `deploy/smoke/smoke.py` runs against a locally started `mta serve` too (see its docstring).
