@@ -206,8 +206,14 @@ public sealed class MimePart
         return text;
     }
 
+    // Composite types are never transfer-encoded (RFC 2045 section 6.4), except message/global and its relatives, which may be
+    // quoted-printable or base64 (RFC 6532 section 3.7); the 8BITMIME downgrade produces exactly that.
     private ContentTransferEncoding EffectiveEncoding =>
-        ContentType.IsMultipart || ContentType.MediaType == "message" ? ContentTransferEncoding.Binary : TransferEncoding;
+        ContentType.IsMultipart || (ContentType.MediaType == "message" && !IsEncodedGlobalMessage) ? ContentTransferEncoding.Binary : TransferEncoding;
+
+    private bool IsEncodedGlobalMessage =>
+        TransferEncoding is ContentTransferEncoding.Base64 or ContentTransferEncoding.QuotedPrintable
+        && (ContentType.MediaSubtype == "global" || ContentType.MediaSubtype.StartsWith("global-", StringComparison.Ordinal));
 
     /// <inheritdoc />
     public override string ToString() => $"{ContentType.MimeType} ({Raw.Length} bytes)";
