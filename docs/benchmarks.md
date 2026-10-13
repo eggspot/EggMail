@@ -86,3 +86,29 @@ dotnet src/Mta.Tools/bin/Release/net10.0/mta-tools.dll load --port 2525 --connec
 `load` reports accepted messages/s, MB/s and p50/p95/p99 transaction latency, and (with `--server-pid`) the server's CPU per 1,000 messages.
 
 **Sample, not a claim:** the SMTP server alone against the discard `sink` on one developer machine (10-core Apple silicon, load generator and server on the same host, loopback, no TLS, no storage) accepted about 63k messages/s of 2 KB with 16 pipelined connections (p99 about 0.6 ms). This measures the protocol path only, not durable ingest through storage; numbers with storage, TLS and on dedicated hardware are published per release under the fairness rules above.
+
+
+## Pipeline harness and first profile (2026-10-13)
+
+`bench/Mta.Bench.Pipeline` runs the real runtime in one process (SMTP ingest, storage, DKIM signing at delivery, delivery engine), a counting sink as the remote MTA and the separate-process load generator (`mta-tools load`) as the client:
+
+```
+dotnet build -c Release src/Mta.Tools
+dotnet run -c Release --project bench/Mta.Bench.Pipeline -- --sync off --history full --messages 30000 --connections 32 --size 2048 --deliver false
+dotnet run -c Release --project bench/Mta.Bench.Pipeline -- --sync full --messages 10000 --deliver true      # durable pair, with delivery to the sink
+# --backend postgres (EGGMAIL_BENCH_POSTGRES=<connection string>), --history statsonly, --content false, --alloc-profile true
+```
+
+**These are development-time observations, not results.** They were taken on one 10-core macOS laptop while other builds and test runs were using the same machine, so throughput varies by a factor of two between runs of the same configuration; macOS `fsync` is weaker than on Linux, so the `Full` rows are optimistic. Do not quote them. The harness exists so the real measurements can be made on a quiet Linux host and published as durable/non-durable pairs per backend (fairness rules above).
+
+What the first runs were good for was finding allocation hot spots with the built-in sampler (`--alloc-profile true`, runtime `GCAllocationTick` events):
+
+| Finding | Effect | Status |
+|---|---|---|
+| The sender check read the tenant's domains with an EF query per message | about 66 KB allocated per message (of 104 KB) | fixed: cached for 5 s in `SubmissionService` (a domain that is added, verified or paused takes effect within that time) |
+| Header repair copied the message three times | about 4 KB per 2 KB message | fixed: one editor pass including the `Received` field |
+| The delivery path creates an EF context per recipient (suppression check) and per group | about 110 KB per message, mostly EF service scopes | open: needs pooled contexts or direct SQL for the hot reads |
+| Content extraction for history (`History:Mode=Full`, `Content:Mode=Retain`) | roughly halves ingest throughput in the quick runs | open: extraction runs inline in the SMTP session; moving it off the accept path or limiting it is an option |
+| `Microsoft.Data.Sqlite` parameter binding | about 10 % of ingest allocations | open |
+
+Current budget status: the design budget of under 2 KB per ingested message excluding body buffers is **not met** (about 22 to 36 KB per 2 KB message depending on history mode, measured as total process allocation per message). It is a gate to close, not a claim.
