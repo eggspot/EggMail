@@ -2,7 +2,7 @@
 
 An open-source, self-hosted **outbound email server** from [eggspot](https://github.com/eggspot): SMTP ingress, an HTTP API, delivery tracking and a dashboard, built on .NET 10 with performance as the primary goal.
 
-> **Status: design phase.** There is no code yet. This repository currently holds the design documents only. Nothing here is released, benchmarked or production-ready.
+> **Status: implemented, not yet production-ready.** The SMTP stack, delivery engine, both storage backends, the HTTP API, the dashboard and the backend switch are written and tested locally (see [docs/progress.md](docs/progress.md) for exactly what is verified and what is not). Nothing is released, no benchmark results are published, GitHub Actions has never run for this repository, and no independent security audit has been done.
 
 > **Name:** the name EggMail is kept. No formal trademark search or registration is planned (owner decision); the MIT license covers the code, not the name. A free check of the USPTO, EUIPO and WIPO databases before wide promotion is recommended but optional (see [docs/decisions.md](docs/decisions.md)).
 
@@ -37,7 +37,7 @@ Backend **characteristics** (not missing features): SQLite is single node and on
 
 **Switching is manual, symmetric and easy; it never happens automatically.** Dashboard indicators are advisory only. A guided dashboard action and a CLI (`mta migrate-storage --to postgres|sqlite`) move you in either direction with one portable, versioned bundle: preflight, drain or quiesce (no need to wait for an empty queue), export, import, verify, confirm, activate, with rollback. The bundle carries config, certificates and ACME state, stats, queued mail and, optionally, per-message history; secrets travel protected by Data Protection and are never written in clear. Only the storage changes; features and settings stay as they were. See [docs/design.md §4.6](docs/design.md#46-switching-backends-manual-and-symmetric).
 
-## Quick start (planned)
+## Quick start (planned: no image is published yet)
 
 A single Docker image will run out of the box on the SQLite backend with one volume at `/data`. This is a plan: nothing is published yet. See [docs/release.md](docs/release.md) for the snippets, including a compose file with PostgreSQL.
 
@@ -53,7 +53,7 @@ docker run -d --name eggmail -p 587:5587 -p 465:4465 -p 2525:2525 -p 8443:8443 \
 | [SECURITY.md](SECURITY.md), [docs/security.md](docs/security.md) | How to report a vulnerability; the threat model, implemented controls and known gaps |
 | [docs/operations.md](docs/operations.md) | Running it: configuration reference, DNS records, backups and restore, monitoring, upgrades |
 | [docs/design.md](docs/design.md) | Architecture, components, interfaces, storage backends and history level, switching, content retention, webhooks, TLS and ports, security, deployment |
-| [docs/decisions.md](docs/decisions.md) | The decisions record (owner and design decisions A–T and items 1–40) |
+| [docs/decisions.md](docs/decisions.md) | The decisions record (owner and design decisions A–T and items 1–52) |
 | [docs/plan.md](docs/plan.md) | Components with engineer-week estimates, phases, cut order, risks, calendar |
 | [docs/benchmarks.md](docs/benchmarks.md) | How performance will be measured and compared, per mode |
 | [docs/release.md](docs/release.md) | Release and packaging plan: the single Docker image, `ghcr.io/eggspot/eggmail`, GitHub Actions release, quick-start snippets (a plan; nothing is published yet) |
