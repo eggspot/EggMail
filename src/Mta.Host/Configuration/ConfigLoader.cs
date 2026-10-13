@@ -23,6 +23,9 @@ public static class ConfigLoader
 {
     public const string BootstrapFileName = "bootstrap.json";
 
+    /// <summary><c>appsettings.json</c> next to the executable (mount or copy one there); the layer below the bootstrap file.</summary>
+    public static string DefaultAppSettingsPath => Path.Combine(AppContext.BaseDirectory, "appsettings.json");
+
     /// <summary>
     /// Where the bootstrap file lives: in the data directory (the hint, else the <c>Sqlite__DataDirectory</c> environment variable,
     /// else <c>/data</c>). It has to be findable before the storage is known, which is why it cannot depend on <c>Storage:*</c>.
@@ -31,7 +34,7 @@ public static class ConfigLoader
         Path.Combine(dataDirectoryHint ?? Environment.GetEnvironmentVariable("Sqlite__DataDirectory") ?? "/data", BootstrapFileName);
 
     /// <summary>
-    /// Builds the layered configuration for the process: appsettings (if present), the bootstrap file in the data directory
+    /// Builds the layered configuration for the process: appsettings (<paramref name="appSettingsPath"/>, default <see cref="DefaultAppSettingsPath"/>, if present), the bootstrap file in the data directory
     /// (storage pointer written by the backend switch), environment variables, then the command line (highest precedence).
     /// <paramref name="storedSettings"/> (the global settings kept in the config store) form the lowest layer, above the built-in defaults.
     /// </summary>
@@ -40,10 +43,11 @@ public static class ConfigLoader
         var builder = new ConfigurationBuilder();
         if (storedSettings is not null)
         {
-            builder.AddInMemoryCollection(storedSettings);   // layer 4 of decision N: settings persisted in the config store, below every deployment layer
+            builder.Add(new StoredSettingsConfigurationSource(storedSettings));   // layer 4 of decision N: settings persisted in the config store, below every deployment layer
         }
 
-        if (appSettingsPath is not null && File.Exists(appSettingsPath))
+        appSettingsPath ??= DefaultAppSettingsPath;
+        if (File.Exists(appSettingsPath))
         {
             builder.AddJsonFile(appSettingsPath, optional: true, reloadOnChange: false);
         }
@@ -62,8 +66,35 @@ public static class ConfigLoader
 
     public static LoadedConfig Load(IConfiguration configuration)
     {
-        var config = new MtaConfig();
         var errors = new List<string>();
+        MtaConfig cfg;
+        try
+        {
+            cfg = Bind(configuration);
+            Validate(cfg, errors);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or FormatException or OverflowException or ArgumentException)
+        {
+            // The binder reports a value of the wrong type ("12x" for a number, "soon" for a TimeSpan) by throwing; that is a configuration error, not a crash.
+            cfg = new MtaConfig();
+            errors.Add(ex.InnerException?.Message is { Length: > 0 } inner ? $"{ex.Message} ({inner})" : ex.Message);
+        }
+
+        var locked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (key, _) in configuration.AsEnumerable())
+        {
+            if (!string.IsNullOrEmpty(key) && configuration[key] is not null)
+            {
+                locked.Add(key);
+            }
+        }
+
+        return new LoadedConfig { Config = cfg, LockedKeys = locked, Errors = errors, Source = configuration };
+    }
+
+    private static MtaConfig Bind(IConfiguration configuration)
+    {
+        var config = new MtaConfig();
 
         // Bind section by section so that listener dictionaries merge with the defaults instead of replacing them.
         var smtpSection = configuration.GetSection("Smtp");
@@ -79,9 +110,20 @@ public static class ConfigLoader
             listeners[child.Key] = merged;
         }
 
-        var storage = BindStorage(configuration);
+        // The binder appends configured list entries to a non-empty default, which would turn a configured schedule into "the default ladder, then these".
+        var webhooks = Bind<Mta.Webhooks.WebhookOptions>(configuration, "Webhooks");
+        var retrySchedule = configuration.GetSection("Webhooks:RetrySchedule").GetChildren().Select(c => c.Get<TimeSpan>()).ToList();
+        if (retrySchedule.Count > 0)
+        {
+            webhooks = webhooks with { RetrySchedule = retrySchedule };
+        }
 
-        var cfg = new MtaConfig
+        var acme = Bind<AcmeSection>(configuration, "Acme");
+        var api = Bind<ApiSection>(configuration, "Api");
+        SplitEntries(acme.Domains, configuration["Acme:Domains"]);
+        SplitEntries(api.MetricsAllowedNetworks, configuration["Api:MetricsAllowedNetworks"]);
+
+        return new MtaConfig
         {
             Hostname = configuration["Hostname"] ?? config.Hostname,
             Smtp = new SmtpSection
@@ -90,35 +132,42 @@ public static class ConfigLoader
                 MaxConnectionsPerIp = smtp.MaxConnectionsPerIp, MaxInFlightBytes = smtp.MaxInFlightBytes, Chunking = smtp.Chunking,
                 SmtpUtf8 = smtp.SmtpUtf8, Listeners = listeners,
             },
-            Storage = storage,
+            Storage = BindStorage(configuration),
             Dns = Bind<DnsSection>(configuration, "Dns"),
             Backup = Bind<BackupSection>(configuration, "Backup"),
             Sending = Bind<SendingSection>(configuration, "Sending"),
             Delivery = Bind<DeliverySection>(configuration, "Delivery"),
-            Webhooks = Bind<Mta.Webhooks.WebhookOptions>(configuration, "Webhooks"),
+            Webhooks = webhooks,
             Dashboard = Bind<DashboardSection>(configuration, "Dashboard"),
             Secrets = Bind<SecretsSection>(configuration, "Secrets"),
             Observability = Bind<ObservabilitySection>(configuration, "Observability"),
             Switch = Bind<SwitchSection>(configuration, "Switch"),
+            Tls = Bind<TlsSection>(configuration, "Tls"),
+            Acme = acme,
+            Api = api,
         };
+    }
 
-        Validate(cfg, errors);
-        var locked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (key, _) in configuration.AsEnumerable())
+    /// <summary>
+    /// A list setting can be given as indexed entries (<c>Acme:Domains:0=a</c>) or, handy in an environment variable, as one value
+    /// with several entries separated by commas, semicolons or white space. Rewrites the list in place with every entry split.
+    /// </summary>
+    private static void SplitEntries(List<string> list, string? scalar)
+    {
+        if (!string.IsNullOrWhiteSpace(scalar))
         {
-            if (!string.IsNullOrEmpty(key) && configuration[key] is not null)
-            {
-                locked.Add(key);
-            }
+            list.Add(scalar);   // the binder ignores a scalar value for a list
         }
 
-        return new LoadedConfig { Config = cfg, LockedKeys = locked, Errors = errors, Source = configuration };
+        string[] split = list.SelectMany(e => e.Split([',', ';', ' ', '\t', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)).ToArray();
+        list.Clear();
+        list.AddRange(split);
     }
 
     /// <summary>
     /// Maps the documented configuration keys (design §4, §5.1, §6) onto <see cref="StorageOptions"/>:
     /// <c>Storage:Backend</c>, <c>Storage:Postgres:*</c>, <c>Mail:Database:Migrate</c>, <c>Sqlite:*</c>, <c>History:*</c>, <c>Content:*</c>,
-    /// <c>Queue:MaxLifetime</c>, <c>Retention:MetadataDays</c>, <c>Stats:*</c> and <c>Webhooks:OutboxRetentionDays|AttemptLogDays</c>.
+    /// <c>Queue:MaxLifetime|MaxLifetimeDays</c>, <c>Retention:MetadataDays</c>, <c>Stats:*</c> and <c>Webhooks:OutboxRetentionDays|AttemptLogDays</c>.
     /// </summary>
     internal static StorageOptions BindStorage(IConfiguration c)
     {
@@ -133,7 +182,7 @@ public static class ConfigLoader
                 Mode = c.GetValue("History:Mode", d.History.Mode),
                 RecentEvents = c.GetValue("History:RecentEvents", d.History.RecentEvents),
             },
-            Queue = new QueueOptions { MaxLifetime = c.GetValue("Queue:MaxLifetime", d.Queue.MaxLifetime) },
+            Queue = new QueueOptions { MaxLifetime = QueueMaxLifetime(c, d.Queue.MaxLifetime) },
             Content = new ContentOptions
             {
                 Retain = !string.Equals(c["Content:Mode"], "None", StringComparison.OrdinalIgnoreCase),
@@ -161,6 +210,9 @@ public static class ConfigLoader
                 ConfigSyncMode = c.GetValue("Sqlite:ConfigSyncMode", d.Sqlite.ConfigSyncMode),
                 QueuePersistence = c.GetValue("Sqlite:QueuePersistence", d.Sqlite.QueuePersistence),
                 QuickCheck = c.GetValue("Sqlite:QuickCheck", d.Sqlite.QuickCheck),
+                StatsFlushInterval = c.GetValue("Sqlite:StatsFlushInterval", d.Sqlite.StatsFlushInterval),
+                RetentionDeleteBatchSize = c.GetValue("Sqlite:RetentionDeleteBatchSize", d.Sqlite.RetentionDeleteBatchSize),
+                RetentionDeletePause = c.GetValue("Sqlite:RetentionDeletePause", d.Sqlite.RetentionDeletePause),
             },
             Postgres = new PostgresOptions
             {
@@ -168,8 +220,27 @@ public static class ConfigLoader
                 RuntimeConnectionString = c["Storage:Postgres:RuntimeConnectionString"],
                 AutoMigrate = !string.Equals(c["Mail:Database:Migrate"], "Never", StringComparison.OrdinalIgnoreCase),
                 MaxPoolSize = c.GetValue("Storage:Postgres:MaxPoolSize", d.Postgres.MaxPoolSize),
+                PartitionsAheadDays = c.GetValue("Storage:Postgres:PartitionsAheadDays", d.Postgres.PartitionsAheadDays),
+                StatsFlushInterval = c.GetValue("Storage:Postgres:StatsFlushInterval", d.Postgres.StatsFlushInterval),
+                RetentionDeleteBatchSize = c.GetValue("Storage:Postgres:RetentionDeleteBatchSize", d.Postgres.RetentionDeleteBatchSize),
+                RetentionDeletePause = c.GetValue("Storage:Postgres:RetentionDeletePause", d.Postgres.RetentionDeletePause),
+                CommandTimeoutSeconds = c.GetValue("Storage:Postgres:CommandTimeoutSeconds", d.Postgres.CommandTimeoutSeconds),
             },
         };
+    }
+
+    /// <summary>
+    /// How long a delivery may stay queued. <c>Queue:MaxLifetime</c> is a time span (<c>2.00:00:00</c>); <c>Queue:MaxLifetimeDays</c> is whole days, the form the
+    /// settings API stores (docs/api.md). When a deployment layer sets both, <c>Queue:MaxLifetime</c> wins.
+    /// </summary>
+    internal static TimeSpan QueueMaxLifetime(IConfiguration c, TimeSpan fallback)
+    {
+        if (c["Queue:MaxLifetime"] is { Length: > 0 })
+        {
+            return c.GetValue("Queue:MaxLifetime", fallback);
+        }
+
+        return c["Queue:MaxLifetimeDays"] is { Length: > 0 } ? TimeSpan.FromDays(c.GetValue<int>("Queue:MaxLifetimeDays")) : fallback;
     }
 
     private static T Bind<T>(IConfiguration c, string section) where T : new()
@@ -266,6 +337,82 @@ public static class ConfigLoader
         if (c.Switch.QuiesceTimeoutSeconds < 1)
         {
             errors.Add("Switch:QuiesceTimeoutSeconds must be at least 1.");
+        }
+
+        ValidateStorageTuning(c.Storage, errors);
+        ValidateTlsAndAcme(c, errors);
+        ValidateApi(c.Api, errors);
+    }
+
+    private static void ValidateStorageTuning(StorageOptions s, List<string> errors)
+    {
+        var pg = s.Postgres;
+        Require(pg.MaxPoolSize >= 1, "Storage:Postgres:MaxPoolSize must be at least 1.", errors);
+        Require(pg.PartitionsAheadDays >= 0, "Storage:Postgres:PartitionsAheadDays must be 0 or more.", errors);
+        Require(pg.StatsFlushInterval >= TimeSpan.Zero, "Storage:Postgres:StatsFlushInterval must not be negative.", errors);
+        Require(pg.RetentionDeleteBatchSize >= 1, "Storage:Postgres:RetentionDeleteBatchSize must be at least 1.", errors);
+        Require(pg.RetentionDeletePause >= TimeSpan.Zero, "Storage:Postgres:RetentionDeletePause must not be negative.", errors);
+        Require(pg.CommandTimeoutSeconds >= 1, "Storage:Postgres:CommandTimeoutSeconds must be at least 1.", errors);
+        Require(s.Sqlite.RetentionDeleteBatchSize >= 1, "Sqlite:RetentionDeleteBatchSize must be at least 1.", errors);
+        Require(s.Sqlite.StatsFlushInterval >= TimeSpan.Zero, "Sqlite:StatsFlushInterval must not be negative.", errors);
+        Require(s.Sqlite.RetentionDeletePause >= TimeSpan.Zero, "Sqlite:RetentionDeletePause must not be negative.", errors);
+    }
+
+    private static void ValidateTlsAndAcme(MtaConfig c, List<string> errors)
+    {
+        TlsSection tls = c.Tls;
+        Require(string.IsNullOrEmpty(tls.KeyPath) || !string.IsNullOrEmpty(tls.CertificatePath), "Tls:KeyPath is set without Tls:CertificatePath.", errors);
+        Require(string.IsNullOrEmpty(tls.PfxPasswordFile) || !string.IsNullOrEmpty(tls.CertificatePath), "Tls:PfxPasswordFile is set without Tls:CertificatePath.", errors);
+        Require(tls.PollInterval > TimeSpan.Zero, "Tls:PollInterval must be positive.", errors);
+
+        AcmeSection acme = c.Acme;
+        if (!acme.Enabled)
+        {
+            return;
+        }
+
+        Require(Uri.TryCreate(acme.DirectoryUrl, UriKind.Absolute, out Uri? directory) && directory.Scheme is "https" or "http", "Acme:DirectoryUrl must be an absolute http(s) URL.", errors);
+        Require(string.Equals(acme.DnsProvider, "Cloudflare", StringComparison.OrdinalIgnoreCase), $"Acme:DnsProvider '{acme.DnsProvider}' is not supported (only Cloudflare).", errors);
+        Require(!string.IsNullOrWhiteSpace(acme.CloudflareApiToken) || !string.IsNullOrWhiteSpace(acme.CloudflareApiTokenFile), "Acme:CloudflareApiToken or Acme:CloudflareApiTokenFile is required when Acme:Enabled is true.", errors);
+        Require(!string.IsNullOrWhiteSpace(acme.CertificateName), "Acme:CertificateName must not be empty.", errors);
+        Require(acme.RenewAtRemainingFraction is > 0 and < 1, "Acme:RenewAtRemainingFraction must be between 0 and 1 (exclusive).", errors);
+        Require(acme.CheckInterval > TimeSpan.Zero, "Acme:CheckInterval must be positive.", errors);
+        Require(acme.PropagationDelay >= TimeSpan.Zero, "Acme:PropagationDelay must not be negative.", errors);
+    }
+
+    private static void ValidateApi(ApiSection api, List<string> errors)
+    {
+        foreach (var (name, value) in new[]
+        {
+            ("Api:MaxBodyBytes", api.MaxBodyBytes), ("Api:MaxSendBodyBytes", api.MaxSendBodyBytes), ("Api:MaxInFlightSendBytes", api.MaxInFlightSendBytes),
+            ("Api:MaxAttachments", (long)api.MaxAttachments), ("Api:MaxCustomHeaders", api.MaxCustomHeaders), ("Api:MaxTags", api.MaxTags),
+            ("Api:MaxDomainsPerTenant", api.MaxDomainsPerTenant), ("Api:MaxApiKeysPerTenant", api.MaxApiKeysPerTenant),
+            ("Api:MaxSmtpCredentialsPerTenant", api.MaxSmtpCredentialsPerTenant), ("Api:MaxWebhooksPerTenant", api.MaxWebhooksPerTenant), ("Api:MaxStatsRows", api.MaxStatsRows),
+        })
+        {
+            Require(value >= 1, $"{name} must be at least 1.", errors);
+        }
+
+        Require(api.SessionLifetime > TimeSpan.Zero, "Api:SessionLifetime must be positive.", errors);
+        Require(api.SessionIdleTimeout > TimeSpan.Zero, "Api:SessionIdleTimeout must be positive.", errors);
+        foreach (string network in api.MetricsAllowedNetworks)
+        {
+            try
+            {
+                Mta.Webhooks.IpNetwork.Parse(network);
+            }
+            catch (Exception ex) when (ex is FormatException or ArgumentException or OverflowException)
+            {
+                errors.Add($"Api:MetricsAllowedNetworks entry '{network}' is not a network in CIDR form (for example 10.0.0.0/8).");
+            }
+        }
+    }
+
+    private static void Require(bool condition, string error, List<string> errors)
+    {
+        if (!condition)
+        {
+            errors.Add(error);
         }
     }
 }

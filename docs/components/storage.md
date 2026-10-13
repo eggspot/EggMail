@@ -137,6 +137,8 @@ All additive; the shared conformance suites cover them on both backends.
 
 ### Roles and connection strings
 
+The settings below are named by the option they set (`PostgresOptions.*`); in deployment configuration they are `Storage:Postgres:<name>` (for example `Storage:Postgres:RuntimeConnectionString`, `Storage:Postgres:PartitionsAheadDays`, `Storage:Postgres:CommandTimeoutSeconds`), `AutoMigrate` is `Mail:Database:Migrate` (`Auto` or `Never`), and the SQLite tuning knobs are `Sqlite:StatsFlushInterval`, `Sqlite:RetentionDeleteBatchSize` and `Sqlite:RetentionDeletePause` ([operations.md](../operations.md) lists every key).
+
 | Setting | Role | Used for |
 |---|---|---|
 | `Postgres:OwnerConnectionString` | schema owner | the migrator, creating and dropping day partitions (DDL needs ownership), `ANALYZE` of the partitioned parents, and the advisory-lock holder connection of every maintenance job. A small pool of its own (4) |
