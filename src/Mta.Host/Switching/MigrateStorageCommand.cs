@@ -183,7 +183,7 @@ public static class MigrateStorageCommand
                 Storage = storage,
                 Secrets = secrets,
                 Options = config.Storage,
-                KeysProtectedAtRest = config.Secrets.KeyProtection != KeyProtectionMode.None,
+                KeysProtectedAtRest = SecretsFactory.KeysProtectedAtRest(config.Secrets, storage.Config),
             };
             return new Opened(storage, endpoint, directoryLock);
         }

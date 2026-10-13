@@ -43,14 +43,37 @@ public sealed class ConfigStoreXmlRepository(IConfigStore config) : IXmlReposito
     }
 }
 
+/// <summary>The key ring does not fit <c>Secrets:*</c>, or the key that protects it is not the right one. The message says what to do.</summary>
+public sealed class SecretsConfigurationException(string message, Exception? inner = null) : InvalidOperationException(message, inner);
+
 public static class SecretsFactory
 {
+    /// <summary>
+    /// True when the keys at rest in the config store are all protected: a mode other than <c>None</c> <b>and</b> no key still stored in the clear from before it was set.
+    /// This is what the backend switch asks before it accepts an unprotected target.
+    /// </summary>
+    public static bool KeysProtectedAtRest(SecretsSection secrets, IConfigStore config) =>
+        secrets.KeyProtection != KeyProtectionMode.None && KeyRingInspector.Inspect(config).NoPlaintext;
+
+    /// <summary>Start-up warnings about the protection (a ring with unprotected keys, a key given in the environment, a key file others can read).</summary>
+    public static IReadOnlyList<string> Warnings(SecretsSection secrets, IConfigStore config) =>
+        [.. KeyRingInspector.Warnings(KeyRingInspector.Inspect(config), secrets), .. KeyWrapProviders.Warnings(secrets)];
+
     /// <summary>
     /// Creates the process-wide secret protector. <see cref="KeyProtectionMode.Certificate"/> encrypts the key ring with the configured
     /// certificate; <see cref="KeyProtectionMode.Kms"/> wraps it with an external key (<see cref="IKeyWrapProvider"/>); <see cref="KeyProtectionMode.None"/> leaves it readable by anyone who can read the database (development only, logged as a warning by the caller).
     /// </summary>
     public static ISecretProtector Create(SecretsSection secrets, IConfigStore config)
     {
+        // Look at the stored ring first, and open the Kms keys with the configured key: Data Protection would treat a key it cannot read as missing and may create a
+        // new one, which strands the secrets protected by the old ring. A ring that does not fit the configuration stops the start here, with the reason.
+        IKeyWrapProvider? wrap = secrets.KeyProtection == KeyProtectionMode.Kms ? KeyWrapProviders.Create(secrets) : null;
+        IReadOnlyList<string> problems = KeyRingInspector.Problems(KeyRingInspector.Inspect(config), secrets, wrap);
+        if (problems.Count > 0)
+        {
+            throw new SecretsConfigurationException(string.Join(" ", problems));
+        }
+
         var services = new ServiceCollection();
         var builder = services.AddDataProtection().SetApplicationName("EggMail");
         builder.Services.Configure<KeyManagementOptions>(o => o.XmlRepository = new ConfigStoreXmlRepository(config));
@@ -68,9 +91,8 @@ public static class SecretsFactory
                 break;
             case KeyProtectionMode.Kms:
                 // The ring in the config store holds only keys wrapped by an external key; the decryptor finds the provider in the container.
-                IKeyWrapProvider wrap = KeyWrapProviders.Create(secrets);
-                builder.Services.AddSingleton(wrap);
-                builder.Services.Configure<KeyManagementOptions>(o => o.XmlEncryptor = new KmsXmlEncryptor(wrap));
+                builder.Services.AddSingleton(wrap!);
+                builder.Services.Configure<KeyManagementOptions>(o => o.XmlEncryptor = new KmsXmlEncryptor(wrap!));
                 break;
         }
 

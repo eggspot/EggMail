@@ -83,6 +83,39 @@ public static class KeyWrapProviders
         return factory(secrets);
     }
 
+    /// <summary>Weaknesses of how the wrapping key is supplied; logged at start (the start itself is not refused).</summary>
+    public static IReadOnlyList<string> Warnings(SecretsSection secrets)
+    {
+        var warnings = new List<string>();
+        if (secrets.KeyProtection != KeyProtectionMode.Kms || !string.Equals(secrets.KmsProvider, LocalKey, StringComparison.OrdinalIgnoreCase))
+        {
+            return warnings;
+        }
+
+        if (!string.IsNullOrWhiteSpace(secrets.KmsKey) && string.IsNullOrWhiteSpace(secrets.KmsKeyFile))
+        {
+            warnings.Add("Secrets:KmsKey carries the key ring's wrapping key in the process environment, where anyone who can read it (docker inspect, /proc, crash dumps) has it. Prefer Secrets:KmsKeyFile with a mounted secret.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(secrets.KmsKeyFile) && !OperatingSystem.IsWindows())
+        {
+            try
+            {
+                UnixFileMode mode = File.GetUnixFileMode(secrets.KmsKeyFile);
+                if ((mode & (UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.OtherRead | UnixFileMode.OtherWrite)) != 0)
+                {
+                    warnings.Add($"Secrets:KmsKeyFile '{secrets.KmsKeyFile}' is readable by other users ({mode}). Make it readable by the EggMail user only (chmod 600).");
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // the key could not be read either; the factory reports that
+            }
+        }
+
+        return warnings;
+    }
+
     public static string UnknownProviderMessage(string? name, IReadOnlyList<string> available) =>
         $"Secrets:KmsProvider '{name}' is not available. Built in: {string.Join(", ", available)}. " +
         "Cloud key services (AWS KMS, Azure Key Vault, Google Cloud KMS) are not part of this build: each needs an SDK and an account to be written and verified against (docs/open-questions.md). " +
@@ -98,9 +131,9 @@ public sealed class LocalKeyWrapProvider : IKeyWrapProvider
     private const byte Version = 1;
     private const int NonceSize = 12;
     private const int TagSize = 16;
-    private static readonly byte[] AssociatedData = Encoding.ASCII.GetBytes("EggMail.KeyRing.LocalKey.v1");
 
     private readonly byte[] _key;
+    private readonly byte[] _associatedData;
 
     public LocalKeyWrapProvider(ReadOnlySpan<byte> key)
     {
@@ -110,7 +143,10 @@ public sealed class LocalKeyWrapProvider : IKeyWrapProvider
         }
 
         _key = key.ToArray();
-        KeyId = Convert.ToHexString(SHA256.HashData(Encoding.ASCII.GetBytes("EggMail.KeyId|").Concat(_key).ToArray()).AsSpan(0, 8)).ToLowerInvariant();
+        // A keyed hash of a constant: identifies the key without revealing anything about it that the key itself would not.
+        KeyId = Convert.ToHexString(HMACSHA256.HashData(_key, "EggMail.KeyRing.KeyId"u8).AsSpan(0, 8)).ToLowerInvariant();
+        // The provider name and key id are authenticated with every wrapped key, so a wrapped key cannot be relabelled as another key's.
+        _associatedData = Encoding.ASCII.GetBytes("EggMail.KeyRing.v1|" + KeyWrapProviders.LocalKey + "|" + KeyId);
     }
 
     public string Name => KeyWrapProviders.LocalKey;
@@ -124,7 +160,7 @@ public sealed class LocalKeyWrapProvider : IKeyWrapProvider
         Span<byte> nonce = result.AsSpan(1, NonceSize);
         RandomNumberGenerator.Fill(nonce);
         using var aes = new AesGcm(_key, TagSize);
-        aes.Encrypt(nonce, plaintext, result.AsSpan(1 + NonceSize + TagSize), result.AsSpan(1 + NonceSize, TagSize), AssociatedData);
+        aes.Encrypt(nonce, plaintext, result.AsSpan(1 + NonceSize + TagSize), result.AsSpan(1 + NonceSize, TagSize), _associatedData);
         return result;
     }
 
@@ -137,7 +173,7 @@ public sealed class LocalKeyWrapProvider : IKeyWrapProvider
 
         byte[] plaintext = new byte[wrapped.Length - 1 - NonceSize - TagSize];
         using var aes = new AesGcm(_key, TagSize);
-        aes.Decrypt(wrapped.Slice(1, NonceSize), wrapped[(1 + NonceSize + TagSize)..], wrapped.Slice(1 + NonceSize, TagSize), plaintext, AssociatedData);
+        aes.Decrypt(wrapped.Slice(1, NonceSize), wrapped[(1 + NonceSize + TagSize)..], wrapped.Slice(1 + NonceSize, TagSize), plaintext, _associatedData);
         return plaintext;
     }
 
@@ -160,6 +196,10 @@ public sealed class LocalKeyWrapProvider : IKeyWrapProvider
             }
 
             key = content.Length == 32 ? content : Decode(Encoding.ASCII.GetString(content).Trim());
+            if (!ReferenceEquals(key, content))
+            {
+                CryptographicOperations.ZeroMemory(content);
+            }
         }
         else if (!string.IsNullOrWhiteSpace(secrets.KmsKey))
         {
@@ -178,7 +218,14 @@ public sealed class LocalKeyWrapProvider : IKeyWrapProvider
             throw new InvalidOperationException($"{source} must hold exactly 32 bytes as base64 (44 characters), hex (64 characters) or raw bytes. Create one with: openssl rand -base64 32");
         }
 
-        return new LocalKeyWrapProvider(key);
+        try
+        {
+            return new LocalKeyWrapProvider(key);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(key);
+        }
     }
 
     private static byte[]? Decode(string text)
@@ -207,7 +254,7 @@ public sealed class LocalKeyWrapProvider : IKeyWrapProvider
 }
 
 /// <summary>Data Protection hook: wraps every key-ring element with the selected <see cref="IKeyWrapProvider"/> before it reaches the config store.</summary>
-internal sealed class KmsXmlEncryptor(IKeyWrapProvider provider) : IXmlEncryptor
+public sealed class KmsXmlEncryptor(IKeyWrapProvider provider) : IXmlEncryptor
 {
     public static readonly XNamespace Ns = "urn:eggmail:keywrap:v1";
 
@@ -221,22 +268,20 @@ internal sealed class KmsXmlEncryptor(IKeyWrapProvider provider) : IXmlEncryptor
     }
 }
 
-/// <summary>Unwraps a key-ring element; created by Data Protection with the provider from the service container.</summary>
-internal sealed class KmsXmlDecryptor(IServiceProvider services) : IXmlDecryptor
+/// <summary>
+/// Unwraps a key-ring element; created by Data Protection with the provider from the service container.
+/// <para><b>The type name is stored in every wrapped element</b> (<c>decryptorType</c>, the assembly-qualified name; the version is ignored on load). Renaming this
+/// class, its namespace or the assembly (<c>mta</c>) makes every existing ring unreadable. <c>KeyWrappingTests</c> pins <see cref="StoredTypeName"/>.</para>
+/// </summary>
+public sealed class KmsXmlDecryptor(IServiceProvider services) : IXmlDecryptor
 {
+    /// <summary>Namespace-qualified type name and assembly name, as stored (without version).</summary>
+    public const string StoredTypeName = "Mta.Host.Secrets.KmsXmlDecryptor, mta";
+
     public XElement Decrypt(XElement encryptedElement)
     {
         IKeyWrapProvider provider = services.GetRequiredService<IKeyWrapProvider>();
-        string? usedProvider = (string?)encryptedElement.Attribute("provider");
-        string? usedKeyId = (string?)encryptedElement.Attribute("keyId");
-        if (!string.Equals(usedProvider, provider.Name, StringComparison.OrdinalIgnoreCase) || !string.Equals(usedKeyId, provider.KeyId, StringComparison.Ordinal))
-        {
-            throw new CryptographicException(
-                $"The Data Protection key ring was wrapped by provider '{usedProvider}' with key '{usedKeyId}', but Secrets:KmsProvider '{provider.Name}' offers key '{provider.KeyId}'. " +
-                "Configure the original key (a rotated key cannot open the old ring), or restore the database from before the change.");
-        }
-
-        byte[] plaintext = provider.Unwrap(Convert.FromBase64String(encryptedElement.Value));
+        byte[] plaintext = UnwrapElement(encryptedElement, provider);
         try
         {
             return XElement.Parse(Encoding.UTF8.GetString(plaintext));
@@ -244,6 +289,28 @@ internal sealed class KmsXmlDecryptor(IServiceProvider services) : IXmlDecryptor
         finally
         {
             CryptographicOperations.ZeroMemory(plaintext);
+        }
+    }
+
+    /// <summary>
+    /// Unwraps one <c>wrappedKey</c> element. The provider decides whether the key fits; only when it cannot unwrap is the recorded provider and key id compared with
+    /// the configured ones, to say which key to bring back (a key service may well accept a key under another id or alias, so the ids alone never refuse).
+    /// </summary>
+    public static byte[] UnwrapElement(XElement wrappedKey, IKeyWrapProvider provider)
+    {
+        string? usedProvider = (string?)wrappedKey.Attribute("provider");
+        string? usedKeyId = (string?)wrappedKey.Attribute("keyId");
+        try
+        {
+            return provider.Unwrap(Convert.FromBase64String(wrappedKey.Value));
+        }
+        catch (Exception ex) when (ex is CryptographicException or FormatException)
+        {
+            bool same = string.Equals(usedProvider, provider.Name, StringComparison.OrdinalIgnoreCase) && string.Equals(usedKeyId, provider.KeyId, StringComparison.Ordinal);
+            throw new CryptographicException(same
+                ? $"A key of the Data Protection key ring (wrapped with {usedProvider} key '{usedKeyId}') cannot be unwrapped: it is damaged or was altered in the database."
+                : $"The Data Protection key ring was wrapped by provider '{usedProvider}' with key '{usedKeyId}', but Secrets:KmsProvider '{provider.Name}' offers key '{provider.KeyId}'. " +
+                  "Configure the original key (a rotated key cannot open the old ring), or restore the database from before the change.", ex);
         }
     }
 }
@@ -261,6 +328,18 @@ public static class SecretsConfigurationCheck
         if (secrets.KeyProtection == KeyProtectionMode.Kms && !KeyWrapProviders.IsRegistered(secrets.KmsProvider))
         {
             errors.Add(KeyWrapProviders.UnknownProviderMessage(secrets.KmsProvider, KeyWrapProviders.Names));
+        }
+        else if (secrets.KeyProtection == KeyProtectionMode.Kms && string.Equals(secrets.KmsProvider, KeyWrapProviders.LocalKey, StringComparison.OrdinalIgnoreCase))
+        {
+            // Reading the key has no side effect, so a missing or unusable one is a configuration error (exit 2) like any other, not a crash later.
+            try
+            {
+                KeyWrapProviders.Create(secrets);
+            }
+            catch (InvalidOperationException ex)
+            {
+                errors.Add(ex.Message);
+            }
         }
     }
 }
