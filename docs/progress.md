@@ -26,7 +26,7 @@ Running status of the implementation, updated in every pull request. **Productio
 | Delivery engine: grouping, MX/relay routes, TLS policy, DKIM signing at delivery, VERP return path, retry/hold/expiry, DSN generation, quiesce | this PR | 13 end-to-end tests over loopback with in-memory storage |
 | SMTP ingest (AUTH, sender policy, submission service, bounce listener, bounce/complaint processing) | this PR | 8 loopback tests with MailKit |
 | Host composition: Data Protection key ring in the config store, runtime wiring (SMTP, delivery, webhooks, certificates/ACME, maintenance), `mta` CLI (`serve`, `migrate-db`, `--healthcheck`, `--version`), dashboard static hosting with strict headers | this PR | 3 secrets tests, 2 full-pipeline integration tests on the SQLite backend, manual smoke run of the real process (healthz, SMTP banner, graceful shutdown) |
-| PostgreSQL backend | in progress (parallel work) | |
+| PostgreSQL backend (EF Core + Npgsql: day partitions, `SKIP LOCKED` claim, owner/runtime roles, advisory-locked maintenance, outage handling) | this PR | 266 tests against a real PostgreSQL 18.6 and 16.13: the whole shared conformance suite, three-backend equivalence, multi-replica claims, partitions and interrupted detach, role-permission split, migrator, outages |
 | HTTP API (docs/api.md) | not started | |
 | Domain verification service (scheduler over the planner/checker and `VerificationSchedule`) | not started | |
 | TLS-RPT: session recording in the delivery engine (MTA-STS/DANE domains only), daily report sender (HTTPS POST or mailto through the normal queue; retries in memory) | this PR | 7 recorder tests, 2 sender tests; **not verified against a real reporting endpoint** |

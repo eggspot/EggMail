@@ -7,6 +7,10 @@
     <PackageReference Include="BenchmarkDotNet" />
   </ItemGroup>
   <ItemGroup>
+    <!-- The PostgreSQL benchmarks reuse the throwaway-cluster launcher of the storage tests. -->
+    <Compile Include="..\..\tests\Mta.Storage.Postgres.Tests\Support\PostgresTestServer.cs" Link="Storage\PostgresTestServer.cs" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="..\..\src\Mta.Core\Mta.Core.csproj" />
     <ProjectReference Include="..\..\src\Mta.Dns\Mta.Dns.csproj" />
     <ProjectReference Include="..\..\src\Mta.Mime\Mta.Mime.csproj" />
