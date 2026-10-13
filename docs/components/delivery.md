@@ -21,7 +21,7 @@ A connection lost after the end of data was sent is deferred with the `possible_
 
 `DeliveryMetrics` (`Mta.Delivery`): attempts by outcome, group duration, holds, claims and their duration, the duration of storing results, bounces generated, and the queue gauges. The gauges (`mta_delivery_queue_depth` by state, the age of the oldest due delivery, spooled bytes) read the last `QueueSample` of `QueueGauges`, a background loop that calls `GetQueueStatsAsync` every `Observability:QueueSampleSeconds`; a scrape never queries the queue. A failed sample keeps the previous numbers and is counted. The metric table is in [../operations.md](../operations.md#monitoring).
 
-`DeliveryTracing` adds the delivery side of the message trace (`MessageTrace`, source `Mta.Message`): `mta.queue.wait` (emitted at the first claim, starting at the acceptance time) and one `mta.delivery.attempt` span per group with a `recipient.result` event per recipient. The trace id is the message id and the parent span id is derived from it, so no trace context is stored in the queue (DESIGN-DECIDED, decision 59). With no listener each entry point costs one check.
+`DeliveryTracing` adds the delivery side of the message trace (`MessageTrace`, source `Mta.Message`): `mta.queue.wait` (emitted at the first claim, starting at the acceptance time) and one `mta.delivery.attempt` span per group with a `recipient.result` event per recipient. The trace id is the message id and the parent span id is derived from it, so no trace context is stored in the queue (DESIGN-DECIDED, decision 64). With no listener each entry point costs one check.
 
 ## Inbound
 

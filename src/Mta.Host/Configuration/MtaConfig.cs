@@ -1,4 +1,5 @@
 using System.Net;
+using Mta.Host.Api;
 using Mta.Smtp.Server;
 using Mta.Storage;
 using Mta.Webhooks;
@@ -29,6 +30,7 @@ public sealed class MtaConfig
     public SwitchSection Switch { get; init; } = new();
     public TlsSection Tls { get; init; } = new();
     public AcmeSection Acme { get; init; } = new();
+    public ApiSection Api { get; init; } = new();
 }
 
 public sealed class SmtpSection
@@ -283,4 +285,49 @@ public sealed class AcmeSection
     public double RenewAtRemainingFraction { get; init; } = 1.0 / 3.0;
 
     public TimeSpan CheckInterval { get; init; } = TimeSpan.FromHours(1);
+}
+
+/// <summary>
+/// Limits and session settings of the HTTP API (docs/api.md). Defaults are those of <see cref="ApiOptions"/>, so an unset key keeps
+/// the documented behaviour. <see cref="Smtp"/> settings (<c>Smtp:MaxMessageSize</c>, <c>Smtp:MaxRecipients</c>) also bound the API.
+/// </summary>
+public sealed class ApiSection
+{
+    private static readonly ApiOptions D = new();
+
+    /// <summary>Largest JSON request body of every endpoint except the two sending endpoints (checked while streaming).</summary>
+    public long MaxBodyBytes { get; init; } = D.MaxBodyBytes;
+
+    /// <summary>Largest JSON request body of <c>POST /messages</c> and <c>/messages/raw</c> (attachments travel as base64).</summary>
+    public long MaxSendBodyBytes { get; init; } = D.MaxSendBodyBytes;
+
+    /// <summary>Bytes of send-request bodies held in memory at once; a request that would exceed it is answered <c>429</c>.</summary>
+    public long MaxInFlightSendBytes { get; init; } = D.MaxInFlightSendBytes;
+
+    public int MaxAttachments { get; init; } = D.MaxAttachments;
+    public int MaxCustomHeaders { get; init; } = D.MaxCustomHeaders;
+    public int MaxTags { get; init; } = D.MaxTags;
+
+    /// <summary>Absolute lifetime of a dashboard session.</summary>
+    public TimeSpan SessionLifetime { get; init; } = D.SessionLifetime;
+
+    /// <summary>A dashboard session unused for this long ends.</summary>
+    public TimeSpan SessionIdleTimeout { get; init; } = D.SessionIdleTimeout;
+
+    /// <summary><c>Auto</c> (Secure unless plain HTTP from a loopback peer), <c>Always</c> or <c>Never</c>.</summary>
+    public CookieSecureMode CookieSecure { get; init; } = D.CookieSecure;
+
+    public int MaxDomainsPerTenant { get; init; } = D.MaxDomainsPerTenant;
+    public int MaxApiKeysPerTenant { get; init; } = D.MaxApiKeysPerTenant;
+    public int MaxSmtpCredentialsPerTenant { get; init; } = D.MaxSmtpCredentialsPerTenant;
+    public int MaxWebhooksPerTenant { get; init; } = D.MaxWebhooksPerTenant;
+
+    /// <summary>Most rows one statistics query may return.</summary>
+    public int MaxStatsRows { get; init; } = D.MaxStatsRows;
+
+    /// <summary>Networks (CIDR) allowed to read <c>/metrics</c>. Empty keeps the default: loopback and private ranges.</summary>
+    public List<string> MetricsAllowedNetworks { get; init; } = [];
+
+    /// <summary>SPF <c>include:</c> host suggested to customers in the DNS records of a sending domain.</summary>
+    public string? SpfInclude { get; init; } = D.SpfInclude;
 }
