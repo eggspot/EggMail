@@ -32,6 +32,20 @@ Defaults: SQLite backend in `Sqlite:DataDirectory` (default `/data`), SMTP on 55
 
 `src/Mta.Tools` builds `mta-tools` (see [benchmarks.md](benchmarks.md)). Benchmarks use BenchmarkDotNet: `dotnet run -c Release --project bench/Mta.Benchmarks -- --filter "*Dkim*"`.
 
+## Fuzzing
+
+`dotnet test` includes `tests/Mta.Fuzz.Tests` (seeds, checked-in corpus, past findings and a fixed number of seeded mutations per parser, no timing assertions). The long, coverage-guided runs are `.github/workflows/fuzz.yml` (weekly, or run it by hand with the `seconds_per_target` and `targets` inputs). Details, the list of targets and how to add a regression input are in [security.md](security.md#fuzzing).
+
+```sh
+dotnet run --project fuzz/Mta.Fuzz.Harness -c Release -- list
+dotnet run --project fuzz/Mta.Fuzz.Harness -c Release -- mutate dns-message 200000 7     # longer local run of the same mutator
+dotnet run --project fuzz/Mta.Fuzz.Harness -c Release -- replay mime path/to/crash-file  # reproduce a finding
+```
+
+## Tests and time
+
+Tests never assert elapsed time, throughput or process memory (they measure the load of the machine, not the code): waits are signals or polls with a deadline far above any plausible load, "no hang" is a generous limit that only turns a hang into a failure, and "bounded work" is asserted on results and on the allocated bytes of the running thread. Throughput belongs to `bench/`.
+
 ## Conventions
 
 - Branch per milestone (`feat/<slug>`), pull request into `main`, squash merge after the diff has been reviewed twice (correctness, then style/tests/leftovers). Commit messages end with the co-author trailer.

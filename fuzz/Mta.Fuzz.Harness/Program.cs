@@ -19,19 +19,16 @@ internal static class Program
 {
     private static int Main(string[] args)
     {
+        // Assemblies instrumented by SharpFuzz write coverage into a shared buffer that only the fuzzing entry point sets up (and replaces
+        // with the real one). Give everything that runs before it (building the targets) and every other mode (list, replay, mutate:
+        // reproducing a finding with the instrumented build) a private buffer, or the first instrumented call dies with an access violation.
+        EnsureTraceBuffer();
+
         if (args.Length == 0)
         {
             // libfuzzer-dotnet starts "dotnet <this dll>" with no further arguments (it supports a single --target_arg); the target
             // comes from the environment then.
             return Environment.GetEnvironmentVariable("EGGMAIL_FUZZ_TARGET") is { Length: > 0 } ? LibFuzzer() : Usage();
-        }
-
-        // Assemblies instrumented by SharpFuzz write coverage into a shared buffer that only the fuzzing entry points set up. Give every other
-        // mode (list, replay, mutate: reproducing a finding with the instrumented build) a private one, or the first instrumented call
-        // dies with an access violation.
-        if (args[0] != "libfuzzer")
-        {
-            EnsureTraceBuffer();
         }
 
         switch (args[0])
