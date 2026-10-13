@@ -119,6 +119,23 @@ The gate prevents regressions; it does not mean the budget is met. The design bu
 
 **Status: written, never run.** Docker is not used on the development machine and the owner runs the comparison by hand on a quiet Linux host. The EggMail path (provisioning script) was exercised against a locally running server; the Postfix configuration and the KumoMTA policy were written from the documentation of the two projects and will probably need small fixes on the first run (the KumoMTA image tag is not pinned, option names must be checked against the pinned version). Haraka, Stalwart and mox are not included (cut order).
 
+## CI trend numbers (2026-10-13)
+
+**GitHub-hosted ubuntu-latest 2-core runner, noisy, not publishable.** (Measured on a runner whose process saw 4 logical cores, Ubuntu 24.04, .NET 10.0.12; the label above is the one the workflow prints. The load generator, the server, the counting sink and PostgreSQL 17 in a container all share that machine, and so do the other jobs of the host.) One manual run of `bench-throughput` ([run 38427180654](https://github.com/eggspot/EggMail/actions/runs/38427180654)), pipeline harness, 2 KB messages, 16 connections, TLS and AUTH on, `History:Mode=Full` unless stated, median of 3 runs (range in brackets):
+
+| Configuration | Ingest msg/s | p50 / p99 ms | Alloc B/msg | CPU ms per 1000 msg |
+|---|---:|---|---:|---:|
+| SQLite `Sqlite:SyncMode=Off` (the default, non-durable) | 7,184 (6,493-7,499) | 1.96 / 4.92 | 32,713 | 354 |
+| SQLite `Sqlite:SyncMode=Full` (its durable pair) | 2,806 (2,447-2,883) | 4.80 / 20.2 | 32,592 | 417 |
+| SQLite `Off`, `History:Mode=StatsOnly` | 9,386 (9,266-9,548) | 1.42 / 4.26 | 18,413 | 262 |
+| SQLite `Off`, application assemblies precompiled with ReadyToRun | 7,488 (7,342-7,526) | 1.89 / 4.56 | 32,490 | 341 |
+| PostgreSQL 17, default durability (WAL synced at commit) | 3,222 (3,140-3,304) | 4.13 / 14.4 | 37,828 | 430 |
+| PostgreSQL 17, `synchronous_commit=off` (its non-durable pair) | 3,426 (3,202-3,702) | 3.93 / 17.6 | 37,982 | 469 |
+| SQLite `Off`, with delivery to the counting sink (10,000 messages): ingest | 1,845 (1,834-1,915) | 7.81 / 18.2 | 101,034 | 1,800 |
+| ... the same, end to end | 1,642 recipients/s until the sink had them all | | | |
+
+How little these numbers can be trusted: the same SQLite `Off` configuration measured 4,114, 5,027 and 7,184 msg/s in the three runs of this workflow done on 2026-10-13 (different runner instances), and the same code on a 10-core laptop gave 1,400 to 6,100. Only the allocation columns are stable (within about 1 % across runs), which is why the regression gate uses them. Read the table for shape, not for values: SQLite `Off` is faster than `Full` and PostgreSQL on this runner; `StatsOnly` is about 30 % faster than `Full` history; `synchronous_commit=off` did not help PostgreSQL measurably here (the runner's disk is fast and the load generator is probably the limit); the durable SQLite row is not comparable with the PostgreSQL durable row (different fsync behaviour, different storage). Nothing here is a claim about being the fastest, and no other server was run on the same machine.
+
 ## Pipeline harness and first profile (2026-10-13)
 
 `bench/Mta.Bench.Pipeline` runs the real runtime in one process (SMTP ingest, storage, DKIM signing at delivery, delivery engine), a counting sink as the remote MTA and the separate-process load generator (`mta-tools load`) as the client:
