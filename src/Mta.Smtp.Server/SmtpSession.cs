@@ -414,6 +414,13 @@ internal sealed class SmtpSession
             return;
         }
 
+        // Stop the plaintext reader before the reply goes out, so a ClientHello that follows 220 at once cannot be read as plaintext.
+        if (!await _transport.StopPlaintextReadingAsync().ConfigureAwait(false))
+        {
+            _close = true;
+            return;
+        }
+
         Write(SmtpReplies.ReadyForTls);
         await FlushAsync().ConfigureAwait(false);
         if (!await UpgradeTlsAsync(startTls: true).ConfigureAwait(false))
