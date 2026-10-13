@@ -225,6 +225,27 @@ public static class ConfigLoader
             errors.Add("Storage:Postgres:RuntimeConnectionString is required when Storage:Backend=Postgres.");
         }
 
+        var obs = c.Observability;
+        if (!string.IsNullOrWhiteSpace(obs.OtlpEndpoint) && !Uri.TryCreate(obs.OtlpEndpoint, UriKind.Absolute, out _))
+        {
+            errors.Add($"Observability:OtlpEndpoint must be an absolute URL (for example http://collector:4317), not '{obs.OtlpEndpoint}'.");
+        }
+
+        if (!obs.OtlpProtocol.Equals("Grpc", StringComparison.OrdinalIgnoreCase) && !obs.OtlpProtocol.Equals("HttpProtobuf", StringComparison.OrdinalIgnoreCase))
+        {
+            errors.Add($"Observability:OtlpProtocol must be Grpc or HttpProtobuf, not '{obs.OtlpProtocol}'.");
+        }
+
+        if (double.IsNaN(obs.TraceSampleRatio) || obs.TraceSampleRatio is < 0 or > 1)
+        {
+            errors.Add("Observability:TraceSampleRatio must be between 0 and 1.");
+        }
+
+        if (obs.QueueSampleSeconds is < 0 or > 3600)
+        {
+            errors.Add("Observability:QueueSampleSeconds must be between 0 (gauges off) and 3600.");
+        }
+
         if (c.Smtp.MaxRecipients is < 1 or > 1000)
         {
             errors.Add("Smtp:MaxRecipients must be between 1 and 1000.");

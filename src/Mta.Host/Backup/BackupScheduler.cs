@@ -44,15 +44,31 @@ public sealed class BackupScheduler
     public async Task<string?> RunOnceAsync(CancellationToken ct)
     {
         var now = _clock.UtcNow;
-        if (LatestBackupAt() is { } latest && now - latest < _interval)
+        if (LatestBackupAt() is { } latest)
         {
-            return null;
+            BackupMetrics.RecordSuccess(latest);   // after a restart the newest backup on disk is the last success
+            if (now - latest < _interval)
+            {
+                return null;
+            }
         }
 
-        Directory.CreateDirectory(_directory);
-        string? path = await _storage.Maintenance.BackupAsync(_directory, ct).ConfigureAwait(false);
+        string? path;
+        try
+        {
+            Directory.CreateDirectory(_directory);
+            path = await _storage.Maintenance.BackupAsync(_directory, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            BackupMetrics.Runs.Add(1, new KeyValuePair<string, object?>("outcome", "failed"));
+            throw;
+        }
+
         if (path is not null)
         {
+            BackupMetrics.Runs.Add(1, new KeyValuePair<string, object?>("outcome", "success"));
+            BackupMetrics.RecordSuccess(now);
             _log.Write(MtaLogLevel.Information, "backup", "backup written to " + path);
             Prune();
         }

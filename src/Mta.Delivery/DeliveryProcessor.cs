@@ -69,6 +69,7 @@ public sealed class DeliveryProcessor
         }
 
         long started = Stopwatch.GetTimestamp();
+        using Activity? span = DeliveryTracing.StartAttempt(group);
         for (int offset = 0; offset < group.Count; offset += _options.MaxRecipientsPerTransaction)
         {
             int count = Math.Min(_options.MaxRecipientsPerTransaction, group.Count - offset);
@@ -1016,9 +1017,12 @@ public sealed class DeliveryProcessor
         foreach (var r in results)
         {
             DeliveryMetrics.Attempts.Add(1, new KeyValuePair<string, object?>("outcome", r.Attempt.Outcome.ToString().ToLowerInvariant()));
+            DeliveryTracing.AddResult(r.Attempt);
         }
 
+        long recordStarted = Stopwatch.GetTimestamp();
         await Task.WhenAll(results.Select(r => _s.Storage.Deliveries.RecordAttemptAsync(r.Attempt, ct).AsTask())).ConfigureAwait(false);
+        DeliveryMetrics.RecordDuration.Record(Stopwatch.GetElapsedTime(recordStarted).TotalSeconds);
     }
 
     private async Task ReportBouncesAsync(List<Result> results, CancellationToken ct)

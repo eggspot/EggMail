@@ -17,6 +17,12 @@ Per group, in order:
 
 A connection lost after the end of data was sent is deferred with the `possible_duplicate` flag. `QuiesceAsync` stops claiming, waits up to the timeout, cancels what is left (recorded as `AbortedBySwitch`, requeued unchanged, flagged possible duplicate only when the end of the message data had begun to be written, see `SmtpClientConnection.EndOfDataStarted`) and releases the leases (decision R).
 
+### Metrics and traces
+
+`DeliveryMetrics` (`Mta.Delivery`): attempts by outcome, group duration, holds, claims and their duration, the duration of storing results, bounces generated, and the queue gauges. The gauges (`mta_delivery_queue_depth` by state, the age of the oldest due delivery, spooled bytes) read the last `QueueSample` of `QueueGauges`, a background loop that calls `GetQueueStatsAsync` every `Observability:QueueSampleSeconds`; a scrape never queries the queue. A failed sample keeps the previous numbers and is counted. The metric table is in [../operations.md](../operations.md#monitoring).
+
+`DeliveryTracing` adds the delivery side of the message trace (`MessageTrace`, source `Mta.Message`): `mta.queue.wait` (emitted at the first claim, starting at the acceptance time) and one `mta.delivery.attempt` span per group with a `recipient.result` event per recipient. The trace id is the message id and the parent span id is derived from it, so no trace context is stored in the queue (DESIGN-DECIDED, decision 54). With no listener each entry point costs one check.
+
 ## Inbound
 
 `IngestHandler` is the `ISmtpServerHandler`. Submission listeners authenticate a tenant's SMTP credential (PBKDF2 hash, shared lockout through `AuthThrottle`, constant work for unknown users) and pass each message to `SubmissionService`, the one path into the queue for SMTP and the HTTP API: size and recipient limits, `SenderPolicy` (From header domain and envelope sender must belong to the tenant and be verified), `Bcc` removal, Message-ID and Date repair, content extraction for history when `History:Mode=Full`, durable intake. The bounce listener accepts only recipients that are valid signed bounce addresses (or postmaster/abuse), always answers 250 for them and hands the message to `BounceProcessor`: permanent DSN failures that the reply classifier attributes to the recipient suppress it, abuse complaints suppress as complaints, and both are published as webhooks. Nothing on the bounce listener can queue mail for delivery.
