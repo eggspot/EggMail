@@ -49,6 +49,9 @@ public sealed class SubmissionRequest
     /// request that did not set one), in which case the tenant's setting and then the global default decide (<see cref="AttachmentStoragePolicy"/>). Needs the master switch either way.
     /// </summary>
     public bool? StoreAttachments { get; init; }
+
+    /// <summary>Tags the API caller gave the message; stored with the message's history (<c>History:Mode=Full</c>) and returned by the messages API.</summary>
+    public IReadOnlyList<string>? Tags { get; init; }
 }
 
 public sealed record SubmissionResult(SubmissionStatus Status, Guid MessageId, SenderRejection? Rejection = null, string? Detail = null, string? IdempotencyFingerprint = null)
@@ -126,9 +129,15 @@ public sealed class SubmissionService
         var now = _clock.UtcNow;
         var editor = new MessageHeaderEditor(request.Message);
         editor.Remove(HeaderNames.Bcc);
-        if (!parsed.Headers.TryGetFirst(HeaderId.MessageId, out _))
+        string messageIdHeader;
+        if (parsed.Headers.TryGetFirst(HeaderId.MessageId, out var existingMessageId))
         {
-            editor.Prepend(HeaderNames.MessageId, MessageBuilder.GenerateMessageId(_options.MessageIdDomain, _clock));
+            messageIdHeader = existingMessageId.Value;
+        }
+        else
+        {
+            messageIdHeader = MessageBuilder.GenerateMessageId(_options.MessageIdDomain, _clock);
+            editor.Prepend(HeaderNames.MessageId, messageIdHeader);
         }
 
         if (!parsed.Headers.TryGetFirst(HeaderId.Date, out _))
@@ -166,6 +175,8 @@ public sealed class SubmissionService
             Content = content,
             RetainRaw = retainRaw,
             SendingDomain = decision.SendingDomain?.Name ?? fromDomain,
+            MessageIdHeader = messageIdHeader,
+            Tags = request.Tags is { Count: > 0 } tags ? tags.Distinct(StringComparer.Ordinal).ToList() : null,
         };
 
         var result = await _storage.Intake.AcceptAsync(accepted, ct).ConfigureAwait(false);

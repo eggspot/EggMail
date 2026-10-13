@@ -64,6 +64,9 @@ public sealed class SettingsService
         new("Sending:PerDay", SettingKind.Number, "Most messages this tenant may send per UTC day (0 or unset: the operator's default). Only an administrator can change this.", AdminOnly: true, Max: long.MaxValue),
     ];
 
+    /// <summary>The keys of the per-tenant settings (stored per tenant, not read from the deployment configuration).</summary>
+    public static IReadOnlyList<string> TenantSettingKeys { get; } = TenantCatalog.Select(d => d.Key).ToList();
+
     private readonly IStorage _storage;
     private readonly StorageOptions _storageOptions;
     private readonly ApiOptions _options;
@@ -103,7 +106,8 @@ public sealed class SettingsService
 
     private IConfigStore Config => _storage.Config;
 
-    private bool IsLockedByDeployment(SettingDefinition d) => d.DeploymentOnly || _options.LockedKeys.Contains(d.ConfigKey ?? d.Key);
+    /// <summary>Locked when the deployment fixes the setting's key or the alias the loader also reads (<c>Queue:MaxLifetime</c> for <c>Queue:MaxLifetimeDays</c>).</summary>
+    private bool IsLockedByDeployment(SettingDefinition d) => d.DeploymentOnly || _options.LockedKeys.Contains(d.Key) || (d.ConfigKey is not null && _options.LockedKeys.Contains(d.ConfigKey));
 
     // Tenant scope
 

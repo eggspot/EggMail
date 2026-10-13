@@ -68,6 +68,9 @@ public sealed class InMemorySendingCounterStore : ISendingCounterStore
     private sealed class Counter
     {
         public long Value;
+
+        /// <summary>The part of <see cref="Value"/> that the persistent copy already holds (only the flushing thread touches it).</summary>
+        public long Flushed;
     }
 
     private readonly ConcurrentDictionary<CounterKey, Counter> _counters = new();
@@ -127,6 +130,65 @@ public sealed class InMemorySendingCounterStore : ISendingCounterStore
 
     /// <inheritdoc />
     public long GetCount(in CounterKey key) => _counters.TryGetValue(key, out Counter? c) ? Volatile.Read(ref c.Value) : 0;
+
+    /// <summary>
+    /// Takes every counter's change since the last call (the amount to add to the persistent copy) and marks it as flushed. Call <see cref="Unflush"/> with the same list when the
+    /// write failed. Only one thread may use this and <see cref="Absorb"/> at a time (the flush loop).
+    /// </summary>
+    internal int TakeUnflushed(List<(CounterKey Key, long Delta)> into)
+    {
+        int n = 0;
+        foreach (var kv in _counters)
+        {
+            long value = Volatile.Read(ref kv.Value.Value);
+            long delta = value - kv.Value.Flushed;
+            if (delta != 0)
+            {
+                into.Add((kv.Key, delta));
+                kv.Value.Flushed = value;
+                n++;
+            }
+        }
+
+        return n;
+    }
+
+    /// <summary>Gives back what <see cref="TakeUnflushed"/> took (the write failed), so the next flush sends it again.</summary>
+    internal void Unflush(IEnumerable<(CounterKey Key, long Delta)> taken)
+    {
+        foreach ((CounterKey key, long delta) in taken)
+        {
+            if (_counters.TryGetValue(key, out Counter? counter))
+            {
+                counter.Flushed -= delta;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Moves a counter to include what the persistent copy holds beyond what this process already knows of it: at start (the current window as it was before the restart) and after each
+    /// flush (what other replicas added). The part this process has not flushed yet stays on top. A persistent value below what is known lowers the counter (another replica posted a
+    /// reservation it later gave back, for example a rolled-back multi-counter reservation that was flushed in between), but never below zero.
+    /// </summary>
+    internal void Absorb(in CounterKey key, long persistedTotal)
+    {
+        Counter counter = _counters.GetOrAdd(key, static _ => new Counter());
+        long extra = persistedTotal - counter.Flushed;
+        if (extra == 0)
+        {
+            return;
+        }
+
+        long current;
+        long next;
+        do
+        {
+            current = Volatile.Read(ref counter.Value);
+            next = Math.Max(0, current + extra);
+        }
+        while (Interlocked.CompareExchange(ref counter.Value, next, current) != current);
+        counter.Flushed += next - current;   // what was really applied (a downward correction is clamped at zero)
+    }
 
     /// <inheritdoc />
     public int Prune(long currentHourIndex, long currentDayIndex)

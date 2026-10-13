@@ -109,6 +109,12 @@ internal sealed class ApiFixtureOptions
     public bool StoreAttachmentsByDefault { get; init; }
     public Action<ApiOptions>? ConfigureApi { get; init; }
     public Action<IServiceCollection>? ConfigureServices { get; init; }
+
+    /// <summary>
+    /// A second server over the storage (and clock) of another fixture: a process restart, or another replica. The tenants, domains and users of the first fixture are
+    /// there already, so nothing is seeded, and the shared storage is left open when this fixture is disposed.
+    /// </summary>
+    public ApiFixture? SharedWith { get; init; }
 }
 
 /// <summary>
@@ -123,6 +129,7 @@ internal sealed class ApiFixture : IAsyncDisposable
     public const string Password = "correct horse battery";
 
     private readonly string? _directory;
+    private bool _ownsStorage = true;
     private WebApplication _app = null!;
 
     private ApiFixture(string? directory) => _directory = directory;
@@ -150,17 +157,25 @@ internal sealed class ApiFixture : IAsyncDisposable
 
     private async Task InitializeAsync(ApiFixtureOptions o)
     {
-        Clock = new TestClock(Start);
-        StorageOptions = new StorageOptions
+        Clock = o.SharedWith?.Clock ?? new TestClock(Start);
+        if (o.SharedWith is { } shared)
         {
-            History = new HistoryOptions { Mode = o.History },
-            Content = new ContentOptions { AllowAttachmentStorage = o.AllowAttachmentStorage, StoreAttachments = o.StoreAttachmentsByDefault },
-            Sqlite = _directory is null ? new SqliteOptions() : new SqliteOptions { DataDirectory = _directory, StatsFlushInterval = TimeSpan.Zero },
-        };
-        Storage = _directory is null
-            ? new InMemoryStorage(StorageOptions, Clock, null, TimeSpan.Zero)
-            : SqliteStorage.Create(StorageOptions, Clock);
-        await Storage.InitializeAsync(default).ConfigureAwait(false);
+            Storage = shared.Storage;
+            StorageOptions = shared.StorageOptions;
+        }
+        else
+        {
+            StorageOptions = new StorageOptions
+            {
+                History = new HistoryOptions { Mode = o.History },
+                Content = new ContentOptions { AllowAttachmentStorage = o.AllowAttachmentStorage, StoreAttachments = o.StoreAttachmentsByDefault },
+                Sqlite = _directory is null ? new SqliteOptions() : new SqliteOptions { DataDirectory = _directory, StatsFlushInterval = TimeSpan.Zero },
+            };
+            Storage = _directory is null
+                ? new InMemoryStorage(StorageOptions, Clock, null, TimeSpan.Zero)
+                : SqliteStorage.Create(StorageOptions, Clock);
+            await Storage.InitializeAsync(default).ConfigureAwait(false);
+        }
 
         Options = new ApiOptions
         {
@@ -207,6 +222,12 @@ internal sealed class ApiFixture : IAsyncDisposable
 
         TenantA = new Tenant(TenantAId, "Acme Corp", "acme", true, Clock.UtcNow, false);
         TenantB = new Tenant(TenantBId, "Globex", "globex", true, Clock.UtcNow, false);
+        if (o.SharedWith is not null)
+        {
+            _ownsStorage = false;
+            return;
+        }
+
         await Storage.Config.UpsertTenantAsync(TenantA, default).ConfigureAwait(false);
         await Storage.Config.UpsertTenantAsync(TenantB, default).ConfigureAwait(false);
         await AddVerifiedDomainAsync(TenantAId, "example.com").ConfigureAwait(false);
@@ -253,7 +274,11 @@ internal sealed class ApiFixture : IAsyncDisposable
     {
         await _app.StopAsync().ConfigureAwait(false);
         await _app.DisposeAsync().ConfigureAwait(false);
-        await Storage.DisposeAsync().ConfigureAwait(false);
+        if (_ownsStorage)
+        {
+            await Storage.DisposeAsync().ConfigureAwait(false);
+        }
+
         if (_directory is not null && Directory.Exists(_directory))
         {
             // The directory was created by this fixture (a unique name under the temp folder) and holds only its own files.
