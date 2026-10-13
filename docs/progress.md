@@ -26,8 +26,8 @@ Running status of the implementation, updated in every pull request. **Productio
 | Delivery engine: grouping, MX/relay routes, TLS policy, DKIM signing at delivery, VERP return path, retry/hold/expiry, DSN generation, quiesce | this PR | 13 end-to-end tests over loopback with in-memory storage |
 | SMTP ingest (AUTH, sender policy, submission service, bounce listener, bounce/complaint processing) | this PR | 8 loopback tests with MailKit |
 | PostgreSQL backend | in progress (parallel work) | |
-| HTTP API (docs/api.md) | not started | |
-| Domain verification service (scheduler over the planner/checker and `VerificationSchedule`) | not started | |
+| HTTP API (docs/api.md): auth (API keys, dashboard sessions, CSRF, roles), errors, sending, messages, domains, suppressions, webhooks, credentials, statistics, settings, admin, operational endpoints | this PR (**not run against a real dashboard in a browser; DNS, ACME and the switch engine are faked in tests**) | 279 host tests over TestHost with in-memory and SQLite storage, incl. contract tests against `dashboard/src/api/types.ts` |
+| Domain verification service (scheduler over the planner/checker and `VerificationSchedule`, DKIM rotation, sending-paused semantics) | this PR | host tests with a controllable clock and DNS |
 | Host composition root and `mta` CLI (`--healthcheck`, `migrate-db`, `admin create`, `migrate-storage`), Data Protection wiring, hosted services | not started | |
 | Backend switch engine (export/import, quiesce, fence, activation, rollback, history migration) | not started | |
 | Dashboard hosting, TLS-RPT/DMARC report sending, metrics endpoint wiring | not started | |
@@ -35,6 +35,8 @@ Running status of the implementation, updated in every pull request. **Productio
 
 ## Not verified / known gaps
 
+- HTTP API: tested in process only (TestHost); no real browser, no Kestrel, no reverse proxy. Per-record DNS check results are remembered in memory only (after a restart, or on another replica, a verified domain shows its required records as `ok` and the rest as `pending` until the next check). Global settings written through `/admin/settings` are stored but applied by the composition root at startup (not built yet); only the webhook allowlist is read live. The API assumes the composition root registers `IStorage`, `StorageOptions`, `ISecretProtector`, `SubmissionService` and `IDnsResolver` ([components/api.md](components/api.md)). Message `tags` are validated but not stored (no storage for them yet). `IStorageSwitchService` has no engine: the endpoints answer 503 `not_ready`. The PostgreSQL provider must override `IWebhookOutbox.EnqueueForEndpointAsync`, implement `IMessageRecipientLookup`, and store the idempotency fingerprint.
+- AcmeRenewalService: a renewal used to insert a second row with the same unique certificate name and fail; it now replaces the row (found while testing the API; no test existed for renewal).
 - **GitHub Actions is disabled for the repository by the organization**, so the CI workflow and the release workflow cannot run. Pull requests are merged after a full local `dotnet test` and review passes; the workflows are written but unproven on GitHub. Owner action: allow Actions for `eggspot/EggMail` ([open-questions.md](open-questions.md)).
 - Docker image build and GHCR publish can only run in GitHub Actions (no Docker is used locally).
 - No real-internet MX delivery has been tested; no independent security audit has been done.
