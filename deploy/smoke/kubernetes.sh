@@ -122,11 +122,11 @@ kubectl -n eggmail-pg rollout status deployment/eggmail --timeout=240s
 forward eggmail-pg 18081
 python3 "$here/smoke.py" --api http://127.0.0.1:18081 --admin-user admin --admin-password "$password" --expect-backend postgres --stop-after signin
 
-echo "-- Unbound sidecar: sigok answers with the AD flag; EggMail is configured to trust it"
+echo "-- Unbound sidecar: a DNSSEC-signed name (cloudflare.com) answers with the AD flag; EggMail is configured to trust it"
 # Unbound has just started: its first validations (trust anchor, DNSKEY fetches) can answer SERVFAIL for a moment, so ask a few times.
 signed=""
 for _ in $(seq 1 10); do
-  signed=$(kubectl -n eggmail-pg exec deploy/eggmail -c unbound -- drill -D sigok.verteiltesysteme.net @127.0.0.1 A || true)
+  signed=$(kubectl -n eggmail-pg exec deploy/eggmail -c unbound -- drill -D cloudflare.com @127.0.0.1 A || true)
   if echo "$signed" | grep -qE '^;; flags:.* ad[ ;]'; then break; fi
   sleep 3
 done
@@ -134,13 +134,7 @@ if ! echo "$signed" | grep -qE '^;; flags:.* ad[ ;]'; then
   echo "$signed"
   echo "::group::Unbound diagnostics"
   kubectl -n eggmail-pg logs deploy/eggmail -c unbound --tail 40 || true
-  kubectl -n eggmail-pg exec deploy/eggmail -c unbound -- drill cloudflare.com @127.0.0.1 A || true
-  kubectl -n eggmail-pg exec deploy/eggmail -c unbound -- drill -D cloudflare.com @127.0.0.1 A || true
   kubectl -n eggmail-pg get networkpolicy -o name || true
-  echo "-- the same query with the NetworkPolicies removed (is the policy the cause?)"
-  kubectl -n eggmail-pg delete networkpolicy --all || true
-  sleep 5
-  kubectl -n eggmail-pg exec deploy/eggmail -c unbound -- drill -D sigok.verteiltesysteme.net @127.0.0.1 A || true
   echo "::endgroup::"
   echo "::error::no AD flag from the sidecar"
   exit 1

@@ -75,14 +75,14 @@ case "$variant" in
     ;;
   unbound)
     python3 "$here/smoke.py" --admin-user admin --admin-password "$admin_password" --expect-backend sqlite --stop-after signin
-    echo "-- Unbound validates DNSSEC: sigok answers with the AD flag, sigfail (a broken signature) answers SERVFAIL"
+    echo "-- Unbound validates DNSSEC: a DNSSEC-signed name (cloudflare.com) answers with the AD flag, sigfail (a broken signature) answers SERVFAIL"
     signed=""
     for _ in $(seq 1 10); do   # the first validations after a start can answer SERVFAIL for a moment
-      signed=$(docker compose "${files[@]}" exec -T unbound drill -D sigok.verteiltesysteme.net @127.0.0.1 A || true)
+      signed=$(docker compose "${files[@]}" exec -T unbound drill -D cloudflare.com @127.0.0.1 A || true)
       if echo "$signed" | grep -qE '^;; flags:.* ad[ ;]'; then break; fi
       sleep 3
     done
-    echo "$signed" | grep -E '^;; flags:.* ad[ ;]' >/dev/null || { echo "$signed"; echo "::error::no AD flag for sigok.verteiltesysteme.net"; exit 1; }
+    echo "$signed" | grep -E '^;; flags:.* ad[ ;]' >/dev/null || { echo "$signed"; echo "::error::no AD flag for cloudflare.com"; exit 1; }
     broken=$(docker compose "${files[@]}" exec -T unbound drill sigfail.verteiltesysteme.net @127.0.0.1 A || true)
     echo "$broken" | grep -q 'rcode: SERVFAIL' || { echo "$broken"; echo "::error::sigfail.verteiltesysteme.net did not fail validation"; exit 1; }
     ;;
