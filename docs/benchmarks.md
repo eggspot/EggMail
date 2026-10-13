@@ -112,3 +112,5 @@ What the first runs were good for was finding allocation hot spots with the buil
 | `Microsoft.Data.Sqlite` parameter binding | about 10 % of ingest allocations | open |
 
 Current budget status: the design budget of under 2 KB per ingested message excluding body buffers is **not met** (about 22 to 36 KB per 2 KB message depending on history mode, measured as total process allocation per message). It is a gate to close, not a claim.
+
+Per-step allocation of the ingest path (`dotnet run -c Release --project bench/Mta.Bench.Pipeline -- --micro true`, 2 KB message): `MimeMessage.Parse` 1.5 KB, header editing 6.3 KB, content extraction for history 5.5 KB, whole `SubmissionService.SubmitAsync` 19.6 KB. The message is parsed three times per submission (sender check, editor, extractor); parsing once and sharing it is the next saving. The 2 KB budget remains unmet.
