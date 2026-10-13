@@ -76,6 +76,7 @@ public static class ConfigLoader
             },
             Storage = storage,
             Dns = Bind<DnsSection>(configuration, "Dns"),
+            Backup = Bind<BackupSection>(configuration, "Backup"),
             Delivery = Bind<DeliverySection>(configuration, "Delivery"),
             Webhooks = Bind<Mta.Webhooks.WebhookOptions>(configuration, "Webhooks"),
             Dashboard = Bind<DashboardSection>(configuration, "Dashboard"),

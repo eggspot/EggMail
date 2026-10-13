@@ -51,6 +51,7 @@ docker run -d --name eggmail -p 587:5587 -p 465:4465 -p 2525:2525 -p 8443:8443 \
 | Document | Contents |
 |---|---|
 | [SECURITY.md](SECURITY.md), [docs/security.md](docs/security.md) | How to report a vulnerability; the threat model, implemented controls and known gaps |
+| [docs/operations.md](docs/operations.md) | Running it: configuration reference, DNS records, backups and restore, monitoring, upgrades |
 | [docs/design.md](docs/design.md) | Architecture, components, interfaces, storage backends and history level, switching, content retention, webhooks, TLS and ports, security, deployment |
 | [docs/decisions.md](docs/decisions.md) | The decisions record (owner and design decisions A–T and items 1–40) |
 | [docs/plan.md](docs/plan.md) | Components with engineer-week estimates, phases, cut order, risks, calendar |
