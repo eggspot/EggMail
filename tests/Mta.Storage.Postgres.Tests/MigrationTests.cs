@@ -102,7 +102,7 @@ public class MigrationTests : PgTestBase
             await PostgresMigrator.MigrateAsync(Db.ConnectionString, null, CancellationToken.None);
         }
 
-        Assert.Equal(1, await ScalarAsync<long>("SELECT count(*) FROM eggmail_schema_version"));
+        Assert.Equal(PostgresMigrator.CurrentVersion, await ScalarAsync<long>("SELECT count(*) FROM eggmail_schema_version")); // every version exactly once
         Assert.Equal(PostgresMigrator.CurrentVersion, await ScalarAsync<int>("SELECT max(version) FROM eggmail_schema_version"));
         Assert.Equal(PostgresMigrator.CurrentVersion, await PostgresMigrator.GetDatabaseVersionAsync(Pg.Runtime.Data, CancellationToken.None));
     }
@@ -132,7 +132,7 @@ public class MigrationTests : PgTestBase
             await using var check = new NpgsqlConnection(connection);
             await check.OpenAsync();
             await using var count = new NpgsqlCommand("SELECT count(*) FROM eggmail_schema_version", check);
-            Assert.Equal(1L, await count.ExecuteScalarAsync());
+            Assert.Equal((long)PostgresMigrator.CurrentVersion, await count.ExecuteScalarAsync());
         }
         finally
         {
