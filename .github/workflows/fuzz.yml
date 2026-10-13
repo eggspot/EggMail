@@ -102,7 +102,7 @@ jobs:
         env:
           SECONDS_PER_TARGET: ${{ github.event.inputs.seconds_per_target || (github.event_name == 'push' && '45') || '300' }}
           TARGETS: ${{ github.event.inputs.targets || 'all' }}
-          SELFTEST: ${{ github.event.inputs.selftest || (github.event_name == 'push' && 'crash') || 'none' }}
+          SELFTEST: ${{ github.event.inputs.selftest || (github.event_name == 'push' && 'hang') || 'none' }}
         run: |
           set -u
           harness="$RUNNER_TEMP/fuzz/Mta.Fuzz.Harness.dll"
