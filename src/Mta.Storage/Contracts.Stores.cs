@@ -162,7 +162,8 @@ public sealed record MessageSummary(
     string EnvelopeFrom,
     int RecipientCount,
     string? Status,
-    long Size);
+    long Size,
+    IReadOnlyList<string>? Tags = null);
 
 public sealed record MessageDetail(MessageSummary Summary, MessageContent? Content, ContentState ContentState, IReadOnlyList<string> Recipients, bool RawRetained);
 
@@ -183,7 +184,8 @@ public sealed record MessageQuery(
     DateTimeOffset? From = null,
     DateTimeOffset? To = null,
     int Limit = 50,
-    string? Cursor = null);
+    string? Cursor = null,
+    string? Tag = null);
 
 public sealed record Page<T>(IReadOnlyList<T> Items, string? NextCursor);
 
@@ -199,7 +201,18 @@ public interface IHistoryStore
 
     /// <summary>Raw message for resend/download when attachment storage retained it; null otherwise.</summary>
     ValueTask<byte[]?> GetRetainedRawAsync(Guid tenantId, Guid messageId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Attaches an asynchronous bounce or complaint to the history of the tenant's message whose <c>Message-ID</c> header is
+    /// <paramref name="messageIdHeader"/> (angle brackets and case do not matter; the newest message wins if a client reused an id): appends the event and moves the
+    /// message status (<see cref="Logic.MessageStatus.AfterReport"/>). Returns the message id, or null when nothing was attached: history is not recorded
+    /// (<see cref="HistoryMode.StatsOnly"/>), the message is unknown, belongs to another tenant or is past <c>Retention:MetadataDays</c>.
+    /// </summary>
+    ValueTask<Guid?> AttachReportAsync(Guid tenantId, string messageIdHeader, AsyncReport report, CancellationToken cancellationToken);
 }
+
+/// <summary>The event an asynchronous bounce (<see cref="MessageEventType.Bounced"/>) or complaint (<see cref="MessageEventType.Complained"/>) adds to a message's history.</summary>
+public sealed record AsyncReport(MessageEventType Type, DateTimeOffset At, string? Recipient, int? SmtpCode, string? EnhancedCode, string? Message);
 
 /// <summary>
 /// Optional capability of an <see cref="IHistoryStore"/>: the recipients of several messages in one call, so list views can show them

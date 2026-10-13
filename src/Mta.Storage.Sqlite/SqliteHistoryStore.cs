@@ -7,9 +7,9 @@ namespace Mta.Storage.Sqlite;
 internal static class HistorySql
 {
     public static readonly Stmt IndexInsert = new(
-        "INSERT INTO message_index (day, message_id, tenant_id, received_at, subject, envelope_from, recipient_count, final_count, delivered_count, failed_count, status, size, content_recorded, raw_retained) " +
-        "VALUES (@day, @m, @t, @rcv, @subj, @from, @n, 0, 0, 0, 'queued', @size, @cr, 0)",
-        "@day", "@m", "@t", "@rcv", "@subj", "@from", "@n", "@size", "@cr");
+        "INSERT INTO message_index (day, message_id, tenant_id, received_at, subject, envelope_from, recipient_count, final_count, delivered_count, failed_count, status, size, content_recorded, raw_retained, message_id_header, tags) " +
+        "VALUES (@day, @m, @t, @rcv, @subj, @from, @n, 0, 0, 0, 'queued', @size, @cr, 0, @mih, @tags)",
+        "@day", "@m", "@t", "@rcv", "@subj", "@from", "@n", "@size", "@cr", "@mih", "@tags");
 
     public static readonly Stmt RecipientInsert = new(
         "INSERT OR IGNORE INTO message_recipient (day, message_id, recipient) VALUES (@day, @m, @r)", "@day", "@m", "@r");
@@ -37,6 +37,10 @@ internal static class HistorySql
     public static readonly Stmt RetainedInsert = new(
         "INSERT OR REPLACE INTO message_raw_retained (day, message_id, tenant_id, raw, retained_at) VALUES (@day, @m, @t, @raw, @at)",
         "@day", "@m", "@t", "@raw", "@at");
+
+    public static readonly Stmt IndexFindByHeader = new(
+        "SELECT day, message_id, recipient_count, status FROM message_index WHERE tenant_id = @t AND message_id_header = @h AND received_at > @floor ORDER BY day DESC, message_id DESC LIMIT 1",
+        "@t", "@h", "@floor");
 
     public static readonly Stmt IndexSetRetained = new("UPDATE message_index SET raw_retained = 1 WHERE day = @day AND message_id = @m", "@day", "@m");
 }
@@ -105,6 +109,7 @@ internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore, IMes
         ctx.Command(HistorySql.IndexInsert)
             .Set(0, day).Set(1, m.MessageId).Set(2, m.TenantId).Set(3, received).Set(4, s.Subject).SetAddress(5, m.EnvelopeFrom)
             .Set(6, m.Recipients.Count).Set(7, (long)m.Raw.Length).Set(8, s.Content is null ? 0 : 1)
+            .Set(9, MessageIdKey.Normalize(m.MessageIdHeader)).Set(10, StorageJson.SerializeTags(m.Tags))
             .ExecuteNonQuery();
 
         PreparedCommand rcpt = ctx.Command(HistorySql.RecipientInsert).Set(0, day).Set(1, m.MessageId);
@@ -193,6 +198,55 @@ internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore, IMes
             return ctx.Command(HistorySql.IndexSetRetained).Set(0, day).Set(1, s.messageId).ExecuteNonQuery();
         }, cancellationToken).ConfigureAwait(false);
 
+    private static IReadOnlyList<string>? TagsOf(string? json) => json is null ? null : StorageJson.DeserializeTags(json);
+
+    public async ValueTask<Guid?> AttachReportAsync(Guid tenantId, string messageIdHeader, AsyncReport report, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(report);
+        string? key = MessageIdKey.Normalize(messageIdHeader);
+        if (!rt.IsFull || key is null)
+        {
+            return null;
+        }
+
+        long floor = MetadataFloorMs(rt.Clock.UtcNow) ?? long.MinValue;
+        Guid eventId = EventIds.Next(report.At);
+        return await rt.HistoryWriter!.SubmitAsync((tenantId, key, report, eventId, floor), AttachReport, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static readonly Func<WriterContext, (Guid Tenant, string Key, AsyncReport Report, Guid EventId, long Floor), Guid?> AttachReport = static (ctx, s) =>
+    {
+        int day;
+        Guid messageId;
+        int recipients;
+        string status;
+        using (RawReader r = ctx.Command(HistorySql.IndexFindByHeader).Set(0, s.Tenant).Set(1, s.Key).Set(2, s.Floor).ExecuteReader())
+        {
+            if (!r.Read())
+            {
+                return null;
+            }
+
+            day = r.GetInt32(0);
+            messageId = r.GetGuid(1);
+            recipients = r.GetInt32(2);
+            status = r.GetString(3);
+        }
+
+        AsyncReport e = s.Report;
+        ctx.Command(HistorySql.EventInsert)
+            .Set(0, day).Set(1, messageId).Set(2, s.EventId).SetNull(3).Set(4, s.Tenant).Set(5, (long)e.Type).Set(6, StorageTime.ToUnixMs(e.At))
+            .Set(7, e.Recipient).Set(8, e.SmtpCode).Set(9, e.EnhancedCode).Set(10, e.Message).SetNull(11).SetNull(12).SetNull(13)
+            .ExecuteNonQuery();
+        string next = MessageStatus.AfterReport(status, recipients, e.Type);
+        if (!string.Equals(next, status, StringComparison.Ordinal))
+        {
+            ctx.Command(HistorySql.IndexStatus).Set(0, next).Set(1, day).Set(2, messageId).ExecuteNonQuery();
+        }
+
+        return messageId;
+    };
+
     // Reads
 
     private long? MetadataFloorMs(DateTimeOffset now) => rt.Options.Retention.MetadataDays > 0 ? StorageTime.ToUnixMs(now.AddDays(-rt.Options.Retention.MetadataDays)) : null;
@@ -218,7 +272,7 @@ internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore, IMes
 
         DateTimeOffset now = rt.Clock.UtcNow;
         string? recipient = string.IsNullOrWhiteSpace(query.Recipient) ? null : query.Recipient.Trim().ToLowerInvariant();
-        var sql = new StringBuilder("SELECT m.day, m.message_id, m.tenant_id, m.received_at, m.subject, m.envelope_from, m.recipient_count, m.status, m.size FROM ");
+        var sql = new StringBuilder("SELECT m.day, m.message_id, m.tenant_id, m.received_at, m.subject, m.envelope_from, m.recipient_count, m.status, m.size, m.tags FROM ");
         sql.Append(recipient is null ? "message_index m" : "message_recipient r JOIN message_index m ON m.day = r.day AND m.message_id = r.message_id");
         sql.Append(" WHERE 1 = 1");
         var args = new List<(string, object)>();
@@ -259,6 +313,11 @@ internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore, IMes
             Arg("m.status = @status", "@status", query.Status.Trim().ToLowerInvariant());
         }
 
+        if (!string.IsNullOrEmpty(query.Tag))
+        {
+            Arg("m.tags IS NOT NULL AND EXISTS (SELECT 1 FROM json_each(m.tags) WHERE json_each.value = @tag)", "@tag", query.Tag);
+        }
+
         if (query.From is { } from)
         {
             Arg("m.received_at >= @from", "@from", StorageTime.ToUnixMs(from));
@@ -297,7 +356,7 @@ internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore, IMes
             while (r.Read())
             {
                 keys.Add((r.GetInt32(0), r.GetGuid(1)));
-                items.Add(new MessageSummary(r.GetGuid(1), r.GetGuid(2), r.GetInstant(3), r.GetNullableString(4), r.GetString(5), r.GetInt32(6), r.GetString(7), r.GetInt64(8)));
+                items.Add(new MessageSummary(r.GetGuid(1), r.GetGuid(2), r.GetInstant(3), r.GetNullableString(4), r.GetString(5), r.GetInt32(6), r.GetString(7), r.GetInt64(8), TagsOf(r.GetNullableString(9))));
             }
         }
 
@@ -328,7 +387,7 @@ internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore, IMes
         long receivedMs;
         using (SqliteCommand cmd = c.CreateCommand())
         {
-            cmd.CommandText = "SELECT message_id, tenant_id, received_at, subject, envelope_from, recipient_count, status, size, content_recorded, raw_retained FROM message_index " +
+            cmd.CommandText = "SELECT message_id, tenant_id, received_at, subject, envelope_from, recipient_count, status, size, content_recorded, raw_retained, tags FROM message_index " +
                 "WHERE day = @day AND message_id = @m AND tenant_id = @t" + (MetadataFloorMs(now) is null ? "" : " AND received_at > @floor");
             cmd.Parameters.AddWithValue("@day", day);
             cmd.Parameters.AddWithValue("@m", messageId);
@@ -345,7 +404,7 @@ internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore, IMes
             }
 
             receivedMs = r.GetInt64(2);
-            summary = new MessageSummary(r.GetGuid(0), r.GetGuid(1), StorageTime.FromUnixMs(receivedMs), r.GetNullableString(3), r.GetString(4), r.GetInt32(5), r.GetString(6), r.GetInt64(7));
+            summary = new MessageSummary(r.GetGuid(0), r.GetGuid(1), StorageTime.FromUnixMs(receivedMs), r.GetNullableString(3), r.GetString(4), r.GetInt32(5), r.GetString(6), r.GetInt64(7), TagsOf(r.GetNullableString(10)));
             contentRecorded = r.GetFlag(8);
             rawRetained = r.GetFlag(9);
         }

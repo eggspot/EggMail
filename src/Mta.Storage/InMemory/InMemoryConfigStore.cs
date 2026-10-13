@@ -5,7 +5,7 @@ using Mta.Storage.Transfer;
 namespace Mta.Storage.InMemory;
 
 /// <summary>In-memory <see cref="IConfigStore"/>; same semantics as the EF implementation (normalization, uniqueness, leases).</summary>
-internal sealed class InMemoryConfigStore : IConfigStore
+internal sealed partial class InMemoryConfigStore : IConfigStore
 {
     private readonly object _gate = new();
     private readonly Dictionary<Guid, TenantEntity> _tenants = [];
@@ -24,6 +24,9 @@ internal sealed class InMemoryConfigStore : IConfigStore
     private readonly Dictionary<Guid, AcmeAccountEntity> _acmeAccounts = [];
     private readonly Dictionary<string, AcmeRenewalEntity> _renewals = [];
     private readonly Dictionary<string, LeaseEntity> _leases = [];
+    private readonly Dictionary<(Guid, string), DomainRecordCheckEntity> _domainChecks = [];
+    private readonly Dictionary<Guid, TlsRptBucketEntity> _tlsRpt = [];
+    private readonly Dictionary<(byte, Guid, string, byte, long), SendingCounterEntity> _counters = [];
     private SwitchStateEntity? _switch;
 
     private static ValueTask<T> R<T>(T value) => ValueTask.FromResult(value);
@@ -343,6 +346,11 @@ internal sealed class InMemoryConfigStore : IConfigStore
         lock (_gate)
         {
             _domains.Remove(domainId);
+            foreach (var k in _domainChecks.Keys.Where(k => k.Item1 == domainId).ToList())
+            {
+                _domainChecks.Remove(k);
+            }
+
             foreach (var k in _dkim.Values.Where(k => k.DomainId == domainId).ToList())
             {
                 _dkim.Remove(k.Id);
@@ -807,6 +815,9 @@ internal sealed class InMemoryConfigStore : IConfigStore
                 "certificate" => Snapshot(_certs.Values.OrderBy(x => x.Id)),
                 "acme_account" => Snapshot(_acmeAccounts.Values.OrderBy(x => x.Id)),
                 "acme_renewal" => Snapshot(_renewals.Values.OrderBy(x => x.CertificateName, StringComparer.Ordinal)),
+                "domain_record_check" => Snapshot(_domainChecks.Values.OrderBy(x => x.DomainId).ThenBy(x => x.RecordKey, StringComparer.Ordinal)),
+                "tls_rpt_bucket" => Snapshot(_tlsRpt.Values.OrderBy(x => x.Id)),
+                "sending_counter" => Snapshot(_counters.Values.OrderBy(x => x.Scope).ThenBy(x => x.TenantId).ThenBy(x => x.Domain, StringComparer.Ordinal).ThenBy(x => x.WindowKind).ThenBy(x => x.WindowIndex)),
                 _ => throw new ArgumentOutOfRangeException(nameof(table), table, "not a config table"),
             };
         }
@@ -839,6 +850,9 @@ internal sealed class InMemoryConfigStore : IConfigStore
                     case CertificateEntity x: _certs[x.Id] = x; break;
                     case AcmeAccountEntity x: _acmeAccounts[x.Id] = x; break;
                     case AcmeRenewalEntity x: _renewals[x.CertificateName] = x; break;
+                    case DomainRecordCheckEntity x: _domainChecks[(x.DomainId, x.RecordKey)] = x; break;
+                    case TlsRptBucketEntity x: _tlsRpt[x.Id] = x; break;
+                    case SendingCounterEntity x: _counters[(x.Scope, x.TenantId, x.Domain, x.WindowKind, x.WindowIndex)] = x; break;
                     default: throw new ArgumentOutOfRangeException(nameof(rows), table, "not a config row");
                 }
             }
@@ -874,6 +888,9 @@ internal sealed class InMemoryConfigStore : IConfigStore
                 case "certificate": _certs.Clear(); break;
                 case "acme_account": _acmeAccounts.Clear(); break;
                 case "acme_renewal": _renewals.Clear(); break;
+                case "domain_record_check": _domainChecks.Clear(); break;
+                case "tls_rpt_bucket": _tlsRpt.Clear(); break;
+                case "sending_counter": _counters.Clear(); break;
                 default: throw new ArgumentOutOfRangeException(nameof(table), table, "not a config table");
             }
         }

@@ -71,19 +71,44 @@ public static class EggMailApiExtensions
     {
         ArgumentNullException.ThrowIfNull(loaded);
         MtaConfig config = loaded.Config;
-        var options = new ApiOptions
+        var options = ApiOptionsFrom(config, loaded.LockedKeys);
+        configure?.Invoke(options);
+        services.TryAddSingleton(config.Storage);
+        return services.AddEggMailApi(options);
+    }
+
+    /// <summary>The API settings the deployment configuration yields: <c>Api:*</c>, plus the SMTP limits, bounce domain, webhook rules and metrics switch the API shares with the rest of the process.</summary>
+    public static ApiOptions ApiOptionsFrom(MtaConfig config, IReadOnlySet<string> lockedKeys)
+    {
+        ApiSection api = config.Api;
+        return new ApiOptions
         {
             MaxMessageBytes = config.Smtp.MaxMessageSize,
             MaxRecipients = config.Smtp.MaxRecipients,
             BounceDomain = config.Delivery.BounceDomain,
             MessageIdDomain = config.Hostname,
             Webhooks = config.Webhooks,
-            LockedKeys = loaded.LockedKeys,
+            LockedKeys = lockedKeys,
             MetricsEnabled = config.Observability.MetricsEndpointEnabled,
+            MaxBodyBytes = api.MaxBodyBytes,
+            MaxSendBodyBytes = api.MaxSendBodyBytes,
+            MaxInFlightSendBytes = api.MaxInFlightSendBytes,
+            MaxAttachments = api.MaxAttachments,
+            MaxCustomHeaders = api.MaxCustomHeaders,
+            MaxTags = api.MaxTags,
+            SessionLifetime = api.SessionLifetime,
+            SessionIdleTimeout = api.SessionIdleTimeout,
+            CookieSecure = api.CookieSecure,
+            MaxDomainsPerTenant = api.MaxDomainsPerTenant,
+            MaxApiKeysPerTenant = api.MaxApiKeysPerTenant,
+            MaxSmtpCredentialsPerTenant = api.MaxSmtpCredentialsPerTenant,
+            MaxWebhooksPerTenant = api.MaxWebhooksPerTenant,
+            MaxStatsRows = api.MaxStatsRows,
+            SpfInclude = api.SpfInclude,
+            MetricsAllowedNetworks = api.MetricsAllowedNetworks.Count == 0
+                ? ApiOptions.DefaultMetricsNetworks()
+                : api.MetricsAllowedNetworks.Select(Mta.Webhooks.IpNetwork.Parse).ToList(),
         };
-        configure?.Invoke(options);
-        services.TryAddSingleton(config.Storage);
-        return services.AddEggMailApi(options);
     }
 
     /// <summary>

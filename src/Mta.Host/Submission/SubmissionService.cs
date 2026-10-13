@@ -46,6 +46,9 @@ public sealed class SubmissionRequest
 
     /// <summary>The caller asks to keep the raw message with its attachments after delivery (needs the global switch too).</summary>
     public bool StoreAttachments { get; init; }
+
+    /// <summary>Tags the API caller gave the message; stored with the message's history (<c>History:Mode=Full</c>) and returned by the messages API.</summary>
+    public IReadOnlyList<string>? Tags { get; init; }
 }
 
 public sealed record SubmissionResult(SubmissionStatus Status, Guid MessageId, SenderRejection? Rejection = null, string? Detail = null, string? IdempotencyFingerprint = null)
@@ -125,7 +128,6 @@ public sealed class SubmissionService
         var now = _clock.UtcNow;
         var headers = parsed.Headers;
         var editor = new MessageHeaderEditor(request.Message);
-
         // Bcc must never reach the stored copy. The parsed list is authoritative only when it is complete: past the header count or
         // size limits it stops recording fields, while the editor (which has no such limit) still sees them, so then the rule stays.
         bool headerListComplete = (headers.Anomalies & (MimeAnomaly.TooManyHeaders | MimeAnomaly.HeaderBlockTooLarge)) == 0;
@@ -134,9 +136,15 @@ public sealed class SubmissionService
             editor.Remove(HeaderNames.Bcc);
         }
 
-        if (!headers.TryGetFirst(HeaderId.MessageId, out _))
+        string messageIdHeader;
+        if (headers.TryGetFirst(HeaderId.MessageId, out var existingMessageId))
         {
-            editor.Prepend(HeaderNames.MessageId, MessageBuilder.GenerateMessageId(_options.MessageIdDomain, _clock));
+            messageIdHeader = existingMessageId.Value;
+        }
+        else
+        {
+            messageIdHeader = MessageBuilder.GenerateMessageId(_options.MessageIdDomain, _clock);
+            editor.Prepend(HeaderNames.MessageId, messageIdHeader);
         }
 
         if (!headers.TryGetFirst(HeaderId.Date, out _))
@@ -172,6 +180,8 @@ public sealed class SubmissionService
             Content = content,
             RetainRaw = request.StoreAttachments && _storageOptions.Content.AllowAttachmentStorage && content is { Attachments.Count: > 0 },
             SendingDomain = decision.SendingDomain?.Name ?? fromDomain,
+            MessageIdHeader = messageIdHeader,
+            Tags = request.Tags is { Count: > 0 } tags ? tags.Distinct(StringComparer.Ordinal).ToList() : null,
         };
 
         var result = await _storage.Intake.AcceptAsync(accepted, ct).ConfigureAwait(false);

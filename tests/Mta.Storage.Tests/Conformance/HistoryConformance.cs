@@ -166,6 +166,105 @@ public abstract class HistoryConformance : StorageTestBase
         Assert.Equal(TenantA, d.Summary.TenantId);
     }
 
+    // Tags (API sends)
+
+    [Fact]
+    public async Task Tags_are_stored_with_the_message_and_returned_by_search_and_detail()
+    {
+        var tagged = await AcceptAsync(Msg(tags: ["welcome", "autumn \"2026\"", "über"], received: Start));
+        var plain = await AcceptAsync(Msg(received: Start.AddSeconds(1)));
+
+        MessageDetail detail = (await Storage.History.GetAsync(TenantA, tagged.MessageId, CancellationToken.None))!;
+        Assert.Equal(["welcome", "autumn \"2026\"", "über"], detail.Summary.Tags);
+        Assert.Null((await Storage.History.GetAsync(TenantA, plain.MessageId, CancellationToken.None))!.Summary.Tags);
+
+        Page<MessageSummary> all = await Storage.History.SearchAsync(new MessageQuery(), CancellationToken.None);
+        Assert.Null(all.Items.Single(i => i.MessageId == plain.MessageId).Tags);
+        Assert.Equal(["welcome", "autumn \"2026\"", "über"], all.Items.Single(i => i.MessageId == tagged.MessageId).Tags);
+    }
+
+    [Fact]
+    public async Task Search_by_tag_matches_a_whole_tag_exactly()
+    {
+        var a = await AcceptAsync(Msg(tags: ["welcome", "vip"], received: Start));
+        var b = await AcceptAsync(Msg(tags: ["welcome-back", "bar\"vip"], received: Start.AddSeconds(1)));
+        await AcceptAsync(Msg(received: Start.AddSeconds(2)));
+        async Task<List<Guid>> Find(string tag, Guid? tenant = null) => (await Storage.History.SearchAsync(new MessageQuery(TenantId: tenant, Tag: tag), CancellationToken.None)).Items.Select(i => i.MessageId).ToList();
+
+        Assert.Equal([a.MessageId], await Find("welcome"));
+        Assert.Equal([b.MessageId], await Find("welcome-back"));
+        Assert.Equal([a.MessageId], await Find("vip"));      // not the tag bar"vip
+        Assert.Equal([b.MessageId], await Find("bar\"vip"));
+        Assert.Empty(await Find("wel"));
+        Assert.Empty(await Find("WELCOME"));
+        Assert.Empty(await Find("welcome", TenantB));
+    }
+
+    // Asynchronous bounces and complaints attached to a message's history
+
+    private static AsyncReport Bounce(DateTimeOffset at, string recipient = "alice@example.org") =>
+        new(MessageEventType.Bounced, at, recipient, 550, "5.1.1", "mailbox unavailable");
+
+    [Fact]
+    public async Task An_async_bounce_is_attached_to_the_message_found_by_its_message_id_header()
+    {
+        var m = await AcceptAsync(Msg(messageIdHeader: "<Abc.123@mail.Example.com>", to: ["alice@example.org"]));
+        var d = (await ClaimAsync()).Single();
+        await RecordAsync(d, DeliveryOutcome.Delivered);
+        Clock.Advance(TimeSpan.FromMinutes(5));
+
+        Guid? found = await Storage.History.AttachReportAsync(TenantA, " abc.123@MAIL.example.com ", Bounce(Clock.UtcNow), CancellationToken.None);
+        Assert.Equal(m.MessageId, found);
+
+        var events = await Storage.History.GetEventsAsync(TenantA, m.MessageId, CancellationToken.None);
+        Assert.Equal([MessageEventType.Queued, MessageEventType.Delivered, MessageEventType.Bounced], events.Select(e => e.Type));
+        MessageEvent bounce = events[^1];
+        Assert.Equal(("alice@example.org", 550, "5.1.1", "mailbox unavailable", null), (bounce.Recipient, bounce.SmtpCode, bounce.EnhancedCode, bounce.Message, bounce.DeliveryId));
+        Assert.Equal(Clock.UtcNow, bounce.At);
+        Assert.Equal("bounced", (await Storage.History.GetAsync(TenantA, m.MessageId, CancellationToken.None))!.Summary.Status);
+    }
+
+    [Fact]
+    public async Task An_async_bounce_of_one_recipient_of_several_makes_a_delivered_message_partial_and_a_complaint_makes_it_complained()
+    {
+        var m = await AcceptAsync(Msg(messageIdHeader: "multi@x", to: ["a@example.org", "b@example.org"]));
+        foreach (var d in await ClaimAsync())
+        {
+            await RecordAsync(d, DeliveryOutcome.Delivered);
+        }
+
+        Assert.Equal("delivered", (await Storage.History.GetAsync(TenantA, m.MessageId, CancellationToken.None))!.Summary.Status);
+        await Storage.History.AttachReportAsync(TenantA, "<multi@x>", Bounce(Clock.UtcNow, "b@example.org"), CancellationToken.None);
+        Assert.Equal("partial", (await Storage.History.GetAsync(TenantA, m.MessageId, CancellationToken.None))!.Summary.Status);
+
+        await Storage.History.AttachReportAsync(TenantA, "<multi@x>", new AsyncReport(MessageEventType.Complained, Clock.UtcNow, "a@example.org", null, null, "abuse"), CancellationToken.None);
+        Assert.Equal("complained", (await Storage.History.GetAsync(TenantA, m.MessageId, CancellationToken.None))!.Summary.Status);
+        var types = (await Storage.History.GetEventsAsync(TenantA, m.MessageId, CancellationToken.None)).Select(e => e.Type).ToList();
+        Assert.Equal(1, types.Count(t => t == MessageEventType.Bounced));
+        Assert.Equal(1, types.Count(t => t == MessageEventType.Complained));
+    }
+
+    [Fact]
+    public async Task An_async_report_changes_nothing_for_another_tenant_an_unknown_id_or_an_expired_message()
+    {
+        var m = await AcceptAsync(Msg(tenant: TenantA, messageIdHeader: "<mine@x>"));
+        Assert.Null(await Storage.History.AttachReportAsync(TenantB, "<mine@x>", Bounce(Clock.UtcNow), CancellationToken.None));
+        Assert.Null(await Storage.History.AttachReportAsync(TenantA, "<unknown@x>", Bounce(Clock.UtcNow), CancellationToken.None));
+        Assert.Null(await Storage.History.AttachReportAsync(TenantA, "  ", Bounce(Clock.UtcNow), CancellationToken.None));
+        Assert.Equal([MessageEventType.Queued], (await Storage.History.GetEventsAsync(TenantA, m.MessageId, CancellationToken.None)).Select(e => e.Type));
+
+        Clock.Advance(TimeSpan.FromDays(21)); // past Retention:MetadataDays = 20
+        Assert.Null(await Storage.History.AttachReportAsync(TenantA, "<mine@x>", Bounce(Clock.UtcNow), CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task A_reused_message_id_header_attaches_to_the_newest_message()
+    {
+        await AcceptAsync(Msg(messageIdHeader: "<same@x>", received: Start));
+        var newer = await AcceptAsync(Msg(messageIdHeader: "<same@x>", received: Start.AddMinutes(1)));
+        Assert.Equal(newer.MessageId, await Storage.History.AttachReportAsync(TenantA, "<same@x>", Bounce(Clock.UtcNow), CancellationToken.None));
+    }
+
     // Content lifetime
 
     protected override StorageOptions BuildOptions() => new()
@@ -295,6 +394,15 @@ public abstract class StatsOnlyHistoryConformance : StorageTestBase
         Assert.Null(await Storage.History.GetAsync(TenantA, m.MessageId, CancellationToken.None));
         Assert.Empty(await Storage.History.GetEventsAsync(TenantA, m.MessageId, CancellationToken.None));
         Assert.Null(await Storage.History.GetRetainedRawAsync(TenantA, m.MessageId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Tags_and_asynchronous_reports_store_no_per_message_record()
+    {
+        var m = await AcceptAsync(Msg(messageIdHeader: "<a@x>", tags: ["welcome"]));
+        Assert.Null(await Storage.History.AttachReportAsync(TenantA, "<a@x>", new AsyncReport(MessageEventType.Bounced, Clock.UtcNow, "alice@example.org", 550, "5.1.1", "no"), CancellationToken.None));
+        Assert.Empty((await Storage.History.SearchAsync(new MessageQuery(Tag: "welcome"), CancellationToken.None)).Items);
+        Assert.Empty(await Storage.History.GetEventsAsync(TenantA, m.MessageId, CancellationToken.None));
     }
 
     [Fact]

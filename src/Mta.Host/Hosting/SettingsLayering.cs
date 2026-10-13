@@ -33,7 +33,8 @@ public static class SettingsLayering
         }
 
         // Only the stored layer is added: which keys are locked (set by the deployment) is decided by the deployment layers alone.
-        var final = new LoadedConfig { Config = merged.Config, LockedKeys = deployment.LockedKeys, Errors = merged.Errors };
+        // Source stays the layered configuration (now including the stored layer): the backend switch reads SwitchTarget:* from it and its activator rewrites the bootstrap layer.
+        var final = new LoadedConfig { Config = merged.Config, LockedKeys = deployment.LockedKeys, Errors = merged.Errors, Source = merged.Source };
         if (SameStorageOptions(deployment.Config.Storage, final.Config.Storage))
         {
             return (final, storage);

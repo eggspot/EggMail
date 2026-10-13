@@ -1,6 +1,6 @@
 namespace Mta.Webhooks;
 
-public sealed class WebhookOptions
+public sealed record WebhookOptions
 {
     /// <summary>Timeout for one delivery attempt (the Standard Webhooks spec suggests 15-30 s; Svix uses 15 s).</summary>
     public TimeSpan Timeout { get; init; } = TimeSpan.FromSeconds(15);
