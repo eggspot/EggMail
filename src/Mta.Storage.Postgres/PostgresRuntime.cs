@@ -14,6 +14,7 @@ internal sealed class PostgresRuntime
     private WebhookTarget[] _targets = [];
     private long _targetsVersion = -1;
     private long _targetsLoadedAt;
+    private readonly SemaphoreSlim _targetsGate = new(1, 1);
 
     /// <summary>Another replica can change endpoints without this process noticing, so the cached list is also refreshed by age.</summary>
     private const long TargetsMaxAgeMs = 5000;
@@ -120,16 +121,47 @@ internal sealed class PostgresRuntime
     public async ValueTask<WebhookTarget[]> GetWebhookTargetsAsync(CancellationToken cancellationToken)
     {
         long version = ConfigStore.WebhookEndpointVersion;
-        if (version == Volatile.Read(ref _targetsVersion) && Environment.TickCount64 - Volatile.Read(ref _targetsLoadedAt) < TargetsMaxAgeMs)
+        if (IsFresh(version))
         {
             return Volatile.Read(ref _targets);
         }
 
-        var endpoints = await ConfigStore.GetWebhookEndpointsAsync(null, cancellationToken).ConfigureAwait(false);
-        WebhookTarget[] targets = endpoints.Where(e => e.Enabled).Select(e => new WebhookTarget(e.Id, e.TenantId, e.EventTypes)).ToArray();
-        Volatile.Write(ref _targets, targets);
-        Volatile.Write(ref _targetsVersion, version);
-        Volatile.Write(ref _targetsLoadedAt, Environment.TickCount64);
-        return targets;
+        // One refresh at a time: the configuration read is synchronous, and dozens of delivery workers that all notice an
+        // expired list at the same moment must not each block a thread and take a pooled connection for it. When only the age
+        // expired (no local change) the others keep using the list they have; after a local endpoint change they wait for the new one.
+        bool ageOnly = version == Volatile.Read(ref _targetsVersion) && Volatile.Read(ref _targetsVersion) >= 0;
+        if (ageOnly)
+        {
+            if (!await _targetsGate.WaitAsync(0, cancellationToken).ConfigureAwait(false))
+            {
+                return Volatile.Read(ref _targets);
+            }
+        }
+        else
+        {
+            await _targetsGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        try
+        {
+            if (IsFresh(version))
+            {
+                return Volatile.Read(ref _targets);
+            }
+
+            var endpoints = await Task.Run(() => ConfigStore.GetWebhookEndpointsAsync(null, cancellationToken).AsTask(), cancellationToken).ConfigureAwait(false);
+            WebhookTarget[] targets = endpoints.Where(e => e.Enabled).Select(e => new WebhookTarget(e.Id, e.TenantId, e.EventTypes)).ToArray();
+            Volatile.Write(ref _targets, targets);
+            Volatile.Write(ref _targetsVersion, version);
+            Volatile.Write(ref _targetsLoadedAt, Environment.TickCount64);
+            return targets;
+        }
+        finally
+        {
+            _targetsGate.Release();
+        }
     }
+
+    private bool IsFresh(long version) =>
+        version == Volatile.Read(ref _targetsVersion) && Environment.TickCount64 - Volatile.Read(ref _targetsLoadedAt) < TargetsMaxAgeMs;
 }

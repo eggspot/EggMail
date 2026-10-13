@@ -275,7 +275,8 @@ internal sealed class PostgresMaintenance(PostgresRuntime rt, PostgresQueueStore
         bool ready;
         try
         {
-            await using NpgsqlConnection c = await rt.Data.OpenConnectionAsync(ct).ConfigureAwait(false);
+            // One connection at a time: the connection of the first query is returned before the next one is opened.
+            await using (NpgsqlConnection c = await rt.Data.OpenConnectionAsync(ct).ConfigureAwait(false))
             await using (var cmd = new NpgsqlCommand("SELECT current_setting('server_version'), pg_is_in_recovery()", c))
             {
                 await using NpgsqlDataReader r = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);

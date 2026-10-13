@@ -16,7 +16,11 @@ internal enum SqliteFileKind
 /// <summary>One SQLite database file (queue.db, stats.db, config.db, history.db): its settings, connections, schema and integrity.</summary>
 internal sealed class SqliteFile
 {
-    /// <summary>Bumped when a schema change needs a migration step (stored in <c>PRAGMA user_version</c>).</summary>
+    /// <summary>
+    /// Bumped when a schema change needs a migration step (stored in <c>PRAGMA user_version</c>). Version 2 added the dashboard user and
+    /// session tables (config.db) and <c>api_idempotency_key.fingerprint</c> (queue.db); version 3 added the backend switch hold column
+    /// and progress tables. <see cref="UpgradeFromV1"/> and <see cref="UpgradeFromV2"/> apply them in turn.
+    /// </summary>
     public const int SchemaVersion = Model.StorageModel.SchemaVersion;
 
     private readonly SqliteOptions _options;
@@ -158,9 +162,15 @@ internal sealed class SqliteFile
             return;
         }
 
-        if (version == 1)
+        if (version >= 1)
         {
-            UpgradeFromVersion1(connection);
+            // One step per version, each in its own transaction: a file at 1 goes through 2 to 3, a file at 2 goes to 3.
+            if (version == 1)
+            {
+                UpgradeFromV1(connection);
+            }
+
+            UpgradeFromV2(connection);
             return;
         }
 
@@ -188,11 +198,55 @@ internal sealed class SqliteFile
         tx.Commit();
     }
 
+    /// <summary>Version 1 to 2: adds what the HTTP API introduced, taking the statements from the generated schema so they cannot drift from the model.</summary>
+    private void UpgradeFromV1(SqliteConnection connection)
+    {
+        string script = ApplyWithoutRowId(_createScript(), WithoutRowIdTables);
+        var statements = new List<string>();
+        if (Kind == SqliteFileKind.Config)
+        {
+            foreach (string table in new[] { "dashboard_user", "dashboard_session" })
+            {
+                statements.Add(Regex.Match(script, "CREATE TABLE \"" + table + "\" \\(.*?\\r?\\n\\);", RegexOptions.Singleline).Value);
+                foreach (Match index in Regex.Matches(script, "CREATE (?:UNIQUE )?INDEX \"[^\"]+\" ON \"" + table + "\" [^;]*;"))
+                {
+                    statements.Add(index.Value);
+                }
+            }
+        }
+        else if (Kind == SqliteFileKind.Queue)
+        {
+            statements.Add("ALTER TABLE \"api_idempotency_key\" ADD COLUMN \"fingerprint\" TEXT NULL;");
+        }
+
+        if (statements.Any(string.IsNullOrEmpty))
+        {
+            throw new InvalidOperationException($"Could not derive the version 2 upgrade of {FileName} from the generated schema script.");
+        }
+
+        using var tx = connection.BeginTransaction();
+        foreach (string statement in statements)
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = statement;
+            cmd.ExecuteNonQuery();
+        }
+
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText = "PRAGMA user_version=2";
+            cmd.ExecuteNonQuery();
+        }
+        tx.Commit();
+    }
+
     /// <summary>
-    /// Version 2 added the backend switch columns and progress table (design §4.6): <c>transfer_switch_id</c> on the queue and
+    /// Version 3 added the backend switch columns and progress table (design §4.6): <c>transfer_switch_id</c> on the queue and
     /// outbox rows (a transfer mark or activation hold) and one <c>transfer_chunk_*</c> table per file.
     /// </summary>
-    private void UpgradeFromVersion1(SqliteConnection connection)
+    private void UpgradeFromV2(SqliteConnection connection)
     {
         string chunkTable = "transfer_chunk_" + Name;
         var regex = new Regex("CREATE TABLE \"" + chunkTable + "\" \\(.*?\\r?\\n\\);", RegexOptions.Singleline);
@@ -219,7 +273,7 @@ internal sealed class SqliteFile
         }
 
         Run(create.Value);
-        Run("PRAGMA user_version=" + SchemaVersion.ToString(CultureInfo.InvariantCulture));
+        Run("PRAGMA user_version=3");
         tx.Commit();
     }
 

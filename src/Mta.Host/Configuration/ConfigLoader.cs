@@ -13,6 +13,9 @@ public sealed class LoadedConfig
 
     public required IReadOnlyList<string> Errors { get; init; }
 
+    /// <summary>The layered configuration this was loaded from (the backend switch reads <c>SwitchTarget:*</c> and detects the layer that supplies a key).</summary>
+    public IConfiguration? Source { get; init; }
+
     public bool IsValid => Errors.Count == 0;
 }
 
@@ -102,7 +105,7 @@ public static class ConfigLoader
             }
         }
 
-        return new LoadedConfig { Config = cfg, LockedKeys = locked, Errors = errors };
+        return new LoadedConfig { Config = cfg, LockedKeys = locked, Errors = errors, Source = configuration };
     }
 
     /// <summary>

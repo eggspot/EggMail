@@ -39,10 +39,11 @@ public sealed class NoModelHooks : IStorageModelHooks
 public static class StorageModel
 {
     /// <summary>
-    /// The version of the persisted schema (SQLite <c>PRAGMA user_version</c>), recorded in switch bundles. Version 2 added the
-    /// backend switch hold column and the <c>transfer_chunk_*</c> progress tables.
+    /// The version of the persisted schema (SQLite <c>PRAGMA user_version</c>), recorded in switch bundles. Version 2 added the dashboard
+    /// users, sessions and the idempotency fingerprint (HTTP API); version 3 the backend switch hold column and the
+    /// <c>transfer_chunk_*</c> progress tables.
     /// </summary>
-    public const int SchemaVersion = 2;
+    public const int SchemaVersion = 3;
 
     /// <summary>
     /// Entity annotation requesting a <c>WITHOUT ROWID</c> table on SQLite (small rows whose primary key is the
@@ -76,6 +77,17 @@ public static class StorageModel
             e.ToTable("smtp_credential").HasKey(x => x.Id);
             e.HasIndex(x => x.UserName).IsUnique();
             e.HasIndex(x => x.TenantId);
+        });
+        mb.Entity<DashboardUserEntity>(e =>
+        {
+            e.ToTable("dashboard_user").HasKey(x => x.Id);
+            e.HasIndex(x => x.UserName).IsUnique();
+        });
+        mb.Entity<DashboardSessionEntity>(e =>
+        {
+            e.ToTable("dashboard_session").HasKey(x => x.IdHash);
+            e.HasIndex(x => x.UserId);
+            e.HasIndex(x => x.ExpiresAt);
         });
         mb.Entity<DomainEntity>(e =>
         {

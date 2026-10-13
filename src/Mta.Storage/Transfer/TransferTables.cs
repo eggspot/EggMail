@@ -29,6 +29,17 @@ public static class TransferTables
         Order = q => q.OrderBy(x => x.Id),
     });
 
+    public static readonly TransferTable<DashboardUserEntity> DashboardUsers = new("dashboard_user", TransferPart.Config, new()
+    {
+        Order = q => q.OrderBy(x => x.Id),
+    });
+
+    /// <summary>Sessions move too, so signed-in users stay signed in after the cutover (only the digest of the secret is stored).</summary>
+    public static readonly TransferTable<DashboardSessionEntity> DashboardSessions = new("dashboard_session", TransferPart.Config, new()
+    {
+        Order = q => q.OrderBy(x => x.IdHash),
+    });
+
     public static readonly TransferTable<DomainEntity> Domains = new("domain", TransferPart.Config, new()
     {
         Order = q => q.OrderBy(x => x.Id),
@@ -205,7 +216,7 @@ public static class TransferTables
     /// <summary>Every table, in import order (config, stats, queue, history).</summary>
     public static IReadOnlyList<TransferTable> All { get; } =
     [
-        Tenants, ApiKeys, SmtpCredentials, Domains, DkimKeys, Suppressions, WebhookEndpoints, Settings, TlsPolicies, RelayRoutes, Certificates, AcmeAccounts, AcmeRenewals,
+        Tenants, ApiKeys, SmtpCredentials, DashboardUsers, DashboardSessions, Domains, DkimKeys, Suppressions, WebhookEndpoints, Settings, TlsPolicies, RelayRoutes, Certificates, AcmeAccounts, AcmeRenewals,
         StatAggregates, StatMeta, RecentEvents, WebhookAttempts,
         Deliveries, Spool, WebhookOutbox, IdempotencyKeys,
         MessageIndex, MessageRecipients, MessageEvents, MessageContents, RetainedRaw,

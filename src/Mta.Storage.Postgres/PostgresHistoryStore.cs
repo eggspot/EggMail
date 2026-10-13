@@ -10,8 +10,49 @@ namespace Mta.Storage.Postgres;
 /// acknowledged without its history row and an event never exists without its delivery outcome. Reads mirror the SQLite
 /// provider statement for statement; only the dialect differs.
 /// </summary>
-internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore
+internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore, IMessageRecipientLookup
 {
+    public async ValueTask<IReadOnlyDictionary<Guid, IReadOnlyList<string>>> GetRecipientsAsync(Guid tenantId, IReadOnlyCollection<Guid> messageIds, int maxPerMessage, CancellationToken cancellationToken)
+    {
+        var result = new Dictionary<Guid, IReadOnlyList<string>>();
+        if (!rt.IsFull || messageIds.Count == 0)
+        {
+            return result;
+        }
+
+        try
+        {
+            await using NpgsqlConnection c = await rt.Data.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            await using var cmd = new NpgsqlCommand(
+                "SELECT r.message_id, r.recipient FROM message_recipient r JOIN message_index m ON m.day = r.day AND m.message_id = r.message_id " +
+                "WHERE r.day = $1 AND r.message_id = $2 AND m.tenant_id = $3 ORDER BY r.recipient LIMIT $4", c);
+            foreach (Guid messageId in messageIds)
+            {
+                cmd.Parameters.Clear();
+                cmd.Parameters.Int(StorageTime.DayNumber(messageId)).Uuid(messageId).Uuid(tenantId).Long(Math.Max(0, maxPerMessage));
+                var list = new List<string>();
+                await using (NpgsqlDataReader r = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    while (await r.ReadAsync(cancellationToken).ConfigureAwait(false))
+                    {
+                        list.Add(r.GetString(1));
+                    }
+                }
+
+                if (list.Count > 0)
+                {
+                    result[messageId] = list;
+                }
+            }
+
+            return result;
+        }
+        catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
+        {
+            throw rt.Unavailable(ex);
+        }
+    }
+
     // Writes (called by PostgresQueueStore inside its transaction)
 
     private const string IndexInsert =

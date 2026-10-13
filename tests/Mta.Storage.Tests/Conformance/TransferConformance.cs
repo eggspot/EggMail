@@ -47,6 +47,9 @@ public abstract class TransferConformance : StorageTestBase
         await c.UpsertTenantAsync(new Tenant(TenantB, "Beta", "beta", false, now, false), default);
         await c.UpsertDomainAsync(new DomainRecord(domainId, TenantA, "example.com", DomainStatus.Verified, "bounces.example.com", true, now, now, now.AddHours(1), 0, null, false, null), default);
         await c.AddDkimKeyAsync(new DkimKeyRecord(Ids.New(), domainId, "s1", [9, 8, 7, 6], "PUBLICKEY", now, true, null), default);
+        Guid dashboardUser = Ids.New();
+        await c.UpsertDashboardUserAsync(new DashboardUser(dashboardUser, "admin", "pbkdf2$hash", DashboardRole.Admin, null, true, now), default);
+        await c.AddDashboardSessionAsync(new DashboardSession(SHA256.HashData("session"u8), dashboardUser, "csrf-token", now, now, now.AddHours(8)), default);
         await c.AddApiKeyAsync(new ApiKeyRecord(Ids.New(), TenantA, "ci", "egg_ab", SHA256.HashData("key"u8), "send,read", now, null, null), default);
         await c.UpsertSmtpCredentialAsync(new SmtpCredential(Ids.New(), TenantA, "acme-user", "pbkdf2$hash", true, now), default);
         await c.AddSuppressionAsync(new SuppressionRecord(TenantA, "gone@example.org", SuppressionReason.HardBounce, "550 5.1.1", now, null), default);
@@ -61,7 +64,13 @@ public abstract class TransferConformance : StorageTestBase
         await c.SetSettingAsync(new SettingRecord(TransferTables.DataProtectionSettingPrefix + "key-1", null, "\"<key/>\"", now), default);
         Guid endpoint = await AddEndpointAsync(TenantA, true, "*");
 
-        await AcceptAsync(Msg(to: ["a@example.org", "b@example.net"], idempotencyKey: "idem-1", retainRaw: true));
+        AcceptedMessage withFingerprint = Msg(to: ["a@example.org", "b@example.net"], idempotencyKey: "idem-1", retainRaw: true);
+        await AcceptAsync(new AcceptedMessage
+        {
+            MessageId = withFingerprint.MessageId, TenantId = withFingerprint.TenantId, Source = withFingerprint.Source, EnvelopeFrom = withFingerprint.EnvelopeFrom, Recipients = withFingerprint.Recipients,
+            Raw = withFingerprint.Raw, ReceivedAt = withFingerprint.ReceivedAt, ExpiresAt = withFingerprint.ExpiresAt, IdempotencyKey = "idem-1", IdempotencyFingerprint = "fp-123", Content = withFingerprint.Content,
+            RetainRaw = true, SendingDomain = withFingerprint.SendingDomain,
+        });
         await AcceptAsync(Msg(to: ["c@example.org"], idempotencyKey: "idem-2", size: 40_000));
         await AcceptAsync(Msg(to: ["d@example.org"], tenant: TenantB));
         var claimed = await ClaimAsync(max: 10, now: now);
@@ -87,7 +96,7 @@ public abstract class TransferConformance : StorageTestBase
             long count = await Transfer.CountAsync(table, TransferRange.All, default);
             var rows = await ReadAllAsync(table);
             Assert.Equal(count, rows.Count);
-            if (table.Name is "tenant" or "domain" or "dkim_key" or "api_key" or "smtp_credential" or "suppression" or "setting" or "tls_policy" or "relay_route" or "certificate"
+            if (table.Name is "tenant" or "dashboard_user" or "dashboard_session" or "domain" or "dkim_key" or "api_key" or "smtp_credential" or "suppression" or "setting" or "tls_policy" or "relay_route" or "certificate"
                 or "acme_account" or "acme_renewal" or "webhook_endpoint" or "delivery_queue" or "message_spool" or "webhook_outbox" or "api_idempotency_key" or "stat_aggregate" or "webhook_attempt")
             {
                 Assert.True(count > 0, $"{table.Name} should have rows");

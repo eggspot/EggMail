@@ -11,6 +11,8 @@ internal sealed class InMemoryConfigStore : IConfigStore
     private readonly Dictionary<Guid, TenantEntity> _tenants = [];
     private readonly Dictionary<Guid, ApiKeyEntity> _apiKeys = [];
     private readonly Dictionary<Guid, SmtpCredentialEntity> _smtp = [];
+    private readonly Dictionary<Guid, DashboardUserEntity> _dashboardUsers = [];
+    private readonly List<DashboardSessionEntity> _dashboardSessions = [];
     private readonly Dictionary<Guid, DomainEntity> _domains = [];
     private readonly Dictionary<Guid, DkimKeyEntity> _dkim = [];
     private readonly Dictionary<(Guid, string), SuppressionEntity> _suppressions = [];
@@ -162,6 +164,129 @@ internal sealed class InMemoryConfigStore : IConfigStore
         }
     }
 
+    public ValueTask<bool> DeleteSmtpCredentialAsync(Guid tenantId, Guid credentialId, CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            return R(_smtp.TryGetValue(credentialId, out var c) && c.TenantId == tenantId && _smtp.Remove(credentialId));
+        }
+    }
+
+    // Dashboard users and sessions
+
+    public ValueTask<IReadOnlyList<DashboardUser>> GetDashboardUsersAsync(CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            return R<IReadOnlyList<DashboardUser>>(_dashboardUsers.Values.OrderBy(u => u.UserName, StringComparer.Ordinal).Select(u => u.ToRecord()).ToList());
+        }
+    }
+
+    public ValueTask<DashboardUser?> GetDashboardUserAsync(Guid id, CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            return R(_dashboardUsers.TryGetValue(id, out var u) ? u.ToRecord() : null);
+        }
+    }
+
+    public ValueTask<DashboardUser?> FindDashboardUserAsync(string userName, CancellationToken ct)
+    {
+        string n = ConfigMapping.NormalizeUserName(userName);
+        lock (_gate)
+        {
+            return R(_dashboardUsers.Values.FirstOrDefault(u => u.UserName == n)?.ToRecord());
+        }
+    }
+
+    public ValueTask UpsertDashboardUserAsync(DashboardUser user, CancellationToken ct)
+    {
+        var e = user.ToEntity();
+        lock (_gate)
+        {
+            if (_dashboardUsers.Values.Any(u => u.UserName == e.UserName && u.Id != e.Id))
+            {
+                throw Conflict("dashboard_user.user_name");
+            }
+
+            _dashboardUsers[e.Id] = e;
+        }
+
+        return default;
+    }
+
+    public ValueTask<bool> DeleteDashboardUserAsync(Guid id, CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            _dashboardSessions.RemoveAll(s => s.UserId == id);
+            return R(_dashboardUsers.Remove(id));
+        }
+    }
+
+    public ValueTask AddDashboardSessionAsync(DashboardSession session, CancellationToken ct)
+    {
+        var e = session.ToEntity();
+        lock (_gate)
+        {
+            if (_dashboardSessions.Any(s => s.IdHash.AsSpan().SequenceEqual(e.IdHash)))
+            {
+                throw Conflict("dashboard_session");
+            }
+
+            _dashboardSessions.Add(e);
+        }
+
+        return default;
+    }
+
+    public ValueTask<DashboardSession?> FindDashboardSessionAsync(byte[] idHash, CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            return R(_dashboardSessions.FirstOrDefault(s => s.IdHash.AsSpan().SequenceEqual(idHash))?.ToRecord());
+        }
+    }
+
+    public ValueTask TouchDashboardSessionAsync(byte[] idHash, DateTimeOffset lastSeenAt, CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            var s = _dashboardSessions.FirstOrDefault(x => x.IdHash.AsSpan().SequenceEqual(idHash));
+            if (s is not null)
+            {
+                s.LastSeenAt = StorageTime.Normalize(lastSeenAt);
+            }
+        }
+
+        return default;
+    }
+
+    public ValueTask<bool> DeleteDashboardSessionAsync(byte[] idHash, CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            return R(_dashboardSessions.RemoveAll(s => s.IdHash.AsSpan().SequenceEqual(idHash)) > 0);
+        }
+    }
+
+    public ValueTask<int> DeleteDashboardSessionsOfUserAsync(Guid userId, CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            return R(_dashboardSessions.RemoveAll(s => s.UserId == userId));
+        }
+    }
+
+    public ValueTask<int> DeleteExpiredDashboardSessionsAsync(DateTimeOffset now, CancellationToken ct)
+    {
+        DateTimeOffset n = StorageTime.Normalize(now);
+        lock (_gate)
+        {
+            return R(_dashboardSessions.RemoveAll(s => s.ExpiresAt <= n));
+        }
+    }
+
     // Domains and DKIM
 
     public ValueTask<IReadOnlyList<DomainRecord>> GetDomainsAsync(Guid? tenantId, CancellationToken ct)
@@ -247,6 +372,14 @@ internal sealed class InMemoryConfigStore : IConfigStore
         }
 
         return default;
+    }
+
+    public ValueTask<bool> DeletePendingDkimKeyAsync(Guid domainId, Guid keyId, CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            return R(_dkim.TryGetValue(keyId, out var k) && k.DomainId == domainId && !k.Active && k.RetiredAt is null && _dkim.Remove(keyId));
+        }
     }
 
     public ValueTask SetActiveDkimKeyAsync(Guid domainId, Guid keyId, DateTimeOffset at, CancellationToken ct)
@@ -392,6 +525,14 @@ internal sealed class InMemoryConfigStore : IConfigStore
                 .OrderBy(w => w.CreatedAt).ThenBy(w => w.Id)
                 .Select(w => w.Id)
                 .ToList();
+        }
+    }
+
+    internal bool IsEnabledEndpointOf(Guid tenantId, Guid endpointId)
+    {
+        lock (_gate)
+        {
+            return _endpoints.TryGetValue(endpointId, out var w) && w.TenantId == tenantId && w.Enabled;
         }
     }
 
@@ -637,6 +778,8 @@ internal sealed class InMemoryConfigStore : IConfigStore
                 "tenant" => Snapshot(_tenants.Values.OrderBy(x => x.Id)),
                 "api_key" => Snapshot(_apiKeys.Values.OrderBy(x => x.Id)),
                 "smtp_credential" => Snapshot(_smtp.Values.OrderBy(x => x.Id)),
+                "dashboard_user" => Snapshot(_dashboardUsers.Values.OrderBy(x => x.Id)),
+                "dashboard_session" => Snapshot(_dashboardSessions.OrderBy(x => Convert.ToHexString(x.IdHash), StringComparer.Ordinal)),
                 "domain" => Snapshot(_domains.Values.OrderBy(x => x.Id)),
                 "dkim_key" => Snapshot(_dkim.Values.OrderBy(x => x.Id)),
                 "suppression" => Snapshot(_suppressions.Values.OrderBy(x => x.TenantId).ThenBy(x => x.Address, StringComparer.Ordinal)),
@@ -664,6 +807,11 @@ internal sealed class InMemoryConfigStore : IConfigStore
                     case TenantEntity x: _tenants[x.Id] = x; break;
                     case ApiKeyEntity x: _apiKeys[x.Id] = x; break;
                     case SmtpCredentialEntity x: _smtp[x.Id] = x; break;
+                    case DashboardUserEntity x: _dashboardUsers[x.Id] = x; break;
+                    case DashboardSessionEntity x:
+                        _dashboardSessions.RemoveAll(s => s.IdHash.AsSpan().SequenceEqual(x.IdHash));
+                        _dashboardSessions.Add(x);
+                        break;
                     case DomainEntity x: _domains[x.Id] = x; break;
                     case DkimKeyEntity x: _dkim[x.Id] = x; break;
                     case SuppressionEntity x: _suppressions[(x.TenantId, x.Address)] = x; break;
@@ -691,6 +839,8 @@ internal sealed class InMemoryConfigStore : IConfigStore
                 case "tenant": _tenants.Clear(); break;
                 case "api_key": _apiKeys.Clear(); break;
                 case "smtp_credential": _smtp.Clear(); break;
+                case "dashboard_user": _dashboardUsers.Clear(); break;
+                case "dashboard_session": _dashboardSessions.Clear(); break;
                 case "domain": _domains.Clear(); break;
                 case "dkim_key": _dkim.Clear(); break;
                 case "suppression": _suppressions.Clear(); break;

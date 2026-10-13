@@ -186,6 +186,20 @@ internal sealed class ScriptedConnection(TcpClient client)
         }
     }
 
+    /// <summary>Reads exactly <paramref name="count"/> bytes (a BDAT chunk), including any already buffered.</summary>
+    public async Task ReadBytesAsync(int count)
+    {
+        while (_buf.Count < count)
+        {
+            byte[] chunk = new byte[4096];
+            int n = await _s.ReadAsync(chunk);
+            if (n == 0) { throw new IOException("eof"); }
+            _buf.AddRange(chunk.AsSpan(0, n).ToArray());
+        }
+
+        _buf.RemoveRange(0, count);
+    }
+
     public void Abort() => client.Client.Close(0);
 
     public async Task HoldOpenAsync(int ms) => await Task.Delay(ms);

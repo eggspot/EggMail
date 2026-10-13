@@ -27,7 +27,7 @@ internal static class DashboardHosting
             await next().ConfigureAwait(false);
         });
 
-        app.MapGet("/healthz", () => Results.Text("ok"));
+        // /healthz, /readyz, /metrics and /api/** belong to the HTTP API (ApiHosting).
         app.MapGet("/.well-known/security.txt", () => Results.Text(
             "Contact: https://github.com/eggspot/EggMail/security/advisories/new\n" +
             "Expires: " + DateTimeOffset.UtcNow.AddDays(180).ToString("yyyy-MM-dd'T'00:00:00'Z'", System.Globalization.CultureInfo.InvariantCulture) + "\n" +

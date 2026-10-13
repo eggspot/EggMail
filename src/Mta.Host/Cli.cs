@@ -135,6 +135,7 @@ internal static class Cli
         // Backend switch startup gate (design 4.6): a confirmed target becomes Active, a fenced source or an unactivated target stays quiet.
         var gate = await StartupGate.EvaluateAsync(storage, clock, startupLog, CancellationToken.None).ConfigureAwait(false);
         await using var runtime = await EggMailRuntime.CreateAsync(config, storage, clock, startupLog, CancellationToken.None).ConfigureAwait(false);
+        await ApiHosting.EnsureBootstrapAdminAsync(config, storage, clock, startupLog, CancellationToken.None).ConfigureAwait(false);
 
         builder.Services.AddSingleton(loaded);
         builder.Services.AddSingleton(config);
@@ -170,6 +171,7 @@ internal static class Cli
             // certificate renewal (the old data stays exactly as it is until the switch is finalized or rolled back).
             startupLog.Write(MtaLogLevel.Warning, "switch", "starting restricted: " + gate.Banner);
         }
+        ApiHosting.AddServices(builder, loaded, runtime);
         builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(45));
 
         builder.WebHost.ConfigureKestrel(k =>
@@ -186,6 +188,7 @@ internal static class Cli
 
         var app = builder.Build();
         DashboardHosting.Map(app);
+        ApiHosting.Map(app, runtime);
         await app.RunAsync().ConfigureAwait(false);
         return 0;
     }

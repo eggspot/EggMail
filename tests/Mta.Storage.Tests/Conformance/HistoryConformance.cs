@@ -46,6 +46,24 @@ public abstract class HistoryConformance : StorageTestBase
     }
 
     [Fact]
+    public async Task Recipient_lookup_returns_sorted_recipients_of_the_tenants_messages_only()
+    {
+        Assert.True(Storage.History is IMessageRecipientLookup, "every provider in this repository implements the optional lookup");
+        var lookup = (IMessageRecipientLookup)Storage.History;
+        var mine = await AcceptAsync(Msg(tenant: TenantA, to: ["zed@example.org", "amy@example.org", "bob@example.org"]));
+        var theirs = await AcceptAsync(Msg(tenant: TenantB, to: ["other@example.org"]));
+
+        var found = await lookup.GetRecipientsAsync(TenantA, [mine.MessageId, theirs.MessageId, Ids.New()], 10, CancellationToken.None);
+        Assert.Equal(["amy@example.org", "bob@example.org", "zed@example.org"], found[mine.MessageId]);
+        Assert.False(found.ContainsKey(theirs.MessageId), "another tenant's message must not be disclosed");
+        Assert.Single(found);
+
+        var capped = await lookup.GetRecipientsAsync(TenantA, [mine.MessageId], 2, CancellationToken.None);
+        Assert.Equal(["amy@example.org", "bob@example.org"], capped[mine.MessageId]);
+        Assert.Empty(await lookup.GetRecipientsAsync(TenantA, [], 5, CancellationToken.None));
+    }
+
+    [Fact]
     public async Task Search_limit_is_respected_and_reports_more_pages()
     {
         await AcceptManyAsync(3);

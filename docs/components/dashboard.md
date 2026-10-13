@@ -117,7 +117,7 @@ Verification at the time of writing: `npm run lint` (tsc plus custom rules over 
 
 ## API contract gaps and additions
 
-[api.md](../api.md) leaves several shapes open. The dashboard and the mock assume the following; the API implementation should either adopt them or tell the dashboard what to change (nothing was changed in api.md).
+[api.md](../api.md) left several shapes open. The dashboard and the mock assume the following. **The API implementation ([api.md](../api.md), [components/api.md](api.md)) adopted all of them and documents them in api.md**; the differences are: a storage switch step in the wrong state answers `409 conflict` (the mock used `409 validation_failed`; the dashboard does not depend on the code), and there are extra response members and error codes (`conflict`, `tenant_disabled`, `content_not_recorded`, `unsupported_media_type`) that the dashboard shows by their `detail` because it has no friendly text for them. `ApiContractTests` in `tests/Mta.Host.Tests/Api` checks the real API against `dashboard/src/api/types.ts`. The dashboard has not been run against the real API in a browser.
 
 1. **CSRF token:** read from the `csrfToken` member of `GET /me` (the `X-CSRF-Token` response header is not read). The mock sends both.
 2. **Sign-out:** `DELETE /api/v1/session` (not in the contract).

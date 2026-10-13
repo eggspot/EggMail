@@ -72,7 +72,7 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
                 }
 
                 return await AcceptCoreAsync(message, now, day, writeHistory, content, storeContent, subject, eventId, cancellationToken).ConfigureAwait(false);
-            }).ConfigureAwait(false);
+            }, () => writeHistory ? day : null, cancellationToken).ConfigureAwait(false);
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrors.UniqueViolation)
         {
@@ -91,8 +91,12 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
         return result;
     }
 
-    /// <summary>A write that hits a missing partition (dropped by another replica, or created too late) creates it and tries once more.</summary>
-    private async Task<T> WithPartitionRetryAsync<T>(Func<Task<T>> body)
+    /// <summary>
+    /// A write that hits a missing partition (dropped by another replica, or never created for this day) creates it and tries
+    /// once more. The failed attempt has already given its connection and transaction back, so the partition is created while
+    /// this caller holds no pooled connection: nothing here ever waits for a second connection while holding the first.
+    /// </summary>
+    private async Task<T> WithPartitionRetryAsync<T>(Func<Task<T>> body, Func<int?> missingDay, CancellationToken ct)
     {
         try
         {
@@ -101,6 +105,11 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
         catch (PostgresException ex) when (ex.SqlState == PostgresErrors.CheckViolation && ex.MessageText.Contains("no partition", StringComparison.Ordinal))
         {
             rt.Partitions.ForgetAll();
+            if (missingDay() is { } day)
+            {
+                await rt.Partitions.EnsureDayAsync(day, force: true, ct).ConfigureAwait(false);
+            }
+
             return await body().ConfigureAwait(false);
         }
     }
@@ -119,21 +128,27 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
                 for (int attempt = 0; ; attempt++)
                 {
                     await using var upsert = new NpgsqlCommand(
-                        "INSERT INTO api_idempotency_key (tenant_id, idempotency_key, message_id, created_at, expires_at) VALUES ($1, $2, $3, $4, $5) " +
-                        "ON CONFLICT (tenant_id, idempotency_key) DO UPDATE SET message_id = excluded.message_id, created_at = excluded.created_at, expires_at = excluded.expires_at " +
-                        "WHERE api_idempotency_key.expires_at <= $6", connection, tx);
-                    upsert.Parameters.Uuid(m.TenantId).Text(key).Uuid(m.MessageId).Time(now).Time(now + rt.Options.Queue.IdempotencyKeyLifetime).Time(now);
+                        "INSERT INTO api_idempotency_key (tenant_id, idempotency_key, message_id, created_at, expires_at, fingerprint) VALUES ($1, $2, $3, $4, $5, $6) " +
+                        "ON CONFLICT (tenant_id, idempotency_key) DO UPDATE SET message_id = excluded.message_id, created_at = excluded.created_at, expires_at = excluded.expires_at, fingerprint = excluded.fingerprint " +
+                        "WHERE api_idempotency_key.expires_at <= $7", connection, tx);
+                    upsert.Parameters.Uuid(m.TenantId).Text(key).Uuid(m.MessageId).Time(now).Time(now + rt.Options.Queue.IdempotencyKeyLifetime).Text(m.IdempotencyFingerprint).Time(now);
                     if (await upsert.ExecuteNonQueryAsync(ct).ConfigureAwait(false) > 0)
                     {
                         break; // the key is ours
                     }
 
-                    await using var get = new NpgsqlCommand("SELECT message_id FROM api_idempotency_key WHERE tenant_id = $1 AND idempotency_key = $2", connection, tx);
+                    await using var get = new NpgsqlCommand("SELECT message_id, fingerprint FROM api_idempotency_key WHERE tenant_id = $1 AND idempotency_key = $2", connection, tx);
                     get.Parameters.Uuid(m.TenantId).Text(key);
-                    if (await get.ExecuteScalarAsync(ct).ConfigureAwait(false) is Guid existing)
+                    await using (NpgsqlDataReader found = await get.ExecuteReaderAsync(ct).ConfigureAwait(false))
                     {
-                        await tx.RollbackAsync(ct).ConfigureAwait(false);
-                        return new IntakeResult(IntakeStatus.DuplicateIdempotencyKey, existing);
+                        if (await found.ReadAsync(ct).ConfigureAwait(false))
+                        {
+                            Guid existing = found.GetGuid(0);
+                            string? fingerprint = found.IsDBNull(1) ? null : found.GetString(1);
+                            await found.CloseAsync().ConfigureAwait(false);
+                            await tx.RollbackAsync(ct).ConfigureAwait(false);
+                            return new IntakeResult(IntakeStatus.DuplicateIdempotencyKey, existing, fingerprint);
+                        }
                     }
 
                     if (attempt >= 2)
@@ -294,7 +309,8 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
         try
         {
             WebhookTarget[] targets = attempt.WebhookEvents.Count == 0 ? [] : await rt.GetWebhookTargetsAsync(cancellationToken).ConfigureAwait(false);
-            result = await WithPartitionRetryAsync(() => RecordAttemptCoreAsync(attempt, targets, cancellationToken)).ConfigureAwait(false);
+            int? historyDay = null;
+            result = await WithPartitionRetryAsync(() => RecordAttemptCoreAsync(attempt, targets, d => historyDay = d, cancellationToken), () => historyDay, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
         {
@@ -320,7 +336,7 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
         }
     }
 
-    private async Task<AttemptResult> RecordAttemptCoreAsync(DeliveryAttempt a, WebhookTarget[] targets, CancellationToken ct)
+    private async Task<AttemptResult> RecordAttemptCoreAsync(DeliveryAttempt a, WebhookTarget[] targets, Action<int?> historyDayWritten, CancellationToken ct)
     {
         DateTimeOffset at = StorageTime.Normalize(a.At);
         await using NpgsqlConnection connection = await rt.Data.OpenConnectionAsync(ct).ConfigureAwait(false);
@@ -345,10 +361,10 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
         int day = StorageTime.DayNumber(row.MessageId);
         DateTimeOffset now = rt.Clock.UtcNow;
         bool writeHistory = rt.IsFull && plan.Events.Count > 0 && history.MetadataWritable(day, now);
-        if (writeHistory)
-        {
-            await rt.Partitions.EnsureDayAsync(day, force: false, ct).ConfigureAwait(false);
-        }
+        // The day's partitions were created when the message was accepted; if they are not there (another replica dropped them, or the
+        // message was accepted before history was on) the first write fails with "no partition", the transaction is rolled back and
+        // WithPartitionRetryAsync creates them with no connection held. Nothing is created here, inside the transaction.
+        historyDayWritten(writeHistory ? day : null);
 
         // 2. The spool counter first (RETURNING is read below), then suppression, the queue row and the webhook fan-out: one round trip.
         await using var batch = new NpgsqlBatch(connection, tx);
@@ -644,6 +660,32 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
             await using var batch = new NpgsqlBatch(connection);
             AppendOutboxFanOut(batch, [draft], targets, tenantId, now);
             return await batch.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
+        {
+            throw rt.Unavailable(ex);
+        }
+    }
+
+    public async ValueTask<Guid?> EnqueueForEndpointAsync(Guid tenantId, Guid endpointId, WebhookEventDraft draft, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(draft);
+        try
+        {
+            bool known = (await rt.GetWebhookTargetsAsync(cancellationToken).ConfigureAwait(false)).Any(t => t.TenantId == tenantId && t.EndpointId == endpointId);
+            if (!known)
+            {
+                return null;
+            }
+
+            Guid id = Ids.New(now);
+            await using NpgsqlConnection connection = await rt.Data.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            await using var cmd = new NpgsqlCommand(
+                "INSERT INTO webhook_outbox (id, endpoint_id, tenant_id, event_type, event_id, payload_json, attempt, next_attempt_at, state, lease_owner, lease_until, created_at, finished_at) " +
+                "VALUES ($1, $2, $3, $4, $5, $6, 0, $7, 0, NULL, 'epoch'::timestamptz, $7, NULL)", connection);
+            cmd.Parameters.Uuid(id).Uuid(endpointId).Uuid(tenantId).Text(draft.EventType).Uuid(draft.EventId).Text(draft.PayloadJson).Time(now);
+            await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            return id;
         }
         catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
         {

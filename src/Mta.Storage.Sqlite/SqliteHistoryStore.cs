@@ -46,8 +46,47 @@ internal readonly record struct ApplyAttemptState(AttemptPlan Plan, Guid Message
 internal readonly record struct AcceptHistoryState(AcceptedMessage Message, MessageContent? Content, string? Subject, Guid EventId);
 
 /// <summary>Per-message history on history.db (present only with <see cref="HistoryMode.Full"/>).</summary>
-internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore
+internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore, IMessageRecipientLookup
 {
+    public ValueTask<IReadOnlyDictionary<Guid, IReadOnlyList<string>>> GetRecipientsAsync(Guid tenantId, IReadOnlyCollection<Guid> messageIds, int maxPerMessage, CancellationToken cancellationToken)
+    {
+        var result = new Dictionary<Guid, IReadOnlyList<string>>();
+        if (!rt.IsFull || messageIds.Count == 0)
+        {
+            return ValueTask.FromResult<IReadOnlyDictionary<Guid, IReadOnlyList<string>>>(result);
+        }
+
+        using SqliteConnection c = rt.History!.OpenReader();
+        using SqliteCommand cmd = c.CreateCommand();
+        cmd.CommandText =
+            "SELECT r.recipient FROM message_recipient r JOIN message_index m ON m.day = r.day AND m.message_id = r.message_id " +
+            "WHERE r.day = @day AND r.message_id = @m AND m.tenant_id = @t ORDER BY r.recipient LIMIT @n";
+        SqliteParameter day = cmd.Parameters.Add("@day", SqliteType.Integer);
+        SqliteParameter id = cmd.Parameters.Add("@m", SqliteType.Text);
+        cmd.Parameters.AddWithValue("@t", tenantId);
+        cmd.Parameters.AddWithValue("@n", (long)Math.Max(0, maxPerMessage));
+        foreach (Guid messageId in messageIds)
+        {
+            day.Value = StorageTime.DayNumber(messageId);
+            id.Value = messageId;
+            var list = new List<string>();
+            using (SqliteDataReader r = cmd.ExecuteReader())
+            {
+                while (r.Read())
+                {
+                    list.Add(r.GetString(0));
+                }
+            }
+
+            if (list.Count > 0)
+            {
+                result[messageId] = list;
+            }
+        }
+
+        return ValueTask.FromResult<IReadOnlyDictionary<Guid, IReadOnlyList<string>>>(result);
+    }
+
     // Writes
 
     internal async ValueTask RecordAcceptedAsync(AcceptedMessage message, CancellationToken cancellationToken)

@@ -190,7 +190,7 @@ internal sealed class MemoryIntake(MemoryState s) : IMessageIntake
                 var k = (message.TenantId, key);
                 if (s.Idempotency.TryGetValue(k, out var existing) && existing.ExpiresAt > now)
                 {
-                    return ValueTask.FromResult(new IntakeResult(IntakeStatus.DuplicateIdempotencyKey, existing.MessageId));
+                    return ValueTask.FromResult(new IntakeResult(IntakeStatus.DuplicateIdempotencyKey, existing.MessageId, existing.Fingerprint));
                 }
 
                 s.Idempotency[k] = new IdempotencyKeyEntity
@@ -200,6 +200,7 @@ internal sealed class MemoryIntake(MemoryState s) : IMessageIntake
                     MessageId = message.MessageId,
                     CreatedAt = StorageTime.Normalize(now),
                     ExpiresAt = StorageTime.Normalize(now + s.Options.Queue.IdempotencyKeyLifetime),
+                    Fingerprint = message.IdempotencyFingerprint,
                 };
             }
 
@@ -685,8 +686,30 @@ internal sealed class MemoryStats(MemoryState s) : IStatsStore
     }
 }
 
-internal sealed class MemoryHistory(MemoryState s) : IHistoryStore
+internal sealed class MemoryHistory(MemoryState s) : IHistoryStore, IMessageRecipientLookup
 {
+    public ValueTask<IReadOnlyDictionary<Guid, IReadOnlyList<string>>> GetRecipientsAsync(Guid tenantId, IReadOnlyCollection<Guid> messageIds, int maxPerMessage, CancellationToken cancellationToken)
+    {
+        var result = new Dictionary<Guid, IReadOnlyList<string>>();
+        if (!s.IsFull)
+        {
+            return ValueTask.FromResult<IReadOnlyDictionary<Guid, IReadOnlyList<string>>>(result);
+        }
+
+        lock (s.Gate)
+        {
+            foreach (Guid id in messageIds)
+            {
+                if (s.Index.TryGetValue(id, out var m) && m.TenantId == tenantId && s.Recipients.TryGetValue(id, out var rs))
+                {
+                    result[id] = rs.OrderBy(x => x, StringComparer.Ordinal).Take(Math.Max(0, maxPerMessage)).ToList();
+                }
+            }
+        }
+
+        return ValueTask.FromResult<IReadOnlyDictionary<Guid, IReadOnlyList<string>>>(result);
+    }
+
     private bool IsMetadataExpired(MessageIndexEntity m, DateTimeOffset now) =>
         s.Options.Retention.MetadataDays > 0 && now >= m.ReceivedAt.AddDays(s.Options.Retention.MetadataDays);
 
@@ -968,6 +991,34 @@ internal sealed class MemoryWebhooks(MemoryState s) : IWebhookOutbox
             }
 
             return ValueTask.FromResult(count);
+        }
+    }
+
+    public ValueTask<Guid?> EnqueueForEndpointAsync(Guid tenantId, Guid endpointId, WebhookEventDraft draft, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        DateTimeOffset at = StorageTime.Normalize(now);
+        lock (s.Gate)
+        {
+            if (!s.Config.IsEnabledEndpointOf(tenantId, endpointId))
+            {
+                return ValueTask.FromResult<Guid?>(null);
+            }
+
+            Guid id = Ids.New(at);
+            s.Outbox[id] = new WebhookOutboxEntity
+            {
+                Id = id,
+                EndpointId = endpointId,
+                TenantId = tenantId,
+                EventType = draft.EventType,
+                EventId = draft.EventId,
+                PayloadJson = draft.PayloadJson,
+                NextAttemptAt = at,
+                State = WebhookOutboxState.Pending,
+                LeaseUntil = StorageTime.Epoch,
+                CreatedAt = at,
+            };
+            return ValueTask.FromResult<Guid?>(id);
         }
     }
 
