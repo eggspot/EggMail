@@ -258,6 +258,8 @@ public static class ConfigLoader
             }
         }
 
+        Secrets.SecretsConfigurationCheck.Validate(c.Secrets, errors);
+
         if (c.Delivery.Workers < 1)
         {
             errors.Add("Delivery:Workers must be at least 1.");

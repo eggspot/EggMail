@@ -127,7 +127,7 @@ The import dominates, and it is the EF change tracker plus one transaction per 5
 
 ## Known gaps
 
-- Not verified against a real orchestrator (the patch text is generated and tested, not applied to a cluster) and not run with a real KMS (`Secrets:KeyProtection=Kms` is not implemented in the host yet).
+- Not verified against a real orchestrator (the patch text is generated and tested, not applied to a cluster) and not run with a real cloud KMS (`Secrets:KeyProtection=Kms` is implemented with the built-in `LocalKey` wrapping key and an `IKeyWrapProvider` extension point; no cloud service is included).
 - There is no dashboard flow yet (the API is complete). `finalize` through the API after the restart needs the old store described as `SwitchSource:*`; otherwise use `mta migrate-storage finalize`. A switch started by the CLI and still pending after a restart is rolled back or finalized with the CLI.
 - A switch started by the CLI against a running SQLite server is not supported (the lock refuses it); online switching of a SQLite source goes through the admin API of the running process, which owns the files.
 - Webhook deliveries in flight on a replica of a shared PostgreSQL store at the moment of the fence can complete and record on the source after the export; receivers de-duplicate by event id, and the attempt record on the source is not moved.

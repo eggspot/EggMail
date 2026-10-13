@@ -32,7 +32,11 @@ Settings come from (highest precedence first): command line, environment variabl
 | `Acme:Enabled`, `DirectoryUrl`, `Email`, `Domains`, `CloudflareApiToken(File)` | off | ACME with Cloudflare DNS-01 (verified against the Pebble test CA, not yet against a production CA; see [TLS certificates and ACME](#tls-certificates-and-acme)) |
 | `Acme:CertificateName`, `PropagationDelay`, `RenewAtRemainingFraction`, `CheckInterval` | `default`, 30 s, 1/3, 1 h | Name of the configured certificate row, wait after creating the TXT records, renew when this fraction of the lifetime is left, how often the renewal check runs |
 | `Tls:PollInterval` | 30 s | How often each replica polls the database for a changed certificate |
-| `Secrets:KeyProtection` | `None` | `Certificate` (with `CertificatePath`) for production. `None` stores the key ring unprotected and logs a warning |
+| `Secrets:KeyProtection` | `None` | `Certificate` (with `Secrets:CertificatePath`) or `Kms` (see below) for production. `None` stores the key ring unprotected and logs a warning |
+| `Secrets:CertificatePath`, `Secrets:CertificatePasswordFile` | none | PFX (and a file with its password) that protects the Data Protection key ring; deployment configuration, never in the database |
+| `Secrets:KmsProvider` | `LocalKey` | With `Kms`: the key service that wraps the key ring. Only `LocalKey` is built in |
+| `Secrets:KmsKeyFile` | none | `LocalKey`: file with the 32-byte wrapping key (base64, hex or raw). A mounted secret; preferred |
+| `Secrets:KmsKey` | none | `LocalKey`: the same key as base64 or hex in a value, for platforms that only pass environment variables |
 | `Backup:Enabled`, `IntervalHours`, `Keep`, `Directory` | true, 24, 3, `<data>/backups` | Scheduled SQLite backups |
 | `Dashboard:HttpPort`, `HttpsPort`, `HttpsEnabled` | 8080, 8443, true | Dashboard / API listeners |
 | `Webhooks:*` | see `WebhookOptions` | Timeouts, SSRF allow-list, retention |
@@ -80,6 +84,10 @@ To restore: stop EggMail, copy the files of one backup directory over the data d
 ## Monitoring
 
 `/healthz` (liveness), `/readyz` (readiness and warnings) and `/metrics` (Prometheus text, admin network only) are served by the HTTP layer *(the API pull request provides `/readyz` and `/metrics`; `/healthz` exists already)*. Meters: `Mta.Smtp.Server`, `Mta.Smtp.Client`, `Mta.Delivery` (attempts by outcome, holds, bounces, group duration), `Mta.Webhooks`, and storage meters. Alert on queue depth and oldest due delivery, repeated `deferred` outcomes to one domain, certificate expiry, the `sqlite_sync_off` warning being unintended, and failed backups.
+
+## Protecting the key ring (`Secrets:KeyProtection`)
+
+DKIM keys, webhook secrets, TLS private keys and the ACME account key are encrypted with ASP.NET Core Data Protection; the key ring itself lives in the database. `Certificate` encrypts the ring with a PFX held outside the database. `Kms` wraps every ring element with a key that is kept outside the database: with `Secrets:KmsProvider=LocalKey` that is a random 32-byte key from a mounted file (`openssl rand -base64 32 > eggmail-keyring.key`, `Secrets:KmsKeyFile=/run/secrets/eggmail-keyring.key`) or an environment value (`Secrets:KmsKey`, less safe: it is visible in the process environment). Elements are sealed with AES-256-GCM and record the provider and a fingerprint of the key, so starting with another key stops with a message naming both instead of failing on the first secret. **Keep the key: without it the ring, and with it every secret in the database, cannot be opened, and a rotated key cannot open an existing ring** (key rotation is not implemented; restore a backup of the database and the old key to go back). A cloud key service (AWS KMS, Azure Key Vault, Google Cloud KMS) is not included: it plugs in as an `IKeyWrapProvider` registered with `KeyWrapProviders.Register` and selected by `Secrets:KmsProvider`; see [open-questions.md](open-questions.md). Backend switching works with any of the modes (the source's key must be reachable during the export).
 
 ## Upgrades
 

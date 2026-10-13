@@ -47,7 +47,7 @@ public static class SecretsFactory
 {
     /// <summary>
     /// Creates the process-wide secret protector. <see cref="KeyProtectionMode.Certificate"/> encrypts the key ring with the configured
-    /// certificate; <see cref="KeyProtectionMode.None"/> leaves it readable by anyone who can read the database (development only, logged as a warning by the caller).
+    /// certificate; <see cref="KeyProtectionMode.Kms"/> wraps it with an external key (<see cref="IKeyWrapProvider"/>); <see cref="KeyProtectionMode.None"/> leaves it readable by anyone who can read the database (development only, logged as a warning by the caller).
     /// </summary>
     public static ISecretProtector Create(SecretsSection secrets, IConfigStore config)
     {
@@ -67,7 +67,11 @@ public static class SecretsFactory
                 builder.ProtectKeysWithCertificate(cert);
                 break;
             case KeyProtectionMode.Kms:
-                throw new NotSupportedException("Secrets:KeyProtection=Kms is not implemented in this version.");
+                // The ring in the config store holds only keys wrapped by an external key; the decryptor finds the provider in the container.
+                IKeyWrapProvider wrap = KeyWrapProviders.Create(secrets);
+                builder.Services.AddSingleton(wrap);
+                builder.Services.Configure<KeyManagementOptions>(o => o.XmlEncryptor = new KmsXmlEncryptor(wrap));
+                break;
         }
 
         var provider = services.BuildServiceProvider().GetRequiredService<IDataProtectionProvider>();

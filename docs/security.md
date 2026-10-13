@@ -28,7 +28,7 @@ Status of the security work, written to be checked against the code and the test
 ## Operational guidance
 
 - Run the container as the non-root user it is built with, read-only root file system, drop all capabilities, publish only the ports you enable (`docs/design.md` section 7).
-- Use `Secrets:KeyProtection=Certificate` with a certificate that is not stored in the database. Keep the database backups and the key-protection certificate separate.
+- Use `Secrets:KeyProtection=Certificate` (a certificate that is not stored in the database) or `Kms` (a wrapping key from a mounted secret; see [operations.md](operations.md)). Keep the database backups and the key-protection certificate separate.
 - Put the dashboard/API behind TLS (the built-in HTTPS listener serves the certificate from the database or from a file override).
 - Review webhook allow-lists: internal addresses are denied unless explicitly allowed per tenant.
 

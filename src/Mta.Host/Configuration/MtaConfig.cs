@@ -196,7 +196,10 @@ public enum KeyProtectionMode : byte
     /// <summary>Data Protection keys are protected by a certificate (<see cref="SecretsSection.CertificatePath"/>).</summary>
     Certificate = 0,
 
-    /// <summary>A cloud KMS wraps the key ring (credentials from the environment). Not implemented in v1.</summary>
+    /// <summary>
+    /// An external key service wraps the key ring (<see cref="SecretsSection.KmsProvider"/>): the ring in the database holds only wrapped keys. Built in is
+    /// <c>LocalKey</c>, a 32-byte key from a file or the environment; a cloud key service plugs in through <c>IKeyWrapProvider</c> (not included, docs/open-questions.md).
+    /// </summary>
     Kms,
 
     /// <summary>Development only: the key ring is stored unprotected.</summary>
@@ -211,6 +214,15 @@ public sealed class SecretsSection
     public string? CertificatePath { get; init; }
 
     public string? CertificatePasswordFile { get; init; }
+
+    /// <summary>With <see cref="KeyProtectionMode.Kms"/>: the key service that wraps the ring. <c>LocalKey</c> is built in.</summary>
+    public string KmsProvider { get; init; } = "LocalKey";
+
+    /// <summary>With <c>KmsProvider=LocalKey</c>: file holding the 32-byte wrapping key (base64, hex or raw bytes). Prefer this to <see cref="KmsKey"/>.</summary>
+    public string? KmsKeyFile { get; init; }
+
+    /// <summary>With <c>KmsProvider=LocalKey</c>: the wrapping key itself (base64 or hex), for platforms that only pass environment variables.</summary>
+    public string? KmsKey { get; init; }
 }
 
 public sealed class ObservabilitySection
