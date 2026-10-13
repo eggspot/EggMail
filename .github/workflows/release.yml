@@ -19,6 +19,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 env:
   IMAGE: ghcr.io/eggspot/eggmail
@@ -56,18 +57,28 @@ jobs:
           props=$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' Directory.Build.props)
           [ "v$props" = "$tag" ] || { echo "::error::Directory.Build.props Version ($props) does not match tag $tag"; exit 1; }
 
-      - uses: actions/setup-dotnet@v4
+      - name: Was the ci workflow green for this exact commit?
         if: steps.gate.outputs.cache-hit != 'true'
+        id: ci
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          n=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&status=success" --jq '.total_count')
+          echo "green=$([ "${n:-0}" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "ci green for ${GITHUB_SHA}: ${n:-0} successful run(s)"
+
+      - uses: actions/setup-dotnet@v4
+        if: steps.gate.outputs.cache-hit != 'true' && steps.ci.outputs.green != 'true'
         with:
           dotnet-version: 10.0.x
       - uses: actions/cache@v4
-        if: steps.gate.outputs.cache-hit != 'true'
+        if: steps.gate.outputs.cache-hit != 'true' && steps.ci.outputs.green != 'true'
         with:
           path: ~/.nuget/packages
           key: nuget-${{ runner.os }}-${{ hashFiles('Directory.Packages.props', 'global.json') }}
           restore-keys: nuget-${{ runner.os }}-
-      - name: Build and test (cheapest checks first)
-        if: steps.gate.outputs.cache-hit != 'true'
+      - name: Build and test (only when ci has not already passed on this commit; saves the duplicate run)
+        if: steps.gate.outputs.cache-hit != 'true' && steps.ci.outputs.green != 'true'
         run: |
           dotnet restore EggMail.slnx
           dotnet build EggMail.slnx -c Release --no-restore

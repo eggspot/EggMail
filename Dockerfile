@@ -25,6 +25,8 @@ RUN case "$TARGETARCH" in amd64) RID=linux-x64 ;; arm64) RID=linux-arm64 ;; *) e
  && dotnet publish src/Mta.Host/Mta.Host.csproj -c Release -r "$RID" --self-contained false \
       -p:PublishReadyToRun="$READYTORUN" -p:Version="$VERSION" -p:DebugType=none -o /out
 COPY --from=dashboard /src/dashboard/dist /out/wwwroot
+# The chiseled runtime has no shell, so the data directory (owned by the non-root user) is prepared here.
+RUN mkdir -p /seed/data
 
 # ---- runtime: chiseled .NET 10 with ICU (the -extra variant), non-root
 FROM mcr.microsoft.com/dotnet/aspnet:10.0-noble-chiseled-extra AS final
@@ -38,6 +40,7 @@ LABEL org.opencontainers.image.source="https://github.com/eggspot/EggMail" \
       org.opencontainers.image.revision="${REVISION}"
 WORKDIR /app
 COPY --from=build /out/ ./
+COPY --from=build --chown=1654:1654 /seed/data /data
 ENV Storage__Backend=Sqlite \
     Sqlite__DataDirectory=/data \
     DOTNET_gcServer=0 \
