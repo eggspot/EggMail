@@ -74,7 +74,7 @@ Response `202`: `{ "id": "<message id>", "status": "queued", "recipients": 1 }`.
 ## Admin (role `admin`)
 
 - `GET/POST/PATCH /admin/tenants`, `GET /admin/status` (queue depth, oldest due, storage health incl. warnings, certificate expiry, backend, version, mode-switch state), `GET/PUT /admin/settings` (global settings; values locked by deployment configuration are marked `locked: true`), `GET /admin/certificates`, `POST /admin/certificates` (upload PEM/PFX), `POST /admin/certificates/acme` (request a certificate), `POST /admin/maintenance/run`.
-- Backend switch (decision 14, design §4.6), never automatic: `POST /admin/storage/switch/preflight` `{ "to": "postgres"|"sqlite", "target": {...}, "include": ["queue","history"], "mode": "drain"|"quiesce" }`, `POST /admin/storage/switch/start`, `GET /admin/storage/switch` (state, progress, report), `POST .../confirm`, `POST .../activate`, `POST .../rollback`, `POST .../finalize`. The same engine backs `mta migrate-storage`.
+- Backend switch (decision 14, design §4.6), never automatic: `POST /admin/storage/switch/preflight` `{ "to": "postgres"|"sqlite", "target": {...}, "include": ["queue","history"], "mode": "drain"|"quiesce" }`, `POST /admin/storage/switch/start`, `GET /admin/storage/switch` (state, progress, report), `POST .../confirm`, `POST .../activate`, `POST .../rollback`, `POST .../finalize`. The same engine backs `mta migrate-storage`: the API layer calls `IStorageSwitchEngine` (`Mta.Storage.Portability`), see [components/switch.md](components/switch.md). While a switch drains, quiesces or fences the instance, the API answers `503` with `Retry-After` (`SwitchRuntimeState.AcceptingApi`) and shows the banner (`SwitchRuntimeState.Banner`).
 
 ## Operational endpoints (no `/api/v1` prefix)
 

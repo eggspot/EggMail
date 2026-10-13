@@ -26,7 +26,16 @@ public sealed partial class StorageSwitchEngine
         var list = new List<(BundleFile, TransferTable)>();
         foreach (BundleFile f in manifest.Files.Where(f => f.Kind == "rows" && f.Table is not null))
         {
-            TransferTable table = TransferTables.ByName(f.Table!);
+            TransferTable table;
+            try
+            {
+                table = TransferTables.ByName(f.Table!);
+            }
+            catch (KeyNotFoundException ex)
+            {
+                throw new BundleException($"{f.Path}: the manifest names a table this version does not know ('{f.Table}').", ex);
+            }
+
             if ((table.Part == TransferPart.History) == history)
             {
                 list.Add((f, table));

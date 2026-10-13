@@ -214,6 +214,7 @@ public class DataDirectoryLockTests : IDisposable
 }
 
 /// <summary>The <c>mta migrate-storage</c> command end to end over two SQLite directories.</summary>
+[Collection("CpuHeavy")]
 public class MigrateStorageCommandTests : IDisposable
 {
     private readonly string _root = Directory.CreateTempSubdirectory("eggmail-cli-").FullName;

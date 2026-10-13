@@ -18,6 +18,8 @@ using Mta.Webhooks;
 
 namespace Mta.Host.Tests;
 
+// Serialized with the migrate-storage CLI tests: their key derivation and RSA generation starve the STARTTLS handshake of this class under load.
+[Collection("CpuHeavy")]
 public class IngestTests : IAsyncLifetime
 {
     private static readonly Guid TenantId = Guid.Parse("a0000000-0000-7000-8000-000000000001");
