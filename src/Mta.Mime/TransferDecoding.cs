@@ -42,6 +42,15 @@ public static class ContentTransferEncodings
         return ContentTransferEncoding.Unknown;
     }
 
+    /// <summary>Parses a Content-Transfer-Encoding header field (the value is cut at 256 bytes); no string is built for the usual short ASCII value.</summary>
+    internal static ContentTransferEncoding ParseHeader(in MimeHeader header)
+    {
+        Span<char> value = stackalloc char[256];
+        return HeaderText.TryGetAsciiValue(header.RawValue.Span, value, out int length)
+            ? Parse(value[..length])
+            : Parse(header.GetValue(256));
+    }
+
     /// <summary>The canonical header token ("7bit", "base64" ...).</summary>
     public static string ToToken(this ContentTransferEncoding encoding) => encoding switch
     {

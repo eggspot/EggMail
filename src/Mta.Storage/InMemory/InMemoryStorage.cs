@@ -241,9 +241,30 @@ internal sealed class MemoryIntake(MemoryState s) : IMessageIntake
                 RecordHistory(message, received, from);
             }
 
-            foreach (var group in message.Recipients.GroupBy(r => r.Address.Domain))
+            // One count per run of recipients with the same domain (the aggregator adds equal keys together).
+            string? run = null;
+            int runCount = 0;
+            foreach (AcceptedRecipient r in message.Recipients)
             {
-                s.Aggregator.Add(new StatKey(received, message.TenantId, message.SendingDomain ?? "", group.Key), StatCounter.Accepted, group.Count());
+                string domain = r.Address.Domain;
+                if (run is not null && string.Equals(run, domain, StringComparison.Ordinal))
+                {
+                    runCount++;
+                    continue;
+                }
+
+                if (run is not null)
+                {
+                    s.Aggregator.Add(new StatKey(received, message.TenantId, message.SendingDomain ?? "", run), StatCounter.Accepted, runCount);
+                }
+
+                run = domain;
+                runCount = 1;
+            }
+
+            if (run is not null)
+            {
+                s.Aggregator.Add(new StatKey(received, message.TenantId, message.SendingDomain ?? "", run), StatCounter.Accepted, runCount);
             }
         }
 
@@ -272,7 +293,18 @@ internal sealed class MemoryIntake(MemoryState s) : IMessageIntake
             MessageIdHeader = MessageIdKey.Normalize(message.MessageIdHeader),
             Tags = StorageJson.SerializeTags(message.Tags),
         };
-        s.Recipients[message.MessageId] = message.Recipients.Select(r => AddressText.Format(r.Address).ToLowerInvariant()).Distinct().ToList();
+        var recipientTexts = new List<string>(message.Recipients.Count);
+        HashSet<string>? seen = message.Recipients.Count > 8 ? new HashSet<string>(StringComparer.Ordinal) : null;
+        foreach (AcceptedRecipient r in message.Recipients)
+        {
+            string text = AddressText.Format(r.Address).ToLowerInvariant();
+            if (seen is null ? !recipientTexts.Contains(text) : seen.Add(text))
+            {
+                recipientTexts.Add(text);
+            }
+        }
+
+        s.Recipients[message.MessageId] = recipientTexts;
         s.Events[message.MessageId] =
         [
             new MessageEventEntity
@@ -306,10 +338,22 @@ internal sealed class MemoryDeliveries(MemoryState s) : IDeliveryStore
 {
     private static readonly TimeSpan ExpiredClaimLease = TimeSpan.FromMinutes(5);
 
+    private static readonly IComparer<QueuedDeliveryEntity> DueOrder = Comparer<QueuedDeliveryEntity>.Create(ByDue);
+
     private static int ByDue(QueuedDeliveryEntity a, QueuedDeliveryEntity b)
     {
         int c = a.DueAt.CompareTo(b.DueAt);
-        return c != 0 ? c : string.CompareOrdinal(MemoryState.IdText(a.Id), MemoryState.IdText(b.Id));
+        return c != 0 ? c : CompareIdText(a.Id, b.Id);
+    }
+
+    /// <summary>The order of the upper-case "D" texts of two ids (what the SQL backends sort by), without building the texts: the big-endian bytes sort the same way.</summary>
+    private static int CompareIdText(Guid x, Guid y)
+    {
+        Span<byte> a = stackalloc byte[16];
+        Span<byte> b = stackalloc byte[16];
+        x.TryWriteBytes(a, bigEndian: true, out _);
+        y.TryWriteBytes(b, bigEndian: true, out _);
+        return a.SequenceCompareTo(b);
     }
 
     public ValueTask<IReadOnlyList<ClaimedDelivery>> ClaimAsync(string owner, int max, DateTimeOffset now, TimeSpan lease, CancellationToken cancellationToken)
@@ -323,10 +367,34 @@ internal sealed class MemoryDeliveries(MemoryState s) : IDeliveryStore
         DateTimeOffset until = StorageTime.Normalize(now + lease);
         lock (s.Gate)
         {
-            var rows = s.Deliveries.Values.Where(d => d.TransferSwitchId is null && d.DueAt <= now && d.LeaseUntil <= now && d.ExpiresAt > now).ToList();
-            rows.Sort(ByDue);
-            var result = new List<ClaimedDelivery>();
-            foreach (var d in rows.Take(Math.Max(0, max)))
+            // The first `max` due rows in due order, picked in one pass over the queue (no list of every due row, no full sort).
+            int take = Math.Max(0, max);
+            var rows = new List<QueuedDeliveryEntity>(Math.Min(take, 64) + 1);
+            if (take > 0)
+            {
+                foreach (var d in s.Deliveries.Values)
+                {
+                    if (d.TransferSwitchId is not null || d.DueAt > now || d.LeaseUntil > now || d.ExpiresAt <= now)
+                    {
+                        continue;
+                    }
+
+                    if (rows.Count == take && ByDue(d, rows[^1]) >= 0)
+                    {
+                        continue;
+                    }
+
+                    int index = rows.BinarySearch(d, DueOrder);
+                    rows.Insert(index < 0 ? ~index : index, d);
+                    if (rows.Count > take)
+                    {
+                        rows.RemoveAt(rows.Count - 1);
+                    }
+                }
+            }
+
+            var result = new List<ClaimedDelivery>(rows.Count);
+            foreach (var d in rows)
             {
                 if (d.LeaseOwner is not null)
                 {
@@ -932,6 +1000,8 @@ internal sealed class MemoryHistory(MemoryState s) : IHistoryStore, IMessageReci
 
 internal sealed class MemoryWebhooks(MemoryState s) : IWebhookOutbox
 {
+    public bool MayHaveSubscribers(Guid tenantId, string eventType) => s.Config.HasEndpointFor(tenantId, eventType);
+
     public ValueTask<IReadOnlyList<WebhookOutboxItem>> ClaimDueAsync(string owner, int max, DateTimeOffset now, TimeSpan lease, CancellationToken cancellationToken)
     {
         if (s.Fence.IsClosed)
