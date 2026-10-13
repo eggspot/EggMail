@@ -136,18 +136,18 @@ internal sealed class SocketTransport : IAsyncDisposable
     {
         if (_input is not null && _output is not null)
         {
-            // 1. Drain pending output (the "220 Ready to start TLS" reply) and stop the output pump.
-            await _output.Writer.CompleteAsync().ConfigureAwait(false);
-            await _outputPump.ConfigureAwait(false);
-
-            // 2. Stop reading plaintext.
+            // 1. Stop reading plaintext BEFORE the "220 Ready to start TLS" reply goes out. A client may start its handshake the instant it
+            // sees 220; if the plaintext reader were still running it could swallow the ClientHello and the guard below would take it for
+            // injected commands. Bytes that are already in the pipe at this point arrived before the reply was sent, so they really are
+            // pipelined plaintext (CVE-2011-0411 family).
             await _pumpCts.CancelAsync().ConfigureAwait(false);
             await _inputPump.ConfigureAwait(false);
-
-            // 3. Injection guard: bytes received after the STARTTLS line but before the handshake mean the client
-            // pipelined plaintext into the encrypted session (CVE-2011-0411 family). Refuse.
             bool leftover = _input.Reader.TryRead(out var pending) && !pending.Buffer.IsEmpty;
             await _input.Reader.CompleteAsync().ConfigureAwait(false);
+
+            // 2. Now flush the pending output (the 220 reply) and stop the output pump.
+            await _output.Writer.CompleteAsync().ConfigureAwait(false);
+            await _outputPump.ConfigureAwait(false);
             if (leftover)
             {
                 return false;

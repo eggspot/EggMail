@@ -182,3 +182,39 @@ public class TlsAndAuthTests
         Assert.Equal(attachment, content.ToArray());
     }
 }
+
+public class StarttlsRaceTests
+{
+    [Fact]
+    public async Task A_client_that_starts_the_handshake_the_instant_it_sees_220_is_never_mistaken_for_an_injection()
+    {
+        // The ClientHello can arrive while the server is still switching from plaintext to TLS; it must wait for the handshake, not be
+        // read as pipelined plaintext. Many fast, concurrent upgrades make the window visible.
+        await using var f = new ServerFixture();
+        int failures = 0;
+        var gate = new SemaphoreSlim(32);
+        var tasks = Enumerable.Range(0, 600).Select(async _ =>
+        {
+            await gate.WaitAsync();
+            try
+            {
+                using var c = await RawClient.ConnectAsync(f.PlainPort);
+                await c.ExpectAsync(220);
+                await c.CommandAsync("EHLO x.test", 250);
+                await c.CommandAsync("STARTTLS", 220);
+                await c.StartTlsHandshakeAsync();
+                await c.CommandAsync("EHLO x.test", 250);
+            }
+            catch (Exception)
+            {
+                Interlocked.Increment(ref failures);
+            }
+            finally
+            {
+                gate.Release();
+            }
+        }).ToArray();
+        await Task.WhenAll(tasks);
+        Assert.Equal(0, failures);
+    }
+}
