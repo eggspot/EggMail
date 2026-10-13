@@ -91,6 +91,7 @@ public sealed class HostSwitchControl(EggMailRuntime runtime, SwitchRuntimeState
         try
         {
             await runtime.Delivery.QuiesceAsync(timeout, cancellationToken).ConfigureAwait(false);
+            await runtime.FlushRuntimeStateAsync(cancellationToken).ConfigureAwait(false);   // the sending and TLS-RPT counters of the last seconds belong in the bundle
         }
         finally
         {

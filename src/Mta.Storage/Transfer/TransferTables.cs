@@ -101,6 +101,25 @@ public static class TransferTables
         CanonicalExcludes = [nameof(AcmeRenewalEntity.ChallengeStateJson)],
     });
 
+    /// <summary>The last DNS check result of each record of a domain: moves so a switched deployment keeps showing the real per-record state.</summary>
+    public static readonly TransferTable<DomainRecordCheckEntity> DomainRecordChecks = new("domain_record_check", TransferPart.Config, new()
+    {
+        Order = q => q.OrderBy(x => x.DomainId).ThenBy(x => x.RecordKey),
+    });
+
+    /// <summary>Unsent TLS-RPT counters and reports move, so a switch does not lose the day's report.</summary>
+    public static readonly TransferTable<TlsRptBucketEntity> TlsRptBuckets = new("tls_rpt_bucket", TransferPart.Config, new()
+    {
+        Order = q => q.OrderBy(x => x.Id),
+    });
+
+    /// <summary>The sending counters of the current windows move, so a switch does not reset the hourly and daily caps.</summary>
+    public static readonly TransferTable<SendingCounterEntity> SendingCounters = new("sending_counter", TransferPart.Config, new()
+    {
+        Order = q => q.OrderBy(x => x.Scope).ThenBy(x => x.TenantId).ThenBy(x => x.Domain).ThenBy(x => x.WindowKind).ThenBy(x => x.WindowIndex),
+        Upsert = true,
+    });
+
     public static readonly TransferTable<StatAggregateEntity> StatAggregates = new("stat_aggregate", TransferPart.Stats, new()
     {
         Order = q => q.OrderBy(x => x.Daily).ThenBy(x => x.PeriodStart).ThenBy(x => x.TenantId).ThenBy(x => x.SendingDomain).ThenBy(x => x.RecipientDomain),
@@ -216,7 +235,7 @@ public static class TransferTables
     /// <summary>Every table, in import order (config, stats, queue, history).</summary>
     public static IReadOnlyList<TransferTable> All { get; } =
     [
-        Tenants, ApiKeys, SmtpCredentials, DashboardUsers, DashboardSessions, Domains, DkimKeys, Suppressions, WebhookEndpoints, Settings, TlsPolicies, RelayRoutes, Certificates, AcmeAccounts, AcmeRenewals,
+        Tenants, ApiKeys, SmtpCredentials, DashboardUsers, DashboardSessions, Domains, DkimKeys, Suppressions, WebhookEndpoints, Settings, TlsPolicies, RelayRoutes, Certificates, AcmeAccounts, AcmeRenewals, DomainRecordChecks, TlsRptBuckets, SendingCounters,
         StatAggregates, StatMeta, RecentEvents, WebhookAttempts,
         Deliveries, Spool, WebhookOutbox, IdempotencyKeys,
         MessageIndex, MessageRecipients, MessageEvents, MessageContents, RetainedRaw,

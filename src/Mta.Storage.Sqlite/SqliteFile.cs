@@ -19,7 +19,8 @@ internal sealed class SqliteFile
     /// <summary>
     /// Bumped when a schema change needs a migration step (stored in <c>PRAGMA user_version</c>). Version 2 added the dashboard user and
     /// session tables (config.db) and <c>api_idempotency_key.fingerprint</c> (queue.db); version 3 added the backend switch hold column
-    /// and progress tables. <see cref="UpgradeFromV1"/> and <see cref="UpgradeFromV2"/> apply them in turn.
+    /// and progress tables; version 4 the persisted runtime state tables (config.db) and the Message-ID header and tags of <c>message_index</c>
+    /// (history.db). <see cref="UpgradeFromV1"/>, <see cref="UpgradeFromV2"/> and <see cref="UpgradeFromV3"/> apply them in turn.
     /// </summary>
     public const int SchemaVersion = Model.StorageModel.SchemaVersion;
 
@@ -164,7 +165,7 @@ internal sealed class SqliteFile
 
         if (version >= 1)
         {
-            // One step per version, each in its own transaction: a file at 1 goes through 2 and 3 to 4, a file at 2 goes through 3 to 4.
+            // One step per version, each in its own transaction: a file at 1 goes through 2, 3 and 4 to 5, a file at 3 goes through 4 to 5.
             if (version == 1)
             {
                 UpgradeFromV1(connection);
@@ -175,7 +176,12 @@ internal sealed class SqliteFile
                 UpgradeFromV2(connection);
             }
 
-            UpgradeFromV3(connection);
+            if (version <= 3)
+            {
+                UpgradeFromV3(connection);
+            }
+
+            UpgradeFromV4(connection);
             return;
         }
 
@@ -282,8 +288,75 @@ internal sealed class SqliteFile
         tx.Commit();
     }
 
-    /// <summary>Version 4 added <c>delivery_queue.smtp_utf8</c> (the message's headers are internationalized); existing rows get false.</summary>
+    /// <summary>
+    /// Version 4 added the persisted runtime state (<c>domain_record_check</c>, <c>tls_rpt_bucket</c>, <c>sending_counter</c> in config.db) and the
+    /// <c>message_id_header</c> and <c>tags</c> columns with the header index on <c>message_index</c> (history.db). The statements come from the generated schema
+    /// script so they cannot drift from the model, and each is skipped when its table, column or index already exists (a file taken back to an older version by hand).
+    /// </summary>
     private void UpgradeFromV3(SqliteConnection connection)
+    {
+        string script = ApplyWithoutRowId(_createScript(), WithoutRowIdTables);
+        var statements = new List<string>();
+        if (Kind == SqliteFileKind.Config)
+        {
+            foreach (string table in new[] { "domain_record_check", "tls_rpt_bucket", "sending_counter" })
+            {
+                statements.Add(IfNotExists(Regex.Match(script, "CREATE TABLE \"" + table + "\" \\(.*?\\r?\\n\\)(?: WITHOUT ROWID)?;", RegexOptions.Singleline).Value));
+                foreach (Match index in Regex.Matches(script, "CREATE (?:UNIQUE )?INDEX \"[^\"]+\" ON \"" + table + "\" [^;]*;"))
+                {
+                    statements.Add(IfNotExists(index.Value));
+                }
+            }
+        }
+        else if (Kind == SqliteFileKind.History)
+        {
+            statements.Add("ALTER TABLE \"message_index\" ADD COLUMN \"message_id_header\" TEXT NULL;");
+            statements.Add("ALTER TABLE \"message_index\" ADD COLUMN \"tags\" TEXT NULL;");
+            statements.Add(IfNotExists(Regex.Match(script, "CREATE INDEX \"[^\"]*message_id_header\" ON \"message_index\" [^;]*;").Value));
+        }
+
+        if (statements.Any(string.IsNullOrEmpty))
+        {
+            throw new InvalidOperationException($"Could not derive the version 4 upgrade of {FileName} from the generated schema script.");
+        }
+
+        using var tx = connection.BeginTransaction();
+
+        void Run(string sql)
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = sql;
+            cmd.ExecuteNonQuery();
+        }
+
+        foreach (string statement in statements)
+        {
+            if (statement.StartsWith("ALTER TABLE", StringComparison.Ordinal) && ColumnExists(connection, tx, "message_index", statement.Split('"')[3]))
+            {
+                continue;
+            }
+
+            Run(statement);
+        }
+
+        Run("PRAGMA user_version=4");
+        tx.Commit();
+    }
+
+    private static string IfNotExists(string statement) =>
+        statement.Length == 0 ? statement : Regex.Replace(statement, "^CREATE (UNIQUE )?(TABLE|INDEX) ", "CREATE $1$2 IF NOT EXISTS ");
+
+    private static bool ColumnExists(SqliteConnection connection, SqliteTransaction tx, string table, string column)
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = "SELECT count(*) FROM pragma_table_info('" + table + "') WHERE name = '" + column + "'";
+        return Convert.ToInt64(cmd.ExecuteScalar(), CultureInfo.InvariantCulture) > 0;
+    }
+
+    /// <summary>Version 5 added <c>delivery_queue.smtp_utf8</c> (the message's headers are internationalized); existing rows get false.</summary>
+    private void UpgradeFromV4(SqliteConnection connection)
     {
         using var tx = connection.BeginTransaction();
         if (Kind == SqliteFileKind.Queue)
@@ -296,7 +369,7 @@ internal sealed class SqliteFile
 
         using var cmd = connection.CreateCommand();
         cmd.Transaction = tx;
-        cmd.CommandText = "PRAGMA user_version=4";
+        cmd.CommandText = "PRAGMA user_version=5";
         cmd.ExecuteNonQuery();
         tx.Commit();
     }

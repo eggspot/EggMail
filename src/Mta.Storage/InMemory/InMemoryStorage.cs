@@ -270,6 +270,8 @@ internal sealed class MemoryIntake(MemoryState s) : IMessageIntake
             Status = MessageStatus.Queued,
             Size = message.Raw.Length,
             ContentRecorded = recordContent,
+            MessageIdHeader = MessageIdKey.Normalize(message.MessageIdHeader),
+            Tags = StorageJson.SerializeTags(message.Tags),
         };
         s.Recipients[message.MessageId] = message.Recipients.Select(r => AddressText.Format(r.Address).ToLowerInvariant()).Distinct().ToList();
         s.Events[message.MessageId] =
@@ -770,6 +772,11 @@ internal sealed class MemoryHistory(MemoryState s) : IHistoryStore, IMessageReci
                 rows = rows.Where(m => m.Status == status);
             }
 
+            if (!string.IsNullOrEmpty(query.Tag))
+            {
+                rows = rows.Where(m => StorageJson.DeserializeTags(m.Tags).Contains(query.Tag, StringComparer.Ordinal));
+            }
+
             if (query.From is { } from)
             {
                 rows = rows.Where(m => m.ReceivedAt >= StorageTime.Normalize(from));
@@ -801,7 +808,7 @@ internal sealed class MemoryHistory(MemoryState s) : IHistoryStore, IMessageReci
     }
 
     private static MessageSummary ToSummary(MessageIndexEntity m) =>
-        new(m.MessageId, m.TenantId, m.ReceivedAt, m.Subject, m.EnvelopeFrom, m.RecipientCount, m.Status, m.Size);
+        new(m.MessageId, m.TenantId, m.ReceivedAt, m.Subject, m.EnvelopeFrom, m.RecipientCount, m.Status, m.Size, m.Tags is null ? null : StorageJson.DeserializeTags(m.Tags));
 
     public ValueTask<MessageDetail?> GetAsync(Guid tenantId, Guid messageId, CancellationToken cancellationToken)
     {
@@ -858,6 +865,49 @@ internal sealed class MemoryHistory(MemoryState s) : IHistoryStore, IMessageReci
             var list = events.OrderBy(e => MemoryState.IdText(e.EventId), StringComparer.Ordinal).Select(e => new MessageEvent(
                 e.EventId, e.MessageId, e.DeliveryId, e.TenantId, e.Type, e.At, e.Recipient, e.SmtpCode, e.EnhancedCode, e.Message, e.MxHost, e.Route, StorageJson.DeserializeTls(e.TlsJson))).ToList();
             return ValueTask.FromResult<IReadOnlyList<MessageEvent>>(list);
+        }
+    }
+
+    public ValueTask<Guid?> AttachReportAsync(Guid tenantId, string messageIdHeader, AsyncReport report, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(report);
+        string? key = MessageIdKey.Normalize(messageIdHeader);
+        if (!s.IsFull || key is null)
+        {
+            return ValueTask.FromResult<Guid?>(null);
+        }
+
+        DateTimeOffset now = s.Clock.UtcNow;
+        lock (s.Gate)
+        {
+            var m = s.Index.Values
+                .Where(x => x.TenantId == tenantId && x.MessageIdHeader == key && !IsMetadataExpired(x, now))
+                .OrderByDescending(x => x.Day).ThenByDescending(x => MemoryState.IdText(x.MessageId), StringComparer.Ordinal).FirstOrDefault();
+            if (m is null)
+            {
+                return ValueTask.FromResult<Guid?>(null);
+            }
+
+            if (!s.Events.TryGetValue(m.MessageId, out var events))
+            {
+                s.Events[m.MessageId] = events = [];
+            }
+
+            events.Add(new MessageEventEntity
+            {
+                Day = m.Day,
+                MessageId = m.MessageId,
+                EventId = EventIds.Next(report.At),
+                TenantId = tenantId,
+                Type = report.Type,
+                At = StorageTime.Normalize(report.At),
+                Recipient = report.Recipient,
+                SmtpCode = report.SmtpCode,
+                EnhancedCode = report.EnhancedCode,
+                Message = report.Message,
+            });
+            m.Status = MessageStatus.AfterReport(m.Status, m.RecipientCount, report.Type);
+            return ValueTask.FromResult<Guid?>(m.MessageId);
         }
     }
 
