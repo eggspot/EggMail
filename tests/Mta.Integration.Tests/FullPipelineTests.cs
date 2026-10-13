@@ -51,6 +51,8 @@ internal sealed class FakeInternet : ISmtpServerHandler
     }
 }
 
+// Same collection as SwitchRuntimeTests: two runtimes generating certificates at once make the STARTTLS handshake of this test flaky under load.
+[Collection("Runtime")]
 public sealed class FullPipelineTests : IAsyncLifetime
 {
     private static readonly Guid TenantId = Guid.Parse("a0000000-0000-7000-8000-000000000001");

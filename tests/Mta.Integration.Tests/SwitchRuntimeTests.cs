@@ -13,6 +13,7 @@ using Mta.Storage.Transfer;
 namespace Mta.Integration.Tests;
 
 /// <summary>The process side of a backend switch on a real runtime: listeners, delivery scheduler, API flag, startup gate.</summary>
+[Collection("Runtime")]
 public sealed class SwitchRuntimeTests : IAsyncLifetime
 {
     private readonly string _dir = Directory.CreateTempSubdirectory("eggmail-switch-it-").FullName;

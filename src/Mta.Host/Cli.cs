@@ -152,9 +152,10 @@ internal static class Cli
             runtime.SmtpServer.AcceptingMail = false; // listeners answer 421, the API answers 503 (SwitchRuntimeState.AcceptingApi)
         }
 
+        // The listeners always start (they answer 421 while the instance does not accept mail, so senders retry cleanly).
+        builder.Services.AddHostedService<SmtpListenerService>();
         if (gate.Mode == StartupMode.Normal || gate.Mode == StartupMode.Draining)
         {
-            builder.Services.AddHostedService<SmtpListenerService>();
             builder.Services.AddHostedService<DeliveryService>();
             builder.Services.AddHostedService<WebhookService>();
             builder.Services.AddHostedService<CertificateService>();
@@ -164,7 +165,7 @@ internal static class Cli
         }
         else
         {
-            // A fenced source or a target that is not active: dashboard and API only. No listeners, no dispatch, no maintenance, no
+            // A fenced source or a target that is not active: dashboard and API only. No dispatch, no maintenance, no
             // certificate renewal (the old data stays exactly as it is until the switch is finalized or rolled back).
             startupLog.Write(MtaLogLevel.Warning, "switch", "starting restricted: " + gate.Banner);
         }
