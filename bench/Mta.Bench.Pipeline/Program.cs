@@ -21,10 +21,12 @@ using Mta.Storage.Sqlite;
 //   options: --backend sqlite|postgres (postgres needs EGGMAIL_BENCH_POSTGRES=<connection string of an empty database>)
 //            --sync off|normal|full   --history full|statsonly   --messages N   --connections N   --size BYTES   --rcpt N
 //            --deliver true|false (default true: also drain the queue to the sink)   --label TEXT   --json out.json
+//   dotnet run -c Release --project bench/Mta.Bench.Pipeline -- --micro true [--json micro.json]
+//            allocation per call of the ingest steps in isolation; deterministic, so the CI allocation gate (bench/compare-allocations.py) uses it
 var opt = Args.Parse(args);
 if (opt.Get("micro", "false") == "true")
 {
-    await Micro.RunAsync();
+    await Micro.RunAsync(opt.Get("json", ""));
     return 0;
 }
 
@@ -277,7 +279,9 @@ internal sealed class AllocationSampler : System.Diagnostics.Tracing.EventListen
 /// <summary>Allocation per call of the ingest steps in isolation (bytes per operation on the calling thread).</summary>
 internal static class Micro
 {
-    public static async Task RunAsync()
+    private static readonly Dictionary<string, long> Results = new(StringComparer.Ordinal);
+
+    public static async Task RunAsync(string jsonPath)
     {
         string head = "From: Tester <news@bench.test>\r\nTo: rcpt0@dest.test\r\nSubject: load test\r\nDate: Mon, 12 Oct 2026 08:00:00 +0000\r\nMessage-ID: <abcdef@bench.test>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n";
         byte[] raw = System.Text.Encoding.ASCII.GetBytes(head + new string('x', 1800) + "\r\n");
@@ -307,7 +311,17 @@ internal static class Micro
         long before = GC.GetAllocatedBytesForCurrentThread();
         const int n = 5000;
         for (int i = 0; i < n; i++) { await submission.SubmitAsync(request, default); }
-        Console.WriteLine($"{"SubmissionService.SubmitAsync (InMemory storage, history Full)",-70} {(GC.GetAllocatedBytesForCurrentThread() - before) / n,8} B/op");
+        Report("SubmissionService.SubmitAsync (InMemory storage, history Full)", (GC.GetAllocatedBytesForCurrentThread() - before) / n);
+        if (jsonPath.Length > 0)
+        {
+            File.WriteAllText(jsonPath, JsonSerializer.Serialize(new { Kind = "micro", BytesPerOperation = Results }, new JsonSerializerOptions { WriteIndented = true }));
+        }
+    }
+
+    private static void Report(string name, long bytesPerOperation)
+    {
+        Results[name] = bytesPerOperation;
+        Console.WriteLine($"{name,-70} {bytesPerOperation,8} B/op");
     }
 
     private static void Measure(string name, Action action)
@@ -316,6 +330,6 @@ internal static class Micro
         long before = GC.GetAllocatedBytesForCurrentThread();
         const int n = 10000;
         for (int i = 0; i < n; i++) { action(); }
-        Console.WriteLine($"{name,-70} {(GC.GetAllocatedBytesForCurrentThread() - before) / n,8} B/op");
+        Report(name, (GC.GetAllocatedBytesForCurrentThread() - before) / n);
     }
 }

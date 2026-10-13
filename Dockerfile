@@ -50,4 +50,5 @@ EXPOSE 5587 4465 2525 2526 8080 8443
 VOLUME ["/data"]
 USER $APP_UID
 ENTRYPOINT ["/app/mta"]
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD ["/app/mta", "--healthcheck"]
+# --start-interval checks every 2 s while starting, so the container reports "healthy" within seconds instead of after the first 30 s interval.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --start-interval=2s --retries=3 CMD ["/app/mta", "--healthcheck"]

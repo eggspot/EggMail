@@ -1,0 +1,149 @@
+name: bench-throughput
+
+# Manual throughput run of the pipeline harness (SMTP ingest through storage, optionally with delivery to a sink), published as a workflow
+# artifact and a markdown summary. Dispatch only: it takes about ten minutes of runner time.
+#
+#   gh workflow run bench-throughput --ref <branch> [-f messages=30000 -f runs=3 -f postgres=true -f readytorun=true]
+#
+# A GitHub-hosted ubuntu-latest runner has 2 cores, shares its host with other jobs and runs the load generator, the server, the sink and
+# PostgreSQL on the same machine. The numbers are for trends and for catching order-of-magnitude mistakes, NOT for publication or for
+# comparing with other servers (docs/benchmarks.md, fairness rules). The summary says so in its first line.
+
+on:
+  workflow_dispatch:
+    inputs:
+      messages:
+        description: Messages per ingest run
+        default: '30000'
+      runs:
+        description: Runs per configuration (the summary reports the median)
+        default: '3'
+      postgres:
+        description: Also measure the PostgreSQL backend (durable and synchronous_commit=off)
+        type: boolean
+        default: true
+      readytorun:
+        description: Also measure start-up time and size of a JIT versus a ReadyToRun publish (decides the Docker build argument)
+        type: boolean
+        default: true
+
+concurrency:
+  group: bench-throughput-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: 1
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  ENVIRONMENT_LABEL: GitHub-hosted ubuntu-latest 2-core runner, noisy, not publishable
+
+jobs:
+  throughput:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('Directory.Packages.props', 'global.json') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Build the harness and the load generator
+        run: dotnet build bench/Mta.Bench.Pipeline -c Release
+
+      - name: PostgreSQL 17 (default durability; the non-durable pair sets synchronous_commit=off per connection)
+        if: inputs.postgres
+        run: |
+          docker run -d --name pg -p 5432:5432 -e POSTGRES_USER=eggmail -e POSTGRES_PASSWORD=eggmail -e POSTGRES_DB=postgres postgres:17
+          for _ in $(seq 1 30); do if docker exec pg pg_isready -U eggmail; then break; fi; sleep 1; done
+
+      - name: Machine
+        run: |
+          echo "cores: $(nproc)"; grep -m1 'model name' /proc/cpuinfo || true; free -m | head -2; df -h . | tail -1
+          mount | grep -E ' / ' || true
+
+      - name: Ingest runs
+        env:
+          MESSAGES: ${{ inputs.messages }}
+          RUNS: ${{ inputs.runs }}
+          POSTGRES: ${{ inputs.postgres }}
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          harness=(dotnet bench/Mta.Bench.Pipeline/bin/Release/net10.0/Mta.Bench.Pipeline.dll)
+          common=(--connections 16 --size 2048 --messages "${MESSAGES}")
+          run_config() { # run_config <name> <harness arguments...>
+            name=$1; shift
+            for n in $(seq 1 "$RUNS"); do
+              echo "== $name run $n"
+              "${harness[@]}" "$@" --label "$name" --json "results/${name}.run${n}.json" | tail -n 40
+            done
+          }
+          # SQLite, the default backend: non-durable (Sqlite:SyncMode=Off, the default) and its durable pair (Full), History:Mode=Full.
+          run_config sqlite-off-full      --sync off  --history full      --deliver false "${common[@]}"
+          run_config sqlite-full-full     --sync full --history full      --deliver false "${common[@]}"
+          run_config sqlite-off-statsonly --sync off  --history statsonly --deliver false "${common[@]}"
+          # With delivery to the counting sink (end-to-end recipients per second); fewer messages: delivery is the slow part.
+          run_config sqlite-off-full-delivery --sync off --history full --deliver true --connections 16 --size 2048 --messages 10000
+          if [ "$POSTGRES" = "true" ]; then
+            pg() { docker exec pg psql -U eggmail -d postgres -v ON_ERROR_STOP=1 -q -c "$1"; }
+            # Each run needs an empty database.
+            for variant in durable nondurable; do
+              options=""; [ "$variant" = "nondurable" ] && options=";Options='-c synchronous_commit=off'"
+              for n in $(seq 1 "$RUNS"); do
+                db="bench_${variant}_${n}"
+                pg "create database ${db}"
+                echo "== postgres-${variant}-full run $n"
+                EGGMAIL_BENCH_POSTGRES="Host=localhost;Port=5432;Username=eggmail;Password=eggmail;Database=${db};Maximum Pool Size=64${options}" \
+                  "${harness[@]}" --backend postgres --history full --deliver false "${common[@]}" --label "postgres-${variant}-full" \
+                  --json "results/postgres-${variant}-full.run${n}.json" | tail -n 40
+              done
+            done
+          fi
+
+      - name: Start-up time and size, JIT versus ReadyToRun (linux-x64), and the linux-arm64 cross-publish
+        if: inputs.readytorun
+        run: |
+          set -euo pipefail
+          for mode in false true; do
+            dotnet publish src/Mta.Host/Mta.Host.csproj -c Release -r linux-x64 --self-contained false -p:PublishReadyToRun=$mode -p:DebugType=none -o "publish-x64-r2r-$mode" -v q
+          done
+          python3 bench/measure-startup.py publish-x64-r2r-false --runs 7 --label "linux-x64 JIT (PublishReadyToRun=false)" | tee results/startup-jit.txt
+          python3 bench/measure-startup.py publish-x64-r2r-true  --runs 7 --label "linux-x64 ReadyToRun (PublishReadyToRun=true)" | tee results/startup-r2r.txt
+          # The image is built for arm64 on an amd64 runner: the ReadyToRun compiler has to cross-compile. Proves it builds and shows the size.
+          dotnet publish src/Mta.Host/Mta.Host.csproj -c Release -r linux-arm64 --self-contained false -p:PublishReadyToRun=true -p:DebugType=none -o publish-arm64-r2r -v q
+          du -sm publish-arm64-r2r | tee results/arm64-r2r-size.txt
+
+      - name: Summary
+        if: ${{ !cancelled() }}
+        run: |
+          python3 bench/summarize-throughput.py results "$ENVIRONMENT_LABEL" > summary.md
+          if [ -f results/startup-jit.txt ]; then
+            {
+              echo
+              echo "### Start-up and size, JIT versus ReadyToRun (same runner, median of 7 starts)"
+              echo
+              echo '```json'
+              cat results/startup-jit.txt results/startup-r2r.txt
+              echo '```'
+              echo "linux-arm64 ReadyToRun cross-publish from this amd64 runner succeeded: $(cut -f1 results/arm64-r2r-size.txt) MiB."
+            } >> summary.md
+          fi
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+          cp summary.md results/summary.md
+
+      - name: Publish the results as an artifact
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: throughput-results-${{ github.run_id }}
+          path: results
+          retention-days: 30

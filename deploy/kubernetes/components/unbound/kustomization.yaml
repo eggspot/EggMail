@@ -1,0 +1,19 @@
+# Optional component: a local DNSSEC-validating resolver (Unbound) as a sidecar, so DANE works with Dns:TrustAuthenticatedData.
+# Use it from a copy of an overlay:
+#
+#   components:
+#     - ../components/unbound
+#
+# The sidecar shares the pod's network namespace, so EggMail asks it at 127.0.0.1:53 and nothing outside the pod can reach it.
+# Unbound needs outbound DNS (UDP/TCP 53) to the Internet, which the base policy does not allow: the policy below adds it for the pod.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - networkpolicy.yaml
+
+patches:
+  - target: { kind: StatefulSet, name: eggmail }
+    path: sidecar-statefulset.yaml
+  - target: { kind: Deployment, name: eggmail }
+    path: sidecar-deployment.yaml

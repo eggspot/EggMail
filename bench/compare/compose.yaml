@@ -1,0 +1,127 @@
+# Baseline comparison: EggMail, Postfix and KumoMTA on the same host, same load generator, same sink (docs/benchmarks.md, "Baseline comparison").
+#
+# STATUS: written, NOT RUN. It needs Docker, which the development machine does not use (owner rule), and a quiet Linux host for the
+# numbers to mean anything. Expect to fix small things on the first run (the KumoMTA policy and the Postfix image were written from the
+# documentation, not from a working installation). Run it by hand, one system at a time:
+#
+#   cd bench/compare
+#   docker compose --profile eggmail up -d --build --wait               # sink + DNS/provisioning + EggMail
+#   docker compose run --rm load load --host eggmail --port 5587 --starttls --connections 32 --messages 200000 --size 2048 \
+#       --auth "$(docker compose exec -T provision cat /out/auth.txt)" --label eggmail-sqlite-off --json /out/eggmail-sqlite-off.json
+#   docker compose --profile eggmail down -v
+#   docker compose --profile postfix up -d --build --wait
+#   docker compose run --rm load load --host postfix --port 25 --connections 32 --messages 200000 --size 2048 --label postfix --json /out/postfix.json
+#   docker compose --profile kumomta up -d --wait
+#   docker compose run --rm load load --host kumomta --port 25 --connections 32 --messages 200000 --size 2048 --label kumomta --json /out/kumomta.json
+#
+# Fairness rules that this file is built to satisfy (the full list is in docs/benchmarks.md):
+#  - One at a time: the profiles are never up together, so the systems do not compete for the host.
+#  - Same client (mta-tools load: same message, size, connections), same sink (mta-tools sink, optional back-pressure with SINK_DELAY_MS).
+#  - Durable AND non-durable results for every system, never one against the other:
+#        EggMail   EGGMAIL_SYNC=Off  (default)  | EGGMAIL_SYNC=Full
+#        Postfix   default (fsyncs queue files) | compose.postfix-tmpfs.yaml (queue on RAM)
+#        KumoMTA   KUMO_SPOOL_FLUSH=false (its default) | KUMO_SPOOL_FLUSH=true
+#  - Authentication: EggMail requires AUTH + STARTTLS on its submission port, Postfix and KumoMTA take unauthenticated mail from this private
+#    network. That favours the two baselines slightly (no TLS handshake, no password hashing per connection); say so when quoting numbers.
+#  - Record image digests and the host (CPU, kernel, filesystem, device) with the results.
+name: eggmail-bench-compare
+
+x-network: &bench-network
+  bench:
+
+services:
+  sink:
+    build: { context: ../.., dockerfile: bench/compare/Dockerfile.tools }
+    command: ["sink", "--bind", "0.0.0.0", "--port", "2525", "--delay-ms", "${SINK_DELAY_MS:-0}"]
+    networks:
+      bench: { ipv4_address: 172.31.7.20 }
+    profiles: [eggmail, postfix, kumomta]
+
+  load:
+    build: { context: ../.., dockerfile: bench/compare/Dockerfile.tools }
+    networks: *bench-network
+    volumes:
+      - results:/out
+    profiles: [load]
+
+  # Serves the DNS a sending server needs (MX of the destination domain -> the sink, and the DKIM record of the sender domain) and creates
+  # the tenant, the sender domain, the SMTP credential and the verification EggMail needs before it accepts mail. Stays up as the resolver.
+  provision:
+    image: python:3.12-slim
+    command: ["python", "/bench/provision_eggmail.py"]
+    volumes:
+      - ./provision_eggmail.py:/bench/provision_eggmail.py:ro
+      - ../../deploy/smoke/smoke.py:/smoke/smoke.py:ro
+      - results:/out
+    environment:
+      BENCH_ADMIN_PASSWORD: ${BENCH_ADMIN_PASSWORD:-bench-only-change-me-123}
+      SINK_ADDRESS: 172.31.7.20
+    networks:
+      bench: { ipv4_address: 172.31.7.53 }
+    depends_on: [eggmail]
+    profiles: [eggmail]
+
+  eggmail:
+    image: ${EGGMAIL_IMAGE:-ghcr.io/eggspot/eggmail:nightly}     # pin a digest for a real comparison and record it
+    hostname: eggmail.bench.test
+    environment:
+      Hostname: eggmail.bench.test
+      Dashboard__BootstrapAdminPasswordFile: /run/configs/admin_password
+      Sqlite__SyncMode: ${EGGMAIL_SYNC:-Off}
+      History__Mode: ${EGGMAIL_HISTORY:-Full}
+      Dns__Servers__0: 172.31.7.53
+      Delivery__RemotePort: "2525"
+      Delivery__AllowPrivateMxAddresses: "true"
+      Delivery__Throttle__MaxConnections: "64"
+      Delivery__Throttle__InitialConnections: "64"
+      Delivery__Throttle__MaxMessagesPerMinute: "100000000"
+      Delivery__Throttle__InitialMessagesPerMinute: "100000000"
+      Delivery__Throttle__MaxMessagesPerConnection: "10000"
+      Smtp__MaxConnections: "4096"
+      Smtp__MaxConnectionsPerIp: "4096"
+      Backup__Enabled: "false"
+    configs:
+      - source: admin_password
+        target: /run/configs/admin_password
+    networks:
+      bench: { ipv4_address: 172.31.7.10 }
+    depends_on: [sink]
+    profiles: [eggmail]
+    volumes:
+      - eggmail-data:/data
+
+  postfix:
+    build: { context: ./postfix }
+    hostname: postfix.bench.test
+    # Default: the queue is on the container's disk and Postfix fsyncs queue files (the durable result). The non-durable pair puts the queue
+    # on RAM: docker compose -f compose.yaml -f compose.postfix-tmpfs.yaml --profile postfix up -d --build
+    networks:
+      bench: { ipv4_address: 172.31.7.11 }
+    depends_on: [sink]
+    profiles: [postfix]
+
+  kumomta:
+    image: ${KUMOMTA_IMAGE:-ghcr.io/kumocorp/kumomta:latest}     # pin a version or digest for a real comparison and record it
+    hostname: kumomta.bench.test
+    environment:
+      KUMO_SPOOL_FLUSH: ${KUMO_SPOOL_FLUSH:-false}
+    volumes:
+      - ./kumomta/init.lua:/opt/kumomta/etc/policy/init.lua:ro
+    networks:
+      bench: { ipv4_address: 172.31.7.12 }
+    depends_on: [sink]
+    profiles: [kumomta]
+
+configs:
+  admin_password:
+    content: ${BENCH_ADMIN_PASSWORD:-bench-only-change-me-123}
+
+networks:
+  bench:
+    ipam:
+      config:
+        - subnet: 172.31.7.0/24
+
+volumes:
+  results:
+  eggmail-data:

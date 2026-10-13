@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "recordedOn": "local development machine (placeholder until the first run of the bench-gate workflow on GitHub)",
+  "thresholds": {
+    "microPercent": 5,
+    "pipelinePercent": 10
+  },
+  "micro": {
+    "MimeMessage.Parse": 1536,
+    "MessageHeaderEditor (remove Bcc, 2 prepends, Received, ToArray)": 3232,
+    "MessageContentExtractor.Extract": 5464,
+    "AddressList.Parse(From)": 864,
+    "Ids.New + EmailAddress.Parse x2": 152,
+    "SubmissionService.SubmitAsync (InMemory storage, history Full)": 16567
+  },
+  "pipeline": {
+    "sqlite-off-full": {
+      "bytesPerMessage": 33500,
+      "messages": 20000,
+      "connections": 8,
+      "sizeBytes": 2048,
+      "history": "Full",
+      "sqliteSync": "Off"
+    }
+  }
+}

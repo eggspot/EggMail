@@ -491,3 +491,6 @@ node_modules/
 
 # Local agent worktrees
 .claude/
+
+# Local deployment secrets (deploy/compose)
+deploy/compose/secrets/
