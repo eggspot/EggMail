@@ -68,6 +68,8 @@ export interface MessageSummary {
   subject: string;
   from: string;
   recipients: string[];
+  /** All recipients; `recipients` holds only the first few in a list. */
+  recipientCount?: number;
   status: MessageStatus;
   size: number;
 }
@@ -83,10 +85,12 @@ export interface AttachmentInfo {
 export interface MessageDetail extends MessageSummary {
   tenantId: string;
   content: {
-    state: 'available' | 'body_expired';
+    state: 'available' | 'body_expired' | 'not_recorded';
     text?: string;
     html?: string;
     attachments: AttachmentInfo[];
+    /** The stored text or HTML was cut at the size limit. */
+    truncated?: boolean;
   };
   rawRetained: boolean;
 }

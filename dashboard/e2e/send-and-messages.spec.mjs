@@ -176,6 +176,23 @@ test.describe('sending and the message list', () => {
     await expect(messageRow(page, okSubject)).toBeVisible();
   });
 
+  test('a message to many recipients shows how many there are, though the list carries only the first few', async ({ adminPage: page, admin, tenant, stack }) => {
+    const domain = await createVerifiedDomain(admin, stack, tenant);
+    const recipientDomain = createRecipientDomain(stack);
+    const key = (await admin.ok('POST', '/api/v1/api-keys', { name: 'many', scopes: ['send'] }, { tenantId: tenant.id })).key;
+    const subject = unique('Seven recipients ');
+    const to = Array.from({ length: 7 }, (_, i) => `person${i}@${recipientDomain}`);
+    expect((await sendViaApi(stack, key, { from: `hello@${domain.name}`, to, subject, text: 'x' })).body.recipients).toBe(7);
+
+    await page.goto('/messages');
+    await expect(async () => {
+      await search(page);
+      await expect(messageRow(page, subject)).toContainText('+6 more', { timeout: 2_000 });
+    }).toPass({ timeout: 30_000 });
+    await messageRow(page, subject).getByRole('link', { name: subject }).click();
+    await expect(page.locator('dl.kv').first()).toContainText(`person6@${recipientDomain}`); // the detail lists everyone
+  });
+
   test('the send page sends a message with an attachment through the API and links to it', async ({ adminPage: page, admin, tenant, stack }) => {
     const domain = await createVerifiedDomain(admin, stack, tenant);
     const recipientDomain = createRecipientDomain(stack);

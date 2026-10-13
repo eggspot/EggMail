@@ -21,6 +21,16 @@ describe('Messages list', () => {
     expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull();
   });
 
+  it('uses recipientCount, because the list only carries the first recipients', async () => {
+    const many = summary({ id: 'c'.repeat(32), subject: 'Many recipients', recipients: ['a@x.test', 'b@x.test', 'c@x.test', 'd@x.test', 'e@x.test'], recipientCount: 50 });
+    const none = summary({ id: 'd'.repeat(32), subject: 'Unlisted', recipients: [], recipientCount: 3 });
+    mockFetch({ 'GET /api/v1/messages': { items: [many, none], next_cursor: null } });
+    renderWithApp(<Messages />);
+    await screen.findByRole('link', { name: 'Many recipients' });
+    expect(screen.getByText('+49 more')).toBeTruthy();
+    expect(screen.getByText('3 recipients')).toBeTruthy();
+  });
+
   it('submits the filters, converting datetime-local values to ISO', async () => {
     const m = mockFetch({ 'GET /api/v1/messages': { items: [A], next_cursor: null } });
     renderWithApp(<Messages />);

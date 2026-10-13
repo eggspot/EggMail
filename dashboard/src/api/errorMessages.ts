@@ -14,6 +14,7 @@ const MESSAGES: Record<string, string> = {
   idempotency_conflict: 'This request was already sent with different content. Reload and try again.',
   history_not_recorded: 'Per-message history is not recorded on this server (History mode is statistics only).',
   body_expired: 'The message content has expired and was removed. Metadata and events are still available.',
+  content_not_recorded: 'The content of this message was never recorded because the server does not keep message content (Content mode is none). Metadata and events are available.',
   message_not_found: 'That message was not found. It may be older than the event retention period.',
   attachments_not_stored: 'This message had attachments that were not stored, so it cannot be resent.',
   not_ready: 'The server is not ready yet (storage unavailable). Try again in a few seconds.',
