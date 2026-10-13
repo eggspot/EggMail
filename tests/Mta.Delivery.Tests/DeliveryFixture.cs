@@ -172,7 +172,7 @@ internal sealed class DeliveryFixture : IAsyncDisposable
     }
 
     /// <summary>Queues an arbitrary raw message (CRLF lines) for the given recipients.</summary>
-    public async Task<Guid> EnqueueRawAsync(byte[] raw, string[] to, string from = "sender@example.org", bool smtpUtf8 = false, string? sendingDomain = "example.org", MessageSource source = MessageSource.Smtp)
+    public async Task<Guid> EnqueueRawAsync(byte[] raw, string[] to, string from = "sender@example.org", bool headersUtf8 = false, string? sendingDomain = "example.org", MessageSource source = MessageSource.Smtp)
     {
         var now = DateTimeOffset.UtcNow;
         var id = Ids.New(now);
@@ -187,7 +187,7 @@ internal sealed class DeliveryFixture : IAsyncDisposable
             ReceivedAt = now,
             ExpiresAt = now + TimeSpan.FromDays(5),
             SendingDomain = sendingDomain,
-            SmtpUtf8 = smtpUtf8,
+            HeadersUtf8 = headersUtf8,
         }, CancellationToken.None);
         Engine.Wake();
         return id;

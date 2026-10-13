@@ -34,9 +34,9 @@ public sealed class QueuedDeliveryEntity
 
     /// <summary>
     /// The message's header section is internationalized (RFC 6532 UTF-8 header fields), so every transaction that carries it needs
-    /// SMTPUTF8 whatever the addresses. Decided once at intake (<see cref="AcceptedMessage.SmtpUtf8"/>) and copied to each recipient's row.
+    /// SMTPUTF8 whatever the addresses. Decided once at intake (<see cref="AcceptedMessage.HeadersUtf8"/>) and copied to each recipient's row.
     /// </summary>
-    public bool SmtpUtf8 { get; set; }
+    public bool HeadersUtf8 { get; set; }
 
     /// <summary>
     /// Backend switch hold (design §4.6): when set, the row cannot be claimed. On the source it is the transfer mark

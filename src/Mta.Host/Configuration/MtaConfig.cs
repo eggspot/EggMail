@@ -112,6 +112,9 @@ public sealed class DeliverySection
 
     /// <summary>Allow MX hosts that resolve to loopback, private or other special-use addresses. Off in production (a hostile MX record must not aim us at the internal network); on for lab and test setups.</summary>
     public bool AllowPrivateMxAddresses { get; init; }
+
+    /// <summary>The address receiving servers see for our connections, reported as <c>sending-mta-ip</c> in TLS-RPT reports. Set it behind NAT or a proxy; when unset only a public local address of the connection is reported.</summary>
+    public string? PublicSendingIp { get; init; }
 }
 
 /// <summary>

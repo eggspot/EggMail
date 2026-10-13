@@ -46,6 +46,19 @@ internal sealed class OutboundTransaction : IDisposable
         _bodyEightBit = MessageInspector.HasEightBitBody(raw);
     }
 
+    private OutboundTransaction(OutboundTransaction source, IReadOnlyList<EmailAddress> recipients)
+    {
+        _raw = source._raw;
+        _signer = source._signer;
+        _bodyEightBit = source._bodyEightBit;
+        HeadersUtf8 = source.HeadersUtf8;
+        From = source.From;
+        Recipients = recipients;
+    }
+
+    /// <summary>The same message and sender for a subset of the recipients (own variants, so it is disposed on its own).</summary>
+    public OutboundTransaction ForRecipients(IReadOnlyList<EmailAddress> recipients) => new(this, recipients);
+
     public EmailAddress From { get; }
 
     public IReadOnlyList<EmailAddress> Recipients { get; }

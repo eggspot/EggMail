@@ -138,9 +138,9 @@ public class IngestTests : IAsyncLifetime
 
         Assert.Equal(2, claimed.Count);
         var utf8 = claimed.Single(d => d.Recipient.ToString() == "rcpt1@dest.example");
-        Assert.True(utf8.SmtpUtf8);
+        Assert.True(utf8.HeadersUtf8);
         Assert.True(Mta.Mime.MessageInspector.HasValidUtf8Headers((await _storage.Deliveries.GetRawAsync(utf8.MessageId, default))!));
-        Assert.False(claimed.Single(d => d.Recipient.ToString() == "rcpt2@dest.example").SmtpUtf8);
+        Assert.False(claimed.Single(d => d.Recipient.ToString() == "rcpt2@dest.example").HeadersUtf8);
     }
 
     [Fact]

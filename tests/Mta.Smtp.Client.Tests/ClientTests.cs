@@ -95,7 +95,7 @@ public class ClientTests
         var policy = new SmtpTlsPolicy { Mode = SmtpTlsMode.StartTls, Require = true, TargetHost = "localhost", ValidationCallback = (_, _, _, e) => e == System.Net.Security.SslPolicyErrors.None };
         var ex = await Assert.ThrowsAsync<SmtpTlsException>(async () => await SmtpClientConnection.ConnectAsync(server.Target(policy), Options));
         Assert.Equal(TlsFailure.HandshakeFailed, ex.Failure);
-        Assert.Equal(IPAddress.Loopback, ex.LocalAddress);   // the source address of the failed session, for TLS-RPT
+        Assert.Equal(IPAddress.Loopback, ex.LocalIpAddress);   // the source address of the failed session, for TLS-RPT
     }
 
     [Fact]

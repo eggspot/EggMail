@@ -228,7 +228,7 @@ public sealed class DeliveryProcessor
             }
 
             // What goes on the wire (and so what DKIM signs) is decided per server, after its EHLO: see OutboundTransaction.
-            transaction = new OutboundTransaction(raw, signer, first.SmtpUtf8, await ChooseEnvelopeFromAsync(first, now, ct).ConfigureAwait(false), pending.Select(d => d.Recipient).ToArray());
+            transaction = new OutboundTransaction(raw, signer, first.HeadersUtf8, await ChooseEnvelopeFromAsync(first, now, ct).ConfigureAwait(false), pending.Select(d => d.Recipient).ToArray());
             var attempt = await RunRoutesAsync(first, transaction, ct).ConfigureAwait(false);
             Interpret(pending, attempt, results);
 
@@ -317,6 +317,10 @@ public sealed class DeliveryProcessor
 
         /// <summary>Recipients that were left out of the transaction because the server cannot take their address.</summary>
         public IReadOnlyDictionary<EmailAddress, SmtpReply>? RecipientRefusals { get; set; }
+
+        /// <summary>For the recipients in <see cref="FollowupRecipients"/> this result replaces the one of the host that took the rest of the group.</summary>
+        public AttemptResult? Followup { get; set; }
+        public HashSet<EmailAddress>? FollowupRecipients { get; set; }
         public bool Connected => Route is not (RouteAttemptResult.ConnectTimeout or RouteAttemptResult.ConnectRefused);
     }
 
@@ -349,6 +353,11 @@ public sealed class DeliveryProcessor
                 ? await TryDirectAsync(first, tx, ct).ConfigureAwait(false)
                 : await TryRelayAsync(first, step.Relay!, tx, ct).ConfigureAwait(false);
             result.RouteName = step.Name;
+            if (result.Followup is not null)
+            {
+                result.Followup.RouteName = step.Name;
+            }
+
             _s.Routes.ReportAttempt(step, result.Route);
             last = result;
 
@@ -386,88 +395,169 @@ public sealed class DeliveryProcessor
         }
 
         var domainTls = await _s.Tls.ResolveDomainAsync(first.RecipientDomain, _s.TlsPolicies.For(first.RecipientDomain), ct).ConfigureAwait(false);
-        AttemptResult? lastFailure = null;
-        AttemptResult? capabilityRefusal = null;
-        int hosts = 0;
-        foreach (var exchanger in mx.Exchangers)
+        AttemptResult? lastFailure = null;          // a failure that a later attempt may overcome (connect, TLS, banner)
+        AttemptResult? capabilityRefusal = null;    // the latest host that answered but cannot take the message (no SMTPUTF8, no safe 8-bit conversion)
+        bool skipped = false;                       // a candidate host was not asked (breaker open, per-attempt cap, no address): the refusals may not be final
+        AttemptResult? partial = null;              // the host that took the group except for the recipients it could not take
+        HashSet<EmailAddress>? leftOver = null;
+        OutboundTransaction? followTx = null;
+        var current = tx;
+        AttemptResult Finish(AttemptResult last)
         {
-            if (hosts >= _options.MaxMxHostsPerAttempt)
+            if (partial is null)
             {
-                break;
+                return last;
             }
 
-            if (!_s.Routes.TryBeginMxHost(exchanger.Host, out _))
-            {
-                continue;
-            }
-
-            hosts++;
-            var decision = await _s.Tls.ResolveForMxAsync(domainTls, exchanger.Host, mx.MxAuthenticated, _options.RemotePort, ct).ConfigureAwait(false);
-            if (decision.IsBlocked)
-            {
-                TlsReportRecorder.RecordBlocked(_s.TlsReports, decision, ProbeSourceAddress(exchanger.Addresses.FirstOrDefault()));
-                lastFailure = new AttemptResult
-                {
-                    Route = RouteAttemptResult.TlsPolicyFailure,
-                    Reply = SmtpReply.Create(451, "4.7.5", "TLS policy forbids delivery via " + exchanger.Host + ": " + decision.BlockedReason),
-                    Error = decision.BlockedReason,
-                    MxHost = exchanger.Host,
-                    Decision = decision,
-                };
-                continue;
-            }
-
-            int tried = 0;
-            foreach (var address in exchanger.Addresses)
-            {
-                if (tried++ >= _options.MaxAddressesPerHost)
-                {
-                    break;
-                }
-
-                var target = new SmtpRemoteTarget
-                {
-                    Host = exchanger.Host,
-                    Address = address,
-                    Port = _options.RemotePort,
-                    Tls = BuildTlsPolicy(decision, exchanger.Host, out var validator),
-                };
-                var result = await SendOnceAsync(target, tx, ct).ConfigureAwait(false);
-                result.MxHost = exchanger.Host;
-                result.Decision = decision;
-                result.Validator = validator;
-                result.ReceivingIp = address.ToString();
-                ReportTls(first.RecipientDomain, decision, result);
-                if (result.Route is RouteAttemptResult.ConnectTimeout or RouteAttemptResult.ConnectRefused)
-                {
-                    _s.Routes.ReportMxHost(exchanger.Host, result.Route);
-                    lastFailure = result;
-                    continue;
-                }
-
-                if (result.CapabilityRefusal)
-                {
-                    // This server cannot take the message (no SMTPUTF8, or no safe 8-bit conversion); a later MX of the domain may. The server itself is healthy.
-                    _s.Routes.ReportMxHost(exchanger.Host, RouteAttemptResult.Delivered);
-                    capabilityRefusal = result;
-                    break;
-                }
-
-                if (result.Route == RouteAttemptResult.TlsPolicyFailure || result.Stage == ClientSmtpStage.Banner)
-                {
-                    // Another MX host (or address) may well accept; remember this failure in case none does.
-                    _s.Routes.ReportMxHost(exchanger.Host, RouteAttemptResult.TemporaryReply);
-                    lastFailure = result;
-                    continue;
-                }
-
-                _s.Routes.ReportMxHost(exchanger.Host, result.Route);
-                return result;
-            }
+            partial.Followup = last;
+            partial.FollowupRecipients = leftOver;
+            return partial;
         }
 
-        // Permanent only when every host that was reached refused for lack of an extension; an unreachable one might still take it later.
-        return lastFailure ?? capabilityRefusal ?? Synthetic(RouteAttemptResult.ConnectRefused, 451, "4.4.1", "no mail host is currently reachable");
+        try
+        {
+            int hosts = 0;
+            foreach (var exchanger in mx.Exchangers)
+            {
+                if (hosts >= _options.MaxMxHostsPerAttempt)
+                {
+                    skipped = true;
+                    break;
+                }
+
+                if (!_s.Routes.TryBeginMxHost(exchanger.Host, out _))
+                {
+                    skipped = true;
+                    continue;
+                }
+
+                hosts++;
+                var decision = await _s.Tls.ResolveForMxAsync(domainTls, exchanger.Host, mx.MxAuthenticated, _options.RemotePort, ct).ConfigureAwait(false);
+                if (decision.IsBlocked)
+                {
+                    TlsReportRecorder.RecordBlocked(_s.TlsReports, decision, ReportableSendingIp(ProbeSourceAddress(exchanger.Addresses.FirstOrDefault())));
+                    lastFailure = new AttemptResult
+                    {
+                        Route = RouteAttemptResult.TlsPolicyFailure,
+                        Reply = SmtpReply.Create(451, "4.7.5", "TLS policy forbids delivery via " + exchanger.Host + ": " + decision.BlockedReason),
+                        Error = decision.BlockedReason,
+                        MxHost = exchanger.Host,
+                        Decision = decision,
+                    };
+                    continue;
+                }
+
+                if (exchanger.Addresses.Count == 0)
+                {
+                    skipped = true;
+                    continue;
+                }
+
+                int tried = 0;
+                foreach (var address in exchanger.Addresses)
+                {
+                    if (tried++ >= _options.MaxAddressesPerHost)
+                    {
+                        break;
+                    }
+
+                    var target = new SmtpRemoteTarget
+                    {
+                        Host = exchanger.Host,
+                        Address = address,
+                        Port = _options.RemotePort,
+                        Tls = BuildTlsPolicy(decision, exchanger.Host, out var validator),
+                    };
+                    var result = await SendOnceAsync(target, current, ct).ConfigureAwait(false);
+                    result.MxHost = exchanger.Host;
+                    result.Decision = decision;
+                    result.Validator = validator;
+                    result.ReceivingIp = address.ToString();
+                    ReportTls(first.RecipientDomain, decision, result);
+                    if (result.Route is RouteAttemptResult.ConnectTimeout or RouteAttemptResult.ConnectRefused)
+                    {
+                        _s.Routes.ReportMxHost(exchanger.Host, result.Route);
+                        lastFailure = result;
+                        continue;
+                    }
+
+                    if (result.CapabilityRefusal)
+                    {
+                        // This server cannot take the message; a later MX of the domain may. The server itself is healthy.
+                        _s.Routes.ReportMxHost(exchanger.Host, RouteAttemptResult.Delivered);
+                        capabilityRefusal = result;
+                        break;
+                    }
+
+                    if (result.Route == RouteAttemptResult.TlsPolicyFailure || result.Stage == ClientSmtpStage.Banner)
+                    {
+                        // Another MX host (or address) may well accept; remember this failure in case none does.
+                        _s.Routes.ReportMxHost(exchanger.Host, RouteAttemptResult.TemporaryReply);
+                        lastFailure = result;
+                        continue;
+                    }
+
+                    _s.Routes.ReportMxHost(exchanger.Host, result.Route);
+                    if (partial is null && result.RecipientRefusals is { Count: > 0 } refused)
+                    {
+                        // This host took the group except for the recipients whose address it cannot take (no SMTPUTF8). Those are not failed yet:
+                        // the remaining hosts are asked about them alone, and only if every host that answers refuses do they fail for good.
+                        partial = result;
+                        leftOver = [.. refused.Keys];
+                        capabilityRefusal = new AttemptResult
+                        {
+                            Route = RouteAttemptResult.PermanentReply,
+                            Reply = refused.Values.First(),
+                            Error = string.Join(' ', refused.Values.First().Lines),
+                            Stage = ClientSmtpStage.RcptTo,
+                            MxHost = exchanger.Host,
+                            CapabilityRefusal = true,
+                        };
+                        result.RecipientRefusals = null;
+                        followTx = current.ForRecipients([.. leftOver]);
+                        current = followTx;
+                        break;
+                    }
+
+                    return Finish(result);
+                }
+            }
+
+            // Permanent only when every host that was asked refused for lack of an extension. A host that failed in another way, or one that
+            // was not asked at all, might still take the message, so then the delivery is retried.
+            if (lastFailure is not null)
+            {
+                return Finish(lastFailure);
+            }
+
+            if (capabilityRefusal is not null)
+            {
+                return Finish(skipped
+                    ? Synthetic(RouteAttemptResult.TemporaryReply, 451, "4.4.1", "the mail host that answered cannot take the message (" + capabilityRefusal.Error + ") and other mail hosts were not asked in this attempt")
+                    : capabilityRefusal);
+            }
+
+            return Finish(Synthetic(RouteAttemptResult.ConnectRefused, 451, "4.4.1", "no mail host is currently reachable"));
+        }
+        finally
+        {
+            followTx?.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// What TLS-RPT may say about our sending address: <c>Delivery:PublicSendingIp</c> when configured (behind NAT the local address of the
+    /// connection is not the one the receiver saw), otherwise the connection's local address only when it is a public one, since a private,
+    /// loopback or link-local address in a report sent to other organizations is noise at best and leaks the internal layout at worst.
+    /// </summary>
+    private string? ReportableSendingIp(string? local)
+    {
+        if (!string.IsNullOrWhiteSpace(_options.PublicSendingIp))
+        {
+            return _options.PublicSendingIp;
+        }
+
+        return local is not null && (_options.ReportNonPublicSendingIp || (IPAddress.TryParse(local, out var ip) && Mta.Webhooks.SsrfGuard.IsPubliclyRoutable(ip))) ? local : null;
     }
 
     /// <summary>The local address the operating system would use to reach <paramref name="destination"/> (a UDP "connect" sends nothing), or null.</summary>
@@ -503,7 +593,7 @@ public sealed class DeliveryProcessor
             return;
         }
 
-        TlsReportRecorder.RecordSession(_s.TlsReports, decision, result.ReceivingIp, result.SendingIp, result.TlsFailure, result.Validator?.Outcome, result.Tls?.Used ?? false);
+        TlsReportRecorder.RecordSession(_s.TlsReports, decision, result.ReceivingIp, ReportableSendingIp(result.SendingIp), result.TlsFailure, result.Validator?.Outcome, result.Tls?.Used ?? false);
     }
 
     private async Task<AttemptResult> TryRelayAsync(ClaimedDelivery first, RelayRouteRecord relay, OutboundTransaction tx, CancellationToken ct)
@@ -654,7 +744,7 @@ public sealed class DeliveryProcessor
                 Tls = ex.Session,
                 Stage = ClientSmtpStage.StartTls,
                 Duration = Stopwatch.GetElapsedTime(started),
-                SendingIp = ex.LocalAddress?.ToString(),
+                SendingIp = ex.LocalIpAddress?.ToString(),
             };
         }
         catch (SmtpGreetingRejectedException ex)
@@ -666,12 +756,12 @@ public sealed class DeliveryProcessor
                 Error = ex.Message,
                 Stage = ex.Stage == ClientSmtpStage.Banner ? ClientSmtpStage.Banner : ex.Stage,
                 Duration = Stopwatch.GetElapsedTime(started),
-                SendingIp = ex.LocalAddress?.ToString(),
+                SendingIp = ex.LocalIpAddress?.ToString(),
             };
         }
         catch (SmtpConnectionException ex)
         {
-            return Dropped(ex, null, started, ex.LocalAddress?.ToString());
+            return Dropped(ex, null, started, ex.LocalIpAddress?.ToString());
         }
         catch (Exception ex) when (ex is SocketException or IOException or SmtpClientException or TimeoutException)
         {
@@ -761,6 +851,19 @@ public sealed class DeliveryProcessor
     }
 
     private void Interpret(List<ClaimedDelivery> pending, AttemptResult a, List<Result> results)
+    {
+        if (a.Followup is { } follow && a.FollowupRecipients is { } followSet)
+        {
+            // Some recipients were handed on to later hosts; each part is read from the result that decided it.
+            InterpretCore(pending.Where(d => !followSet.Contains(d.Recipient)).ToList(), a, results);
+            InterpretCore(pending.Where(d => followSet.Contains(d.Recipient)).ToList(), follow, results);
+            return;
+        }
+
+        InterpretCore(pending, a, results);
+    }
+
+    private void InterpretCore(List<ClaimedDelivery> pending, AttemptResult a, List<Result> results)
     {
         var now = _s.Clock.UtcNow;
         if (a.HoldUntil is { } hold)

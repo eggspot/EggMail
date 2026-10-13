@@ -38,9 +38,6 @@ public sealed class SubmissionRequest
 
     public string? RemoteAddress { get; init; }
     public string? Authenticated { get; init; }
-
-    /// <summary>The submitter declared SMTPUTF8 (the MAIL FROM parameter, or an internationalized address in the API request). Informational: what is stored is decided from the message headers, see <see cref="AcceptedMessage.SmtpUtf8"/>.</summary>
-    public bool SmtpUtf8 { get; init; }
     public string? IdempotencyKey { get; init; }
 
     /// <summary>Digest of the request that carries <see cref="IdempotencyKey"/>; storage returns the stored one on a duplicate so the caller can detect key reuse with another body.</summary>
@@ -169,7 +166,7 @@ public sealed class SubmissionService
             // What the message itself needs (UTF-8 in its header fields), decided from its bytes rather than from the submitter's MAIL FROM
             // parameter: a client that declares SMTPUTF8 only for an internationalized address must not make every transaction of this
             // message demand SMTPUTF8, and one that sends UTF-8 headers without declaring it still gets them delivered as such.
-            SmtpUtf8 = MessageInspector.HasValidUtf8Headers(raw),
+            HeadersUtf8 = MessageInspector.HasValidUtf8Headers(raw),
             Content = content,
             RetainRaw = request.StoreAttachments && _storageOptions.Content.AllowAttachmentStorage && content is { Attachments.Count: > 0 },
             SendingDomain = decision.SendingDomain?.Name ?? fromDomain,

@@ -130,13 +130,13 @@ public class EightBitAndInternationalDeliveryTests
         Assert.Equal(DkimStatus.Pass, Assert.Single(await new DkimVerifier(f.Dns).VerifyAsync(msg.Body)).Status);
     }
 
-    [Fact]
+    [Ipv6Fact]
     public async Task A_conversion_after_an_unreachable_first_mx_is_signed_and_verifies()
     {
         // The preferred MX does not answer, the backup lacks 8BITMIME: the message is converted and signed for the host that does answer.
         await using var f = Signed(eightBitMime: false);
         await AddDkimKeyAsync(f);
-        f.Dns.AddMx("dual.example", 5, "down.dual.example").AddA("down.dual.example", "127.0.0.2").AddMx("dual.example", 10, "mx.dest.example");
+        f.Dns.AddMx("dual.example", 5, "down.dual.example").AddAaaa("down.dual.example", "::1").AddMx("dual.example", 10, "mx.dest.example");   // nothing listens on [::1]:port
         var id = await f.EnqueueRawAsync(EightBitMessage(), ["rcpt@dual.example"]);
 
         await f.WaitForEventAsync(id, MessageEventType.Delivered);
@@ -202,26 +202,32 @@ public class EightBitAndInternationalDeliveryTests
         Assert.DoesNotContain(f.Remote.Messages, m => m.Recipients.Contains("rcpt@dest.example"));
     }
 
-    [Fact]
-    public async Task A_second_mx_that_offers_SMTPUTF8_takes_the_message_the_first_mx_could_not()
-    {
-        if (!System.Net.Sockets.Socket.OSSupportsIPv6)
-        {
-            return;   // the second server listens on the IPv6 loopback address, on the same port
-        }
+    private static string Utf8Headers(string rcpt) =>
+        $"From: Jürgen <sender@example.org>\r\nTo: {rcpt}\r\nSubject: Grüße\r\nMessage-ID: <d@example.org>\r\nDate: Mon, 12 Oct 2026 08:00:00 +0000\r\n";
 
-        await using var f = new DeliveryFixture(smtpUtf8: false);
-        var second = new RemoteServer();
-        await using var secondServer = new Mta.Smtp.Server.SmtpServer(new Mta.Smtp.Server.SmtpServerOptions
+    /// <summary>A second receiving server on the IPv6 loopback address, on the same port as the fixture's (which listens on IPv4 loopback).</summary>
+    private static (RemoteServer Remote, Mta.Smtp.Server.SmtpServer Server) StartSecondServer(DeliveryFixture f, bool smtpUtf8 = true)
+    {
+        var remote = new RemoteServer();
+        var server = new Mta.Smtp.Server.SmtpServer(new Mta.Smtp.Server.SmtpServerOptions
         {
             Hostname = "mx2.dual.example",
+            SmtpUtf8 = smtpUtf8,
             Listeners = [new Mta.Smtp.Server.SmtpListenerOptions { Name = "mx2", BindAddress = System.Net.IPAddress.IPv6Loopback, Port = f.Port, Mode = Mta.Smtp.Server.ListenerMode.Plain, AuthRequired = false, Role = Mta.Smtp.Server.ListenerRole.Bounce }],
-        }, second);
-        secondServer.Start();
+        }, remote);
+        server.Start();
+        return (remote, server);
+    }
+
+    [Ipv6Fact]
+    public async Task A_second_mx_that_offers_SMTPUTF8_takes_the_message_the_first_mx_could_not()
+    {
+        await using var f = new DeliveryFixture(smtpUtf8: false);
+        var (second, server) = StartSecondServer(f);
+        await using var _ = server;
         f.Dns.AddMx("dual.example", 10, "mx1.dual.example").AddA("mx1.dual.example", "127.0.0.1")
             .AddMx("dual.example", 20, "mx2.dual.example").AddAaaa("mx2.dual.example", "::1");
-        string headers = "From: Jürgen <sender@example.org>\r\nTo: rcpt@dual.example\r\nSubject: Grüße\r\nMessage-ID: <d@example.org>\r\nDate: Mon, 12 Oct 2026 08:00:00 +0000\r\n";
-        var id = await f.EnqueueRawAsync(EightBitMessage(headers), ["rcpt@dual.example"]);
+        var id = await f.EnqueueRawAsync(EightBitMessage(Utf8Headers("rcpt@dual.example")), ["rcpt@dual.example"]);
 
         var events = await f.WaitForEventAsync(id, MessageEventType.Delivered);
 
@@ -232,19 +238,89 @@ public class EightBitAndInternationalDeliveryTests
         Assert.Equal("mx2.dual.example", events.Single(e => e.Type == MessageEventType.Delivered).MxHost);
     }
 
-    [Fact]
-    public async Task The_message_bounces_when_every_mx_that_answers_lacks_the_extension_but_waits_when_one_is_unreachable()
+    [Ipv6Fact]
+    public async Task A_recipient_the_first_mx_cannot_take_is_not_failed_but_offered_to_the_next_mx()
     {
         await using var f = new DeliveryFixture(smtpUtf8: false);
         AllowBounces(f);
-        f.Dns.AddMx("flaky.example", 10, "mx1.flaky.example").AddA("mx1.flaky.example", "127.0.0.1")
-            .AddMx("flaky.example", 20, "mx2.flaky.example").AddA("mx2.flaky.example", "127.0.0.9");   // nothing listens there
-        string headers = "From: Jürgen <sender@example.org>\r\nTo: rcpt@flaky.example\r\nSubject: Grüße\r\nMessage-ID: <d@example.org>\r\nDate: Mon, 12 Oct 2026 08:00:00 +0000\r\n";
-        var id = await f.EnqueueRawAsync(EightBitMessage(headers), ["rcpt@flaky.example"]);
+        var (second, server) = StartSecondServer(f);
+        await using var _ = server;
+        f.Dns.AddMx("dual.example", 10, "mx1.dual.example").AddA("mx1.dual.example", "127.0.0.1")
+            .AddMx("dual.example", 20, "mx2.dual.example").AddAaaa("mx2.dual.example", "::1");
+        var id = await f.EnqueueRawAsync(AsciiMessage(), ["plain@dual.example", "пользователь@dual.example"]);
+
+        var events = await f.WaitForEventAsync(id, MessageEventType.Delivered, count: 2);
+
+        Assert.DoesNotContain(events, e => e.Type == MessageEventType.Bounced);
+        Assert.Equal(["plain@dual.example"], Assert.Single(f.Remote.Messages).Recipients);
+        Assert.False(f.Remote.Messages[0].SmtpUtf8);
+        var other = Assert.Single(second.Messages);
+        Assert.Equal(["пользователь@dual.example"], other.Recipients);
+        Assert.True(other.SmtpUtf8);
+        Assert.Equal("mx1.dual.example", events.Single(e => e.Recipient == "plain@dual.example" && e.Type == MessageEventType.Delivered).MxHost);
+        Assert.Equal("mx2.dual.example", events.Single(e => e.Recipient == "пользователь@dual.example" && e.Type == MessageEventType.Delivered).MxHost);
+    }
+
+    [Ipv6Fact]
+    public async Task A_recipient_every_mx_cannot_take_fails_for_good_while_the_others_are_delivered()
+    {
+        await using var f = new DeliveryFixture(smtpUtf8: false);
+        AllowBounces(f);
+        var (_, server) = StartSecondServer(f, smtpUtf8: false);
+        await using var _s = server;
+        f.Dns.AddMx("dual.example", 10, "mx1.dual.example").AddA("mx1.dual.example", "127.0.0.1")
+            .AddMx("dual.example", 20, "mx2.dual.example").AddAaaa("mx2.dual.example", "::1");
+        var id = await f.EnqueueRawAsync(AsciiMessage(), ["plain@dual.example", "пользователь@dual.example"]);
+
+        var events = await f.WaitForEventAsync(id, MessageEventType.Bounced);
+
+        Assert.Equal("5.6.7", events.Single(e => e.Type == MessageEventType.Bounced).EnhancedCode);
+        await f.WaitForEventAsync(id, MessageEventType.Delivered);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_refusal_is_not_final_while_another_mx_was_not_asked(bool secondMxSkippedByTheCap)
+    {
+        // Only the first host is asked per attempt (the cap), so the second one's opinion is unknown: retry, do not bounce.
+        await using var f = new DeliveryFixture(o => Lab(o, maxMxHosts: secondMxSkippedByTheCap ? 1 : 5), smtpUtf8: false);
+        AllowBounces(f);
+        f.Dns.AddMx("dual.example", 10, "mx1.dual.example").AddA("mx1.dual.example", "127.0.0.1")
+            .AddMx("dual.example", 20, "mx2.dual.example").AddA("mx2.dual.example", "127.0.0.1");
+        var id = await f.EnqueueRawAsync(EightBitMessage(Utf8Headers("rcpt@dual.example")), ["rcpt@dual.example"]);
+
+        if (secondMxSkippedByTheCap)
+        {
+            var events = await f.WaitForEventAsync(id, MessageEventType.Deferred);
+            Assert.DoesNotContain(events, e => e.Type == MessageEventType.Bounced);
+            Assert.Contains("other mail hosts were not asked", events.Single(e => e.Type == MessageEventType.Deferred).Message, StringComparison.Ordinal);
+        }
+        else
+        {
+            // Both hosts are asked and both refuse (same server): now it is final.
+            var events = await f.WaitForEventAsync(id, MessageEventType.Bounced);
+            Assert.Equal("5.6.9", events.Single(e => e.Type == MessageEventType.Bounced).EnhancedCode);
+        }
+
+        Assert.DoesNotContain(f.Remote.Messages, m => m.Recipients.Contains("rcpt@dual.example"));
+    }
+
+    [Ipv6Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_refusal_is_not_final_when_another_mx_is_unreachable(bool unreachableFirst)
+    {
+        await using var f = new DeliveryFixture(smtpUtf8: false);
+        AllowBounces(f);
+        string refusing = "127.0.0.1";   // the fixture's server: no SMTPUTF8
+        f.Dns.AddMx("flaky.example", unreachableFirst ? (ushort)20 : (ushort)10, "mx1.flaky.example").AddA("mx1.flaky.example", refusing)
+            .AddMx("flaky.example", unreachableFirst ? (ushort)10 : (ushort)20, "mx2.flaky.example").AddAaaa("mx2.flaky.example", "::1");   // nothing listens on [::1]:port
+        var id = await f.EnqueueRawAsync(EightBitMessage(Utf8Headers("rcpt@flaky.example")), ["rcpt@flaky.example"]);
 
         var events = await f.WaitForEventAsync(id, MessageEventType.Deferred);
 
-        Assert.DoesNotContain(events, e => e.Type == MessageEventType.Bounced);   // not final: the second host may take it later
+        Assert.DoesNotContain(events, e => e.Type == MessageEventType.Bounced);   // not final: the unreachable host may take it later
         Assert.Empty(f.Remote.Messages);
     }
 
@@ -254,7 +330,7 @@ public class EightBitAndInternationalDeliveryTests
         await using var f = new DeliveryFixture(smtpUtf8: false);
         AllowBounces(f);
         // The stored flag says the headers are internationalized even though this copy of the bytes is ASCII: it is believed.
-        var id = await f.EnqueueRawAsync(AsciiMessage(), ["rcpt@dest.example"], smtpUtf8: true);
+        var id = await f.EnqueueRawAsync(AsciiMessage(), ["rcpt@dest.example"], headersUtf8: true);
 
         var events = await f.WaitForEventAsync(id, MessageEventType.Bounced);
 
@@ -380,21 +456,87 @@ public class EightBitAndInternationalDeliveryTests
         }
     }
 
-    [Theory]
-    [InlineData("enforce", "mx.dest.example")]   // the handshake is refused by the client: the address is carried by the failure
-    [InlineData("enforce", "other.example")]     // the host is not in the policy, no connection is made: the address the OS would use
-    public async Task Tls_rpt_failure_records_carry_the_real_sending_address(string mode, string policyMx)
+    private static DeliveryOptions Lab(DeliveryOptions o, string? publicIp = null, bool nonPublic = false, int maxMxHosts = 5) => new()
+    {
+        Owner = o.Owner, Hostname = o.Hostname, RemotePort = o.RemotePort, IdlePoll = o.IdlePoll, ExpirySweepInterval = o.ExpirySweepInterval, BounceDomain = o.BounceDomain,
+        PublicSendingIp = publicIp, ReportNonPublicSendingIp = nonPublic, MaxMxHostsPerAttempt = maxMxHosts,
+    };
+
+    private static async Task<string?> ReportedSendingIpAsync(string mode, string policyMx, Func<DeliveryOptions, DeliveryOptions> options)
     {
         var collector = new TlsRptCollector();
         var fetcher = new FixedPolicyFetcher($"version: STSv1\nmode: {mode}\nmx: {policyMx}\nmax_age: 86400\n");
-        await using var f = new DeliveryFixture(serverTls: true, tlsReports: collector,
+        await using var f = new DeliveryFixture(options, serverTls: true, tlsReports: collector,
             tlsResolver: dns => new OutboundTlsPolicyResolver(new MtaStsPolicyStore(dns, fetcher, new InMemoryMtaStsCache(SystemClock.Instance), SystemClock.Instance), null));
         f.Dns.AddTxt("_mta-sts.dest.example", "v=STSv1; id=1");
         await f.EnqueueRawAsync(AsciiMessage(), ["rcpt@dest.example"]);
 
         await DeliveryFixture.WaitAsync(() => collector.Snapshot().Any(d => d.Policies.Any(p => p.FailureCount > 0)));
 
-        var detail = collector.Snapshot().SelectMany(d => d.Policies).SelectMany(p => p.FailureDetails).First();
-        Assert.Equal("127.0.0.1", detail.SendingMtaIp);
+        return collector.Snapshot().SelectMany(d => d.Policies).SelectMany(p => p.FailureDetails).First().SendingMtaIp;
+    }
+
+    [Theory]
+    [InlineData("enforce", "mx.dest.example")]   // the handshake is refused by the client: the address is carried by the failure
+    [InlineData("enforce", "other.example")]     // the host is not in the policy, no connection is made: the address the OS would use
+    public async Task Tls_rpt_failure_records_carry_the_real_sending_address_when_asked_to_report_non_public_ones(string mode, string policyMx) =>
+        Assert.Equal("127.0.0.1", await ReportedSendingIpAsync(mode, policyMx, o => Lab(o, nonPublic: true)));
+
+    [Theory]
+    [InlineData("mx.dest.example")]
+    [InlineData("other.example")]
+    public async Task Tls_rpt_reports_never_carry_a_loopback_or_private_sending_address_by_default(string policyMx) =>
+        Assert.Null(await ReportedSendingIpAsync("enforce", policyMx, o => Lab(o)));
+
+    [Theory]
+    [InlineData("mx.dest.example")]
+    [InlineData("other.example")]
+    public async Task Tls_rpt_reports_the_configured_public_sending_address(string policyMx) =>
+        Assert.Equal("203.0.113.7", await ReportedSendingIpAsync("enforce", policyMx, o => Lab(o, publicIp: "203.0.113.7")));
+}
+
+/// <summary>Whether a second receiving server can listen on the IPv6 loopback address (and nothing is on it by chance).</summary>
+internal static class Ipv6Support
+{
+    public static bool Available(out string? reason)
+    {
+        reason = null;
+        if (!System.Net.Sockets.Socket.OSSupportsIPv6)
+        {
+            reason = "this machine has no IPv6";
+            return false;
+        }
+
+        try
+        {
+            using var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.IPv6Loopback, 0);
+            probe.Start();
+            return true;
+        }
+        catch (System.Net.Sockets.SocketException ex)
+        {
+            reason = "the IPv6 loopback address cannot be used here: " + ex.SocketErrorCode;
+            return false;
+        }
+    }
+}
+
+/// <summary>A theory that is reported as skipped (with the reason) where the IPv6 loopback address is not usable.</summary>
+internal sealed class Ipv6TheoryAttribute : TheoryAttribute
+{
+    public override string Skip
+    {
+        get => base.Skip ?? (Ipv6Support.Available(out string? reason) ? null! : reason!);
+        set => base.Skip = value;
+    }
+}
+
+/// <summary>A fact that is reported as skipped (with the reason) where the IPv6 loopback address is not usable.</summary>
+internal sealed class Ipv6FactAttribute : FactAttribute
+{
+    public override string Skip
+    {
+        get => base.Skip ?? (Ipv6Support.Available(out string? reason) ? null! : reason!);
+        set => base.Skip = value;
     }
 }

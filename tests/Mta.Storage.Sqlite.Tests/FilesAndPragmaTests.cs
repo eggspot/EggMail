@@ -218,7 +218,7 @@ public class FilesAndPragmaTests : SqliteTestBase
 
         // Turn the files back into what version 1 created (no API tables, no fingerprint, and none of the version 3 switch tables).
         Run("config.db", "DROP TABLE dashboard_session", "DROP TABLE dashboard_user", "DROP TABLE transfer_chunk_config", "PRAGMA user_version = 1");
-        Run("queue.db", "ALTER TABLE api_idempotency_key DROP COLUMN fingerprint", "ALTER TABLE delivery_queue DROP COLUMN smtp_utf8", "ALTER TABLE delivery_queue DROP COLUMN transfer_switch_id", "ALTER TABLE webhook_outbox DROP COLUMN transfer_switch_id", "DROP TABLE transfer_chunk_queue", "PRAGMA user_version = 1");
+        Run("queue.db", "ALTER TABLE api_idempotency_key DROP COLUMN fingerprint", "ALTER TABLE delivery_queue DROP COLUMN headers_utf8", "ALTER TABLE delivery_queue DROP COLUMN transfer_switch_id", "ALTER TABLE webhook_outbox DROP COLUMN transfer_switch_id", "DROP TABLE transfer_chunk_queue", "PRAGMA user_version = 1");
         Run("stats.db", "DROP TABLE transfer_chunk_stats", "PRAGMA user_version = 1");
         Run("history.db", "DROP TABLE transfer_chunk_history", "PRAGMA user_version = 1");
 
@@ -227,7 +227,7 @@ public class FilesAndPragmaTests : SqliteTestBase
         Assert.Equal(SqliteFile.SchemaVersion, ScalarLong(PathOf("queue.db"), "PRAGMA user_version"));
         Assert.Equal(5, SqliteFile.SchemaVersion);
         Assert.Equal(0, ScalarLong(PathOf("queue.db"), "SELECT count(*) FROM transfer_chunk_queue")); // the 1 to 2 to 3 path reached the switch tables too
-        Assert.Equal(1, ScalarLong(PathOf("queue.db"), "SELECT count(*) FROM pragma_table_info('delivery_queue') WHERE name = 'smtp_utf8'")); // and the version 5 column
+        Assert.Equal(1, ScalarLong(PathOf("queue.db"), "SELECT count(*) FROM pragma_table_info('delivery_queue') WHERE name = 'headers_utf8'")); // and the version 5 column
 
         var user = new DashboardUser(Guid.NewGuid(), "Upgraded", "hash", DashboardRole.Admin, null, true, Clock.UtcNow);
         await Storage.Config.UpsertDashboardUserAsync(user, default);
@@ -274,7 +274,7 @@ public class FilesAndPragmaTests : SqliteTestBase
             c.Open();
             using SqliteCommand cmd = c.CreateCommand();
             cmd.CommandText = $"DROP TABLE transfer_chunk_{kind};" + (kind == "queue"
-                ? "ALTER TABLE delivery_queue DROP COLUMN smtp_utf8; ALTER TABLE delivery_queue DROP COLUMN transfer_switch_id; ALTER TABLE webhook_outbox DROP COLUMN transfer_switch_id;"
+                ? "ALTER TABLE delivery_queue DROP COLUMN headers_utf8; ALTER TABLE delivery_queue DROP COLUMN transfer_switch_id; ALTER TABLE webhook_outbox DROP COLUMN transfer_switch_id;"
                 : "") + "PRAGMA user_version = 2";
             cmd.ExecuteNonQuery();
         }
@@ -293,7 +293,7 @@ public class FilesAndPragmaTests : SqliteTestBase
     [Theory]
     [InlineData(3)]
     [InlineData(4)]
-    public async Task An_older_database_is_upgraded_with_the_smtp_utf8_column_and_old_rows_read_false(int fromVersion)
+    public async Task An_older_database_is_upgraded_with_the_headers_utf8_column_and_old_rows_read_false(int fromVersion)
     {
         await AcceptAsync(Msg(to: ["a@example.org"]));
         await Storage.DisposeAsync();
@@ -303,16 +303,16 @@ public class FilesAndPragmaTests : SqliteTestBase
             using var c = new SqliteConnection($"Data Source={PathOf(kind + ".db")};Pooling=False");
             c.Open();
             using SqliteCommand cmd = c.CreateCommand();
-            cmd.CommandText = (kind == "queue" ? "ALTER TABLE delivery_queue DROP COLUMN smtp_utf8;" : "") + "PRAGMA user_version = " + fromVersion;
+            cmd.CommandText = (kind == "queue" ? "ALTER TABLE delivery_queue DROP COLUMN headers_utf8;" : "") + "PRAGMA user_version = " + fromVersion;
             cmd.ExecuteNonQuery();
         }
 
         await ReopenAsync();
         Assert.Equal(5, SqliteFile.SchemaVersion);
         Assert.Equal(5, ScalarLong(PathOf("queue.db"), "PRAGMA user_version"));
-        Assert.Equal(1, ScalarLong(PathOf("queue.db"), "SELECT count(*) FROM delivery_queue WHERE smtp_utf8 = 0"));
+        Assert.Equal(1, ScalarLong(PathOf("queue.db"), "SELECT count(*) FROM delivery_queue WHERE headers_utf8 = 0"));
         var claimed = Assert.Single(await ClaimAsync());
-        Assert.False(claimed.SmtpUtf8);
+        Assert.False(claimed.HeadersUtf8);
     }
 
     [Fact]

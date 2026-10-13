@@ -33,17 +33,17 @@ public abstract class IntakeConformance : StorageTestBase
     }
 
     [Fact]
-    public async Task The_smtp_utf8_flag_of_the_message_reaches_every_claimed_delivery_and_survives_a_reschedule()
+    public async Task The_headers_utf8_flag_of_the_message_reaches_every_claimed_delivery_and_survives_a_reschedule()
     {
-        await AcceptAsync(Msg(to: ["a@example.org", "b@example.net"], smtpUtf8: true));
+        await AcceptAsync(Msg(to: ["a@example.org", "b@example.net"], headersUtf8: true));
         await AcceptAsync(Msg(to: ["c@example.org"]));
 
         var claimed = await ClaimAsync(lease: TimeSpan.FromHours(1));
         Assert.Equal(3, claimed.Count);
-        Assert.All(claimed.Where(c => c.Recipient.LocalPart is "a" or "b"), c => Assert.True(c.SmtpUtf8));
-        Assert.False(claimed.Single(c => c.Recipient.LocalPart == "c").SmtpUtf8);
+        Assert.All(claimed.Where(c => c.Recipient.LocalPart is "a" or "b"), c => Assert.True(c.HeadersUtf8));
+        Assert.False(claimed.Single(c => c.Recipient.LocalPart == "c").HeadersUtf8);
 
-        var flagged = claimed.First(c => c.SmtpUtf8);
+        var flagged = claimed.First(c => c.HeadersUtf8);
         await Storage.Deliveries.RecordAttemptAsync(new DeliveryAttempt
         {
             DeliveryId = flagged.DeliveryId,
@@ -56,7 +56,7 @@ public abstract class IntakeConformance : StorageTestBase
         Clock.Advance(TimeSpan.FromMinutes(2));
         var again = Assert.Single(await ClaimAsync());
         Assert.Equal(flagged.DeliveryId, again.DeliveryId);
-        Assert.True(again.SmtpUtf8);
+        Assert.True(again.HeadersUtf8);
     }
 
     [Fact]

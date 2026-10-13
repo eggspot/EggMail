@@ -111,6 +111,10 @@ public static class EightBitDowngrader
             return EmitLeaf(part, isRoot);
         }
 
+        /// <summary>The outermost entity of the message or of an embedded message/rfc822: the one whose headers need MIME-Version for a transfer encoding to mean anything.</summary>
+        private static bool IsMessageRoot(MimePart part, bool isRoot) =>
+            isRoot || (part.Parent is { IsEmbeddedMessage: true } parent && parent.ContentType.MediaSubtype == "rfc822");
+
         private bool EmitComposite(MimePart part, bool isRoot)
         {
             var raw = part.Raw.Span;
@@ -122,7 +126,7 @@ public static class EightBitDowngrader
 
             // A composite entity must be 7bit/8bit/binary only; what it contains is now 7-bit, so say so.
             string? cte = part.TransferEncoding is ContentTransferEncoding.EightBit or ContentTransferEncoding.Binary ? "7bit" : null;
-            WriteHeaders(part, cte, isRoot, addContentType: false);
+            WriteHeaders(part, cte, IsMessageRoot(part, isRoot), addContentType: false);
 
             int partStart = OffsetOf(part.Raw);
             int cursor = headers.BodyOffset;
@@ -202,8 +206,9 @@ public static class EightBitDowngrader
                 target = ContentTransferEncoding.QuotedPrintable;   // non-ASCII data never yields 7bit; defensive
             }
 
-            bool addContentType = isRoot && !part.Headers.TryGetFirst(HeaderId.ContentType, out _) && Utf8.IsValid(body);
-            WriteHeaders(part, target.ToToken(), isRoot, addContentType);
+            bool messageRoot = IsMessageRoot(part, isRoot);
+            bool addContentType = messageRoot && !part.Headers.TryGetFirst(HeaderId.ContentType, out _) && Utf8.IsValid(body);
+            WriteHeaders(part, target.ToToken(), messageRoot, addContentType);
             if (target == ContentTransferEncoding.QuotedPrintable)
             {
                 TransferEncoder.WriteQuotedPrintable(body, output);
@@ -224,7 +229,7 @@ public static class EightBitDowngrader
         /// Copies the header block of <paramref name="part"/> with its Content-Transfer-Encoding replaced (added when missing, further
         /// duplicates dropped). At the message root MIME-Version is added when missing, since a transfer encoding means nothing without it.
         /// </summary>
-        private void WriteHeaders(MimePart part, string? newCte, bool isRoot, bool addContentType)
+        private void WriteHeaders(MimePart part, string? newCte, bool messageRoot, bool addContentType)
         {
             var data = part.Raw.Span;
             var headers = part.Headers;
@@ -261,7 +266,7 @@ public static class EightBitDowngrader
                 cursor = fieldsEnd;
             }
 
-            if (isRoot && !hasMimeVersion)
+            if (messageRoot && !hasMimeVersion)
             {
                 WriteField("MIME-Version", "1.0");
             }

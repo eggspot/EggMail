@@ -230,18 +230,24 @@ public static class DsnBuilder
         return sb.ToString();
     }
 
-    /// <summary>Strips CR, LF and NUL so values cannot inject header fields (diagnostic text comes from remote servers).</summary>
+    /// <summary>
+    /// Replaces control characters (CR, LF, NUL, tab and the other C0/C1 controls) and the bidirectional formatting characters with a space, so
+    /// values cannot inject header fields or reorder the text a person reads (diagnostic text comes from remote servers).
+    /// </summary>
     private static string Sanitize(string value)
     {
         var sb = new StringBuilder(value.Length);
         foreach (char c in value)
         {
-            sb.Append(c is '\r' or '\n' or '\0' or '\t' ? ' ' : c);
+            sb.Append(char.IsControl(c) || IsBidiControl(c) ? ' ' : c);
         }
 
         return sb.ToString().Trim();
     }
 
+    private static bool IsBidiControl(char c) => c is '\u061C' or '\u200E' or '\u200F' || c is >= '\u202A' and <= '\u202E' || c is >= '\u2066' and <= '\u2069';
+
+    /// <summary>At most 900 characters, never ending inside a surrogate pair.</summary>
     private static string Fold(string s)
     {
         if (s.Length <= 900)
@@ -249,7 +255,7 @@ public static class DsnBuilder
             return s;
         }
 
-        return s[..900];
+        return char.IsHighSurrogate(s[899]) ? s[..899] : s[..900];
     }
 
     private static string Rfc5322Date(DateTimeOffset d) => d.UtcDateTime.ToString("ddd, dd MMM yyyy HH:mm:ss '+0000'", CultureInfo.InvariantCulture);
@@ -268,6 +274,10 @@ public static class DsnBuilder
             // Cut at a line boundary so the returned part stays well-formed.
             int cut = original[..max].LastIndexOf((byte)'\n');
             end = cut >= 0 ? cut + 1 : max;
+            while (cut < 0 && end > 0 && (original[end] & 0xC0) == 0x80)
+            {
+                end--;   // a line longer than the limit: do not cut a UTF-8 sequence in half
+            }
         }
 
         return original[..end].ToArray();

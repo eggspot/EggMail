@@ -43,7 +43,7 @@ public static class StorageModel
     /// users, sessions and the idempotency fingerprint (HTTP API); version 3 the backend switch hold column and the
     /// <c>transfer_chunk_*</c> progress tables; version 4 the persisted runtime state (<c>domain_record_check</c>, <c>tls_rpt_bucket</c>,
     /// <c>sending_counter</c>) and the Message-ID header and tags of <c>message_index</c>; version 5 the
-    /// <c>smtp_utf8</c> column on queued deliveries (internationalized headers).
+    /// <c>headers_utf8</c> column on queued deliveries (internationalized headers).
     /// </summary>
     public const int SchemaVersion = 5;
 

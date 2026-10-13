@@ -80,7 +80,7 @@ public sealed class SmtpClientConnection : IAsyncDisposable
         }
         catch (SmtpClientException ex)
         {
-            ex.LocalAddress = c.LocalIpAddress;
+            ex.LocalIpAddress = c.LocalIpAddress;
             await c.DisposeAsync().ConfigureAwait(false);
             throw;
         }

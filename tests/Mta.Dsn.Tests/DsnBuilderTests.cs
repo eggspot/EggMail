@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Unicode;
 using MimeKit;
 using Mta.Core;
 using Mta.Dsn;
@@ -222,6 +223,35 @@ public class DsnBuilderTests
 
         var report = InboundReportParser.Parse(writer.WrittenMemory);
         Assert.Contains(report.Recipients, r => r.FinalRecipient == "пользователь@dest.example" && r.IsPermanentFailure);
+    }
+
+    [Fact]
+    public void Control_and_bidi_characters_in_remote_text_are_replaced_and_long_text_is_cut_on_a_character_boundary()
+    {
+        string diagnostic = "550 5.1.1 bad\u202Etxt.exe\u0007\u0085\u2067mix " + new string('x', 880) + "\U0001F600\U0001F600";
+        byte[] dsn = DsnBuilder.Build(International(["rcpt@dest.example"], diagnostic: diagnostic));
+        string text = Encoding.UTF8.GetString(dsn);
+        Assert.DoesNotContain('\u202E', text);
+        Assert.DoesNotContain('\u2067', text);
+        Assert.DoesNotContain('\u0007', text);
+        Assert.DoesNotContain('\u0085', text);
+        Assert.DoesNotContain('\uFFFD', text);   // no half character was written
+        var status = Mta.Mime.MimeMessage.Parse(dsn).Root.Children[1];
+        Assert.Contains("bad txt.exe", Encoding.UTF8.GetString(status.Body.Span), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_returned_line_longer_than_the_limit_is_not_cut_in_the_middle_of_a_utf8_sequence()
+    {
+        byte[] original = Encoding.UTF8.GetBytes("X-Long: " + new string('é', 3000) + "\r\n\r\nbody");
+        var req = International(["rcpt@dest.example"], original: original);
+        var small = new DsnRequest
+        {
+            ReportingMta = req.ReportingMta, To = req.To, Action = req.Action, ArrivalDate = req.ArrivalDate, Now = req.Now, OriginalMessage = original,
+            MaxReturnedBytes = 1001, UniqueToken = "t", Recipients = req.Recipients,
+        };
+        byte[] dsn = DsnBuilder.Build(small);
+        Assert.True(Utf8.IsValid(dsn.AsSpan(dsn.AsSpan().IndexOf("X-Long: "u8))), "the report must stay valid UTF-8");
     }
 
     [Fact]

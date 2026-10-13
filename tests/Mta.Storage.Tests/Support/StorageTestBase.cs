@@ -130,7 +130,7 @@ public abstract class StorageTestBase : IAsyncLifetime
         MessageSource source = MessageSource.Api,
         string? messageIdHeader = null,
         string[]? tags = null,
-        bool smtpUtf8 = false)
+        bool headersUtf8 = false)
     {
         DateTimeOffset at = received ?? Clock.UtcNow;
         string[] recipients = to ?? ["alice@example.org"];
@@ -155,7 +155,7 @@ public abstract class StorageTestBase : IAsyncLifetime
             SendingDomain = sendingDomain,
             MessageIdHeader = messageIdHeader,
             Tags = tags,
-            SmtpUtf8 = smtpUtf8,
+            HeadersUtf8 = headersUtf8,
         };
     }
 

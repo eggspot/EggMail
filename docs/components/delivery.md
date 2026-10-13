@@ -26,20 +26,23 @@ A connection lost after the end of data was sent is deferred with the `possible_
 | 8-bit body | offers `8BITMIME` | `BODY=8BITMIME`, bytes unchanged (signed as they are) |
 | 8-bit body | no `8BITMIME` | body converted to 7-bit by `EightBitDowngrader` (`Mta.Mime`), no `BODY` parameter, **then** signed; if no safe conversion exists: permanent `554 5.6.1` naming the reason |
 | 7-bit body | any | no `BODY` parameter |
-| valid UTF-8 in the header section (also when every address is ASCII), or the persisted flag `ClaimedDelivery.SmtpUtf8` | offers `SMTPUTF8` | `SMTPUTF8` declared |
+| valid UTF-8 in the header section (also when every address is ASCII), or the persisted flag `ClaimedDelivery.HeadersUtf8` | offers `SMTPUTF8` | `SMTPUTF8` declared |
 | same | no `SMTPUTF8` | nothing is sent: permanent `554 5.6.9` (headers are not downgraded: RFC 6857 is experimental) |
-| sender with a non-ASCII local part | no `SMTPUTF8` | permanent `553 5.6.7` for the whole transaction (a bounce domain makes the sender an ASCII VERP address, which avoids it) |
-| recipient with a non-ASCII local part | no `SMTPUTF8` | only that recipient fails (`553 5.6.7`); the others in the group are sent without `SMTPUTF8` |
+| sender with a non-ASCII local part | no `SMTPUTF8` | permanent `553 5.6.7` for the whole transaction (after the other hosts of the domain were asked) (a bounce domain makes the sender an ASCII VERP address, which avoids it) |
+| recipient with a non-ASCII local part | no `SMTPUTF8` | the others in the group are sent without `SMTPUTF8`; that recipient is offered to the other hosts and fails with `553 5.6.7` only if all refuse |
 
 * "Needs SMTPUTF8" is decided by `EmailAddress.RequiresSmtpUtf8` (non-ASCII local part), not `IsInternational`: a domain is held as an A-label, so `user@bücher.example` is plain ASCII on the wire.
-* The persisted flag (`AcceptedMessage.SmtpUtf8`, column `delivery_queue.smtp_utf8`, schema version 5 / PostgreSQL `V005`) is decided at intake from the message bytes (`MessageInspector.HasValidUtf8Headers`), not from the submitter's MAIL FROM parameter; delivery also re-checks the stored bytes, so rows queued before the upgrade are handled. UTF-8 that is not valid (8-bit headers in a legacy charset) is not announced as SMTPUTF8 and is sent as is.
-* 5.6.x replies are classified `PermanentContent`: the message bounces, the recipient is **not** suppressed. The bounce (DSN) carries the text. A server that lacks an extension does not fail the delivery while another MX host of the domain is untried: the refusal is remembered and the next host is asked; it is final only when every host that answered refused (an unreachable host makes the result a retry instead). A partial refusal (some recipients only) is final for those recipients.
+* The persisted flag (`AcceptedMessage.HeadersUtf8`, column `delivery_queue.headers_utf8`, schema version 5 / PostgreSQL `V005`) is decided at intake from the message bytes (`MessageInspector.HasValidUtf8Headers`), not from the submitter's MAIL FROM parameter; delivery also re-checks the stored bytes, so rows queued before the upgrade are handled. UTF-8 that is not valid (8-bit headers in a legacy charset) is not announced as SMTPUTF8 and is sent as is.
+* 5.6.x replies are classified `PermanentContent`: the message bounces, the recipient is **not** suppressed. The bounce (DSN) carries the text.
+* **A refusal is final only when every candidate host was asked and refused.** A server that lacks an extension does not end the delivery while another MX host of the domain has not been asked: the refusal is remembered and the next host is tried. If a host failed in another way (unreachable, TLS, banner), or was not asked at all in this attempt (circuit breaker open, `MaxMxHostsPerAttempt` reached, no address), the result is a temporary `4.4.1` and the delivery is retried until it expires.
+* **Recipients are not failed on the first MX.** When a host takes the group except for recipients whose address it cannot take (no SMTPUTF8), those recipients are offered to the remaining hosts in a transaction of their own (`AttemptResult.Followup`); the others are recorded as delivered or failed by the first host. They fail with `5.6.7` only if every host that answers refuses. (One level only: a second partial refusal on a later host is final for those recipients.)
+* **No rerouting through a relay.** A capability refusal is a permanent reply and `RoutePlanner` never reroutes a permanent reply: the relay chain is opt-in per domain for networks that block port 25 (decision 18), not a way around a destination's limits. A relay that supports the extension is reached when the relay is the only route, not as a fallback after a refusal.
 * Conversion rules are in [mime.md](mime.md#8bitmime-downgrade); the DKIM-signed bytes are exactly the converted bytes (the conversion changes the body and the `Content-Transfer-Encoding` fields, which a signature made before it would not survive).
 * Bounce messages for internationalized recipients use RFC 6533: `message/global-delivery-status` with `Final-Recipient: utf-8; ...` (see `DsnBuilder`), `message/global-headers` or `message/global` for the returned original when its headers hold UTF-8, and the DSN is queued with the SMTPUTF8 flag when its own header section holds UTF-8 (an internationalized sender). Such a report is itself 8-bit and goes through the same conversion for servers without `8BITMIME`.
 
 ## TLS-RPT sending address
 
-`sending-mta-ip` in TLS-RPT failure details is the local address of the TCP connection (`SmtpClientConnection.LocalIpAddress`, also carried by `SmtpClientException.LocalAddress` for failures during setup). When a policy blocks an MX host before any connection exists, it is the address the operating system would use to reach it (a UDP "connect" probe that sends nothing). Successful sessions are only counted, as RFC 8460 asks.
+`sending-mta-ip` in TLS-RPT failure details is `Delivery:PublicSendingIp` when configured; otherwise the local address of the TCP connection, but only when it is a public address (private, loopback and link-local addresses are left out of reports that go to other organizations). The local address comes from `SmtpClientConnection.LocalIpAddress`, also carried by `SmtpClientException.LocalIpAddress` for failures during setup). When a policy blocks an MX host before any connection exists, it is the address the operating system would use to reach it (a UDP "connect" probe that sends nothing). Successful sessions are only counted, as RFC 8460 asks.
 
 ## Inbound
 
@@ -47,9 +50,9 @@ A connection lost after the end of data was sent is deferred with the `possible_
 
 ## Known gaps
 
-- Header downgrading (RFC 6857, experimental) is not implemented: a message with UTF-8 header fields cannot be delivered to a server without `SMTPUTF8`; it bounces with `5.6.9`. The `8BITMIME` conversion does not touch 8-bit header fields of nested parts or embedded messages either (it refuses, see mime.md).
+- **Behaviour change.** A message with UTF-8 header fields used to be sent as is to every server; it now bounces with `5.6.9` (nothing is sent) when the server lacks SMTPUTF8, as RFC 6531 requires. Header downgrading (RFC 6857, experimental) is not implemented, so such mail cannot reach those servers. The `8BITMIME` conversion does not touch 8-bit header fields of nested parts or embedded messages either (it refuses, see mime.md).
 - `BINARYMIME`/`CHUNKING` are not used for binary bodies: a `binary`-encoded part is base64-encoded when the server lacks `8BITMIME` and sent as 8-bit otherwise.
-- The capability fallback to the next MX host is tested with two loopback servers (IPv4 and IPv6 loopback on the same port); that test returns early on a machine without IPv6.
+- The capability fallback to the next MX host is tested with two loopback servers (IPv4 and IPv6 loopback on the same port); those tests are reported as skipped, with the reason, on a machine without a usable IPv6 loopback address.
 - Throttle state and circuit breakers are per process (see `components/policy.md`). The sending counters are persisted and shared through the config store (see `components/policy.md`); TLS-RPT counters and pending reports are persisted too (see `components/tls.md`).
 
 See [../progress.md](../progress.md).

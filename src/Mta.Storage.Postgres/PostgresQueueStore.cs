@@ -21,7 +21,7 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
     private static readonly TimeSpan ExpiredClaimLease = TimeSpan.FromMinutes(5);
 
     private const string ClaimColumns =
-        "id, message_id, tenant_id, envelope_from, recipient, recipient_domain, attempt, created_at, expires_at, lease_until, last_error, possible_duplicate, sending_domain, source, due_at, smtp_utf8";
+        "id, message_id, tenant_id, envelope_from, recipient, recipient_domain, attempt, created_at, expires_at, lease_until, last_error, possible_duplicate, sending_domain, source, due_at, headers_utf8";
 
     private const string ClaimSql =
         "UPDATE delivery_queue SET lease_owner = $1, lease_until = $2, possible_duplicate = possible_duplicate OR lease_owner IS NOT NULL WHERE id IN (" +
@@ -168,13 +168,13 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
 
             NpgsqlBatchCommand deliveries = batch.CreateBatchCommand();
             deliveries.CommandText =
-                "INSERT INTO delivery_queue (id, message_id, tenant_id, envelope_from, recipient, recipient_domain, sending_domain, source, attempt, due_at, created_at, expires_at, lease_owner, lease_until, last_error, possible_duplicate, smtp_utf8) " +
+                "INSERT INTO delivery_queue (id, message_id, tenant_id, envelope_from, recipient, recipient_domain, sending_domain, source, attempt, due_at, created_at, expires_at, lease_owner, lease_until, last_error, possible_duplicate, headers_utf8) " +
                 "SELECT d.id, $2, $3, $4, d.rcpt, d.dom, $5, $6, 0, $7, $7, $8, NULL, 'epoch'::timestamptz, NULL, false, $11 FROM unnest($1, $9, $10) AS d(id, rcpt, dom)";
             deliveries.Parameters.UuidArray(m.Recipients.Select(r => r.DeliveryId).ToArray()).Uuid(m.MessageId).Uuid(m.TenantId)
                 .Text(AddressText.Format(m.EnvelopeFrom)).Text(m.SendingDomain).Small((int)m.Source).Time(m.ReceivedAt).Time(m.ExpiresAt)
                 .TextArray(m.Recipients.Select(r => AddressText.Format(r.Address)).ToArray())
                 .TextArray(m.Recipients.Select(r => r.Address.Domain).ToArray())
-                .Bool(m.SmtpUtf8);
+                .Bool(m.HeadersUtf8);
             batch.BatchCommands.Add(deliveries);
 
             if (writeHistory)
@@ -270,7 +270,7 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
                     PossibleDuplicate = r.GetBoolean(11),
                     SendingDomain = r.GetNullableString(12),
                     Source = (MessageSource)r.GetInt16(13),
-                    SmtpUtf8 = r.GetBoolean(15),
+                    HeadersUtf8 = r.GetBoolean(15),
                 }));
             }
 

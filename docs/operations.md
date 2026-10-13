@@ -84,6 +84,7 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | `Delivery:Throttle:InitialMessagesPerMinute` | 120 | Messages per minute allowed at first; grows the same way |
 | `Delivery:RemotePort` | 25 | Destination port for direct MX delivery; lab setups only |
 | `Delivery:AllowPrivateMxAddresses` | false | Allow MX hosts that resolve to loopback or private addresses; lab setups only |
+| `Delivery:PublicSendingIp` | none | The address receiving servers see for our connections; reported as `sending-mta-ip` in TLS-RPT reports. Set it when EggMail is behind NAT or a proxy. Without it only a public local address of the connection is reported; private, loopback and link-local addresses are left out |
 | `Dns:Servers` | system resolvers | Resolvers (IP with optional port) |
 | `Dns:RequestDnssec` | true | Ask for DNSSEC records (needed for DANE) |
 | `Dns:TrustAuthenticatedData` | false | Trust the AD bit; only behind a local validating resolver |
@@ -224,7 +225,7 @@ To restore: stop EggMail, copy the files of one backup directory over the data d
 
 ## Bounces caused by the receiving server's capabilities
 
-EggMail sends 8-bit bodies with `BODY=8BITMIME` and internationalized mail with `SMTPUTF8` when the receiving server offers them, and converts or refuses when it does not. Three permanent failures name this in the bounce text (none of them suppresses the recipient): `5.6.1` the server has no 8BITMIME and the message could not be converted to 7-bit (the text says why, for example 8-bit header fields in an attached message); `5.6.9` the message has UTF-8 header fields and the server has no SMTPUTF8; `5.6.7` the sender or recipient address has non-ASCII characters before the `@` and the server has no SMTPUTF8 (when only some recipients are affected the others are delivered). A configured `Delivery:BounceDomain` makes the envelope sender an ASCII bounce address, which avoids `5.6.7` for the sender. Bounce reports about internationalized recipients are RFC 6533 reports (`message/global-delivery-status`).
+EggMail sends 8-bit bodies with `BODY=8BITMIME` and internationalized mail with `SMTPUTF8` when the receiving server offers them, and converts or refuses when it does not. Three permanent failures name this in the bounce text (none of them suppresses the recipient): `5.6.1` the server has no 8BITMIME and the message could not be converted to 7-bit (the text says why, for example 8-bit header fields in an attached message); `5.6.9` the message has UTF-8 header fields and the server has no SMTPUTF8 (a change from earlier versions, which sent such mail as is; headers are not downgraded, RFC 6857); `5.6.7` the sender or recipient address has non-ASCII characters before the `@` and the server has no SMTPUTF8 (when only some recipients are affected the others are delivered, and the affected ones are offered to the domain's other mail hosts first). A configured `Delivery:BounceDomain` makes the envelope sender an ASCII bounce address, which avoids `5.6.7` for the sender. Bounce reports about internationalized recipients are RFC 6533 reports (`message/global-delivery-status`).
 
 ## Upgrades
 

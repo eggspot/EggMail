@@ -228,7 +228,7 @@ internal sealed class MemoryIntake(MemoryState s) : IMessageIntake
                     RecipientDomain = r.Address.Domain,
                     SendingDomain = message.SendingDomain,
                     Source = message.Source,
-                    SmtpUtf8 = message.SmtpUtf8,
+                    HeadersUtf8 = message.HeadersUtf8,
                     Attempt = 0,
                     DueAt = received,
                     CreatedAt = received,
@@ -381,7 +381,7 @@ internal sealed class MemoryDeliveries(MemoryState s) : IDeliveryStore
         PossibleDuplicate = d.PossibleDuplicate,
         SendingDomain = d.SendingDomain,
         Source = d.Source,
-        SmtpUtf8 = d.SmtpUtf8,
+        HeadersUtf8 = d.HeadersUtf8,
     };
 
     public ValueTask<byte[]?> GetRawAsync(Guid messageId, CancellationToken cancellationToken)

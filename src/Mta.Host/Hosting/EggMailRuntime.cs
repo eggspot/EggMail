@@ -108,6 +108,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
             MaxRecipientsPerTransaction = config.Delivery.MaxRecipientsPerTransaction,
             BounceDomain = config.Delivery.BounceDomain,
             RemotePort = config.Delivery.RemotePort,
+            PublicSendingIp = config.Delivery.PublicSendingIp,
         };
         var collector = config.Tls.ReportingEnabled ? new TlsRptCollector(clock) : null;
         var mx = new MxResolver(dns, new MxResolverOptions { ExcludeSpecialAddresses = !config.Delivery.AllowPrivateMxAddresses });

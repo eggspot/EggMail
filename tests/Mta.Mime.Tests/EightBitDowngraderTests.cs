@@ -238,6 +238,20 @@ public class EightBitDowngraderTests
     }
 
     [Fact]
+    public void An_embedded_message_without_mime_headers_gets_them_so_that_its_encoding_means_something()
+    {
+        string source = "From: a@example.com\nMIME-Version: 1.0\nContent-Type: message/rfc822\n\nFrom: inner@example.org\nSubject: old style\n\ninner Grüße aus München, mostly plain ASCII text around the umlauts here.\n";
+        byte[] input = T.Crlf(source);
+        var (result, output) = Run(input);
+        Assert.Equal(EightBitDowngradeStatus.Downgraded, result.Status);
+        var inner = MimeMessage.Parse(output).Root.Children[0];
+        Assert.True(inner.Headers.TryGetFirst(HeaderId.MimeVersion, out _));
+        Assert.Equal("utf-8", inner.ContentType.Charset);
+        Assert.Equal(ContentTransferEncoding.QuotedPrintable, inner.TransferEncoding);
+        Assert.Contains("inner Grüße aus München", Encoding.UTF8.GetString(inner.GetDecodedBytes()), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void An_embedded_message_with_a_multipart_body_is_handled_recursively()
     {
         string source = "From: a@example.com\nMIME-Version: 1.0\nContent-Type: message/rfc822\n\nFrom: inner@example.org\nSubject: inner\nMIME-Version: 1.0\nContent-Type: multipart/alternative; boundary=ib\n\n--ib\nContent-Type: text/plain; charset=utf-8\nContent-Transfer-Encoding: 8bit\n\ninner Grüße\n--ib\nContent-Type: text/html\n\n<i>x</i>\n--ib--\n";
@@ -348,6 +362,38 @@ public class EightBitDowngraderTests
         Assert.Contains("message/external-body", result.Reason, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void A_soft_line_break_cannot_forge_a_mime_boundary()
+    {
+        // 'é' (=C3=A9) and 69 x fill 75 columns; the first '-' of the boundary-looking text would start the next line.
+        string source = "From: a@example.com\nMIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=bnd\n\n--bnd\nContent-Type: text/plain; charset=utf-8\nContent-Transfer-Encoding: 8bit\n\né" + new string('x', 69) + "--bnd\nsecond\n--bnd--\n";
+        byte[] input = T.Crlf(source);
+        var (result, output) = Run(input);
+        Assert.Equal(EightBitDowngradeStatus.Downgraded, result.Status);
+        Assert.Contains("=\r\n=2D-bnd", Encoding.ASCII.GetString(output), StringComparison.Ordinal);
+        Assert.Single(MimeMessage.Parse(output).Root.Children);
+        Assert.Single(Assert.IsType<Mk.Multipart>(MkLoad(output).Body));
+        AssertDowngradedFaithfully(input);
+    }
+
+    [Theory]
+    [InlineData(60)]
+    [InlineData(68)]
+    [InlineData(69)]
+    [InlineData(70)]
+    [InlineData(74)]
+    public void Quoted_printable_never_starts_a_line_with_two_dashes_after_a_soft_break(int filler)
+    {
+        string text = "é" + new string('x', filler) + "--bnd--\r\nnext";
+        var writer = new ArrayBufferWriter<byte>();
+        TransferEncoder.WriteQuotedPrintable(Encoding.UTF8.GetBytes(text), writer);
+        foreach (string line in Encoding.ASCII.GetString(writer.WrittenSpan).Split("\r\n"))
+        {
+            Assert.False(line.StartsWith("--", StringComparison.Ordinal), line);
+            Assert.True(line.Length <= 76);
+        }
+    }
+
     // ------------------------------------------------------------------ random structures
 
     [Theory]
@@ -371,7 +417,7 @@ public class EightBitDowngraderTests
         {
             var ms = new MemoryStream();
             Write(ms, "From: a@example.com\r\nTo: b@example.net\r\nSubject: random\r\nMessage-ID: <r@example.com>\r\nMIME-Version: 1.0\r\n");
-            Generate(ms, rng, 0, ref boundaries, root: true);
+            Generate(ms, rng, 0, ref boundaries, root: true, enclosing: null);
             byte[] input = ms.ToArray();
             var (result, output) = Run(input);
             if (result.Status == EightBitDowngradeStatus.NotNeeded)
@@ -390,12 +436,12 @@ public class EightBitDowngraderTests
 
     private static void Write(Stream s, string text) => s.Write(Encoding.UTF8.GetBytes(text));
 
-    private static void Generate(MemoryStream s, Random rng, int depth, ref int boundaries, bool root)
+    private static void Generate(MemoryStream s, Random rng, int depth, ref int boundaries, bool root, string? enclosing)
     {
         int kind = depth < 3 ? rng.Next(5) : 3 + rng.Next(2);
         if (kind <= 1)
         {
-            string boundary = $"=_b{boundaries++}_{rng.Next(1000)}";
+            string boundary = $"bnd{boundaries++}x{rng.Next(1000)}";
             Write(s, $"Content-Type: multipart/{(rng.Next(2) == 0 ? "mixed" : "alternative")}; boundary=\"{boundary}\"\r\n\r\n");
             if (rng.Next(2) == 0)
             {
@@ -406,7 +452,7 @@ public class EightBitDowngraderTests
             for (int i = 0; i < children; i++)
             {
                 Write(s, "--" + boundary + "\r\n");
-                Generate(s, rng, depth + 1, ref boundaries, root: false);
+                Generate(s, rng, depth + 1, ref boundaries, root: false, enclosing: boundary);
                 Write(s, "\r\n");
             }
 
@@ -417,7 +463,7 @@ public class EightBitDowngraderTests
         if (kind == 2)
         {
             Write(s, "Content-Type: message/rfc822\r\n\r\nFrom: inner@example.org\r\nSubject: inner\r\nMIME-Version: 1.0\r\n");
-            Generate(s, rng, depth + 1, ref boundaries, root: false);
+            Generate(s, rng, depth + 1, ref boundaries, root: false, enclosing: enclosing);
             return;
         }
 
@@ -429,7 +475,14 @@ public class EightBitDowngraderTests
             int lines = rng.Next(1, 5);
             for (int i = 0; i < lines; i++)
             {
-                Write(s, samples[rng.Next(samples.Length)] + (i == lines - 1 && !root ? "" : "\r\n"));
+                string line = samples[rng.Next(samples.Length)];
+                if (enclosing is not null && rng.Next(2) == 0)
+                {
+                    // The enclosing boundary in the middle of a line, at a column where a soft break would put it at the start of one.
+                    line = "é" + new string('x', rng.Next(66, 73)) + "--" + enclosing + "--";
+                }
+
+                Write(s, line + (i == lines - 1 && !root ? "" : "\r\n"));
             }
 
             return;

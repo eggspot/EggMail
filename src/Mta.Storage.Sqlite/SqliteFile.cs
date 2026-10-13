@@ -355,15 +355,15 @@ internal sealed class SqliteFile
         return Convert.ToInt64(cmd.ExecuteScalar(), CultureInfo.InvariantCulture) > 0;
     }
 
-    /// <summary>Version 5 added <c>delivery_queue.smtp_utf8</c> (the message's headers are internationalized); existing rows get false.</summary>
+    /// <summary>Version 5 added <c>delivery_queue.headers_utf8</c> (the message's headers are internationalized); existing rows get false. Skipped when the column already exists (a file taken back to an older version by hand).</summary>
     private void UpgradeFromV4(SqliteConnection connection)
     {
         using var tx = connection.BeginTransaction();
-        if (Kind == SqliteFileKind.Queue)
+        if (Kind == SqliteFileKind.Queue && !ColumnExists(connection, tx, "delivery_queue", "headers_utf8"))
         {
             using var alter = connection.CreateCommand();
             alter.Transaction = tx;
-            alter.CommandText = "ALTER TABLE \"delivery_queue\" ADD COLUMN \"smtp_utf8\" INTEGER NOT NULL DEFAULT 0";
+            alter.CommandText = "ALTER TABLE \"delivery_queue\" ADD COLUMN \"headers_utf8\" INTEGER NOT NULL DEFAULT 0";
             alter.ExecuteNonQuery();
         }
 
