@@ -297,9 +297,9 @@ public static class ConfigLoader
         }
 
         var obs = c.Observability;
-        if (!string.IsNullOrWhiteSpace(obs.OtlpEndpoint) && !Uri.TryCreate(obs.OtlpEndpoint, UriKind.Absolute, out _))
+        if (!string.IsNullOrWhiteSpace(obs.OtlpEndpoint) && !(Uri.TryCreate(obs.OtlpEndpoint, UriKind.Absolute, out Uri? otlp) && (otlp.Scheme == Uri.UriSchemeHttp || otlp.Scheme == Uri.UriSchemeHttps)))
         {
-            errors.Add($"Observability:OtlpEndpoint must be an absolute URL (for example http://collector:4317), not '{obs.OtlpEndpoint}'.");
+            errors.Add($"Observability:OtlpEndpoint must be an http or https URL (for example http://collector:4317), not '{obs.OtlpEndpoint}'.");
         }
 
         if (!obs.OtlpProtocol.Equals("Grpc", StringComparison.OrdinalIgnoreCase) && !obs.OtlpProtocol.Equals("HttpProtobuf", StringComparison.OrdinalIgnoreCase))

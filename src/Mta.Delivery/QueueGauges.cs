@@ -10,7 +10,7 @@ public sealed record QueueSample(QueueStats Stats, DateTimeOffset At);
 /// Samples the queue in the background for the <c>mta_delivery_queue_*</c> gauges. The numbers come from
 /// <see cref="IDeliveryStore.GetQueueStatsAsync"/>, which reads the whole queue table, so it runs every few seconds on one task and
 /// never per scrape: any number of scrapers (Prometheus, OTLP, the admin status) read the cached <see cref="Latest"/>.
-/// A failed sample (storage down) keeps the previous one and is counted; <c>mta_delivery_queue_sample_age_seconds</c> shows the staleness.
+/// A failed sample (storage down, or a store timeout) keeps the previous one and is counted; <c>mta_delivery_queue_sample_age_seconds</c> shows the staleness.
 /// </summary>
 public sealed class QueueGauges(IDeliveryStore store, IClock clock, IMtaLog log, TimeSpan interval)
 {
@@ -31,8 +31,9 @@ public sealed class QueueGauges(IDeliveryStore store, IClock clock, IMtaLog log,
             Volatile.Write(ref _latest, new QueueSample(stats, clock.UtcNow));
             _failing = false;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
         {
+            // A store timeout surfaces as an OperationCanceledException of its own token; only our own cancellation ends the sampler.
             DeliveryMetrics.QueueSampleFailures.Add(1);
             if (!_failing)
             {
@@ -55,7 +56,7 @@ public sealed class QueueGauges(IDeliveryStore store, IClock clock, IMtaLog log,
             }
             while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false));
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
         }
     }

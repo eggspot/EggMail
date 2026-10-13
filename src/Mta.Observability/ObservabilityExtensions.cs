@@ -35,6 +35,9 @@ public sealed class ObservabilityOptions
     public string ServiceVersion { get; init; } = "0.0.0";
 
     public bool OtlpEnabled => !string.IsNullOrWhiteSpace(OtlpEndpoint);
+
+    /// <summary>Keep the Prometheus text exporter (the <c>/metrics</c> endpoint). Off: no meter listener of ours exists and the instruments cost nothing for it.</summary>
+    public bool PrometheusEnabled { get; init; } = true;
 }
 
 public static class ObservabilityExtensions
@@ -47,8 +50,12 @@ public static class ObservabilityExtensions
     public static IServiceCollection AddMtaObservability(this IServiceCollection services, ObservabilityOptions options)
     {
         services.AddSingleton<IMtaLog>(sp => new MtaLogAdapter(sp.GetRequiredService<ILoggerFactory>()));
-        services.AddSingleton<PrometheusTextExporter>();
-        services.AddHostedService<MetricsListenerStarter>();   // a MeterListener only sees measurements made after it started: create it with the host, not at the first scrape
+        if (options.PrometheusEnabled)
+        {
+            services.AddSingleton<PrometheusTextExporter>();
+            services.AddHostedService<MetricsListenerStarter>();   // a MeterListener only sees measurements made after it started: create it with the host, not at the first scrape
+        }
+
         services.AddSingleton<HealthService>();
         if (!options.OtlpEnabled)
         {

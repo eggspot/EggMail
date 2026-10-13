@@ -8,6 +8,7 @@ using Mta.Storage.InMemory;
 namespace Mta.Webhooks.Tests;
 
 /// <summary>Metrics and the trace span of the webhook dispatcher, with a stub receiver. All dispatching in this assembly happens in this class, so counts are exact.</summary>
+[Collection("webhook-dispatch")]
 public class WebhookObservabilityTests
 {
     private sealed class PlainProtector : ISecretProtector

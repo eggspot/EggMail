@@ -10,7 +10,7 @@ namespace Mta.Host.Backup;
 /// the data directory (the state returns to the moment of the backup; mail accepted since is lost). Only directories with exactly that
 /// name pattern are ever deleted, one by one.
 /// </summary>
-public sealed class BackupScheduler
+public sealed class BackupScheduler : IDisposable
 {
     private const string Prefix = "eggmail-backup-";
 
@@ -20,6 +20,8 @@ public sealed class BackupScheduler
     private readonly TimeSpan _interval;
     private readonly int _keep;
     private readonly IMtaLog _log;
+    private readonly IDisposable _meters;
+    private long _lastSuccessTicks;
 
     public BackupScheduler(IStorage storage, IClock clock, string directory, TimeSpan interval, int keep, IMtaLog? log = null)
     {
@@ -35,7 +37,18 @@ public sealed class BackupScheduler
         _interval = interval;
         _keep = keep;
         _log = log ?? NullMtaLog.Instance;
+        if (LatestBackupAt() is { } onDisk)
+        {
+            _lastSuccessTicks = onDisk.UtcTicks;   // after a restart the newest backup on disk is the last success, visible before the first run
+        }
+
+        _meters = BackupMetrics.Attach(this);
     }
+
+    /// <summary>The newest good backup this scheduler knows of (on disk when it was created, or made by it since); null when there is none.</summary>
+    public DateTimeOffset? LastSuccessAt => Interlocked.Read(ref _lastSuccessTicks) is var ticks and > 0 ? new DateTimeOffset(ticks, TimeSpan.Zero) : null;
+
+    public void Dispose() => _meters.Dispose();
 
     /// <summary>The newest backup's time, from its directory name (null when there is none).</summary>
     public DateTimeOffset? LatestBackupAt() => Backups().Select(b => b.At).Cast<DateTimeOffset?>().OrderByDescending(t => t).FirstOrDefault();
@@ -46,7 +59,7 @@ public sealed class BackupScheduler
         var now = _clock.UtcNow;
         if (LatestBackupAt() is { } latest)
         {
-            BackupMetrics.RecordSuccess(latest);   // after a restart the newest backup on disk is the last success
+            NoteSuccess(latest);
             if (now - latest < _interval)
             {
                 return null;
@@ -68,12 +81,21 @@ public sealed class BackupScheduler
         if (path is not null)
         {
             BackupMetrics.Runs.Add(1, new KeyValuePair<string, object?>("outcome", "success"));
-            BackupMetrics.RecordSuccess(now);
+            NoteSuccess(now);
             _log.Write(MtaLogLevel.Information, "backup", "backup written to " + path);
             Prune();
         }
 
         return path;
+    }
+
+    private void NoteSuccess(DateTimeOffset at)
+    {
+        long ticks = at.UtcTicks;
+        long current;
+        while (ticks > (current = Interlocked.Read(ref _lastSuccessTicks)) && Interlocked.CompareExchange(ref _lastSuccessTicks, ticks, current) != current)
+        {
+        }
     }
 
     private void Prune()

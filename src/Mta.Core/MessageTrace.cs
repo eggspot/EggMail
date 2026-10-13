@@ -110,9 +110,9 @@ public static class MessageTrace
     /// <summary>Starts a span that is not tied to a message (an event without one): a new root trace, or a child of the ambient activity.</summary>
     public static Activity? StartUnattached(string name, ActivityKind kind = ActivityKind.Internal)
     {
-        if (!Source.HasListeners())
+        if (!Source.HasListeners() || (SampleRatio < 1 && Random.Shared.NextDouble() >= SampleRatio))
         {
-            return null;
+            return null;   // not about a message, so there is no id to decide by: the ratio is applied per span
         }
 
         Activity? activity = Source.StartActivity(name, kind);

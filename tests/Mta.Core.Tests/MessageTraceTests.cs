@@ -130,4 +130,35 @@ public class MessageTraceTests
 
         Assert.Empty(stopped);
     }
+
+    [Fact]
+    public void A_span_without_a_message_follows_the_ratio_too()
+    {
+        var stopped = new List<Activity>();
+        double before = MessageTrace.SampleRatio;
+        try
+        {
+            using ActivityListener listener = Listen(stopped);
+
+            MessageTrace.SampleRatio = 0;
+            for (int i = 0; i < 200; i++) { Assert.Null(MessageTrace.StartUnattached(MessageTrace.WebhookDeliverSpan)); }
+
+            MessageTrace.SampleRatio = 1;
+            using (Activity? all = MessageTrace.StartUnattached(MessageTrace.WebhookDeliverSpan)) { Assert.NotNull(all); }
+
+            MessageTrace.SampleRatio = 0.5;
+            int started = 0;
+            for (int i = 0; i < 4000; i++)
+            {
+                using Activity? maybe = MessageTrace.StartUnattached(MessageTrace.WebhookDeliverSpan);
+                if (maybe is not null) { started++; }
+            }
+
+            Assert.InRange(started, 1700, 2300);
+        }
+        finally
+        {
+            MessageTrace.SampleRatio = before;
+        }
+    }
 }

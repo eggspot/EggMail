@@ -121,6 +121,7 @@ internal static class Cli
     private static ObservabilityOptions ObservabilityOptionsFrom(ObservabilitySection section) => new()
     {
         OtlpEndpoint = section.OtlpEndpoint,
+        PrometheusEnabled = section.MetricsEndpointEnabled,
         OtlpTransport = Enum.Parse<OtlpTransport>(section.OtlpProtocol, ignoreCase: true),
         TraceSampleRatio = section.TraceSampleRatio,
         ServiceVersion = typeof(Cli).Assembly.GetName().Version?.ToString(3) ?? "0.0.0",

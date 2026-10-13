@@ -62,12 +62,37 @@ public class OtlpWiringTests
     }
 
     [Fact]
-    public void The_log_provider_is_added_only_with_an_endpoint()
+    public void The_log_exporter_exists_only_with_an_endpoint()
     {
-        var off = LoggerFactory.Create(b => b.AddMtaOtlpLogging(new ObservabilityOptions()));
-        off.Dispose();
+        var off = new ServiceCollection();
+        off.AddLogging(b => b.AddMtaOtlpLogging(new ObservabilityOptions()));
+        using (ServiceProvider sp = off.BuildServiceProvider())
+        {
+            Assert.Null(sp.GetService<OpenTelemetry.Logs.LoggerProvider>());
+        }
 
-        using var factory = LoggerFactory.Create(b => b.AddMtaOtlpLogging(new ObservabilityOptions { OtlpEndpoint = "http://127.0.0.1:1" }));
-        factory.CreateLogger("test").LogInformation("hello");   // goes to the (unreachable) exporter's queue without throwing
+        var on = new ServiceCollection();
+        on.AddLogging(b => b.AddMtaOtlpLogging(new ObservabilityOptions { OtlpEndpoint = "http://127.0.0.1:1" }));
+        using (ServiceProvider sp = on.BuildServiceProvider())
+        {
+            Assert.NotNull(sp.GetService<OpenTelemetry.Logs.LoggerProvider>());
+        }
+    }
+
+    [Fact]
+    public void Prometheus_can_be_switched_off_and_then_no_exporter_or_listener_exists()
+    {
+        using ServiceProvider sp = Build(new ObservabilityOptions { PrometheusEnabled = false });
+
+        Assert.Null(sp.GetService<PrometheusTextExporter>());
+        Assert.DoesNotContain(sp.GetServices<Microsoft.Extensions.Hosting.IHostedService>(), s => s.GetType().Name == "MetricsListenerStarter");
+    }
+
+    [Fact]
+    public void Prometheus_is_on_by_default_and_created_with_the_host()
+    {
+        using ServiceProvider sp = Build(new ObservabilityOptions());
+
+        Assert.Contains(sp.GetServices<Microsoft.Extensions.Hosting.IHostedService>(), s => s.GetType().Name == "MetricsListenerStarter");
     }
 }

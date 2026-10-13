@@ -329,6 +329,9 @@ public sealed class WebhookDispatcher : IAsyncDisposable
             PooledConnectionLifetime = TimeSpan.FromMinutes(2),
             ConnectTimeout = _options.Timeout,
             ConnectCallback = ConnectGuardedAsync,
+            // While our webhook span is the current activity the handler would add traceparent/tracestate to the request, handing customers'
+            // receivers our trace ids. Nothing of ours belongs on a request to a third party.
+            ActivityHeadersPropagator = DistributedContextPropagator.CreateNoOutputPropagator(),
         };
         return new HttpClient(handler, disposeHandler: _handlerOverride is null) { Timeout = Timeout.InfiniteTimeSpan };
     }

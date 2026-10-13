@@ -23,6 +23,10 @@ public sealed class PrometheusTextExporter : IDisposable
     private static readonly double[] LatencyBuckets = [0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60];
     private static readonly double[] CountBuckets = [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000];
     private static readonly object NullTagValue = new();
+    private static long s_droppedSeries;
+
+    /// <summary>Label combinations refused because a metric reached <see cref="MaxSeriesPerMetric"/> (process-wide); rendered as <c>eggmail_exporter_dropped_series_total</c> once it is above zero.</summary>
+    public static long DroppedSeries => Interlocked.Read(ref s_droppedSeries);
 
     private readonly MeterListener _listener = new();
     private readonly object _renderLock = new();
@@ -101,6 +105,13 @@ public sealed class PrometheusTextExporter : IDisposable
             {
                 f.Render(sb);
             }
+        }
+
+        if (DroppedSeries > 0)
+        {
+            sb.Append("# HELP eggmail_exporter_dropped_series_total Label combinations refused because a metric reached its series limit; a label is unbounded somewhere\n");
+            sb.Append("# TYPE eggmail_exporter_dropped_series_total counter\n");
+            sb.Append("eggmail_exporter_dropped_series_total ").Append(DroppedSeries.ToString(CultureInfo.InvariantCulture)).Append('\n');
         }
 
         return sb.ToString();
@@ -213,7 +224,8 @@ public sealed class PrometheusTextExporter : IDisposable
                 string? key = Volatile.Read(ref _singleKey);
                 if (key is null || string.Equals(key, tag.Key, StringComparison.Ordinal))
                 {
-                    object value = tag.Value ?? NullTagValue;
+                    // 1 and "1" are the same label value, so non-strings are keyed by their text (strings, the usual case, allocate nothing).
+                    object value = tag.Value switch { null => NullTagValue, string text => text, var other => Convert.ToString(other, CultureInfo.InvariantCulture) ?? "" };
                     return _single.TryGetValue(value, out Series? hit) ? hit : CreateSingle(value, tag);
                 }
             }
@@ -291,6 +303,7 @@ public sealed class PrometheusTextExporter : IDisposable
         {
             if (_count >= MaxSeriesPerMetric)
             {
+                Interlocked.Increment(ref s_droppedSeries);
                 return null;
             }
 

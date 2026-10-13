@@ -55,7 +55,8 @@ internal static class DeliveryTracing
         span.AddEvent(new ActivityEvent("recipient.result", tags: tags));
         if (attempt.Outcome == DeliveryOutcome.Failed)
         {
-            span.SetStatus(ActivityStatusCode.Error, attempt.Message);
+            // Never the server's free-text reply: it echoes recipient addresses and leaves the box with the span. Codes only.
+            span.SetStatus(ActivityStatusCode.Error, attempt.EnhancedCode ?? (attempt.SmtpCode is int smtp ? "smtp " + smtp : "failed"));
         }
     }
 }

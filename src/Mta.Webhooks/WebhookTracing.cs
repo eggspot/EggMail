@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Text.Json;
 using Mta.Core;
 using Mta.Storage;
 
@@ -27,7 +26,6 @@ internal static class WebhookTracing
             span.SetTag("mta.webhook.event_type", item.EventType);
             span.SetTag("mta.webhook.attempt", item.Attempt + 1);
             span.SetTag("mta.tenant.id", Ids.ToCompact(item.TenantId));
-            span.SetTag("mta.webhook.endpoint_id", Ids.ToCompact(item.EndpointId));
         }
 
         return span;
@@ -55,24 +53,20 @@ internal static class WebhookTracing
         span.Stop();   // the span covers the HTTP call, not the bookkeeping that follows
     }
 
-    private static Guid? MessageIdOf(string payloadJson)
+    private const string MessageIdKey = "\"message_id\":\"";
+
+    /// <summary>
+    /// The <c>data.message_id</c> of an event payload (32 hex digits), found by a scan instead of a JSON parse: this runs for every webhook while a
+    /// trace exporter is attached, before the sampling decision is known. Our own payloads are compact; a payload without the key is not about a message.
+    /// </summary>
+    internal static Guid? MessageIdOf(string payloadJson)
     {
-        try
+        int at = payloadJson.IndexOf(MessageIdKey, StringComparison.Ordinal);
+        if (at < 0 || payloadJson.Length < at + MessageIdKey.Length + 32)
         {
-            using JsonDocument document = JsonDocument.Parse(payloadJson);
-            if (document.RootElement.TryGetProperty("data", out JsonElement data)
-                && data.ValueKind == JsonValueKind.Object
-                && data.TryGetProperty("message_id", out JsonElement id)
-                && id.ValueKind == JsonValueKind.String
-                && Guid.TryParseExact(id.GetString(), "N", out Guid messageId))
-            {
-                return messageId;
-            }
-        }
-        catch (JsonException)
-        {
+            return null;
         }
 
-        return null;
+        return Guid.TryParseExact(payloadJson.AsSpan(at + MessageIdKey.Length, 32), "N", out Guid messageId) ? messageId : null;
     }
 }

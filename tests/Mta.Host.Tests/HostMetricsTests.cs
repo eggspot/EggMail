@@ -63,7 +63,6 @@ public class BackupMetricsTests : IAsyncLifetime
         public long Timestamp => Now.UtcTicks;
     }
 
-    // Far in the future: the "last success" gauge keeps the newest time ever seen, so this test's value wins over any other test's.
     private readonly FakeClock _clock = new(new DateTimeOffset(2090, 3, 4, 5, 6, 7, TimeSpan.Zero));
     private readonly string _dir = Directory.CreateTempSubdirectory("eggmail-backup-metrics-").FullName;
     private SqliteStorage _storage = null!;
@@ -81,17 +80,20 @@ public class BackupMetricsTests : IAsyncLifetime
         Directory.Delete(_dir, recursive: true);
     }
 
+    private static long LastSuccessGauge(BackupScheduler scheduler) =>
+        Assert.Single(BackupMetrics.ObserveLastSuccess([scheduler])).Value;   // this scheduler alone: the gauge itself spans every live scheduler of the process
+
     [Fact]
     public async Task A_successful_backup_is_counted_and_sets_the_last_success_time()
     {
         using var capture = new MeterCapture("Mta.Backup");
-        var scheduler = new BackupScheduler(_storage, _clock, Path.Combine(_dir, "backups"), TimeSpan.FromHours(24), keep: 2);
+        using var scheduler = new BackupScheduler(_storage, _clock, Path.Combine(_dir, "backups"), TimeSpan.FromHours(24), keep: 2);
+        Assert.Empty(BackupMetrics.ObserveLastSuccess([scheduler]));   // no backup yet: the series is absent, which is what the absent() alert watches
 
         Assert.NotNull(await scheduler.RunOnceAsync(default));
-        capture.Pull();
 
         Assert.True(capture.Sum("mta.backup.runs", ("outcome", "success")) >= 1);
-        Assert.Equal(_clock.Now.ToUnixTimeSeconds(), capture.Of("mta.backup.last_success.timestamp").Last().Value);
+        Assert.Equal(_clock.Now.ToUnixTimeSeconds(), LastSuccessGauge(scheduler));
     }
 
     [Fact]
@@ -100,26 +102,39 @@ public class BackupMetricsTests : IAsyncLifetime
         using var capture = new MeterCapture("Mta.Backup");
         string blocker = Path.Combine(_dir, "not-a-directory");
         await File.WriteAllTextAsync(blocker, "a file where the backup directory should be");
-        var scheduler = new BackupScheduler(_storage, _clock, Path.Combine(blocker, "backups"), TimeSpan.FromHours(24), keep: 2);
+        using var scheduler = new BackupScheduler(_storage, _clock, Path.Combine(blocker, "backups"), TimeSpan.FromHours(24), keep: 2);
 
         await Assert.ThrowsAnyAsync<IOException>(() => scheduler.RunOnceAsync(default));
 
         Assert.Equal(1, capture.Sum("mta.backup.runs", ("outcome", "failed")));
+        Assert.Empty(BackupMetrics.ObserveLastSuccess([scheduler]));
     }
 
     [Fact]
-    public async Task After_a_restart_the_newest_backup_on_disk_is_the_last_success()
+    public void The_newest_backup_on_disk_is_the_last_success_from_the_moment_the_scheduler_exists()
     {
         string backups = Path.Combine(_dir, "backups");
         Directory.CreateDirectory(Path.Combine(backups, "eggmail-backup-20900305T060607000Z"));
-        var scheduler = new BackupScheduler(_storage, _clock, backups, TimeSpan.FromHours(24), keep: 2);
+        Directory.CreateDirectory(Path.Combine(backups, "eggmail-backup-20900301T000000000Z"));
+
+        using var scheduler = new BackupScheduler(_storage, _clock, backups, TimeSpan.FromHours(24), keep: 2);   // no run needed: a restart is visible at once
+
+        Assert.Equal(new DateTimeOffset(2090, 3, 5, 6, 6, 7, TimeSpan.Zero).ToUnixTimeSeconds(), LastSuccessGauge(scheduler));
+    }
+
+    [Fact]
+    public async Task A_disposed_scheduler_is_no_longer_observed()
+    {
         using var capture = new MeterCapture("Mta.Backup");
-
-        Assert.Null(await scheduler.RunOnceAsync(default));   // the existing backup is younger than the interval: nothing to do
+        var scheduler = new BackupScheduler(_storage, _clock, Path.Combine(_dir, "backups"), TimeSpan.FromHours(24), keep: 2);
+        await scheduler.RunOnceAsync(default);
+        long mine = _clock.Now.ToUnixTimeSeconds();
         capture.Pull();
+        Assert.Contains(capture.Of("mta.backup.last_success.timestamp"), m => m.Value >= mine);
 
-        long expected = new DateTimeOffset(2090, 3, 5, 6, 6, 7, TimeSpan.Zero).ToUnixTimeSeconds();
-        Assert.True(capture.Of("mta.backup.last_success.timestamp").Last().Value >= expected);
+        scheduler.Dispose();
+
+        Assert.False(BackupMetrics.IsAttached(scheduler));
     }
 }
 

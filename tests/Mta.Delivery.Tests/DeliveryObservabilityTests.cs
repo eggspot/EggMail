@@ -11,9 +11,17 @@ internal sealed class CountingQueueStore(IDeliveryStore inner) : IDeliveryStore
     public int StatsReads;
     public bool FailStats;
 
+    /// <summary>Fail like a store whose own command timeout expired: an OperationCanceledException that is not the caller's cancellation.</summary>
+    public bool TimeOut;
+
     public ValueTask<QueueStats> GetQueueStatsAsync(CancellationToken cancellationToken)
     {
         Interlocked.Increment(ref StatsReads);
+        if (TimeOut)
+        {
+            throw new OperationCanceledException("the store's command timeout expired");
+        }
+
         return FailStats ? throw new StorageUnavailableException("queue store is down") : inner.GetQueueStatsAsync(cancellationToken);
     }
 
@@ -114,6 +122,53 @@ public class QueueGaugeTests
     }
 
     [Fact]
+    public async Task A_store_timeout_is_a_failed_sample_not_a_cancellation()
+    {
+        await using var f = new DeliveryFixture(startEngine: false);
+        var store = new CountingQueueStore(f.Storage.Deliveries) { TimeOut = true };
+        var gauges = new QueueGauges(store, SystemClock.Instance, NullMtaLog.Instance, TimeSpan.FromSeconds(15));
+        using var capture = Capture();
+
+        await gauges.SampleOnceAsync(default);   // an OperationCanceledException of the store's own makes no difference to the caller
+
+        Assert.Null(gauges.Latest);
+        Assert.True(capture.Sum("mta.delivery.queue.sample.failures") >= 1);
+    }
+
+    [Fact]
+    public async Task Our_own_cancellation_still_propagates_from_a_sample()
+    {
+        await using var f = new DeliveryFixture(startEngine: false);
+        var store = new CountingQueueStore(f.Storage.Deliveries) { TimeOut = true };
+        var gauges = new QueueGauges(store, SystemClock.Instance, NullMtaLog.Instance, TimeSpan.FromSeconds(15));
+        using var cancelled = new CancellationTokenSource();
+        await cancelled.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => gauges.SampleOnceAsync(cancelled.Token));
+    }
+
+    [Fact]
+    public async Task A_store_timeout_does_not_end_the_sampling_loop()
+    {
+        await using var f = new DeliveryFixture(startEngine: false);
+        await f.EnqueueAsync(["a@dest.example"]);
+        var store = new CountingQueueStore(f.Storage.Deliveries) { TimeOut = true };
+        var gauges = new QueueGauges(store, SystemClock.Instance, NullMtaLog.Instance, TimeSpan.FromMilliseconds(20));
+        using var stop = new CancellationTokenSource();
+        Task run = gauges.RunAsync(stop.Token);
+
+        await DeliveryFixture.WaitAsync(() => store.StatsReads >= 3);   // it keeps trying while every sample times out
+        Assert.False(run.IsCompleted);
+
+        store.TimeOut = false;   // the store recovers: the next sample lands
+        await DeliveryFixture.WaitAsync(() => gauges.Latest is not null);
+        Assert.Equal(1, gauges.Latest!.Stats.Queued);
+
+        await stop.CancelAsync();
+        await run;
+    }
+
+    [Fact]
     public async Task Detaching_stops_the_gauges()
     {
         await using var f = new DeliveryFixture(startEngine: false);
@@ -152,6 +207,8 @@ public class QueueGaugeTests
     }
 }
 
+/// <summary>Runs deliveries and watches the process-wide meters, so every class that runs a delivery engine shares the "delivery-pipeline" collection and counts are exact.</summary>
+[Collection("delivery-pipeline")]
 public class DeliveryObservabilityTests
 {
     private static ActivityListener Listen(Guid messageId, List<Activity> stopped)
@@ -225,6 +282,10 @@ public class DeliveryObservabilityTests
         }
 
         Assert.Equal(ActivityStatusCode.Error, attempt.Status);
+        // The status carries codes only: the server's reply text echoes recipient addresses and must not leave the box with the span.
+        Assert.Equal("5.1.1", attempt.StatusDescription);
+        Assert.DoesNotContain("No such user", attempt.StatusDescription);
+        Assert.DoesNotContain(attempt.Events.SelectMany(e => e.Tags), t => t.Value is string text && text.Contains("No such user", StringComparison.Ordinal));
         Assert.Contains(attempt.Events.Single().Tags, t => t.Key == "mta.delivery.outcome" && (string?)t.Value == "failed");
     }
 
@@ -236,12 +297,13 @@ public class DeliveryObservabilityTests
         var id = await f.EnqueueAsync(["rcpt@dest.example"]);
         await f.WaitForEventAsync(id, MessageEventType.Delivered);
 
-        // Parallel tests share the static meters, so assert on presence, not on exact counts.
-        Assert.True(capture.Of("mta.delivery.claim.duration", ("result", "claimed")).Any());
-        Assert.True(capture.Of("mta.delivery.claim.duration", ("result", "empty")).Any() || capture.Of("mta.delivery.claim.duration").Any());
-        Assert.True(capture.Of("mta.delivery.record.duration").Any());
-        Assert.True(capture.Sum("mta.delivery.attempts", ("outcome", "delivered")) >= 1);
-        Assert.True(capture.Of("mta.delivery.group.duration").Any());
+        // Every class that runs an engine is in the same collection, so nothing else records into these meters meanwhile.
+        Assert.Single(capture.Of("mta.delivery.claim.duration", ("result", "claimed")));
+        Assert.Equal(1, capture.Sum("mta.delivery.claimed"));
+        Assert.Single(capture.Of("mta.delivery.record.duration"));
+        Assert.Equal(1, capture.Sum("mta.delivery.attempts", ("outcome", "delivered")));
+        Assert.Single(capture.Of("mta.delivery.group.duration"));
+        Assert.All(capture.Of("mta.delivery.record.duration"), m => Assert.InRange(m.Value, 0, 30));
     }
 
     private static SmtpReply SmtpReplyFor550() => SmtpReply.Create(550, "5.1.1", "No such user");

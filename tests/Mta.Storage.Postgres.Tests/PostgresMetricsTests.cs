@@ -62,6 +62,10 @@ public class PostgresMetricsTests : PgTestBase
             Assert.True(published.ContainsKey(name), $"Npgsql does not publish {name}. Published:\n{string.Join("\n", published.OrderBy(p => p.Key).Select(p => p.Key + " " + p.Value))}");
         }
 
+        // The label names the exporter turns into Prometheus labels (and the guide documents) are part of the contract with the driver.
+        Assert.Contains(seen["db.client.operation.duration"], x => x.Tags.Contains("db.client.connection.pool.name=", StringComparison.Ordinal) && x.Tags.Contains("server.address=", StringComparison.Ordinal));
+        Assert.Contains(seen["db.client.connection.count"], x => x.Tags.Contains("db.client.connection.state=idle", StringComparison.Ordinal));
+        Assert.Contains(seen["db.client.connection.count"], x => x.Tags.Contains("db.client.connection.state=used", StringComparison.Ordinal));
         Assert.Contains(seen["db.client.operation.duration"], x => x.Value > 0);
         Assert.Contains(seen["db.client.connection.max"], x => x.Value >= 1);
 

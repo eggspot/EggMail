@@ -55,7 +55,7 @@ public class ApiMetricsScrapeTests : IAsyncLifetime
         string backups = Path.Combine(Path.GetTempPath(), "eggmail-scrape-backups-" + Guid.NewGuid().ToString("N"));
         try
         {
-            var scheduler = new BackupScheduler(_f.Storage, _f.Clock, backups, TimeSpan.FromHours(24), keep: 1);
+            using var scheduler = new BackupScheduler(_f.Storage, _f.Clock, backups, TimeSpan.FromHours(24), keep: 1);
             Assert.NotNull(await scheduler.RunOnceAsync(default));
 
             string text = await ScrapeAsync();

@@ -122,6 +122,37 @@ public class ExporterBehaviourTests
     }
 
     [Fact]
+    public void A_number_and_its_text_are_the_same_label_value()
+    {
+        using var meter = new Meter("Mta.Test.BoxedKeys");
+        using var exporter = new PrometheusTextExporter(m => m.Name == "Mta.Test.BoxedKeys");
+        var counter = meter.CreateCounter<long>("mta.test.coded", "{event}", "By code");
+        counter.Add(1, Tag("code", 250));
+        counter.Add(2, Tag("code", "250"));
+        counter.Add(4, Tag("code", 250L));
+
+        string text = exporter.Render();
+        Assert.Equal(1, CountOccurrences(text, "mta_test_coded_total{"));
+        Assert.Contains("mta_test_coded_total{code=\"250\"} 7\n", text);
+    }
+
+    [Fact]
+    public void Refused_series_are_counted_and_reported()
+    {
+        long before = PrometheusTextExporter.DroppedSeries;
+        using var meter = new Meter("Mta.Test.Dropped");
+        using var exporter = new PrometheusTextExporter(m => m.Name == "Mta.Test.Dropped");
+        var counter = meter.CreateCounter<long>("mta.test.unbounded", "{event}", "Unbounded");
+        for (int i = 0; i < PrometheusTextExporter.MaxSeriesPerMetric + 10; i++)
+        {
+            counter.Add(1, Tag("id", "x" + i));
+        }
+
+        Assert.True(PrometheusTextExporter.DroppedSeries - before >= 10);
+        Assert.Contains("# TYPE eggmail_exporter_dropped_series_total counter", exporter.Render());
+    }
+
+    [Fact]
     public void Names_and_types_follow_the_prometheus_conventions()
     {
         using var meter = new Meter("Mta.Test.Names");

@@ -1,39 +1,52 @@
+using System.Collections.Concurrent;
 using System.Diagnostics.Metrics;
 
 namespace Mta.Host.Backup;
 
 /// <summary>
 /// Meters of the scheduled SQLite backups (<c>Mta.Backup</c>): how each run ended and when the last good backup was made. Alert when
-/// <c>time() - mta_backup_last_success_timestamp_seconds</c> exceeds a few backup intervals, or when failed runs keep coming.
+/// <c>time() - mta_backup_last_success_timestamp_seconds</c> exceeds a few backup intervals, when failed runs keep coming, and (with backups
+/// enabled on SQLite) on <c>absent(mta_backup_last_success_timestamp_seconds)</c>, which is what a fresh install with no backup yet looks like.
 /// </summary>
 public static class BackupMetrics
 {
     public static readonly Meter Meter = new("Mta.Backup");
 
-    private static long s_lastSuccessUnixSeconds;
+    private static readonly ConcurrentDictionary<BackupScheduler, byte> Live = new();
 
     /// <summary>Backup runs by outcome: <c>success</c> or <c>failed</c> (the storage could not write a backup).</summary>
     public static readonly Counter<long> Runs = Meter.CreateCounter<long>("mta.backup.runs", "{run}", "Backup runs by outcome (success, failed)");
 
-    /// <summary>Unix time of the newest good backup, including one found on disk at start; absent until there is one (or when backups are off).</summary>
-    public static readonly ObservableGauge<long> LastSuccess = Meter.CreateObservableGauge("mta.backup.last_success.timestamp", ObserveLastSuccess, "s", "Unix time of the newest successful backup");
+    /// <summary>Unix time of the newest good backup, including one found on disk when the scheduler was created; absent until there is one (or when backups are off).</summary>
+    public static readonly ObservableGauge<long> LastSuccess = Meter.CreateObservableGauge("mta.backup.last_success.timestamp", () => ObserveLastSuccess(Live.Keys), "s", "Unix time of the newest successful backup");
 
-    /// <summary>Notes a good backup made at <paramref name="at"/> (an older value than the one known is ignored).</summary>
-    public static void RecordSuccess(DateTimeOffset at)
+    internal static IDisposable Attach(BackupScheduler scheduler)
     {
-        long seconds = at.ToUnixTimeSeconds();
-        long current;
-        while (seconds > (current = Interlocked.Read(ref s_lastSuccessUnixSeconds)) && Interlocked.CompareExchange(ref s_lastSuccessUnixSeconds, seconds, current) != current)
+        Live[scheduler] = 0;
+        return new Detach(scheduler);
+    }
+
+    internal static bool IsAttached(BackupScheduler scheduler) => Live.ContainsKey(scheduler);
+
+    internal static IEnumerable<Measurement<long>> ObserveLastSuccess(IEnumerable<BackupScheduler> schedulers)
+    {
+        long newest = 0;
+        foreach (BackupScheduler scheduler in schedulers)
         {
+            if (scheduler.LastSuccessAt is { } at)
+            {
+                newest = Math.Max(newest, at.ToUnixTimeSeconds());
+            }
+        }
+
+        if (newest > 0)
+        {
+            yield return new Measurement<long>(newest);
         }
     }
 
-    private static IEnumerable<Measurement<long>> ObserveLastSuccess()
+    private sealed class Detach(BackupScheduler scheduler) : IDisposable
     {
-        long seconds = Interlocked.Read(ref s_lastSuccessUnixSeconds);
-        if (seconds > 0)
-        {
-            yield return new Measurement<long>(seconds);
-        }
+        public void Dispose() => Live.TryRemove(scheduler, out _);
     }
 }
