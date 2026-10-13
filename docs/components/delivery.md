@@ -23,4 +23,7 @@ A connection lost after the end of data was sent is deferred with the `possible_
 
 ## Known gaps
 
+- 8-bit message bodies are sent as they are even when the receiving server does not advertise `8BITMIME` (no downgrade to quoted-printable). `SMTPUTF8` is honoured: a server without it gets a permanent failure for internationalized addresses.
+- Throttle state, circuit breakers and sending counters are per process (see `components/policy.md`).
+
 See [../progress.md](../progress.md): per-process throttle state, no TLS-RPT counting yet, async bounces are not linked to history events.
