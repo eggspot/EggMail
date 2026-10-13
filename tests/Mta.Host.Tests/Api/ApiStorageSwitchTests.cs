@@ -88,7 +88,8 @@ public class ApiStorageSwitchTests : IAsyncLifetime
         await busy.Config.UpsertTenantAsync(new Tenant(Ids.New(), "Existing", "existing", true, DateTimeOffset.UtcNow, false), default);
     }
 
-    private async Task<Reply> UntilAsync(string state, int seconds = 30)
+    // Generous: a switch is CPU-bound (RSA key, PKCS#12 with 600,000 iterations, three times) and shares a two-core CI runner with other test projects.
+    private async Task<Reply> UntilAsync(string state, int seconds = 180)
     {
         DateTime deadline = DateTime.UtcNow.AddSeconds(seconds);
         Reply last;
