@@ -87,7 +87,7 @@ internal sealed class DeliveryFixture : IAsyncDisposable
     public DeliveryServices Services { get; private set; }
     public int Port { get; }
 
-    public DeliveryFixture(Func<DeliveryOptions, DeliveryOptions>? tweak = null, bool serverTls = false, bool startEngine = true, Func<DeliveryServices, IDkimSignerProvider>? dkim = null, SendingLimitsOptions? limits = null, VerpCodec? verp = null)
+    public DeliveryFixture(Func<DeliveryOptions, DeliveryOptions>? tweak = null, bool serverTls = false, bool startEngine = true, Func<DeliveryServices, IDkimSignerProvider>? dkim = null, SendingLimitsOptions? limits = null, VerpCodec? verp = null, IMtaLog? log = null)
     {
         var clock = SystemClock.Instance;
         Storage = new InMemoryStorage(new StorageOptions { History = new HistoryOptions { Mode = HistoryMode.Full } }, clock);
@@ -123,13 +123,14 @@ internal sealed class DeliveryFixture : IAsyncDisposable
             Throttle = new DestinationThrottle(clock),
             Limits = new SendingLimits(clock, null, limits),
             Retry = new RetrySchedule(),
+            Log = log ?? NullMtaLog.Instance,
         };
         if (dkim is not null || verp is not null)
         {
             Services = new DeliveryServices
             {
                 Storage = Services.Storage, Clock = Services.Clock, Mx = Services.Mx, Tls = Services.Tls, TlsPolicies = Services.TlsPolicies, Pool = Services.Pool,
-                Routes = Services.Routes, Throttle = Services.Throttle, Limits = Services.Limits, Retry = Services.Retry, Dkim = dkim?.Invoke(Services) ?? NoDkimSignerProvider.Instance, Verp = verp,
+                Routes = Services.Routes, Throttle = Services.Throttle, Limits = Services.Limits, Retry = Services.Retry, Dkim = dkim?.Invoke(Services) ?? NoDkimSignerProvider.Instance, Verp = verp, Log = Services.Log,
             };
         }
 

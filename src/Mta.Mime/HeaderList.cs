@@ -151,7 +151,7 @@ public sealed class HeaderList : IReadOnlyList<MimeHeader>
         var span = data.Span;
         int length = span.Length;
         var anomalies = MimeAnomaly.None;
-        var headers = new MimeHeader[length == 0 ? 0 : 16];
+        var headers = new MimeHeader[length == 0 ? 0 : InitialCapacity(span, limits)];
         int count = 0;
         int pos = 0;
         int bodyOffset = length;
@@ -211,6 +211,16 @@ public sealed class HeaderList : IReadOnlyList<MimeHeader>
         }
 
         return new HeaderList(data, headers, count, bodyOffset, separator, anomalies);
+    }
+
+    /// <summary>
+    /// A record array sized for the header block (one slot per line is an upper bound for the number of fields), so a typical message
+    /// does not carry a mostly empty 16 slot array and does not grow it. Capped: a hostile block grows by doubling like before.
+    /// </summary>
+    private static int InitialCapacity(ReadOnlySpan<byte> data, MimeLimits limits)
+    {
+        int lines = data[..FindBodyOffset(data)].Count((byte)'\n');
+        return Math.Clamp(lines, 1, Math.Min(limits.MaxHeaderCount, 128));
     }
 
     /// <summary>Finds the extent of the line at <paramref name="pos"/>: content end (before CR LF), line-ending length and next position.</summary>

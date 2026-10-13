@@ -75,6 +75,12 @@ public sealed class MessageBuffer : IBufferWriter<byte>, IDisposable
             return ReadOnlySequence<byte>.Empty;
         }
 
+        if (ReferenceEquals(_head, _tail))
+        {
+            // The usual message fits one segment: a plain array sequence, no segment objects to walk or to allocate.
+            return new ReadOnlySequence<byte>(_head.Array, 0, _head.Written);
+        }
+
         return new ReadOnlySequence<byte>(_head, 0, _tail, _tail.Written);
     }
 
