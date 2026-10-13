@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using Mta.Core;
+using Mta.Dns;
 
 namespace Mta.Host.Hosting;
 
@@ -39,13 +40,18 @@ public static class UnicodeSelfTest
     /// <summary>Process exit code of <c>mta serve</c> and <c>mta self-test</c> when the test fails (<c>EX_OSERR</c>: the environment is unfit).</summary>
     public const int FailedExitCode = 71;
 
+    /// <summary>
+    /// The probes run through the code the pipeline uses: <see cref="DnsName.TryNormalize"/> (MX, SPF, DKIM and MTA-STS lookups) and the address parser of
+    /// <see cref="EmailAddress"/> (sender and recipient domains), plus the platform's U-label and normalization functions.
+    /// </summary>
     public static UnicodeSelfTestResult Run() => Run(
-        text => new IdnMapping { UseStd3AsciiRules = false, AllowUnassigned = false }.GetAscii(text),
+        text => DnsName.TryNormalize(text, out string? ascii) ? ascii : throw new ArgumentException("the name was refused"),
         text => new IdnMapping { UseStd3AsciiRules = false, AllowUnassigned = false }.GetUnicode(text),
-        text => text.Normalize(NormalizationForm.FormC));
+        text => text.Normalize(NormalizationForm.FormC),
+        domain => EmailAddress.TryParse("user@" + domain, allowUtf8: true, out EmailAddress address) ? address.Domain : throw new ArgumentException("the address was refused"));
 
     /// <summary>The probes with replaceable implementations, so the failure path can be tested without a process in invariant mode.</summary>
-    public static UnicodeSelfTestResult Run(Func<string, string> toAscii, Func<string, string> toUnicode, Func<string, string> normalizeNfc)
+    public static UnicodeSelfTestResult Run(Func<string, string> toAscii, Func<string, string> toUnicode, Func<string, string> normalizeNfc, Func<string, string>? addressDomain = null)
     {
         var failures = new List<string>();
         Probe(failures, "IDN A-label of a precomposed name", () => toAscii("bücher.example"), "xn--bcher-kva.example");
@@ -53,6 +59,12 @@ public static class UnicodeSelfTest
         Probe(failures, "IDN A-label of a decomposed name", () => toAscii("bücher.example"), "xn--bcher-kva.example");
         Probe(failures, "IDN U-label of an A-label", () => toUnicode("xn--bcher-kva.example"), "bücher.example");
         Probe(failures, "IDN A-label of a CJK name", () => toAscii("日本語.jp"), "xn--wgv71a119e.jp");
+        if (addressDomain is not null)
+        {
+            Probe(failures, "domain of an internationalized address (upper case)", () => addressDomain("B\u00dcCHER.example"), "xn--bcher-kva.example");
+            Probe(failures, "domain of an internationalized address (decomposed)", () => addressDomain("bu\u0308cher.example"), "xn--bcher-kva.example");
+        }
+
         Probe(failures, "NFC normalization of e + combining acute", () => normalizeNfc("é"), "é");
         return new UnicodeSelfTestResult(failures, InvariantModeRequested());
     }
@@ -70,6 +82,7 @@ public static class UnicodeSelfTest
         if (!required)
         {
             log.Write(MtaLogLevel.Warning, "startup", result.Describe());
+            error.WriteLine("warning: " + result.Describe());
             return true;
         }
 

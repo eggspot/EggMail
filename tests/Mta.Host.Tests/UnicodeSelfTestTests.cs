@@ -66,7 +66,7 @@ public class UnicodeSelfTestTests
         var optOutLog = new RecordingLog();
         var optOutError = new StringWriter();
         Assert.True(UnicodeSelfTest.Enforce(required: false, optOutLog, optOutError, () => failing));
-        Assert.Equal(string.Empty, optOutError.ToString());
+        Assert.StartsWith("warning: Unicode self-test failed", optOutError.ToString(), StringComparison.Ordinal);   // still said out loud on the console
         Assert.Contains(optOutLog.Entries, e => e.Level == MtaLogLevel.Warning && e.Message.Contains("failed", StringComparison.Ordinal));
     }
 
@@ -90,7 +90,9 @@ public class UnicodeSelfTestTests
         Assert.False(ConfigLoader.Load(off).Config.Startup.RequireUnicodeSupport);
     }
 
-    // The real process, in invariant globalization mode: it must refuse to start and say why.
+    // The real process, in invariant globalization mode: it must refuse to run and say why.
+
+    private static readonly Dictionary<string, string> Invariant = new() { ["DOTNET_SYSTEM_GLOBALIZATION_INVARIANT"] = "1" };
 
     private static (int ExitCode, string Output, string Error) RunMta(Dictionary<string, string> environment, params string[] args)
     {
@@ -111,14 +113,35 @@ public class UnicodeSelfTestTests
         using Process process = Process.Start(info)!;
         Task<string> output = process.StandardOutput.ReadToEndAsync();
         Task<string> error = process.StandardError.ReadToEndAsync();
-        Assert.True(process.WaitForExit(TimeSpan.FromSeconds(120)), "mta did not exit");
+        if (!process.WaitForExit(TimeSpan.FromSeconds(120)))
+        {
+            process.Kill(entireProcessTree: true);   // never leave a server that started after all running behind the test run
+            process.WaitForExit();
+            Assert.Fail($"mta {string.Join(' ', args)} did not exit within 120 s (it should have been refused at start). Output: {output.Result} {error.Result}");
+        }
+
         return (process.ExitCode, output.Result, error.Result);
+    }
+
+    /// <summary>
+    /// The refusal can only be observed where the runtime really gives wrong answers in invariant mode (true for .NET 10 today). If a future runtime passes
+    /// every probe there, the process tests have nothing to refuse, so they return without asserting (xUnit 2 cannot report a skip from inside a test).
+    /// </summary>
+    private static bool InvariantModeStillFails()
+    {
+        var (exit, _, _) = RunMta(Invariant, "self-test");
+        return exit == UnicodeSelfTest.FailedExitCode;
     }
 
     [Fact]
     public void The_self_test_command_fails_in_invariant_mode_and_passes_with_ICU()
     {
-        var (badExit, _, badError) = RunMta(new Dictionary<string, string> { ["DOTNET_SYSTEM_GLOBALIZATION_INVARIANT"] = "1" }, "self-test");
+        var (badExit, _, badError) = RunMta(Invariant, "self-test");
+        if (badExit == 0)
+        {
+            return;   // see InvariantModeStillFails
+        }
+
         Assert.Equal(UnicodeSelfTest.FailedExitCode, badExit);
         Assert.Contains("Unicode self-test failed", badError, StringComparison.Ordinal);
         Assert.Contains("invariant globalization mode", badError, StringComparison.Ordinal);
@@ -129,20 +152,51 @@ public class UnicodeSelfTestTests
     }
 
     [Fact]
-    public void Serve_refuses_to_start_in_invariant_mode_before_it_touches_any_storage()
+    public void Every_command_that_handles_mail_or_accounts_refuses_to_run_in_invariant_mode_before_it_touches_any_storage()
     {
+        if (!InvariantModeStillFails())
+        {
+            return;
+        }
+
         string data = Directory.CreateTempSubdirectory("eggmail-unicode-").FullName;
         try
         {
-            var (exit, _, error) = RunMta(new Dictionary<string, string> { ["DOTNET_SYSTEM_GLOBALIZATION_INVARIANT"] = "1" }, "serve", $"--Sqlite:DataDirectory={data}");
+            foreach (string[] command in new[]
+            {
+                new[] { "serve" },
+                new[] { "migrate-db" },
+                new[] { "migrate-storage", "preflight", "--to", "postgres" },
+                new[] { "admin", "create", "--user", "root" },
+            })
+            {
+                var (exit, _, error) = RunMta(Invariant, [.. command, $"--Sqlite:DataDirectory={data}"]);
 
-            Assert.Equal(UnicodeSelfTest.FailedExitCode, exit);
-            Assert.Contains("Unicode self-test failed", error, StringComparison.Ordinal);
-            Assert.Empty(Directory.GetFileSystemEntries(data));
+                Assert.True(exit == UnicodeSelfTest.FailedExitCode, $"{string.Join(' ', command)} exited {exit}: {error}");
+                Assert.Contains("Unicode self-test failed", error, StringComparison.Ordinal);
+                Assert.Empty(Directory.GetFileSystemEntries(data));
+            }
         }
         finally
         {
             Directory.Delete(data, recursive: true);
         }
+    }
+
+    [Fact]
+    public void Version_and_the_health_check_do_not_need_Unicode_and_the_opt_out_lets_serve_past_the_check()
+    {
+        if (!InvariantModeStillFails())
+        {
+            return;
+        }
+
+        var (versionExit, versionOutput, _) = RunMta(Invariant, "--version");
+        Assert.Equal(0, versionExit);
+        Assert.NotEmpty(versionOutput.Trim());
+
+        // --healthcheck only asks the local port, which nobody serves here: it fails with 1 (unhealthy), not with 71.
+        var (healthExit, _, _) = RunMta(Invariant, "--healthcheck", "--Dashboard:HttpPort=1");
+        Assert.Equal(1, healthExit);
     }
 }

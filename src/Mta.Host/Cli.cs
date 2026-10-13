@@ -22,6 +22,12 @@ internal static class Cli
     {
         string command = args.FirstOrDefault(a => !a.StartsWith("--", StringComparison.Ordinal) || a is "--healthcheck" or "--version") ?? "serve";
         string[] rest = args.Where(a => a != command).ToArray();
+        // Every command that handles mail, addresses or accounts needs working Unicode; --version, --healthcheck and self-test (which reports it) do not.
+        if (command is "serve" or "migrate-db" or "migrate-storage" or "admin" && !UnicodeSelfTest.Enforce(RequiresUnicodeSupport(rest), UnicodeLog(command), Console.Error))
+        {
+            return UnicodeSelfTest.FailedExitCode;
+        }
+
         switch (command)
         {
             case "--version":
@@ -44,6 +50,24 @@ internal static class Cli
                 return 64;
         }
     }
+
+    /// <summary><c>Startup:RequireUnicodeSupport</c> from the configuration these arguments select (true when the configuration cannot be loaded: that error is reported by the command itself).</summary>
+    private static bool RequiresUnicodeSupport(string[] args)
+    {
+        try
+        {
+            LoadedConfig loaded = ConfigLoader.Load(ConfigLoader.Build(args));
+            return !loaded.IsValid || loaded.Config.Startup.RequireUnicodeSupport;
+        }
+        catch (FormatException)
+        {
+            return true;   // command-line arguments the configuration cannot parse (the command reports them)
+        }
+    }
+
+    /// <summary>The server logs as JSON; the one-off commands print their own output, so the check stays quiet there unless it fails.</summary>
+    private static IMtaLog UnicodeLog(string command) =>
+        command == "serve" ? new MtaLogAdapter(LoggerFactory.Create(b => b.AddJsonConsole())) : NullMtaLog.Instance;
 
     private static LoadedConfig? Load(string[] args)
     {
@@ -149,12 +173,6 @@ internal static class Cli
         using var startupFactory = LoggerFactory.Create(b => b.AddJsonConsole());
         var startupLog = new MtaLogAdapter(startupFactory);
         var clock = SystemClock.Instance;
-
-        // Before anything is opened: an environment where IDN and normalization silently give wrong answers must not start (design section 10).
-        if (!UnicodeSelfTest.Enforce(loaded.Config.Startup.RequireUnicodeSupport, startupLog, Console.Error))
-        {
-            return UnicodeSelfTest.FailedExitCode;
-        }
 
         // One process owns a SQLite data directory (the offline migrate-storage commands take the same lock).
         using DataDirectoryLock? directoryLock = loaded.Config.Storage.Backend == StorageBackend.Sqlite ? DataDirectoryLock.Acquire(loaded.Config.Storage.Sqlite.DataDirectory) : null;

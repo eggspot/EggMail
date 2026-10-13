@@ -15,6 +15,7 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | Key | Default | Meaning |
 |---|---|---|
 | `Hostname` | machine name | Name in SMTP greetings, `Received` headers and EHLO; should match the PTR record of the sending IP |
+| `Startup:RequireUnicodeSupport` | true | Refuse to run `serve`, `migrate-db`, `migrate-storage` and `admin` when the Unicode self-test fails (see "Unicode support" below); `false` only logs a warning |
 | `Storage:Backend` | `Sqlite` | `Sqlite` or `Postgres` (same image) |
 | `Sqlite:DataDirectory` | `/data` | Where the database files live (mount a volume here) |
 | `Sqlite:SyncMode` | `Off` | `Off`, `Normal`, `Full` for queue and stats files. **`Off` is safe against a process kill but not against power loss or an OS crash**: files can corrupt and acknowledged mail can be lost. Use `Normal` or `Full`, or PostgreSQL, if you need that |
@@ -160,7 +161,6 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | `Webhooks:ThrottleExtraDelay` | `00:01:00` | Extra delay when the receiver answers 429/502/504 |
 | `Webhooks:MaxResponseSnippetBytes` | 1024 | Response bytes kept in the attempt log |
 | `Webhooks:UserAgent` | `EggMail-Webhooks/1.0` | |
-| `Startup:RequireUnicodeSupport` | true | Refuse to start when the Unicode self-test fails (see "Unicode support" below); `false` only logs a warning |
 | `Webhooks:OutboxRetentionDays` | 7 | Finished deliveries; `0` keeps forever |
 | `Webhooks:AttemptLogDays` | 7 | Attempt log; `0` keeps forever |
 
@@ -225,7 +225,7 @@ To restore: stop EggMail, copy the files of one backup directory over the data d
 
 ## Unicode support
 
-Internationalized domain names and Unicode normalization depend on ICU. In invariant globalization mode (`DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1`, `InvariantGlobalization=true`, or a host without `libicu`) .NET gives wrong answers for anything outside ASCII without any error: an upper case or decomposed IDN becomes the wrong A-label, so a sender domain no longer matches the one that was registered. At start `mta serve` therefore runs a self-test (A-labels of a precomposed, an upper case, a decomposed and a CJK name, U-label round trip, NFC normalization) and, if it fails, prints what was wrong and how to fix it and exits with code 71 before opening any storage. `mta self-test` runs the same test and prints the result (exit 0 or 71): use it to check an image or a host. The published image is the chiseled `-extra` variant with ICU. `Startup:RequireUnicodeSupport=false` starts anyway with a warning in the log (not recommended).
+Internationalized domain names and Unicode normalization depend on ICU. In invariant globalization mode (`DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1`, `InvariantGlobalization=true`, or a host without `libicu`) .NET gives wrong answers for anything outside ASCII without any error: an upper case or decomposed IDN becomes the wrong A-label, so a sender domain no longer matches the one that was registered. Before `mta serve`, `migrate-db`, `migrate-storage` and `admin` do anything they therefore run a self-test (A-labels of a precomposed, an upper case, a decomposed and a CJK name, U-label round trip, NFC normalization) and, if it fails, print what was wrong and how to fix it and exit with code 71 before opening any storage (`--version`, `--healthcheck` and `self-test` itself are exempt). The probes go through the same code the mail pipeline uses for domain names (`DnsName`, the address parser). `mta self-test` runs the same test and prints the result (exit 0 or 71): use it to check an image or a host. The published image is the chiseled `-extra` variant with ICU. `Startup:RequireUnicodeSupport=false` starts anyway with a warning in the log (not recommended).
 
 ## Upgrades
 
