@@ -93,6 +93,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Assembly and image version (a valid SemVer, the tag or the props version with a nightly pre-release)
+        if: steps.gate.outputs.cache-hit != 'true'
+        id: ver
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then v="${GITHUB_REF_NAME#v}"
+          else v="$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' Directory.Build.props)-nightly.g${GITHUB_SHA::7}"; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
       - name: Image tags and labels
         if: steps.gate.outputs.cache-hit != 'true'
         id: meta
@@ -119,7 +127,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VERSION=${{ steps.meta.outputs.version }}
+            VERSION=${{ steps.ver.outputs.version }}
             REVISION=${{ github.sha }}
           sbom: true
           provenance: mode=max
