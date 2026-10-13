@@ -102,6 +102,7 @@ internal static class Cli
         var storage = StorageFactory.Create(config.Storage, clock, startupLog);
         await storage.InitializeAsync(CancellationToken.None).ConfigureAwait(false);
         await using var runtime = await EggMailRuntime.CreateAsync(config, storage, clock, startupLog, CancellationToken.None).ConfigureAwait(false);
+        await ApiHosting.EnsureBootstrapAdminAsync(config, storage, clock, startupLog, CancellationToken.None).ConfigureAwait(false);
 
         builder.Services.AddSingleton(loaded);
         builder.Services.AddSingleton(config);
@@ -115,6 +116,7 @@ internal static class Cli
         builder.Services.AddHostedService<CertificateService>();
         builder.Services.AddHostedService<MaintenanceService>();
         builder.Services.AddHostedService<TlsReportService>();
+        ApiHosting.AddServices(builder, loaded, runtime);
         builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(45));
 
         builder.WebHost.ConfigureKestrel(k =>
@@ -131,6 +133,7 @@ internal static class Cli
 
         var app = builder.Build();
         DashboardHosting.Map(app);
+        ApiHosting.Map(app, runtime);
         await app.RunAsync().ConfigureAwait(false);
         return 0;
     }

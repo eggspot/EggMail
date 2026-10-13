@@ -8,6 +8,10 @@ var app = builder.Build();
 app.MapEggMailApi();                                  // /api/v1/** plus /healthz, /readyz, /metrics
 ```
 
+## Wiring into `mta serve`
+
+`Hosting/ApiHosting.cs` connects the API to the runtime built by `EggMailRuntime`: it registers the runtime's `SubmissionService`, `ISecretProtector`, `AuthThrottle` (the instance the SMTP ingest uses), `IDnsResolver` and `AcmeRenewalService`, calls `AddEggMailApi(loadedConfig)`, maps the routes (`/healthz` moved here from `DashboardHosting`), gives the webhook dispatcher the tenants' SSRF allowlists (`SettingsService.GetWebhookAllowlistSnapshot`) and creates the first administrator from `Dashboard:BootstrapAdminUser` and the password file `Dashboard:BootstrapAdminPasswordFile` when no admin exists. `Cli.ServeAsync` has three calls into it.
+
 ## What the host must provide
 
 Registered by the host (the API registers none of them): `IStorage`, `StorageOptions`, `ISecretProtector` (Data Protection in production), `SubmissionService`, `IDnsResolver` (for domain verification). Optional: `IClock`, `AuthThrottle` (**share the instance with the SMTP ingest** so the failed-login lockout is shared), `IStorageSwitchService` (the engine; without it the endpoints answer 503 `not_ready`), `AcmeRenewalService` (without it `POST /admin/certificates/acme` answers 503), `PrometheusTextExporter` (for `/metrics`), `IStoragePressureSource`. `AddEggMailApi` registers the API services, the `DomainVerificationService` hosted service, two health contributors (storage warnings, certificate warnings), `HealthService` and defaults for the optional services above. `ApiOptions` (`AddEggMailApi(LoadedConfig)` derives limits, the bounce domain, the locked configuration keys, webhook options and `MetricsEnabled` from the deployment configuration) holds every limit with its default.
@@ -59,9 +63,9 @@ JSON body 1 MiB (sending endpoints 40 MiB), message 25 MiB, 50 recipients, 50 at
 
 ## Known gaps
 
-- Not exercised through Kestrel, a reverse proxy, TLS or a browser; the dashboard's own Vitest suite runs against its mock, not against this API.
+- The automated tests run in process (TestHost). `mta serve` was smoke-tested on Kestrel by hand (curl); a reverse proxy, TLS in front of the API and a browser were not exercised, and the dashboard's own Vitest suite runs against its mock, not against this API.
 - Per-record DNS results are remembered in memory only (see api.md).
-- Global settings are stored but only applied at startup by a composition root that does not exist yet.
+- Global settings are stored but the runtime does not apply them at startup yet (it reads deployment configuration only); `mta admin create` is not written (`DashboardAccounts` is what it will call).
 - `tags` are validated but not stored. `recipient_suppressed` is reserved.
 - No audit log of administrative actions, no per-tenant request rate limit (only the failed-login throttle, the verify limit and the send byte budget), no API for creating dashboard users (use `DashboardAccounts`).
 - The switch endpoints are a validated pass-through: nothing behind them exists yet.

@@ -161,20 +161,67 @@ public sealed class SettingsService
             await Config.UpsertTenantAsync(updated, ct).ConfigureAwait(false);
         }
 
+        if (validated.Any(v => v.Def.Key == WebhookAllowlistKey))
+        {
+            await GetWebhookAllowlistAsync(tenant.Id, ct).ConfigureAwait(false); // refresh the cached view the dispatcher reads
+        }
+
         return await ListTenantAsync(updated, callerIsAdmin, ct).ConfigureAwait(false);
     }
 
-    /// <summary>The tenant's SSRF allowlist for webhook endpoints (empty when none). Also what the webhook dispatcher is wired to.</summary>
+    /// <summary>The tenant's SSRF allowlist for webhook endpoints (empty when none).</summary>
     public async ValueTask<IReadOnlyList<IpNetwork>> GetWebhookAllowlistAsync(Guid tenantId, CancellationToken ct)
     {
         var stored = (await Config.GetSettingsAsync(tenantId, ct).ConfigureAwait(false)).FirstOrDefault(s => s.Key == WebhookAllowlistKey);
+        IReadOnlyList<IpNetwork> networks;
         if (stored is null)
         {
-            return [];
+            networks = [];
+        }
+        else
+        {
+            JsonElement value = Parse(stored.ValueJson);
+            networks = ParseNetworks(value.ValueKind == JsonValueKind.String ? value.GetString() ?? "" : "", out _);
         }
 
-        string text = Parse(stored.ValueJson).ValueKind == JsonValueKind.String ? Parse(stored.ValueJson).GetString() ?? "" : "";
-        return ParseNetworks(text, out _);
+        _allowlists[tenantId] = (_clock.Timestamp, networks);
+        return networks;
+    }
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, (long At, IReadOnlyList<IpNetwork> Networks)> _allowlists = new();
+
+    /// <summary>
+    /// Synchronous, cached view of <see cref="GetWebhookAllowlistAsync"/> for <c>WebhookDispatcher.AllowlistProvider</c>, which cannot await. An unknown or stale
+    /// tenant returns the last known list (empty at first) and refreshes in the background; a delivery that is refused meanwhile is simply retried.
+    /// </summary>
+    public IReadOnlyList<IpNetwork> GetWebhookAllowlistSnapshot(Guid tenantId)
+    {
+        long ttl = 30 * System.Diagnostics.Stopwatch.Frequency;
+        if (_allowlists.TryGetValue(tenantId, out var entry))
+        {
+            if (_clock.Timestamp - entry.At > ttl)
+            {
+                _ = RefreshAllowlistAsync(tenantId);
+            }
+
+            return entry.Networks;
+        }
+
+        _allowlists[tenantId] = (_clock.Timestamp, []);
+        _ = RefreshAllowlistAsync(tenantId);
+        return [];
+    }
+
+    private async Task RefreshAllowlistAsync(Guid tenantId)
+    {
+        try
+        {
+            await GetWebhookAllowlistAsync(tenantId, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Keep the previous list; the next call tries again.
+        }
     }
 
     private static IReadOnlyList<IpNetwork> ParseNetworks(string text, out string? error)

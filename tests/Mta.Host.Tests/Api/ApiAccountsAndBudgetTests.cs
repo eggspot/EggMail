@@ -73,6 +73,79 @@ public class ApiAccountsTests : IAsyncLifetime
     }
 }
 
+public class ApiHostingTests : IAsyncLifetime
+{
+    private ApiFixture _f = null!;
+    private string _dir = null!;
+
+    public async Task InitializeAsync()
+    {
+        _f = await ApiFixture.StartAsync();
+        _dir = Path.Combine(Path.GetTempPath(), "eggmail-boot-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(_dir);
+        foreach (DashboardUser u in await _f.Storage.Config.GetDashboardUsersAsync(default))
+        {
+            await _f.Storage.Config.DeleteDashboardUserAsync(u.Id, default);
+        }
+    }
+
+    public async Task DisposeAsync()
+    {
+        await _f.DisposeAsync();
+        Directory.Delete(_dir, recursive: true); // created by this test
+    }
+
+    private Mta.Host.Configuration.MtaConfig Config(string? passwordFile, string user = "admin") =>
+        new() { Dashboard = new Mta.Host.Configuration.DashboardSection { BootstrapAdminPasswordFile = passwordFile, BootstrapAdminUser = user } };
+
+    [Fact]
+    public async Task The_bootstrap_admin_is_created_from_the_password_file_once()
+    {
+        string file = Path.Combine(_dir, "pw");
+        await File.WriteAllTextAsync(file, "first-run-password\n");
+        await Mta.Host.Hosting.ApiHosting.EnsureBootstrapAdminAsync(Config(file, "boss"), _f.Storage, _f.Clock, Mta.Core.NullMtaLog.Instance, default);
+
+        Reply login = await _f.NewClient().PostAsync("/api/v1/session", new { user = "boss", password = "first-run-password" });
+        Assert.Equal(HttpStatusCode.OK, login.Status);
+        Assert.Equal("admin", login.Str("role"));
+
+        await File.WriteAllTextAsync(file, "a-different-password\n");
+        await Mta.Host.Hosting.ApiHosting.EnsureBootstrapAdminAsync(Config(file, "second"), _f.Storage, _f.Clock, Mta.Core.NullMtaLog.Instance, default);
+        Assert.Single(await _f.Storage.Config.GetDashboardUsersAsync(default)); // an admin exists: nothing more is created
+    }
+
+    [Fact]
+    public async Task Missing_or_weak_password_files_are_logged_not_fatal()
+    {
+        await Mta.Host.Hosting.ApiHosting.EnsureBootstrapAdminAsync(Config(null), _f.Storage, _f.Clock, Mta.Core.NullMtaLog.Instance, default);
+        await Mta.Host.Hosting.ApiHosting.EnsureBootstrapAdminAsync(Config(Path.Combine(_dir, "missing")), _f.Storage, _f.Clock, Mta.Core.NullMtaLog.Instance, default);
+        string weak = Path.Combine(_dir, "weak");
+        await File.WriteAllTextAsync(weak, "short");
+        await Mta.Host.Hosting.ApiHosting.EnsureBootstrapAdminAsync(Config(weak), _f.Storage, _f.Clock, Mta.Core.NullMtaLog.Instance, default);
+        Assert.Empty(await _f.Storage.Config.GetDashboardUsersAsync(default));
+    }
+
+    [Fact]
+    public async Task The_dispatchers_view_of_the_webhook_allowlist_is_read_from_settings_and_cached()
+    {
+        var settings = _f.Get<SettingsService>();
+        Assert.Empty(settings.GetWebhookAllowlistSnapshot(ApiFixture.TenantAId));
+
+        await _f.Storage.Config.SetSettingAsync(new SettingRecord(SettingsService.WebhookAllowlistKey, ApiFixture.TenantAId, "\"10.0.0.0/8\"", _f.Clock.UtcNow), default);
+        _f.Clock.Advance(TimeSpan.FromMinutes(1)); // past the cache time
+        settings.GetWebhookAllowlistSnapshot(ApiFixture.TenantAId); // returns the old view and refreshes in the background
+        for (int i = 0; i < 100 && settings.GetWebhookAllowlistSnapshot(ApiFixture.TenantAId).Count == 0; i++)
+        {
+            await Task.Delay(20);
+        }
+
+        var networks = settings.GetWebhookAllowlistSnapshot(ApiFixture.TenantAId);
+        Assert.Single(networks);
+        Assert.True(networks[0].Contains(System.Net.IPAddress.Parse("10.2.3.4")));
+        Assert.Empty(settings.GetWebhookAllowlistSnapshot(ApiFixture.TenantBId));
+    }
+}
+
 public class SendBudgetTests
 {
     private static DefaultHttpContext Request(long length) => new() { Request = { ContentLength = length } };
