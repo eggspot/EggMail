@@ -117,10 +117,12 @@ public sealed class DomainsApi(ApiAuthenticator auth, IStorage storage, ISecretP
         try
         {
             await Config.UpsertDomainAsync(domain, ct).ConfigureAwait(false);
+            Mta.Host.Submission.DomainChangeSignal.Bump();
         }
         catch (StorageConflictException)
         {
             await Config.DeleteDomainAsync(domain.Id, CancellationToken.None).ConfigureAwait(false); // removes the orphan key
+            Mta.Host.Submission.DomainChangeSignal.Bump();
             throw ApiException.Validation("name", "This domain is already registered.");
         }
 
@@ -132,6 +134,7 @@ public sealed class DomainsApi(ApiAuthenticator auth, IStorage storage, ISecretP
         ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.Domains).ConfigureAwait(false);
         DomainRecord domain = await FindOwnAsync(caller, id, context.RequestAborted).ConfigureAwait(false);
         await Config.DeleteDomainAsync(domain.Id, context.RequestAborted).ConfigureAwait(false);
+        Mta.Host.Submission.DomainChangeSignal.Bump();
         verification.Forget(domain.Id);
         return ApiResults.NoContent();
     }
@@ -194,6 +197,7 @@ public sealed class DomainsApi(ApiAuthenticator auth, IStorage storage, ISecretP
             {
                 fresh = fresh with { NextCheckAt = soon };
                 await Config.UpsertDomainAsync(fresh, ct).ConfigureAwait(false);
+                Mta.Host.Submission.DomainChangeSignal.Bump();
             }
 
             return ApiResults.Ok(await ToResponseAsync(fresh, ct).ConfigureAwait(false));

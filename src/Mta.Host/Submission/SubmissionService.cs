@@ -77,7 +77,7 @@ public sealed class SubmissionService
     private readonly SenderPolicy _policy;
     private readonly StorageOptions _storageOptions;
     private readonly SubmissionOptions _options;
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, (IReadOnlyList<DomainRecord> Domains, long ExpiresAt)> _domainCache = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, (IReadOnlyList<DomainRecord> Domains, long ExpiresAt, long Version)> _domainCache = new();
 
     public SubmissionService(IStorage storage, IClock clock, SenderPolicy policy, StorageOptions storageOptions, SubmissionOptions? options = null)
     {
@@ -166,19 +166,20 @@ public sealed class SubmissionService
     }
 
     /// <summary>
-    /// The tenant's domains, cached briefly: the sender check runs for every message and the list changes rarely. A domain that is added,
-    /// verified or paused takes effect within <see cref="SubmissionOptions.DomainCacheTtl"/>.
+    /// The tenant's domains, cached briefly: the sender check runs for every message and the list changes rarely. A change made through this process (API, verification service) takes effect at once
+    /// (<see cref="DomainChangeSignal"/>); a change made by another replica within <see cref="SubmissionOptions.DomainCacheTtl"/>.
     /// </summary>
     private async ValueTask<IReadOnlyList<DomainRecord>> GetDomainsAsync(Guid tenantId, CancellationToken ct)
     {
         long now = _clock.Timestamp;
-        if (_domainCache.TryGetValue(tenantId, out var cached) && now < cached.ExpiresAt)
+        long version = DomainChangeSignal.Version;
+        if (_domainCache.TryGetValue(tenantId, out var cached) && now < cached.ExpiresAt && cached.Version == version)
         {
             return cached.Domains;
         }
 
         var domains = await _storage.Config.GetDomainsAsync(tenantId, ct).ConfigureAwait(false);
-        _domainCache[tenantId] = (domains, now + (long)(_options.DomainCacheTtl.TotalSeconds * System.Diagnostics.Stopwatch.Frequency));
+        _domainCache[tenantId] = (domains, now + (long)(_options.DomainCacheTtl.TotalSeconds * System.Diagnostics.Stopwatch.Frequency), version);
         return domains;
     }
 
@@ -223,4 +224,17 @@ public sealed class SubmissionService
 
         return domain;
     }
+}
+
+/// <summary>
+/// Raised by every code path that changes a domain record, so cached copies of a tenant's domain list (the sender check on the hot
+/// path) are dropped at once instead of waiting for their time to live.
+/// </summary>
+public static class DomainChangeSignal
+{
+    private static long _version;
+
+    public static long Version => Interlocked.Read(ref _version);
+
+    public static void Bump() => Interlocked.Increment(ref _version);
 }

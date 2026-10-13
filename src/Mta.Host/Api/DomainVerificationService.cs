@@ -202,6 +202,8 @@ public sealed class DomainVerificationService : BackgroundService
         }
 
         await Config.UpsertDomainAsync(updated, ct).ConfigureAwait(false);
+
+        Mta.Host.Submission.DomainChangeSignal.Bump();
         if (result.Result != VerificationCheckResult.DnsTemporaryFailure)
         {
             await ActivateRotatedKeyAsync(updated, keys, result, now, ct).ConfigureAwait(false);

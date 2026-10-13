@@ -178,7 +178,7 @@ internal sealed class ApiFixture : IAsyncDisposable
         builder.Services.AddSingleton<ISecretProtector>(Protector);
         builder.Services.AddSingleton<IDnsResolver>(Dns);
         builder.Services.AddSingleton(Throttle);
-        builder.Services.AddSingleton(new SubmissionService(Storage, Clock, new SenderPolicy(), StorageOptions, new SubmissionOptions { MessageIdDomain = "egg.test" }));
+        builder.Services.AddSingleton(new SubmissionService(Storage, Clock, new SenderPolicy(), StorageOptions, new SubmissionOptions { MessageIdDomain = "egg.test", DomainCacheTtl = TimeSpan.Zero }));
         builder.Services.AddEggMailApi(Options);
         o.ConfigureServices?.Invoke(builder.Services);
 
