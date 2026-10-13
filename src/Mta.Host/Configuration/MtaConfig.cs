@@ -17,6 +17,7 @@ public sealed class MtaConfig
     public string Hostname { get; init; } = Environment.MachineName.ToLowerInvariant();
 
     public SmtpSection Smtp { get; init; } = new();
+    public BackupSection Backup { get; init; } = new();
     public DnsSection Dns { get; init; } = new();
     public StorageOptions Storage { get; init; } = new();
     public DeliverySection Delivery { get; init; } = new();
@@ -108,6 +109,21 @@ public sealed class DeliverySection
 
     /// <summary>Allow MX hosts that resolve to loopback, private or other special-use addresses. Off in production (a hostile MX record must not aim us at the internal network); on for lab and test setups.</summary>
     public bool AllowPrivateMxAddresses { get; init; }
+}
+
+public sealed class BackupSection
+{
+    /// <summary>Scheduled consistent backups (<c>VACUUM INTO</c> per SQLite file, while running). PostgreSQL has no built-in backup here: use <c>pg_dump</c> or your platform's backups.</summary>
+    public bool Enabled { get; init; } = true;
+
+    /// <summary>Hours between backups (the first one runs shortly after start-up when none exists yet).</summary>
+    public double IntervalHours { get; init; } = 24;
+
+    /// <summary>How many of the newest backups to keep.</summary>
+    public int Keep { get; init; } = 3;
+
+    /// <summary>Where backups go; defaults to <c>backups</c> inside the SQLite data directory. Put it on a different disk than the data when you can.</summary>
+    public string? Directory { get; init; }
 }
 
 public sealed class DnsSection

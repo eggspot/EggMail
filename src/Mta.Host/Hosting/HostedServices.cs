@@ -115,3 +115,40 @@ internal sealed class TlsReportService(EggMailRuntime runtime) : BackgroundServi
         }
     }
 }
+
+/// <summary>Scheduled backups of the SQLite files (PostgreSQL deployments back up with their own tools).</summary>
+internal sealed class BackupService(EggMailRuntime runtime) : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        var backup = runtime.Config.Backup;
+        if (!backup.Enabled || runtime.Storage.Backend != Mta.Storage.StorageBackend.Sqlite)
+        {
+            return;
+        }
+
+        string directory = backup.Directory ?? Path.Combine(runtime.Config.Storage.Sqlite.DataDirectory, "backups");
+        var scheduler = new Backup.BackupScheduler(runtime.Storage, runtime.Clock, directory, TimeSpan.FromHours(backup.IntervalHours), backup.Keep, runtime.Log);
+        using var timer = new PeriodicTimer(TimeSpan.FromMinutes(10));
+        try
+        {
+            // First check shortly after start so a fresh install gets its first backup soon, then every ten minutes whether one is due.
+            await Task.Delay(TimeSpan.FromMinutes(1), stoppingToken).ConfigureAwait(false);
+            do
+            {
+                try
+                {
+                    await scheduler.RunOnceAsync(stoppingToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    runtime.Log.Write(MtaLogLevel.Error, "backup", "backup failed", ex);
+                }
+            }
+            while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false));
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+}
