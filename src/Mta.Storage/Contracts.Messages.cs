@@ -61,6 +61,15 @@ public sealed class AcceptedMessage
 
     /// <summary>Recipient-domain buckets and sending domain for statistics.</summary>
     public string? SendingDomain { get; init; }
+
+    /// <summary>
+    /// The message's <c>Message-ID</c> header, so an asynchronous bounce or complaint that returns the headers can be attached to the message's history
+    /// (<see cref="IHistoryStore.AttachReportAsync"/>). Recorded only with <see cref="HistoryMode.Full"/>.
+    /// </summary>
+    public string? MessageIdHeader { get; init; }
+
+    /// <summary>Tags the API caller gave the message. Recorded with the message's history (<see cref="HistoryMode.Full"/> only).</summary>
+    public IReadOnlyList<string>? Tags { get; init; }
 }
 
 public enum IntakeStatus : byte

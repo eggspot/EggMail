@@ -47,6 +47,15 @@ public sealed class EggMailRuntime : IAsyncDisposable
     public AcmeRenewalService? Acme { get; init; }
     public TlsReportSender? TlsReports { get; init; }
 
+    /// <summary>Persists the sending counters (write-behind); loaded before the first delivery, flushed by <see cref="FlushRuntimeStateAsync"/>.</summary>
+    public required SendingCounterPersistence CounterPersistence { get; init; }
+
+    /// <summary>Persists the TLS-RPT counters; null when TLS reporting is off.</summary>
+    public TlsReportJournal? TlsJournal { get; init; }
+
+    /// <summary>The in-memory TLS-RPT counters the delivery engine records into; null when TLS reporting is off.</summary>
+    public TlsRptCollector? TlsCollector { get; init; }
+
     private readonly List<IAsyncDisposable> _owned = [];
 
     public static async Task<EggMailRuntime> CreateAsync(MtaConfig config, IStorage storage, IClock clock, IMtaLog log, CancellationToken ct, IDnsResolver? dnsOverride = null,
@@ -70,7 +79,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
             new SubmissionOptions { MessageIdDomain = config.Hostname, MaxMessageBytes = config.Smtp.MaxMessageSize, MaxRecipients = config.Smtp.MaxRecipients });
         var throttle = new AuthThrottle(clock);
 
-        var bounces = new BounceProcessor(verp, storage.Config, storage.Stats, new StorageWebhookPublisher(storage), clock, log);
+        var bounces = new BounceProcessor(verp, storage.Config, storage.Stats, new StorageWebhookPublisher(storage), clock, log, history: storage.History);
         DeliveryEngine? engine = null;
         var handler = new IngestHandler(storage, submission, throttle, new IngestOptions { BounceDomain = config.Delivery.BounceDomain, MaxRecipientsPerMessage = config.Smtp.MaxRecipients }, bounces, onAccepted: () => engine?.Wake(), log);
 
@@ -107,7 +116,11 @@ public sealed class EggMailRuntime : IAsyncDisposable
         var tls = new OutboundTlsPolicyResolver(mtaSts, new DaneTlsaLookup(dns));
         var pool = new SmtpConnectionPool(new SmtpClientOptions { HeloName = config.Delivery.HeloName ?? config.Hostname, PreferChunking = config.Delivery.PreferChunking }, clock);
         var routes = new RoutePlanner(new RouteHealth(clock));
-        var limits = new SendingLimits(clock, null, SendingConfigurator.OptionsFrom(config.Sending));
+        var sendingCounters = new InMemorySendingCounterStore();
+        var limits = new SendingLimits(clock, sendingCounters, SendingConfigurator.OptionsFrom(config.Sending));
+        // The current hour and day windows as they were before a restart: the caps and the warm-up must not start from zero again.
+        var counterPersistence = new SendingCounterPersistence(sendingCounters, storage.Config, clock);
+        await counterPersistence.LoadAsync(ct).ConfigureAwait(false);
         var services = new DeliveryServices
         {
             Storage = storage,
@@ -136,9 +149,10 @@ public sealed class EggMailRuntime : IAsyncDisposable
 
         var webhooks = new WebhookDispatcher(storage.Webhooks, storage.Config, secrets, config.Webhooks, clock, log, new EndpointDisabledNotifier(storage, clock, log));
 
-        TlsReportSender? reports = collector is null
+        var tlsJournal = collector is null ? null : new TlsReportJournal(collector, storage.Config, clock, log);
+        TlsReportSender? reports = tlsJournal is null
             ? null
-            : new TlsReportSender(collector, new TlsRptRecordLookup(dns), new TlsRptHttpsSender(), storage.Intake, clock, config.Hostname, config.Tls.ReportContact ?? "postmaster@" + config.Hostname, log);
+            : new TlsReportSender(tlsJournal, storage.Config, new TlsRptRecordLookup(dns), new TlsRptHttpsSender(), storage.Intake, clock, config.Hostname, config.Tls.ReportContact ?? "postmaster@" + config.Hostname, log);
 
         AcmeRenewalService? acme = null;
         if (config.Acme.Enabled)
@@ -157,6 +171,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
             Config = config, Storage = storage, Clock = clock, Log = log, Secrets = secrets, Certificates = certificates, Verp = verp,
             Submission = submission, AuthThrottle = throttle, SmtpServer = smtp, Delivery = delivery, Webhooks = webhooks, Dns = dns,
             Pool = pool, Routes = routes, Limits = limits, Acme = acme, TlsReports = reports,
+            CounterPersistence = counterPersistence, TlsJournal = tlsJournal, TlsCollector = collector,
         };
         runtime._owned.Add(certificateMeters);
         runtime._owned.Add(pool);
@@ -213,6 +228,34 @@ public sealed class EggMailRuntime : IAsyncDisposable
         }
 
         throw new InvalidOperationException($"Dns:Servers entry '{text}' is not an IP address with an optional port.");
+    }
+
+    /// <summary>
+    /// Writes the state kept in memory for speed to the storage: the sending counters and the TLS-RPT counters. Called every few seconds by the runtime state service,
+    /// at shutdown, and when a backend switch quiesces this instance (so the bundle holds the last counts). A failure is logged and the data stays in memory for the next call.
+    /// </summary>
+    public async Task FlushRuntimeStateAsync(CancellationToken ct, bool includeTlsReports = true)
+    {
+        try
+        {
+            await CounterPersistence.FlushAsync(ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Log.Write(MtaLogLevel.Warning, "state", "could not persist the sending counters; they stay in memory for the next flush", ex);
+        }
+
+        if (includeTlsReports && TlsJournal is { } journal)
+        {
+            try
+            {
+                await journal.FlushAsync(ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                Log.Write(MtaLogLevel.Warning, "state", "could not persist the TLS-RPT counters; they stay in memory for the next flush", ex);
+            }
+        }
     }
 
     public async ValueTask DisposeAsync()

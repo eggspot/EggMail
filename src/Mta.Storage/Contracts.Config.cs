@@ -137,14 +137,63 @@ public sealed record AcmeRenewalRecord(
 
 public sealed record LeaseRecord(string Name, string Owner, DateTimeOffset LeaseUntil, long FencingToken);
 
+/// <summary>The last DNS check result of one record a domain must publish. <see cref="RecordKey"/> is <c>TYPE|host</c> (see <c>DomainCheckSnapshot.KeyOf</c>); <see cref="Status"/> is the API word (ok, missing, invalid, pending).</summary>
+public sealed record DomainRecordCheckRecord(Guid DomainId, string RecordKey, string Status, string? Found, DateTimeOffset CheckedAt);
+
+/// <summary>One flush of the TLS-RPT collector for one policy domain and UTC day, kept until the report of that day has been sent. <see cref="Day"/> is days since 1970-01-01.</summary>
+public sealed record TlsRptBucketRecord(Guid Id, int Day, string PolicyDomain, string DataJson, int Attempts, DateTimeOffset CreatedAt);
+
+/// <summary>
+/// A persisted sending counter. <see cref="Scope"/> is 0 global, 1 tenant, 2 sending domain; <see cref="Window"/> is 0 hour, 1 day; <see cref="WindowIndex"/>
+/// counts hours or days since the Unix epoch; <see cref="Domain"/> is empty unless the scope is a sending domain. As an argument to
+/// <see cref="IRuntimeStateStore.AddSendingCountersAsync"/> <see cref="Count"/> is a delta (it can be negative); as a result it is the stored total.
+/// </summary>
+public sealed record SendingCounterRecord(byte Scope, Guid TenantId, string Domain, byte Window, long WindowIndex, long Count);
+
 /// <summary>Where a backend switch stands in this store (design §4.6).</summary>
 public sealed record SwitchStateRecord(Guid SwitchId, string Role, string State, DateTimeOffset UpdatedAt, string? Detail);
+
+/// <summary>
+/// State the running process would otherwise keep in memory only, persisted so a restart (or another replica) sees it: the per-record DNS check
+/// results of the domain verification, the TLS-RPT counters and unsent reports, and the sending counters behind the hourly and daily caps. It sits
+/// on the config store (one EF implementation for both providers, one in-memory implementation) and moves in a backend switch with the config part.
+/// </summary>
+public interface IRuntimeStateStore
+{
+    // Domain verification: the result of the last check of each record
+
+    ValueTask<IReadOnlyList<DomainRecordCheckRecord>> GetDomainRecordChecksAsync(Guid domainId, CancellationToken ct);
+
+    /// <summary>Replaces every stored result of the domain with <paramref name="checks"/> (an empty list clears them).</summary>
+    ValueTask ReplaceDomainRecordChecksAsync(Guid domainId, IReadOnlyList<DomainRecordCheckRecord> checks, CancellationToken ct);
+
+    // TLS-RPT: an append-only journal of collector flushes, merged and removed when the day's report is sent
+
+    ValueTask AddTlsRptBucketsAsync(IReadOnlyList<TlsRptBucketRecord> buckets, CancellationToken ct);
+
+    /// <summary>Buckets of days before <paramref name="beforeDay"/> (days since 1970-01-01), oldest day first, then by domain and creation; at most <paramref name="max"/>.</summary>
+    ValueTask<IReadOnlyList<TlsRptBucketRecord>> GetTlsRptBucketsAsync(int beforeDay, int max, CancellationToken ct);
+
+    /// <summary>In one transaction deletes the buckets <paramref name="removeIds"/> and inserts <paramref name="replacement"/> (null: only delete). Ids that are already gone are ignored.</summary>
+    ValueTask ReplaceTlsRptBucketsAsync(IReadOnlyCollection<Guid> removeIds, TlsRptBucketRecord? replacement, CancellationToken ct);
+
+    // Sending counters
+
+    /// <summary>The stored totals of the hour windows from <paramref name="minHourIndex"/> and the day windows from <paramref name="minDayIndex"/> on.</summary>
+    ValueTask<IReadOnlyList<SendingCounterRecord>> GetSendingCountersAsync(long minHourIndex, long minDayIndex, CancellationToken ct);
+
+    /// <summary>
+    /// Adds each record's <see cref="SendingCounterRecord.Count"/> (a delta) to the stored total, which never drops below zero, then deletes the windows older
+    /// than <paramref name="pruneBeforeHour"/> and <paramref name="pruneBeforeDay"/>. Replicas add their own deltas, so the totals are the sum of all of them.
+    /// </summary>
+    ValueTask AddSendingCountersAsync(IReadOnlyList<SendingCounterRecord> deltas, long pruneBeforeHour, long pruneBeforeDay, CancellationToken ct);
+}
 
 /// <summary>
 /// Configuration data: tenants, keys, domains, suppressions, webhook endpoints, settings, TLS state, leases.
 /// One implementation over EF for both providers. Secrets arrive here already protected (Data Protection).
 /// </summary>
-public interface IConfigStore
+public interface IConfigStore : IRuntimeStateStore
 {
     // Tenants and credentials
     ValueTask<IReadOnlyList<Tenant>> GetTenantsAsync(CancellationToken ct);
