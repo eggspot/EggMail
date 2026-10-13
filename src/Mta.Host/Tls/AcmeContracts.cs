@@ -9,12 +9,21 @@ public interface IDnsChallengeProvider
     ValueTask DeleteTxtAsync(string handle, CancellationToken cancellationToken);
 }
 
+/// <summary>
+/// One order. <paramref name="AccountKeyPem"/> is the stored account key, or null for the first order against a directory: the runner then
+/// registers an account and reports it through <paramref name="AccountCreated"/> as soon as it exists, before the order can fail, so a failed
+/// order never leaves an account at the CA whose key is lost (every retry would register another one, and CAs rate-limit registrations).
+/// </summary>
 public sealed record AcmeOrderRequest(
     string DirectoryUrl,
     string Email,
     IReadOnlyList<string> Domains,
     string? AccountKeyPem,
-    TimeSpan PropagationDelay);
+    TimeSpan PropagationDelay,
+    Func<AcmeAccountCreated, CancellationToken, Task>? AccountCreated = null);
+
+/// <summary>A freshly registered ACME account: its private key (PEM) and its URL at the CA.</summary>
+public sealed record AcmeAccountCreated(string AccountKeyPem, string? AccountUrl);
 
 /// <summary>An issued certificate: leaf-first PEM chain and a PKCS#8 DER private key, plus the account that ordered it.</summary>
 public sealed record AcmeIssuedCertificate(string ChainPem, byte[] PrivateKeyPkcs8, string AccountKeyPem, string? AccountUrl, DateTimeOffset NotAfter);

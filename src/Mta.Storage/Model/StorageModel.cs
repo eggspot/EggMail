@@ -41,9 +41,10 @@ public static class StorageModel
     /// <summary>
     /// The version of the persisted schema (SQLite <c>PRAGMA user_version</c>), recorded in switch bundles. Version 2 added the dashboard
     /// users, sessions and the idempotency fingerprint (HTTP API); version 3 the backend switch hold column and the
-    /// <c>transfer_chunk_*</c> progress tables.
+    /// <c>transfer_chunk_*</c> progress tables; version 4 the persisted runtime state (<c>domain_record_check</c>, <c>tls_rpt_bucket</c>,
+    /// <c>sending_counter</c>) and the Message-ID header and tags of <c>message_index</c>.
     /// </summary>
-    public const int SchemaVersion = 3;
+    public const int SchemaVersion = 4;
 
     /// <summary>
     /// Entity annotation requesting a <c>WITHOUT ROWID</c> table on SQLite (small rows whose primary key is the
@@ -138,6 +139,19 @@ public static class StorageModel
         {
             e.ToTable("acme_renewal").HasKey(x => x.CertificateName);
         });
+        mb.Entity<DomainRecordCheckEntity>(e =>
+        {
+            e.ToTable("domain_record_check").HasKey(x => new { x.DomainId, x.RecordKey });
+        });
+        mb.Entity<TlsRptBucketEntity>(e =>
+        {
+            e.ToTable("tls_rpt_bucket").HasKey(x => x.Id);
+            e.HasIndex(x => new { x.Day, x.PolicyDomain });
+        });
+        mb.Entity<SendingCounterEntity>(e =>
+        {
+            e.ToTable("sending_counter").HasKey(x => new { x.Scope, x.TenantId, x.Domain, x.WindowKind, x.WindowIndex });
+        });
         mb.Entity<LeaseEntity>(e =>
         {
             e.ToTable("lease").HasKey(x => x.Name);
@@ -216,6 +230,7 @@ public static class StorageModel
         {
             e.ToTable("message_index").HasKey(x => new { x.Day, x.MessageId });
             e.HasIndex(x => new { x.TenantId, x.Day, x.MessageId });
+            e.HasIndex(x => new { x.TenantId, x.MessageIdHeader });
             e.HasAnnotation(WithoutRowIdAnnotation, true);
         });
         mb.Entity<MessageRecipientEntity>(e =>

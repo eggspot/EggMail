@@ -80,6 +80,39 @@ internal sealed class MaintenanceService(EggMailRuntime runtime) : BackgroundSer
     }
 }
 
+/// <summary>
+/// Writes the state the process keeps in memory for speed (sending counters every 10 seconds, TLS-RPT counters every minute) to the storage, and once more at shutdown. Registered before the
+/// services that produce that state, so it stops after them and the last counts are written.
+/// </summary>
+public sealed class RuntimeStateService(EggMailRuntime runtime) : BackgroundService
+{
+    private static readonly TimeSpan Interval = TimeSpan.FromSeconds(10);
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        using var timer = new PeriodicTimer(Interval);
+        int tick = 0;
+        try
+        {
+            while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false))
+            {
+                // The TLS-RPT counters are a journal (one row per domain and flush), so they are written less often than the counters.
+                await runtime.FlushRuntimeStateAsync(stoppingToken, includeTlsReports: ++tick % 6 == 0).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    public override async Task StopAsync(CancellationToken cancellationToken)
+    {
+        await base.StopAsync(cancellationToken).ConfigureAwait(false);
+        using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await runtime.FlushRuntimeStateAsync(limit.Token).ConfigureAwait(false);
+    }
+}
+
 /// <summary>Sends the TLS-RPT reports of completed days, hourly.</summary>
 internal sealed class TlsReportService(EggMailRuntime runtime) : BackgroundService
 {
