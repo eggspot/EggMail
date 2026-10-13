@@ -33,6 +33,7 @@ Running status of the implementation, updated in every pull request. **Productio
 | Chaos pipeline test: randomized refusals, greylisting and cut connections after end-of-data against an unreliable remote; invariants: one final state per recipient, no loss, duplicates only when flagged `possible_duplicate`, bounces explained and suppressed | this PR | runs in `dotnet test` (about 150 messages, 3 s); `EGGMAIL_CHAOS_MESSAGES` / `EGGMAIL_CHAOS_SEED` scale it (25 consecutive 1,000-message runs passed) |
 | Scheduled SQLite backups with retention (`Backup:*`), operations guide | this PR | 3 backup tests (consistent copy opens, interval and retention, unrelated directories untouched) |
 | Pipeline benchmark harness (`bench/Mta.Bench.Pipeline`) with allocation sampler; first profile fixed two hot spots (domain query per message, extra copies) | this PR | development-time numbers only (noisy machine); allocation budget **not met** yet, see `docs/benchmarks.md` |
+| Stored settings layer (decision N layer 4): global settings from `/admin/settings` apply at the next start below every deployment layer; the storage is reopened when they change its options | this PR | 4 tests (filtering, precedence, reopen, invalid stored value ignored) |
 | `mta admin create` and `mta migrate-storage` commands (`admin create` can now use `DashboardAccounts`; `migrate-storage` needs the switch engine) | not started | |
 | Backend switch engine (export/import, quiesce, fence, activation, rollback, history migration) | not started | |
 | DMARC aggregate report sending | not started | |

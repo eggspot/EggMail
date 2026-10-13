@@ -115,7 +115,6 @@ internal static class Cli
             return 2;
         }
 
-        var config = loaded.Config;
         var builder = WebApplication.CreateBuilder(args);
         builder.Logging.ClearProviders().AddJsonConsole();
         builder.Logging.AddFilter("Microsoft.AspNetCore", LogLevel.Warning);
@@ -123,8 +122,10 @@ internal static class Cli
         using var startupFactory = LoggerFactory.Create(b => b.AddJsonConsole());
         var startupLog = new MtaLogAdapter(startupFactory);
         var clock = SystemClock.Instance;
-        var storage = StorageFactory.Create(config.Storage, clock, startupLog);
+        var storage = StorageFactory.Create(loaded.Config.Storage, clock, startupLog);
         await storage.InitializeAsync(CancellationToken.None).ConfigureAwait(false);
+        (loaded, storage) = await SettingsLayering.ApplyAsync(args, loaded, storage, clock, startupLog, CancellationToken.None).ConfigureAwait(false);
+        var config = loaded.Config;
         await using var runtime = await EggMailRuntime.CreateAsync(config, storage, clock, startupLog, CancellationToken.None).ConfigureAwait(false);
         await ApiHosting.EnsureBootstrapAdminAsync(config, storage, clock, startupLog, CancellationToken.None).ConfigureAwait(false);
 
