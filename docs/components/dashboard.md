@@ -80,14 +80,14 @@ The same switches can be flipped live with `POST /__mock/config` (`{ "history": 
 
 The host serves the contents of `dashboard/dist` as static files under `/` and answers any `GET` that is not an API or operational path and has no file extension with `index.html` (SPA fallback). Paths the host must keep for itself: `/api/`, `/healthz`, `/readyz`, `/metrics`. Assets are content-hashed under `/assets/` and can be cached for a year (`immutable`); `index.html` must be served `no-cache`. All asset URLs are absolute from `/` (Vite `base`).
 
-The build is compatible with this strict CSP (the mock sends exactly this; `npm run check-csp` enforces the build side):
+The build is compatible with this strict CSP (`npm run check-csp` enforces the build side). The mock sends the first policy below; the real host sends the second (it also allows `data:` images and sets no `frame-src`, so frames fall back to `default-src 'self'`):
 
 ```
-default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self';
-frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'
+mock: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'
+host: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'
 ```
 
-plus `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`.
+plus `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY` and `Cross-Origin-Opener-Policy: same-origin`. The host answers `/assets/*` with `Cache-Control: public, max-age=31536000, immutable` and everything else it serves (the shell `index.html`, the SPA fallback, the favicon) with `no-cache` (the assets used to have no cache header; found by the end-to-end tests). A missing path under `/api/` is an API `404 problem+json`, never the HTML shell.
 
 Docker Node stage (design §9.3):
 
@@ -101,7 +101,7 @@ Run `npm audit signatures` and an OSV scan in CI next to it (design §9.3).
 
 - The session is an HttpOnly, SameSite=Strict cookie that script cannot read. The CSRF token from `GET /api/v1/me` lives in a module variable (never in web storage) and is sent as `X-CSRF-Token` on every `POST`, `PUT`, `PATCH` and `DELETE`. A `401` from any call returns the user to the sign-in form. Failed sign-ins surface `429` and `Retry-After`.
 - One-time secrets (API key, SMTP password, webhook signing secret) are held only in the state of the creating component, shown with a copy button and a warning, and dropped when the user confirms they saved them.
-- Stored message HTML is rendered only in `<iframe sandbox="" srcdoc=...>` (no sandbox flags at all: no scripts, no forms, no popups, unique origin) whose document starts with a CSP `<meta>` (`default-src 'none'; img-src data:`; inline styles only). The plain-text view is the default. HTML is never inserted into the app DOM. `scripts/lint.mjs` rejects `innerHTML`, `dangerouslySetInnerHTML`, `eval`, inline styles, `fetch` outside `src/api/client.ts`, external URLs and any `<iframe>` without `sandbox` or with `allow-*` flags.
+- Stored message HTML is rendered only in `<iframe sandbox="" srcdoc=...>` (no sandbox flags at all: no scripts, no forms, no popups, unique origin) whose document starts with a CSP `<meta>` (`default-src 'none'; img-src data:`). The frame has no styling of its own: a `srcdoc` document also inherits the host page's `style-src 'self'`, so inline styles are blocked whatever the meta says (a `<style>` block of the dashboard's own was a CSP violation until the end-to-end tests found it). The plain-text view is the default. HTML is never inserted into the app DOM. `scripts/lint.mjs` rejects `innerHTML`, `dangerouslySetInnerHTML`, `eval`, inline styles, `fetch` outside `src/api/client.ts`, external URLs and any `<iframe>` without `sandbox` or with `allow-*` flags.
 - No runtime network access except same-origin `/api/v1/*` (and `/readyz`); no CDN, font or analytics requests; no inline script or style, so the CSP above holds.
 - Web storage holds only non-secret conveniences: theme choice (`localStorage`), the acting tenant of an admin and the collapsed state of a warning (`sessionStorage`).
 
@@ -115,13 +115,65 @@ Semantic landmarks and headings, a skip link, focus moved to the page content af
 
 ## Bundle size
 
-`npm run build` then `npm run size` (gzip level 9): the initial load (entry JS + CSS) is **21.2 KiB gzip** (entry JS 18.2 KiB, CSS 3.7 KiB). All routes are separate lazy chunks of 1 to 7 KiB gzip each, except the storage switch wizard (6.5 KiB gzip). The whole `dist/` is 64.8 KiB gzip (154 KiB JS raw, 14 KiB CSS raw, no fonts or images apart from a 0.2 KiB favicon).
+`npm run build` then `npm run size` (gzip level 9): the initial load (entry JS + CSS) is **21.7 KiB gzip**. All routes are separate lazy chunks of 0.2 to 7 KiB gzip each. The whole `dist/` is 67.6 KiB gzip (164 KiB JS raw, 14 KiB CSS raw, no fonts or images apart from a 0.2 KiB favicon).
 
-Verification at the time of writing: `npm run lint` (tsc plus custom rules over 49 source files), `npm run typecheck`, `npm test` (26 files, 371 tests, including contrast checks for both themes, the CSP checker, the mock API contract, and a smoke test that renders every route against the real mock server for both roles and both history modes), `npm run build` and `npm run check-csp` all pass.
+Verification at the time of writing: `npm run lint` (tsc plus custom rules over 49 source files), `npm run typecheck`, `npm test` (29 files, 403 tests, including contrast checks for both themes, the CSP checker, the mock API contract, and a smoke test that renders every route against the real mock server for both roles and both history modes), `npm run build` and `npm run check-csp` pass, and the end-to-end tests (below) pass against the real server.
+
+## Pages and features, audited against the plan
+
+[plan.md](../plan.md) and [design.md](../design.md) name the dashboard by its parts: overview and statistics, message search with timeline and resend, domains with DNS records, webhooks, suppressions, keys and SMTP credentials, settings, tenants, certificates, the persistent warnings, the sandboxed message view, the advisory pressure indicators and the guided storage switch. [api.md](../api.md) is the full list of what the server offers. Every endpoint of api.md that a person would use has a page; the audit (2026-10) found these API features without one, or shown wrongly, and fixed them:
+
+| Where | Change |
+|---|---|
+| Domain | the DKIM keys of the domain (signing, waiting for DNS, retired) and cancelling a pending key rotation (`DELETE /domains/{id}/dkim/rotate`); the key card describes the key that signs, not the pending one |
+| Webhooks | finishing a secret rotation (`DELETE /webhooks/{id}/previous-secret`, shown while `secretRotationPending`); the `webhook.endpoint.disabled` event type; the attempt log refreshes for 20 s after a test event or a replay (deliveries are asynchronous); replaying a delivery that waits for its retry explains why the server refuses |
+| Certificates | the ACME renewal state (`GET /admin/certificates/acme`: status, last and next attempt, failures, last error) |
+| Server status | the maintenance report (`GET /admin/maintenance`) |
+| Settings | "takes effect the next time the server starts" for stored values that `requiresRestart` |
+| Message | content that was never recorded (`Content:Mode=None`: `not_recorded`, `410 content_not_recorded`), truncated stored content, the real recipient count (the list carries only the first five addresses) |
+| Header | the tenant picker follows tenants created, renamed or suspended on the Tenants page (it was loaded once at sign-in); the first tenant of a fresh install becomes the acting tenant |
+| Statistics | daily ranges (longer than 30 days): the server rolls hourly rows up into daily rows only for finished days, so the page adds today and yesterday from the hourly rows (a new install showed "no traffic" for 30 and 400 days) |
+| Webhook attempts, recent events | the "Event" and "Sending domain" columns appear only when the server fills them (it does not: api.md) |
+| Sign-in | a wrong password says so (it said the session had expired); the user of a suspended tenant is told why |
+| Storage switch | the `verifying` state (the page was blank), the activation result (cutover patch or bootstrap note) on the finalize step, where the server produces it, whether the deployment supplies the storage pointer before activation, the reason when finalize is refused |
+
+The storage switch wizard is built (`pages/admin/StorageSwitch.tsx`, `components/switch/`): direction, drain or quiesce and what to include, preflight, typed confirmation and export passphrase, progress, verification report, confirm, activate, finalize, and rollback until activation. **There is no bundle download**: the bundle is a directory on the server volume (`Switch:BundleDirectory`) written and read by the server only ([switch.md](switch.md)), and design §4.6 has none. The API only switches between backends (`to` must differ from the running backend), so the wizard offers the opposite one; moving SQLite files to another volume is a copy of the stopped server's data directory.
+
+Deliberately not in the dashboard: creating dashboard users (`mta admin create`, offline), changing the storage pointer by hand (deployment configuration), Bearer API keys as a sign-in (cookie sessions only).
+
+## End-to-end tests
+
+`dashboard/e2e/` drives Chromium (`@playwright/test` 1.63.0, chromium only, one worker) against the **real server**. A fixture publishes `src/Mta.Host` (`dotnet publish -c Release`), puts the production `dashboard/dist` into its `wwwroot` (what the Docker image contains), creates the administrator with `mta admin create`, and starts `mta serve` on a temporary SQLite data directory with loopback ports. Three fakes stand where the internet would be, and the server is pointed at them by configuration (`Dns:Servers`, `Delivery:RemotePort`, `Delivery:AllowPrivateMxAddresses`, `Webhooks:AllowHttp`): a DNS server (a domain's records are published exactly as the dashboard shows them, wrongly, or not at all; the recipients' MX points at the sink), an SMTP sink for the recipients' mail server (a recipient named `reject...` is refused with 550) and a webhook receiver. Nothing is mocked in the server or the browser.
+
+```sh
+cd dashboard
+npm ci --ignore-scripts
+npx playwright install chromium          # once; add --with-deps on a fresh Linux machine
+npm run e2e                              # npm run build, then npx playwright test
+npx playwright test webhooks             # one spec file
+```
+
+Needs the .NET 10 SDK, Node 22, `openssl` (the certificate upload test makes a certificate) and, for the storage switch specs, `psql` plus either `EGGMAIL_TEST_POSTGRES` (a connection string to a server whose role may create databases; CI provides one) or the PostgreSQL binaries (`initdb`, `postgres`; `EGGMAIL_TEST_PG_BIN`) for a throwaway cluster, found the way the .NET tests find theirs. Without PostgreSQL the switch specs are skipped with the reason; in CI a missing PostgreSQL fails the job. `EGGMAIL_E2E_APP_DIR` reuses an already published host.
+
+| Spec | Drives |
+|---|---|
+| `auth` | wrong and right sign-in, cookie flags, CSRF (missing, wrong, valid token), sign-out ends the session on the server, an ended session returns to the form, API keys never reach `/admin` |
+| `tenants-domains` | create, rename, suspend and activate a tenant (its keys stop at once), add a domain, the DNS records view and copy buttons, the verification states (nothing published: missing; wrong value: invalid with found and expected; correct: verified, SPF and DMARC only advice), the 30 s verify limit, DKIM rotation and cancelling it, deleting a domain |
+| `send-and-messages` | create an API key in the dashboard and use its one-time secret, revoke it, SMTP credentials, send through the API, the message becomes delivered (the sink receives a DKIM-signed copy), detail with events and sandboxed HTML, resend, a refused recipient ends as bounced with the reply in the events, search filters, many recipients, the send page with an attachment, an unverified domain is refused |
+| `settings-suppressions` | tenant and global settings (validation, locked values, persistence), suppressions (add, filter, remove, paging, a suppressed recipient is not delivered) |
+| `webhooks` | the SSRF guard until an administrator allows loopback, create and test with a signature verified in the test, a failing receiver and replay, edit, disable and delete, secret rotation with both signatures until the previous one is removed, a delivered message produces a signed event |
+| `overview-admin` | counters, recent events and the per-domain table after real traffic, server status and maintenance, certificate upload (PEM, wrong key, duplicate, ACME not configured), navigation |
+| `storage-switch` | the wizard from SQLite to PostgreSQL: refusals, typed phrase, verification report, source fenced while pending, rollback, and a full switch through the bootstrap file with a restart on PostgreSQL, the data that came along, and finalize; a deployment that pins the storage pointer gets a cutover patch without secrets |
+| `tenant-user` | a tenant account (made with `mta admin create --role tenant` between two server starts) sees no administration, cannot change the webhook allowlist, cannot see or touch another tenant, is told when its tenant is suspended |
+| `csp-pages` | headers of the shell, assets and API, every page of the administrator, the message frame with a hostile message, the sign-in page |
+
+Every test also fails on any console error, page error or `securitypolicyviolation` event (an automatic fixture; "Failed to load resource" lines for the 4xx answers a test provokes are not counted, and a test can list messages it expects, for example the browser reporting a blocked remote image). Tests create their own uniquely named data on one shared server, except the storage switch and tenant account specs, which start servers of their own (a switch fences the server it runs on). Not covered: other browsers, a screen reader, Docker, a PostgreSQL source, the domain states `temporary_failure` and `failed` (they need days of simulated time; component tests and the server's `DomainVerificationTests` cover them).
+
+What the first run found and fixed: `mta admin create --role admin` lost its role (the command parser removed every argument equal to the command name); the bootstrap file was looked for in `/data` when the data directory was given on the command line (a switch then ended in a 500); the cutover patch was never shown; the state `verifying` produced a blank page; assets had no cache header; the message frame violated the CSP with its own `<style>`; the tenant picker was never refreshed; the daily statistics lacked the days not yet rolled up; and two table columns the server never fills.
 
 ## API contract gaps and additions
 
-[api.md](../api.md) left several shapes open. The dashboard and the mock assume the following. **The API implementation ([api.md](../api.md), [components/api.md](api.md)) adopted all of them and documents them in api.md**; the differences are: a storage switch step in the wrong state answers `409 conflict` (the mock used `409 validation_failed`; the dashboard does not depend on the code), and there are extra response members and error codes (`conflict`, `tenant_disabled`, `content_not_recorded`, `unsupported_media_type`) that the dashboard shows by their `detail` because it has no friendly text for them. `ApiContractTests` in `tests/Mta.Host.Tests/Api` checks the real API against `dashboard/src/api/types.ts`. The dashboard has not been run against the real API in a browser.
+[api.md](../api.md) left several shapes open. The dashboard and the mock assume the following. **The API implementation ([api.md](../api.md), [components/api.md](api.md)) adopted all of them and documents them in api.md**; the differences are: a storage switch step in the wrong state answers `409 conflict` (the mock used `409 validation_failed`; the dashboard does not depend on the code), and there are extra response members and error codes (`conflict`, `tenant_disabled`, `content_not_recorded`, `unsupported_media_type`) that the dashboard shows by their `detail` because it has no friendly text for them. `ApiContractTests` in `tests/Mta.Host.Tests/Api` checks the real API against `dashboard/src/api/types.ts`. The end-to-end tests run the dashboard against the real API in a browser; where they found the assumptions below wrong, this list says so.
 
 1. **CSRF token:** read from the `csrfToken` member of `GET /me` (the `X-CSRF-Token` response header is not read). The mock sends both.
 2. **Sign-out:** `DELETE /api/v1/session` (not in the contract).
@@ -131,24 +183,19 @@ Verification at the time of writing: `npm run lint` (tsc plus custom rules over 
 6. **Validation status code:** `validation_failed` is assumed to be `400` with `errors: [{ field, message }]`; field names are the request member names (`url`, `name`, ...). The client does not depend on the numeric status.
 7. **Lists** may be a bare array or `{ items, next_cursor }`; the client accepts both. Messages and suppressions are cursor-paged (`next_cursor`).
 8. **Statistics:** `GET /stats` returns `{ granularity, rows: [...] }` (a bare array is accepted); each row has `period` (ISO start), `sendingDomain`, `recipientDomain` and the counters `accepted, delivered, deferred, hardBounce, softBounce, expired, complained, rejected, suppressed`. `GET /stats/recent-events` returns `[{ at, type, recipientDomain, sendingDomain }]`.
-9. **Object shapes** not spelled out in api.md: webhook `{ id, url, event_types, enabled, disabledReason, createdAt, secret? }` with event types such as `message.delivered`; webhook attempt `{ id, outboxId, eventType, at, status, durationMs, errorClass, snippet }`; API key `{ id, name, prefix, scopes, createdAt, lastUsedAt, key? }`; SMTP credential `{ id, username, createdAt, password? }` (create body `{ username }`); tenant `{ id, name, status, createdAt }` with status `active|suspended`. Webhook members are snake_case (`event_types`) as in the contract while most others are camelCase; the client follows the contract literally.
+9. **Object shapes** not spelled out in api.md: webhook `{ id, url, event_types, enabled, disabledReason, createdAt, secret? }` with event types such as `message.delivered`; webhook attempt `{ id, outboxId, at, status, durationMs, errorClass, snippet }` (the mock also sends `eventType`; the real API does not, and the dashboard shows the column only when present); API key `{ id, name, prefix, scopes, createdAt, lastUsedAt, key? }`; SMTP credential `{ id, username, createdAt, password? }` (create body `{ username }`); tenant `{ id, name, status, createdAt }` with status `active|suspended`. Webhook members are snake_case (`event_types`) as in the contract while most others are camelCase; the client follows the contract literally.
 10. **Message detail** carries the text and html parts in `content` (the dashboard falls back to `GET /messages/{id}/content` when they are missing and treats its `410 body_expired` as an expected state).
 11. **Admin status:** `{ version, backend, historyMode, uptimeSeconds, queue: { depth, deferred, oldestDueAt }, storage: { healthy, detail, warnings }, certificates: [{ subject, notAfter, source }], pressure: { writerQueueDepth, writerQueueOverThresholdSeconds, commitP99Ms, advisory }, switch: { state } }`. `pressure` is advisory only.
 12. **Certificates:** list items `{ id, subject, issuer, san, notBefore, notAfter, source: acme|upload|self_signed, active }`; upload body `{ certificatePem, privateKeyPem }` or `{ pfxBase64, pfxPassword }`; ACME request body `{ domains: [...] }`.
-13. **Storage switch:** `preflight` returns `{ ok, checks: [{ name, ok, message, severity }], counts, estimate, notCarried: [...], orchestratorManaged }`. `start` takes the preflight body plus `exportPassphrase` (at least 12 characters, design 4.6) and `confirmation` (the typed phrase `switch to <postgres|sqlite>`). `GET /admin/storage/switch` returns `{ switchId, state, direction, mode, include, progress: { phase, percent, rowsDone, rowsTotal }, verifyReport, cutoverPatch: { kind, text }, orchestratorManaged, error }` with `state` one of `none, draining, quiescing, fenced, exporting, importing, verified, confirmed, active, finalized, rolled_back, failed`. `confirm`, `activate`, `rollback` and `finalize` return the new status; calling them in the wrong state should answer `409`.
+13. **Storage switch:** `preflight` returns `{ ok, checks: [{ name, ok, message, severity }], counts, estimate, notCarried: [...], orchestratorManaged }`. `start` takes the preflight body plus `exportPassphrase` (at least 12 characters, design 4.6) and `confirmation` (the typed phrase `switch to <postgres|sqlite>`). `GET /admin/storage/switch` returns `{ switchId, state, direction, mode, include, progress: { phase, percent, rowsDone, rowsTotal }, verifyReport, cutoverPatch: { kind, text }, orchestratorManaged, error }` with `state` one of `none, draining, quiescing, fenced, exporting, importing, verifying, verified, confirmed, active, finalized, rolled_back, failed` (the real server also reports `verifying`; an unknown state is treated as work in progress). The server creates `cutoverPatch` when `activate` is called (`kind: "patch"` for an orchestrator-managed deployment, `"bootstrap"` with a note when the bootstrap file was rewritten), so the dashboard shows it on the finalize step; `orchestratorManaged` is known from the start. `confirm`, `activate`, `rollback` and `finalize` return the new status; calling them in the wrong state should answer `409`.
 14. **CSRF and role failures** are assumed to be `403 forbidden` (no dedicated code is listed in api.md).
 
 ## Known gaps
 
-- **No real browser run.** Everything was verified with jsdom component tests and the mock API; no screenshot, real-browser or screen-reader pass has been done. Layout and the sandboxed iframe under the strict CSP should be checked once in Chrome, Firefox and Safari.
-- **Message HTML is shown without remote images and with limited styling.** The iframe CSP blocks remote content, and a `srcdoc` document inherits the host page's CSP, so inline styles in messages may be dropped under `style-src 'self'`. There is no "load remote images" option; the text view is the default.
+- **Message HTML is shown without remote images and without styling.** The frame's policy and the host page's policy (a `srcdoc` document inherits it) block remote content and inline styles, and the browser logs each blocked item to the console. There is no "load remote images" option; the text view is the default.
 - Charts are static SVG without hover tooltips; the data table next to them is the accessible alternative.
 - Lists such as tenants and domains are not paged; suppression search filters the loaded entries only.
-- The storage wizard has only been run against the mock engine; real timing, restarts mid-switch and the cutover patch format are unverified.
-- `npm audit signatures` and an OSV scan are not wired up (GitHub Actions is disabled for the repository, see open-questions.md); the lockfile is committed and `npm ci --ignore-scripts` is the supported install.
+- After a switch has been activated and the server restarted on the target, `finalize` from the dashboard needs the old store described as `SwitchSource:*` ([switch.md](switch.md)); otherwise the page shows the reason and the CLI command (`mta migrate-storage finalize`).
+- The webhook attempt log and the recent-events ring do not record the event type or the sending domain (api.md), so those columns are absent.
+- Verified in Chromium only; no screen-reader pass, no Firefox or Safari run.
 - English only; no i18n. Bearer API keys are not used by the dashboard (cookie session only).
-
-
-## Real-browser smoke test (2026-10-13)
-
-`dashboard/scripts/browser-smoke.mjs` drives a headless Chrome (DevTools protocol, no extra packages) against a running server: it signs in as the administrator, visits every page and reports console errors, CSP violations and pages showing an error banner. It was run once against `mta serve` (SQLite backend, the production `dist/` served from `wwwroot`): the pages render under the strict CSP, sign-in works, with one tenant every page loads without errors. The first run found that an administrator on a fresh install (no tenant yet) saw an "X-Tenant-Id required" error on every tenant page; those pages now say "Create a tenant first" / "Choose a tenant". Not covered by the script: creating domains, sending, webhook and key flows, the storage switch wizard, accessibility with a screen reader, other browsers.

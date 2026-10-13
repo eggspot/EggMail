@@ -373,9 +373,9 @@ Rationale: patching the deployment is the operator's job and cannot be done safe
 - *Effective values travel in the pointer.* They are deployment configuration, not rows, so the activation carries every effective source setting that differs from the built-in default (bootstrap file, or cutover patch), instead of writing them into the `setting` table.
 - *One process per SQLite directory.* A lock file proves the server is stopped before the offline `mta migrate-storage` commands open the files.
 - *Abort flag precision.* `SmtpClientConnection.EndOfDataStarted` tells the delivery engine whether the end-of-data terminator of the current transaction had begun to be written when a quiesce cancelled it; only then is the requeued delivery flagged `possible_duplicate` (item 4 above).
-- Not yet built: the dashboard flow (the admin API endpoints are `StorageSwitchService` over `IStorageSwitchEngine`).
+- The dashboard flow is built (`dashboard/src/pages/admin/StorageSwitch.tsx`) over the admin API (`StorageSwitchService` over `IStorageSwitchEngine`) and is exercised by the browser end-to-end tests. There is no bundle download in the dashboard: the bundle stays on the server volume.
 
-Effort: the switch engine, quiesce and fence, resumable history migration, Data Protection bundle protection, the orchestrator-aware cutover, the CLI and the dashboard flow ([plan.md](plan.md)); engine, fence, history migration, bundle protection, cutover and CLI are built, the dashboard flow is not.
+Effort: the switch engine, quiesce and fence, resumable history migration, Data Protection bundle protection, the orchestrator-aware cutover, the CLI and the dashboard flow ([plan.md](plan.md)); engine, fence, history migration, bundle protection, cutover, CLI and the dashboard flow are built.
 
 ## 5. History and content retention
 
