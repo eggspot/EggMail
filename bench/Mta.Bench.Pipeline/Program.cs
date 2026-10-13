@@ -129,6 +129,7 @@ var psi = new ProcessStartInfo("dotnet", $"\"{tools}\" load --port {port} --star
     RedirectStandardOutput = true,
     RedirectStandardError = true,
 };
+psi.Environment.Remove("DOTNET_EnableEventPipe");   // a trace of this process (see docs/benchmarks.md) must not be started in the load generator too
 using (var load = Process.Start(psi)!)
 {
     await load.StandardOutput.ReadToEndAsync();
@@ -459,6 +460,7 @@ internal static class SinkOnly
         long before = GC.GetTotalAllocatedBytes(precise: true);
         var cpuBefore = Process.GetCurrentProcess().TotalProcessorTime;
         var psi = new ProcessStartInfo("dotnet", $"\"{tools}\" load --port {server.LocalEndPoints["sink"].Port} --connections {connections} --messages {messages} --size {size} --json \"{loadJson}\" --label sink-only") { RedirectStandardOutput = true, RedirectStandardError = true };
+        psi.Environment.Remove("DOTNET_EnableEventPipe");
         using (var load = Process.Start(psi)!)
         {
             await load.StandardOutput.ReadToEndAsync();

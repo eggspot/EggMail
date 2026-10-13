@@ -60,6 +60,16 @@ internal static class MicroDelivery
                     foreach (var d in claimed) { await storage.Deliveries.GetRawAsync(d.MessageId, default); }
                 });
 
+                await Step("IsSuppressedAsync, 32 concurrent", claimed.Count, async () =>
+                {
+                    await Parallel.ForEachAsync(claimed, new ParallelOptions { MaxDegreeOfParallelism = 32 }, async (d, ct) => await storage.Config.IsSuppressedAsync(d.TenantId, d.Recipient.ToString(), ct));
+                });
+
+                await Step("GetRawAsync, 32 concurrent", claimed.Count, async () =>
+                {
+                    await Parallel.ForEachAsync(claimed, new ParallelOptions { MaxDegreeOfParallelism = 32 }, async (d, ct) => await storage.Deliveries.GetRawAsync(d.MessageId, ct));
+                });
+
                 if (label == "InMemory")
                 {
                     using var rsa = RSA.Create(2048);

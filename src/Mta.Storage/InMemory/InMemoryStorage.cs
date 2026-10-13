@@ -950,6 +950,8 @@ internal sealed class MemoryHistory(MemoryState s) : IHistoryStore, IMessageReci
 
 internal sealed class MemoryWebhooks(MemoryState s) : IWebhookOutbox
 {
+    public bool MayHaveSubscribers(Guid tenantId, string eventType) => s.Config.HasEndpointFor(tenantId, eventType);
+
     public ValueTask<IReadOnlyList<WebhookOutboxItem>> ClaimDueAsync(string owner, int max, DateTimeOffset now, TimeSpan lease, CancellationToken cancellationToken)
     {
         if (s.Fence.IsClosed)

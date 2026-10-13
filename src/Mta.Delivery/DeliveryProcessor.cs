@@ -242,18 +242,36 @@ public sealed class DeliveryProcessor
                 message = rented.AsMemory(0, signature.Length + raw.Length);
             }
 
-            var envelope = new SmtpEnvelope(await ChooseEnvelopeFromAsync(first, now, ct).ConfigureAwait(false), pending.Select(d => d.Recipient).ToArray(), pending.Any(d => d.Recipient.IsInternational) || first.EnvelopeFrom.IsInternational, EightBit: false);
+            var recipients = new EmailAddress[pending.Count];
+            bool international = first.EnvelopeFrom.IsInternational;
+            for (int i = 0; i < recipients.Length; i++)
+            {
+                recipients[i] = pending[i].Recipient;
+                international |= recipients[i].IsInternational;
+            }
+
+            var envelope = new SmtpEnvelope(await ChooseEnvelopeFromAsync(first, now, ct).ConfigureAwait(false), recipients, international, EightBit: false);
             var attempt = await RunRoutesAsync(first, envelope, message, ct).ConfigureAwait(false);
             Interpret(pending, attempt, results);
+
+            bool throttled = false;
+            int undelivered = 0;
+            foreach (var r in results)
+            {
+                throttled |= r.Class == DeliveryClass.TransientThrottle;
+                if (r.Attempt.Outcome != DeliveryOutcome.Delivered && pending.Contains(r.Delivery))
+                {
+                    undelivered++;
+                }
+            }
 
             lease.Report(attempt.Route switch
             {
                 RouteAttemptResult.Delivered => ThrottleSignal.Success,
                 RouteAttemptResult.ConnectTimeout or RouteAttemptResult.ConnectRefused => ThrottleSignal.ConnectionFailure,
-                _ => results.Any(r => r.Class == DeliveryClass.TransientThrottle) ? ThrottleSignal.Throttled : ThrottleSignal.Success,
+                _ => throttled ? ThrottleSignal.Throttled : ThrottleSignal.Success,
             });
 
-            int undelivered = results.Count(r => r.Attempt.Outcome != DeliveryOutcome.Delivered && pending.Contains(r.Delivery));
             if (undelivered > 0)
             {
                 _s.Limits.Release(first.TenantId, first.SendingDomain, undelivered, decision.At);
@@ -656,6 +674,38 @@ public sealed class DeliveryProcessor
         }
     }
 
+    /// <summary>Lets an interpolated trace line cost nothing while debug logging is off: the text is only built when it will be written.</summary>
+    private void Trace([System.Runtime.CompilerServices.InterpolatedStringHandlerArgument("")] ref TraceLine line)
+    {
+        if (line.Enabled)
+        {
+            _s.Log.Write(MtaLogLevel.Debug, Source, line.ToStringAndClear());
+        }
+    }
+
+    [System.Runtime.CompilerServices.InterpolatedStringHandler]
+    private ref struct TraceLine
+    {
+        private System.Runtime.CompilerServices.DefaultInterpolatedStringHandler _text;
+
+        public TraceLine(int literalLength, int formattedCount, DeliveryProcessor owner, out bool shouldAppend)
+        {
+            Enabled = owner._s.Log.IsEnabled(MtaLogLevel.Debug);
+            shouldAppend = Enabled;
+            _text = Enabled ? new System.Runtime.CompilerServices.DefaultInterpolatedStringHandler(literalLength, formattedCount) : default;
+        }
+
+        public bool Enabled { get; }
+
+        public void AppendLiteral(string value) => _text.AppendLiteral(value);
+
+        public void AppendFormatted<T>(T value) => _text.AppendFormatted(value);
+
+        public void AppendFormatted<T>(T value, string? format) => _text.AppendFormatted(value, format);
+
+        public string ToStringAndClear() => _text.ToStringAndClear();
+    }
+
     private static AttemptResult Dropped(SmtpConnectionException ex, SmtpTlsSession? tls, long started)
     {
         bool beforeSession = ex.Stage is ClientSmtpStage.Connect;
@@ -755,7 +805,16 @@ public sealed class DeliveryProcessor
             }
             else
             {
-                var rcpt = send.Recipients.FirstOrDefault(r => r.Address.Equals(d.Recipient));
+                SmtpRecipientResult? rcpt = null;
+                for (int i = 0; i < send.Recipients.Count; i++)   // by index: enumerating the interface allocates
+                {
+                    if (send.Recipients[i].Address.Equals(d.Recipient))
+                    {
+                        rcpt = send.Recipients[i];
+                        break;
+                    }
+                }
+
                 if (rcpt is not null && !rcpt.Accepted)
                 {
                     reply = rcpt.Reply;
@@ -865,7 +924,7 @@ public sealed class DeliveryProcessor
         };
     }
 
-    private static Result Terminal(ClaimedDelivery d, DeliveryOutcome outcome, DateTimeOffset now, SmtpReply? reply, string message) => new()
+    private Result Terminal(ClaimedDelivery d, DeliveryOutcome outcome, DateTimeOffset now, SmtpReply? reply, string message) => new()
     {
         Delivery = d,
         Reply = reply,
@@ -916,8 +975,15 @@ public sealed class DeliveryProcessor
         }
     }
 
-    private static DeliveryAttempt Build(ClaimedDelivery d, DeliveryAttempt attempt)
+    private DeliveryAttempt Build(ClaimedDelivery d, DeliveryAttempt attempt)
     {
+        // The event payload is only built when an endpoint can receive it (the fan-out would discard it otherwise).
+        string? type = WebhookEventFactory.EventTypeFor(attempt.Outcome);
+        if (type is null || !_s.Storage.Webhooks.MayHaveSubscribers(d.TenantId, type))
+        {
+            return attempt;
+        }
+
         var draft = WebhookEventFactory.ForAttempt(d, attempt);
         return draft is null ? attempt : Clone(attempt, [draft]);
     }
@@ -1015,10 +1081,22 @@ public sealed class DeliveryProcessor
     {
         foreach (var r in results)
         {
-            DeliveryMetrics.Attempts.Add(1, new KeyValuePair<string, object?>("outcome", r.Attempt.Outcome.ToString().ToLowerInvariant()));
+            DeliveryMetrics.Attempts.Add(1, DeliveryMetrics.OutcomeTag(r.Attempt.Outcome));
         }
 
-        await Task.WhenAll(results.Select(r => _s.Storage.Deliveries.RecordAttemptAsync(r.Attempt, ct).AsTask())).ConfigureAwait(false);
+        if (results.Count == 1)
+        {
+            await _s.Storage.Deliveries.RecordAttemptAsync(results[0].Attempt, ct).ConfigureAwait(false);
+            return;
+        }
+
+        var recording = new Task[results.Count];
+        for (int i = 0; i < recording.Length; i++)
+        {
+            recording[i] = _s.Storage.Deliveries.RecordAttemptAsync(results[i].Attempt, ct).AsTask();
+        }
+
+        await Task.WhenAll(recording).ConfigureAwait(false);
     }
 
     private async Task ReportBouncesAsync(List<Result> results, CancellationToken ct)

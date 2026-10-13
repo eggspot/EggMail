@@ -37,6 +37,7 @@ internal sealed class SqliteFile
         _createScript = createScript;
         WithoutRowIdTables = withoutRowIdTables;
         Name = kind.ToString().ToLowerInvariant();
+        ReadSessions = new SqliteReadSessionPool(this);
         FileName = Name + ".db";
         Path = inMemory ? null : System.IO.Path.Combine(options.DataDirectory, FileName);
         int timeoutSeconds = Math.Max(1, (int)Math.Ceiling(options.BusyTimeout.TotalSeconds));
@@ -60,6 +61,9 @@ internal sealed class SqliteFile
     }
 
     public SqliteFileKind Kind { get; }
+
+    /// <summary>Open read connections with prepared statements for the reads on the delivery path (not used for the in-memory queue, whose reads run on its writer).</summary>
+    public SqliteReadSessionPool ReadSessions { get; }
 
     public string Name { get; }
 
@@ -134,6 +138,7 @@ internal sealed class SqliteFile
     /// <summary>Releases pooled connections so the files can be moved or deleted.</summary>
     public void ClearPool()
     {
+        ReadSessions.Clear();
         if (IsMemory)
         {
             return;

@@ -18,5 +18,23 @@ public static class DeliveryMetrics
 
     public static readonly Counter<long> Claimed = Meter.CreateCounter<long>("mta.delivery.claimed", "{recipient}", "Deliveries claimed from the queue");
 
+    private static readonly KeyValuePair<string, object?>[] OutcomeTags = BuildOutcomeTags();
+
+    /// <summary>The <c>outcome</c> tag of <see cref="Attempts"/> for an outcome: built once per outcome, not per measurement.</summary>
+    public static KeyValuePair<string, object?> OutcomeTag(Mta.Storage.DeliveryOutcome outcome) =>
+        (int)outcome < OutcomeTags.Length ? OutcomeTags[(int)outcome] : new KeyValuePair<string, object?>("outcome", outcome.ToString().ToLowerInvariant());
+
+    private static KeyValuePair<string, object?>[] BuildOutcomeTags()
+    {
+        var values = Enum.GetValues<Mta.Storage.DeliveryOutcome>();
+        var tags = new KeyValuePair<string, object?>[values.Max(v => (int)v) + 1];
+        foreach (var value in values)
+        {
+            tags[(int)value] = new KeyValuePair<string, object?>("outcome", value.ToString().ToLowerInvariant());
+        }
+
+        return tags;
+    }
+
     public static readonly Counter<long> Bounces = Meter.CreateCounter<long>("mta.delivery.bounces.generated", "{message}", "Bounce messages generated");
 }

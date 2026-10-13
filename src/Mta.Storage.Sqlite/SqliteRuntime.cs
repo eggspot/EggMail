@@ -99,6 +99,28 @@ internal sealed class SqliteRuntime
         return ValueTask.FromResult(read(connection, state));
     }
 
+    /// <summary>
+    /// Whether an enabled endpoint of the tenant subscribes to the event type according to the loaded list; null when that list is not current
+    /// (nothing loaded yet, or an endpoint changed since), in which case the caller must assume yes and let the fan-out load it.
+    /// </summary>
+    public bool? AnyWebhookSubscriber(Guid tenantId, string eventType)
+    {
+        if (ConfigStore.WebhookEndpointVersion != Volatile.Read(ref _targetsVersion))
+        {
+            return null;
+        }
+
+        foreach (WebhookTarget target in Volatile.Read(ref _targets))
+        {
+            if (target.TenantId == tenantId && WebhookSubscriptions.Matches(target.EventTypes, eventType))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>The enabled endpoints, refreshed whenever the config store reports a webhook endpoint change.</summary>
     public async ValueTask<WebhookTarget[]> GetWebhookTargetsAsync(CancellationToken cancellationToken)
     {

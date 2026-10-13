@@ -264,6 +264,13 @@ public interface IWebhookOutbox
     /// </summary>
     ValueTask<Guid?> EnqueueForEndpointAsync(Guid tenantId, Guid endpointId, WebhookEventDraft draft, DateTimeOffset now, CancellationToken cancellationToken) =>
         throw new NotSupportedException("This storage provider does not support targeted webhook events.");
+
+    /// <summary>
+    /// False only when it is known, without any I/O, that no enabled endpoint of the tenant subscribes to the event type, so a delivery attempt
+    /// need not build the event payload (JSON, about 6 KB per attempt) that the fan-out would throw away. True when unsure (the endpoint list
+    /// is not loaded or has just changed). Decided from the same list the fan-out uses, so it never skips an event the fan-out would have queued.
+    /// </summary>
+    bool MayHaveSubscribers(Guid tenantId, string eventType) => true;
 }
 
 public sealed record MaintenanceReport(string Job, TimeSpan Duration, long RowsAffected, string? Detail);

@@ -120,6 +120,8 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
 {
     private static readonly TimeSpan ExpiredClaimLease = TimeSpan.FromMinutes(5);
 
+    public bool MayHaveSubscribers(Guid tenantId, string eventType) => rt.AnyWebhookSubscriber(tenantId, eventType) ?? true;
+
     // Intake
 
     [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
@@ -298,20 +300,44 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
             }));
         }
 
-        // RETURNING does not promise an order.
-        rows.Sort(static (a, b) => a.Due != b.Due ? a.Due.CompareTo(b.Due) : string.CompareOrdinal(a.Delivery.DeliveryId.ToString(), b.Delivery.DeliveryId.ToString()));
-        return rows.Select(x => x.Delivery).ToList();
+        // RETURNING does not promise an order: due time, then the id's text (compared as its big-endian bytes, which sort the same way).
+        rows.Sort(static (a, b) => a.Due != b.Due ? a.Due.CompareTo(b.Due) : CompareIdText(a.Delivery.DeliveryId, b.Delivery.DeliveryId));
+        var claimed = new ClaimedDelivery[rows.Count];
+        for (int i = 0; i < claimed.Length; i++)
+        {
+            claimed[i] = rows[i].Delivery;
+        }
+
+        return claimed;
     }
 
-    public async ValueTask<byte[]?> GetRawAsync(Guid messageId, CancellationToken cancellationToken) =>
-        await rt.ReadAsync(rt.Queue, rt.QueueWriter, messageId, static (c, id) =>
+    private static int CompareIdText(Guid x, Guid y)
+    {
+        Span<byte> a = stackalloc byte[16];
+        Span<byte> b = stackalloc byte[16];
+        x.TryWriteBytes(a, bigEndian: true, out _);
+        y.TryWriteBytes(b, bigEndian: true, out _);
+        return a.SequenceCompareTo(b);
+    }
+
+    private static readonly Stmt SpoolRaw = new("SELECT raw FROM message_spool WHERE message_id = @m", "@m");
+
+    public ValueTask<byte[]?> GetRawAsync(Guid messageId, CancellationToken cancellationToken)
+    {
+        if (rt.Queue.IsMemory)
         {
-            using SqliteCommand cmd = c.CreateCommand();
-            cmd.CommandText = "SELECT raw FROM message_spool WHERE message_id = @m";
-            cmd.Parameters.AddWithValue("@m", id);
-            using SqliteDataReader r = cmd.ExecuteReader();
-            return r.Read() ? r.GetFieldValue<byte[]>(0) : null;
-        }).ConfigureAwait(false);
+            // The in-memory queue has one connection, owned by its writer: the read runs there.
+            return rt.QueueWriter.SubmitAsync(messageId, static (ctx, id) =>
+            {
+                using RawReader r = ctx.Command(SpoolRaw).Set(0, id).ExecuteReader();
+                return r.Read() ? r.GetBytes(0) : null;
+            }, cancellationToken);
+        }
+
+        using ReadLease lease = rt.Queue.ReadSessions.Rent();
+        using RawReader row = lease.Session.Command(SpoolRaw).Set(0, messageId).ExecuteReader();
+        return ValueTask.FromResult(row.Read() ? row.GetBytes(0) : null);
+    }
 
     // Recording attempts
 
