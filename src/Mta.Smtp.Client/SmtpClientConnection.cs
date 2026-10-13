@@ -174,7 +174,21 @@ public sealed class SmtpClientConnection : IAsyncDisposable
         return cts;
     }
 
-    private static void DisarmTimeout(CancellationTokenSource cts) => cts.CancelAfter(Timeout.InfiniteTimeSpan);
+    /// <summary>
+    /// Ends the timed operation. <see cref="CancellationTokenSource.TryReset"/> stops the timer and fails when it has already fired, so a
+    /// timer callback that is in flight can never cancel the NEXT operation that reuses the source: in that case the source is dropped.
+    /// </summary>
+    private void DisarmTimeout(CancellationTokenSource cts)
+    {
+        if (!cts.TryReset())
+        {
+            cts.Dispose();
+            if (ReferenceEquals(_timeoutSource, cts))
+            {
+                _timeoutSource = null;
+            }
+        }
+    }
 
     [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<SmtpReply> ReadReplyAsync(SmtpStage stage, TimeSpan timeout, CancellationToken ct)

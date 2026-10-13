@@ -74,10 +74,15 @@ public class ReadSessionTests : SqliteTestBase
         Assert.NotNull(await Storage.Deliveries.GetRawAsync(message.MessageId, default));
         Assert.False(await Storage.Config.IsSuppressedAsync(TenantA, "x@example.org", default));
 
+        Assert.True(Sql.Runtime.Queue.ReadSessions.IdleCount > 0);
+        Assert.True(Sql.Runtime.Config.ReadSessions.IdleCount > 0);
         foreach (SqliteFile file in Sql.Runtime.Files)
         {
-            file.ClearPool();   // what moving, backing up or quarantining a file does first
+            file.ClearPool();   // what quarantining a file and disposing the storage do
         }
+
+        Assert.Equal(0, Sql.Runtime.Queue.ReadSessions.IdleCount);
+        Assert.Equal(0, Sql.Runtime.Config.ReadSessions.IdleCount);
 
         Assert.NotNull(await Storage.Deliveries.GetRawAsync(message.MessageId, default));
         Assert.False(await Storage.Config.IsSuppressedAsync(TenantA, "x@example.org", default));

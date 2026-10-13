@@ -134,15 +134,20 @@ public partial class MessagePathTests
     }
 
     [Theory]
-    [InlineData("<a@example.com>")]
-    [InlineData("<\"quoted local\"@example.com>")]
-    [InlineData("<@relay.example,@relay2.example:a@example.com>")]
-    public async Task Paths_are_parsed_the_same_from_stack_memory(string path)
+    [InlineData("<a@example.com>", "a@example.com")]
+    [InlineData("<\"quoted local\"@example.com>", "\"quoted local\"@example.com")]
+    [InlineData("<@relay.example,@relay2.example:a@example.com>", "a@example.com")]   // the obsolete source route is dropped
+    [InlineData("<Mixed.Case@Example.COM>", "Mixed.Case@example.com")]                  // the local part keeps its case, the domain is lower-cased
+    public async Task Paths_are_decoded_to_the_address_the_handler_sees(string path, string expected)
     {
         await using var f = new ServerFixture();
         using var c = await OpenAsync(f);
         await c.CommandAsync("EHLO client.test", 250);
-        await c.CommandAsync($"MAIL FROM:{path}", 250);
+        await SendMessageAsync(c, path[1..^1], [path[1..^1]]);
+
+        var message = Assert.Single(f.Handler.Messages);
+        Assert.Equal(expected, message.Sender.ToString());
+        Assert.Equal([expected], message.Recipients);
     }
 
     [Fact]

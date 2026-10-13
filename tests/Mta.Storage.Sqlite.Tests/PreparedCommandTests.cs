@@ -164,4 +164,71 @@ public class PreparedCommandTests : IDisposable
 
         tx.Commit();
     }
+
+    [Fact]
+    public void Statements_take_part_in_the_transaction_of_their_connection()
+    {
+        var count = new Stmt("SELECT count(*) FROM t");
+        using var insert = Prepare(Insert);
+        using var counter = Prepare(count);
+
+        using (SqliteTransaction tx = _connection.BeginTransaction(deferred: false))
+        {
+            insert.Set(0, 1L).SetNull(1).Set(2, "rolled back").SetNull(3).SetNull(4).SetNull(5).ExecuteNonQuery();
+            using (RawReader inside = counter.ExecuteReader())
+            {
+                Assert.True(inside.Read());
+                Assert.Equal(1, inside.GetInt64(0));   // visible to its own transaction
+            }
+
+            tx.Rollback();
+        }
+
+        using (RawReader after = counter.ExecuteReader())
+        {
+            Assert.True(after.Read());
+            Assert.Equal(0, after.GetInt64(0));
+        }
+
+        using (SqliteTransaction tx = _connection.BeginTransaction(deferred: false))
+        {
+            insert.Set(0, 2L).Set(2, "committed").ExecuteNonQuery();
+            tx.Commit();
+        }
+
+        using RawReader committed = counter.ExecuteReader();
+        Assert.True(committed.Read());
+        Assert.Equal(1, committed.GetInt64(0));
+    }
+
+    [Fact]
+    public void Reading_a_null_column_as_a_value_is_an_error_like_with_the_data_reader()
+    {
+        using var insert = Prepare(Insert);
+        insert.Set(0, 1L).SetNull(1).SetNull(2).SetNull(3).SetNull(4).SetNull(5).ExecuteNonQuery();
+        using var select = Prepare(Select);
+        using RawReader r = select.Set(0, 1L).ExecuteReader();
+        Assert.True(r.Read());
+        Assert.True(r.IsDBNull(1));
+        Assert.Throws<InvalidOperationException>(() => r.GetString(1));
+        Assert.Throws<InvalidOperationException>(() => r.GetInt64(3));
+        Assert.Throws<InvalidOperationException>(() => r.GetGuid(0));
+        Assert.Throws<InvalidOperationException>(() => r.GetBytes(2));
+        Assert.Null(r.GetNullableString(1));
+        Assert.Null(r.GetNullableInt(3));
+        Assert.Null(r.GetNullableGuid(0));
+    }
+
+    [Fact]
+    public void Doubles_are_stored_as_reals()
+    {
+        using var insert = Prepare(Insert);
+        insert.Set(0, 1L).SetNull(1).SetNull(2).SetNull(3).Set(4, 2.5).SetNull(5).ExecuteNonQuery();
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT typeof(n), n FROM t WHERE id = 1";
+        using var r = cmd.ExecuteReader();
+        Assert.True(r.Read());
+        Assert.Equal("real", r.GetString(0));
+        Assert.Equal(2.5, r.GetDouble(1));
+    }
 }

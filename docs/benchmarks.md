@@ -118,7 +118,7 @@ Per-step allocation of the ingest path (`dotnet run -c Release --project bench/M
 
 ## Allocation work, second round (2026-10-13)
 
-Parse once, native SQLite statements, and a pass over the delivery path. Everything below was measured with the harness in `bench/Mta.Bench.Pipeline` on one 10-core Apple-silicon laptop that was **shared with other builds and test runs throughout** (the load average was between 13 and 40 for the whole session). **Allocation figures are exact and repeatable** (bytes counted by the runtime, no sampling). **Time and throughput figures are not**: they moved by a factor of two or three between runs of the same build, so they are reported as ranges and as CPU time per 1,000 messages, and none of them is a result. Dev-machine observations, not claims; the publication rules above still apply.
+Parse once, native SQLite statements, and a pass over the delivery path. Everything below was measured with the harness in `bench/Mta.Bench.Pipeline` on one 10-core Apple-silicon laptop that was **shared with other builds and test runs throughout** (the load average was between 13 and 40 for the whole session). **Allocation figures are exact and repeatable** (bytes counted by the runtime, no sampling). **Time and throughput figures are not** exact: in the first, shared window they moved by a factor of two or three between runs of the same build; the throughput table below comes from a second, quiet window with six alternating runs of each build, and is still not a result. Dev-machine observations, not claims; the publication rules above still apply.
 
 "Before" is `main` at commit `0cab93f` built and run with the same harness (its harness was patched only to print the same columns). "After" is this branch.
 
@@ -153,7 +153,16 @@ Wall time per message in the same micro-benchmark (fastest of three passes, shar
 | Ingest, 200-byte message, plain text | not measurable | **4.8 KB** |
 | Delivery to a sink MX, per recipient (`--split true`, DKIM signing on) | 66.0 KB | **25.5 KB** |
 
-CPU time of the process per 1,000 messages, three runs each, before then after: ingest 330, 337, 344 ms against 288, 285, 274 ms; delivery 1,986, 2,036, 2,010 ms against 1,771, 1,892, 1,858 ms (RSA-2048 signing is about 0.83 ms of the 1.8 ms per message on delivery and was not touched). Throughput in the same three pairs of runs: ingest 13.4k, 14.6k, 15.0k msg/s before and 5.2k, 17.9k, 8.4k after; delivery 3.6k, 4.0k, 2.5k recipients/s before and 3.4k, 4.3k, 3.2k after. **These throughput numbers overlap and show no reliable difference**: the machine was busy with other work and the spread between runs of one build is larger than the effect. The CPU column supports the expectation (fewer allocations, about 15 % less CPU per ingested message); the throughput column does not demonstrate it. Repeat on a quiet Linux host before quoting anything.
+Throughput and CPU, measured in a second, quiet window (six alternating before/after runs of `--sync off --history full --messages 30000 --connections 32 --size 2048 --deliver true --split true`, so ingest and delivery are each measured alone; the machine had no other significant load at the start, its one-minute load average was 2.3 before the first run and rose to about 14 by the last, which is mostly the harness itself: ten cores, 32 connections, 64 delivery workers):
+
+| | Before, six runs | After, six runs | Median change |
+|---|---|---|---|
+| Ingest, msg/s | 14.9k, 16.7k, 14.8k, 15.7k, 15.7k, 16.0k (median 15.7k) | 16.0k, 18.0k, 17.0k, 17.2k, 17.1k, 17.6k (median 17.2k) | +9 % |
+| Ingest, process CPU ms per 1,000 messages | 328, 304, 332, 331, 320, 318 (median 324) | 294, 300, 299, 295, 306, 303 (median 300) | -8 % |
+| Delivery, recipients/s | 4,224, 4,248, 4,204, 4,151, 4,213, 4,192 (median 4,208) | 4,614, 4,540, 4,487, 4,392, 4,546, 3,471 (median 4,513) | +7 % |
+| Delivery, process CPU ms per 1,000 messages | 2,007, 1,965, 1,932, 1,981, 1,946, 1,970 (median 1,967) | 1,862, 1,875, 1,876, 1,848, 1,869, 1,819 (median 1,866) | -5 % |
+
+The allocation figures are identical from run to run; the throughput ranges of the two builds overlap slightly for ingest (before up to 16.7k, after from 16.0k) and the medians differ by 9 %. Delivery is bound by RSA-2048 signing (about 0.83 ms of the 1.8 ms CPU per message), and one after-run (3.5k) shows what a disturbed run looks like. An earlier set of runs on the same machine under a load average of 13 to 40 (other builds and tests running) gave ingest 13.4k, 14.6k, 15.0k before and 5.2k, 17.9k, 8.4k after: nothing can be concluded from runs taken while the machine is shared, and they are not used. These are still one laptop, loopback and a counting sink: the direction (fewer bytes, less CPU, no regression) is supported by these runs, the size of the gain is not a published result.
 
 ### Where the remaining ingest allocation goes (plain text, tiny message, SQLite: 4.8 KB)
 
@@ -187,7 +196,7 @@ dotnet run -c Release --project bench/Mta.Bench.Pipeline -- --sync off --history
 #   --tls false  measures the server without the TLS stack;  --size 200  the fixed cost per message
 ```
 
-The `--alloc-profile` sampler (one `GCAllocationTick` per about 100 KB) shows types but not who allocated them, and it aliases on a periodic single-thread loop. For attribution with call stacks, record an EventPipe trace of the harness process and aggregate it with `bench/Mta.Bench.AllocStacks`:
+The `--alloc-profile` sampler (one `GCAllocationTick` per about 100 KB) shows types but not who allocated them, and it aliases on a periodic single-thread loop. For attribution with call stacks, record an EventPipe trace of the harness process and aggregate it with `bench/Mta.Bench.AllocStacks` (a developer tool that references the TraceEvent package; it is deliberately **not** in `EggMail.slnx`, so CI neither restores nor builds it and billed minutes are unchanged; `dotnet run --project` builds it on demand):
 
 ```sh
 DOTNET_EnableEventPipe=1 DOTNET_EventPipeOutputPath=/tmp/pipeline.nettrace DOTNET_EventPipeConfig='Microsoft-Windows-DotNETRuntime:0x39:5' \

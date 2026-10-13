@@ -162,21 +162,15 @@ internal sealed class PreparedCommand : IDisposable
         return this;
     }
 
-    /// <summary>For the rare caller that holds a boxed value (null and DBNull become NULL).</summary>
-    public PreparedCommand Set(int index, object? value) => value switch
+    public PreparedCommand Set(int index, double value)
     {
-        null or DBNull => SetNull(index),
-        long l => Set(index, l),
-        int i => Set(index, (long)i),
-        short s => Set(index, (long)s),
-        byte b => Set(index, (long)b),
-        bool f => Set(index, f),
-        Guid g => Set(index, g),
-        string t => Set(index, t),
-        byte[] blob => Set(index, blob),
-        Enum e => Set(index, Convert.ToInt64(e, System.Globalization.CultureInfo.InvariantCulture)),
-        _ => throw new NotSupportedException($"Cannot bind a value of type {value.GetType()}."),
-    };
+        Check(raw.sqlite3_bind_double(_stmt, _slots[index], value));
+        return this;
+    }
+
+    // There is deliberately no overload for object: a value of a type that is not listed here (DateTimeOffset, decimal, ...) is a compile
+    // error at the call site, because Microsoft.Data.Sqlite stores each of those in a specific way and a silent guess would write
+    // data the readers do not expect. Convert to one of the types above first (the schema stores instants as Unix milliseconds).
 
     /// <summary>Runs the statement to completion and returns the number of rows changed (0 for a statement that reads).</summary>
     public int ExecuteNonQuery()
@@ -276,13 +270,20 @@ internal sealed class RawReader : IDisposable
 
     public bool IsDBNull(int ordinal) => raw.sqlite3_column_type(_command.Handle, ordinal) == raw.SQLITE_NULL;
 
-    public long GetInt64(int ordinal) => raw.sqlite3_column_int64(_command.Handle, ordinal);
+    // Reading a NULL column as a value is an error, as it is with SqliteDataReader (check IsDBNull, or use the Get...Nullable methods).
 
-    public int GetInt32(int ordinal) => (int)raw.sqlite3_column_int64(_command.Handle, ordinal);
+    public long GetInt64(int ordinal) => raw.sqlite3_column_int64(_command.Handle, NotNull(ordinal));
 
-    public bool GetFlag(int ordinal) => raw.sqlite3_column_int64(_command.Handle, ordinal) != 0;
+    public int GetInt32(int ordinal) => (int)raw.sqlite3_column_int64(_command.Handle, NotNull(ordinal));
 
-    public string GetString(int ordinal) => raw.sqlite3_column_text(_command.Handle, ordinal).utf8_to_string();
+    public bool GetFlag(int ordinal) => raw.sqlite3_column_int64(_command.Handle, NotNull(ordinal)) != 0;
+
+    public string GetString(int ordinal) => raw.sqlite3_column_text(_command.Handle, NotNull(ordinal)).utf8_to_string();
+
+    private int NotNull(int ordinal) =>
+        raw.sqlite3_column_type(_command.Handle, ordinal) == raw.SQLITE_NULL
+            ? throw new InvalidOperationException($"Column {ordinal} is NULL.")
+            : ordinal;
 
     public string? GetNullableString(int ordinal) => IsDBNull(ordinal) ? null : GetString(ordinal);
 
@@ -292,11 +293,12 @@ internal sealed class RawReader : IDisposable
 
     public DateTimeOffset? GetNullableInstant(int ordinal) => IsDBNull(ordinal) ? null : GetInstant(ordinal);
 
-    public byte[] GetBytes(int ordinal) => raw.sqlite3_column_blob(_command.Handle, ordinal).ToArray();
+    public byte[] GetBytes(int ordinal) => raw.sqlite3_column_blob(_command.Handle, NotNull(ordinal)).ToArray();
 
     public Guid GetGuid(int ordinal)
     {
         sqlite3_stmt stmt = _command.Handle;
+        NotNull(ordinal);
         if (raw.sqlite3_column_type(stmt, ordinal) == raw.SQLITE_BLOB)
         {
             return new Guid(raw.sqlite3_column_blob(stmt, ordinal));

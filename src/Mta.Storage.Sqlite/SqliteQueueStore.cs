@@ -623,8 +623,8 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
             throw new ArgumentException("A pending outbox item needs nextAttemptAt.", nameof(nextAttemptAt));
         }
 
-        object? next = nextAttemptAt is { } n ? StorageTime.ToUnixMs(n) : null;
-        object? finished = newState == WebhookOutboxState.Pending ? null : StorageTime.ToUnixMs(attempt.At);
+        long? next = nextAttemptAt is { } n ? StorageTime.ToUnixMs(n) : null;
+        long? finished = newState == WebhookOutboxState.Pending ? null : StorageTime.ToUnixMs(attempt.At);
         (Guid Endpoint, Guid Tenant)? owner = await rt.QueueWriter.SubmitAsync((outboxId, newState, next, finished), static (ctx, s) =>
         {
             using RawReader r = ctx.Command(QueueSql.OutboxComplete).Set(0, s.outboxId).Set(1, (long)s.newState).Set(2, s.next).Set(3, s.finished).ExecuteReader();

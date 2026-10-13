@@ -7,6 +7,9 @@ public abstract class WebhookConformance : StorageTestBase
 {
     private Guid _endpoint;
 
+    /// <summary>False for a backend whose endpoint list is also refreshed by age (PostgreSQL: another replica may change it), where "no subscriber" is only guaranteed while the list is young.</summary>
+    protected virtual bool SubscriberAnswerIsPrecise => true;
+
     public override async Task InitializeAsync()
     {
         await base.InitializeAsync();
@@ -76,6 +79,15 @@ public abstract class WebhookConformance : StorageTestBase
         {
             await RecordAsync(d, DeliveryOutcome.Delivered, events: [Draft("message.delivered", "{}")]);
         }
+
+        // With the list loaded and current, a tenant nobody subscribed for is skipped, an event the other tenant's "*" endpoint wants is not.
+        if (SubscriberAnswerIsPrecise)
+        {
+            Assert.False(Storage.Webhooks.MayHaveSubscribers(TenantB, "message.delivered"));
+            Assert.False(Storage.Webhooks.MayHaveSubscribers(Guid.NewGuid(), "message.delivered"));
+        }
+
+        Assert.True(Storage.Webhooks.MayHaveSubscribers(TenantA, "message.delivered"));
 
         // ...then subscribe tenant B: the very next question must say yes, however the answer was cached before,
         Guid added = await AddEndpointAsync(TenantB, true, "message.delivered");

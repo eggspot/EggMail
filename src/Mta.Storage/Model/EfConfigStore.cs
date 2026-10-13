@@ -311,9 +311,10 @@ public sealed partial class EfConfigStore<TContext>(IConfigDbAccess<TContext> db
                 return ValueTask.FromResult(known);
             }
         }
-        catch (Exception ex) when (db.TranslateException(ex) is { } translated)
+        catch (Exception ex)
         {
-            throw translated;
+            // Like the async version this replaced, a failure surfaces when the result is awaited, not when the method is called.
+            return ValueTask.FromException<bool>(db.TranslateException(ex) ?? ex);
         }
 
         return IsSuppressedByQueryAsync(tenantId, a);

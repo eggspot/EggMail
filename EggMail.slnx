@@ -46,7 +46,6 @@
   </Folder>
   <Folder Name="/bench/">
     <Project Path="bench/Mta.Benchmarks/Mta.Benchmarks.csproj" />
-    <Project Path="bench/Mta.Bench.AllocStacks/Mta.Bench.AllocStacks.csproj" />
     <Project Path="bench/Mta.Bench.Pipeline/Mta.Bench.Pipeline.csproj" />
   </Folder>
 </Solution>
