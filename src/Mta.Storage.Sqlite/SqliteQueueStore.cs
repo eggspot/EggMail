@@ -122,6 +122,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
 
     // Intake
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<IntakeResult> AcceptAsync(AcceptedMessage message, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(message);
@@ -211,7 +212,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
                 .ExecuteNonQuery();
             if (changed == 0)
             {
-                using SqliteDataReader r = ctx.Command(QueueSql.IdempotencyGet).Set(0, m.TenantId).Set(1, key).ExecuteReader();
+                using RawReader r = ctx.Command(QueueSql.IdempotencyGet).Set(0, m.TenantId).Set(1, key).ExecuteReader();
                 if (r.Read())
                 {
                     return new IntakeResult(IntakeStatus.DuplicateIdempotencyKey, r.GetGuid(0), r.GetNullableString(1));
@@ -227,7 +228,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
 
         string from = AddressText.Format(m.EnvelopeFrom);
         long expires = StorageTime.ToUnixMs(m.ExpiresAt);
-        SqliteCommand insert = ctx.Command(QueueSql.DeliveryInsert);
+        PreparedCommand insert = ctx.Command(QueueSql.DeliveryInsert);
         foreach (AcceptedRecipient r in m.Recipients)
         {
             insert.Set(0, r.DeliveryId).Set(1, m.MessageId).Set(2, m.TenantId).Set(3, from)
@@ -275,7 +276,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
 
     private static IReadOnlyList<ClaimedDelivery> RunClaim(WriterContext ctx, ClaimState s, Stmt stmt)
     {
-        using SqliteDataReader r = ctx.Command(stmt).Set(0, s.Owner).Set(1, s.UntilMs).Set(2, s.NowMs).Set(3, (long)s.Max).ExecuteReader();
+        using RawReader r = ctx.Command(stmt).Set(0, s.Owner).Set(1, s.UntilMs).Set(2, s.NowMs).Set(3, (long)s.Max).ExecuteReader();
         var rows = new List<(long Due, ClaimedDelivery Delivery)>();
         while (r.Read())
         {
@@ -394,7 +395,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
     {
         DeliveryAttempt a = s.Attempt;
         DeliveryRowInfo row;
-        using (SqliteDataReader r = ctx.Command(QueueSql.DeliverySelect).Set(0, a.DeliveryId).ExecuteReader())
+        using (RawReader r = ctx.Command(QueueSql.DeliverySelect).Set(0, a.DeliveryId).ExecuteReader())
         {
             if (!r.Read())
             {
@@ -427,7 +428,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
         if (plan.CountAttempt && a.WebhookEvents.Count > 0 && s.Targets.Length > 0)
         {
             long atMs = StorageTime.ToUnixMs(a.At);
-            SqliteCommand insert = ctx.Command(QueueSql.OutboxInsert);
+            PreparedCommand insert = ctx.Command(QueueSql.OutboxInsert);
             foreach (WebhookEventDraft draft in a.WebhookEvents)
             {
                 foreach (WebhookTarget target in s.Targets)
@@ -448,7 +449,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
         {
             int pending = 1;
             bool retain = false;
-            using (SqliteDataReader r = ctx.Command(QueueSql.SpoolDecrement).Set(0, row.MessageId).ExecuteReader())
+            using (RawReader r = ctx.Command(QueueSql.SpoolDecrement).Set(0, row.MessageId).ExecuteReader())
             {
                 if (r.Read())
                 {
@@ -554,7 +555,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
         var state = new ClaimState(owner, max, StorageTime.ToUnixMs(now), StorageTime.ToUnixMs(now + lease));
         return await rt.QueueWriter.SubmitAsync(state, static (ctx, s) =>
         {
-            using SqliteDataReader r = ctx.Command(QueueSql.OutboxClaim).Set(0, s.Owner).Set(1, s.UntilMs).Set(2, s.NowMs).Set(3, (long)s.Max).ExecuteReader();
+            using RawReader r = ctx.Command(QueueSql.OutboxClaim).Set(0, s.Owner).Set(1, s.UntilMs).Set(2, s.NowMs).Set(3, (long)s.Max).ExecuteReader();
             var rows = new List<WebhookOutboxItem>();
             while (r.Read())
             {
@@ -589,7 +590,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
         object? finished = newState == WebhookOutboxState.Pending ? null : StorageTime.ToUnixMs(attempt.At);
         (Guid Endpoint, Guid Tenant)? owner = await rt.QueueWriter.SubmitAsync((outboxId, newState, next, finished), static (ctx, s) =>
         {
-            using SqliteDataReader r = ctx.Command(QueueSql.OutboxComplete).Set(0, s.outboxId).Set(1, (long)s.newState).Set(2, s.next).Set(3, s.finished).ExecuteReader();
+            using RawReader r = ctx.Command(QueueSql.OutboxComplete).Set(0, s.outboxId).Set(1, (long)s.newState).Set(2, s.next).Set(3, s.finished).ExecuteReader();
             return r.Read() ? ((Guid, Guid)?)(r.GetGuid(0), r.GetGuid(1)) : null;
         }, cancellationToken).ConfigureAwait(false);
 
@@ -634,7 +635,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
         return await rt.QueueWriter.SubmitAsync((targets, draft, tenantId, now), static (ctx, s) =>
         {
             long atMs = StorageTime.ToUnixMs(s.now);
-            SqliteCommand insert = ctx.Command(QueueSql.OutboxInsert);
+            PreparedCommand insert = ctx.Command(QueueSql.OutboxInsert);
             foreach (WebhookTarget target in s.targets)
             {
                 insert.Set(0, Ids.New(s.now)).Set(1, target.EndpointId).Set(2, s.tenantId).Set(3, s.draft.EventType).Set(4, s.draft.EventId).Set(5, s.draft.PayloadJson).Set(6, atMs)
@@ -682,7 +683,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
 
         var pending = await rt.QueueWriter.SubmitAsync(1000, static (ctx, max) =>
         {
-            using SqliteDataReader r = ctx.Command(QueueSql.SpoolAwaitingList).Set(0, (long)max).ExecuteReader();
+            using RawReader r = ctx.Command(QueueSql.SpoolAwaitingList).Set(0, (long)max).ExecuteReader();
             var list = new List<(Guid, Guid, DateTimeOffset)>();
             while (r.Read())
             {

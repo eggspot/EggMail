@@ -240,6 +240,50 @@ public sealed class AddressList : IReadOnlyList<AddressItem>
         }
     }
 
+    /// <summary>
+    /// Looks at the valid mailboxes (group members included, invalid entries skipped) and reports whether they all share one domain,
+    /// without allocating. <paramref name="domain"/> is the lower-case domain of the first valid mailbox, also when the result is
+    /// <see cref="CommonDomainResult.MultipleDomains"/>; it is null when there is no valid mailbox.
+    /// </summary>
+    public CommonDomainResult GetCommonDomain(out string? domain)
+    {
+        domain = null;
+        bool differs = false;
+        foreach (var item in _items)
+        {
+            if (item is Mailbox m)
+            {
+                Visit(m, ref domain, ref differs);
+            }
+            else if (item is MailboxGroup g)
+            {
+                foreach (var member in g.Members)
+                {
+                    Visit(member, ref domain, ref differs);
+                }
+            }
+        }
+
+        return domain is null ? CommonDomainResult.NoValidMailbox : differs ? CommonDomainResult.MultipleDomains : CommonDomainResult.Single;
+
+        static void Visit(Mailbox mailbox, ref string? domain, ref bool differs)
+        {
+            if (!mailbox.IsValid)
+            {
+                return;
+            }
+
+            if (domain is null)
+            {
+                domain = mailbox.Address.Domain.ToLowerInvariant();
+            }
+            else if (!string.Equals(mailbox.Address.Domain, domain, StringComparison.OrdinalIgnoreCase))
+            {
+                differs = true;
+            }
+        }
+    }
+
     /// <summary>Parses an address header value (the unfolded text; RFC 2047 words in display names are decoded).</summary>
     public static AddressList Parse(string? value, MimeLimits? limits = null) =>
         string.IsNullOrWhiteSpace(value) ? Empty : AddressParser.Parse(value, limits ?? MimeLimits.Default);
@@ -254,6 +298,19 @@ public sealed class AddressList : IReadOnlyList<AddressItem>
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
 
     internal static AddressList Create(AddressItem[] items, MimeAnomaly anomalies) => new(items, anomalies);
+}
+
+/// <summary>Outcome of <see cref="AddressList.GetCommonDomain"/>.</summary>
+public enum CommonDomainResult
+{
+    /// <summary>There is no valid mailbox.</summary>
+    NoValidMailbox,
+
+    /// <summary>All valid mailboxes use the same domain (compared case-insensitively).</summary>
+    Single,
+
+    /// <summary>The valid mailboxes use more than one domain.</summary>
+    MultipleDomains,
 }
 
 /// <summary>Tolerant RFC 5322 address-list parser. Every loop iteration consumes input, so it always terminates in linear time.</summary>

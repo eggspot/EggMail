@@ -68,6 +68,9 @@ public sealed class MimePart
 
     internal void SetChildren(MimePart[] children) => _children = children;
 
+    /// <summary>The limits this entity was parsed with (reused by consumers that continue working on an already parsed message).</summary>
+    internal MimeLimits Limits => _limits;
+
     /// <summary>True for <c>multipart/*</c> that was split into children (or has none because the structure is broken).</summary>
     public bool IsMultipart => ContentType.IsMultipart;
 
@@ -231,6 +234,9 @@ public sealed class MimeMessage
 
     /// <summary>The message header fields.</summary>
     public HeaderList Headers => Root.Headers;
+
+    /// <summary>The limits this message was parsed with.</summary>
+    internal MimeLimits Limits => Root.Limits;
 
     /// <summary>The raw message bytes that were parsed.</summary>
     public ReadOnlyMemory<byte> Raw => Root.Raw;

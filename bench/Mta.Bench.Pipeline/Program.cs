@@ -24,7 +24,7 @@ using Mta.Storage.Sqlite;
 var opt = Args.Parse(args);
 if (opt.Get("micro", "false") == "true")
 {
-    await Micro.RunAsync();
+    await Micro.RunAsync(opt.Get("alloc-profile", "false") == "true");
     return 0;
 }
 
@@ -263,59 +263,124 @@ internal sealed class AllocationSampler : System.Diagnostics.Tracing.EventListen
         _bytes.AddOrUpdate(e.Payload[typeIndex]?.ToString() ?? "?", Convert.ToInt64(e.Payload[amountIndex]), (_, old) => old + Convert.ToInt64(e.Payload[amountIndex]));
     }
 
-    public void Print()
+    public void Reset() => _bytes.Clear();
+
+    public void Print(int top = 25)
     {
         long total = _bytes.Values.Sum();
         Console.WriteLine($"allocation sample (about 100 KB granularity), total {total / 1_000_000.0:F1} MB:");
-        foreach (var (type, bytes) in _bytes.OrderByDescending(kv => kv.Value).Take(25))
+        foreach (var (type, bytes) in _bytes.OrderByDescending(kv => kv.Value).Take(top))
         {
             Console.WriteLine($"  {bytes * 100.0 / total,5:F1}%  {type}");
         }
     }
 }
 
-/// <summary>Allocation per call of the ingest steps in isolation (bytes per operation on the calling thread).</summary>
+/// <summary>Allocation per call of the ingest steps in isolation (bytes per operation, all threads, measured while nothing else runs).</summary>
 internal static class Micro
 {
-    public static async Task RunAsync()
+    private const string Head = "From: Tester <news@bench.test>\r\nTo: rcpt0@dest.test\r\nSubject: load test\r\nDate: Mon, 12 Oct 2026 08:00:00 +0000\r\nMessage-ID: <abcdef@bench.test>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n";
+
+    private static AllocationSampler? _sampler;
+
+    public static async Task RunAsync(bool profile)
     {
-        string head = "From: Tester <news@bench.test>\r\nTo: rcpt0@dest.test\r\nSubject: load test\r\nDate: Mon, 12 Oct 2026 08:00:00 +0000\r\nMessage-ID: <abcdef@bench.test>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n";
-        byte[] raw = System.Text.Encoding.ASCII.GetBytes(head + new string('x', 1800) + "\r\n");
+        using var allocProfile = profile ? new AllocationSampler() : null;
+        _sampler = allocProfile;
+        byte[] raw = System.Text.Encoding.ASCII.GetBytes(Head + new string('x', 1800) + "\r\n");
+        byte[] tiny = System.Text.Encoding.ASCII.GetBytes(Head + "hello\r\n");
         byte[] received = System.Text.Encoding.ASCII.GetBytes("Received: from client.test (127.0.0.1) by egg.local with ESMTPSA id abc; Mon, 12 Oct 2026 08:00:00 +0000\r\n");
 
+        Console.WriteLine($"message of {raw.Length} bytes (2 KB) and of {tiny.Length} bytes (headers only, 'tiny'); B/op = bytes allocated per operation");
         Measure("MimeMessage.Parse", () => { Mta.Mime.MimeMessage.Parse(raw); });
+        Measure("MessageHeaderEditor (Received only, ToArray)", () =>
+        {
+            var e = new Mta.Mime.MessageHeaderEditor(raw);
+            e.PrependRawWithoutCopy(received);
+            e.ToArray();
+        });
         Measure("MessageHeaderEditor (remove Bcc, 2 prepends, Received, ToArray)", () =>
         {
             var e = new Mta.Mime.MessageHeaderEditor(raw);
             e.Remove("Bcc");
             e.Prepend("Message-ID", "<x@y>");
             e.Prepend("Date", "Mon, 12 Oct 2026 08:00:00 +0000");
-            e.PrependRaw(received);
+            e.PrependRawWithoutCopy(received);
             e.ToArray();
         });
-        Measure("MessageContentExtractor.Extract", () => { Mta.Mime.MessageContentExtractor.Extract(raw, 262144); });
-        Measure("AddressList.Parse(From)", () => { Mta.Mime.AddressList.Parse("Tester <news@bench.test>").Mailboxes.ToList(); });
+        var parsedOnce = Mta.Mime.MimeMessage.Parse(raw);
+        Measure("MessageContentExtractor.Extract(raw) (parses itself)", () => { Mta.Mime.MessageContentExtractor.Extract(raw, 262144); });
+        Measure("MessageContentExtractor.Extract(parsed message)", () => { Mta.Mime.MessageContentExtractor.Extract(parsedOnce, 262144); });
+        Measure("AddressList.Parse(From) + GetCommonDomain", () => { Mta.Mime.AddressList.Parse("Tester <news@bench.test>").GetCommonDomain(out _); });
         Measure("Ids.New + EmailAddress.Parse x2", () => { Mta.Core.Ids.New(); Mta.Core.EmailAddress.Parse("rcpt0@dest.test"); Mta.Core.EmailAddress.Parse("load0@bench.test"); });
 
-        var storage = new Mta.Storage.InMemory.InMemoryStorage(new Mta.Storage.StorageOptions());
-        await storage.InitializeAsync(default);
         var tenant = new Mta.Storage.Tenant(Guid.NewGuid(), "T", "t", true, DateTimeOffset.UtcNow, false);
-        await storage.Config.UpsertDomainAsync(new Mta.Storage.DomainRecord(Guid.NewGuid(), tenant.Id, "bench.test", Mta.Storage.DomainStatus.Verified, null, false, DateTimeOffset.UtcNow, null, null, 0, null, false, null), default);
-        var submission = new Mta.Host.Submission.SubmissionService(storage, Mta.Core.SystemClock.Instance, new Mta.Policy.SenderPolicy(), new Mta.Storage.StorageOptions());
-        var request = new Mta.Host.Submission.SubmissionRequest { Tenant = tenant, Source = Mta.Storage.MessageSource.Smtp, EnvelopeFrom = Mta.Core.EmailAddress.Parse("load0@bench.test"), Recipients = [Mta.Core.EmailAddress.Parse("rcpt0@dest.test")], Message = raw, ReceivedHeader = received };
-        await submission.SubmitAsync(request, default);
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        const int n = 5000;
-        for (int i = 0; i < n; i++) { await submission.SubmitAsync(request, default); }
-        Console.WriteLine($"{"SubmissionService.SubmitAsync (InMemory storage, history Full)",-70} {(GC.GetAllocatedBytesForCurrentThread() - before) / n,8} B/op");
+        string dir = Directory.CreateTempSubdirectory("eggmail-micro-").FullName;
+        try
+        {
+            foreach (var (label, storage) in new (string, Mta.Storage.IStorage)[]
+            {
+                ("InMemory", new Mta.Storage.InMemory.InMemoryStorage(new Mta.Storage.StorageOptions())),
+                ("SQLite (sync off)", Mta.Storage.Sqlite.SqliteStorage.Create(new Mta.Storage.StorageOptions { Sqlite = new Mta.Storage.SqliteOptions { DataDirectory = dir, SyncMode = Mta.Storage.SqliteSyncMode.Off } })),
+            })
+            {
+                await storage.InitializeAsync(default);
+                await storage.Config.UpsertDomainAsync(new Mta.Storage.DomainRecord(Guid.NewGuid(), tenant.Id, "bench.test", Mta.Storage.DomainStatus.Verified, null, false, DateTimeOffset.UtcNow, null, null, 0, null, false, null), default);
+                var options = new Mta.Storage.StorageOptions();
+                var submission = new Mta.Host.Submission.SubmissionService(storage, Mta.Core.SystemClock.Instance, new Mta.Policy.SenderPolicy(), options);
+                foreach (var (size, message) in new[] { ("2 KB", raw), ("tiny", tiny) })
+                {
+                    var request = new Mta.Host.Submission.SubmissionRequest { Tenant = tenant, Source = Mta.Storage.MessageSource.Smtp, EnvelopeFrom = Mta.Core.EmailAddress.Parse("load0@bench.test"), Recipients = [Mta.Core.EmailAddress.Parse("rcpt0@dest.test")], Message = message, ReceivedHeader = received };
+                    await MeasureAsync($"SubmissionService.SubmitAsync, {label}, history Full, {size}", async () => { await submission.SubmitAsync(request, default); });
+                    if (label != "InMemory")
+                    {
+                        await MeasureConcurrentAsync($"SubmissionService.SubmitAsync, {label}, history Full, {size}, 32 concurrent", () => submission.SubmitAsync(request, default).AsTask());
+                    }
+                }
+
+                await storage.DisposeAsync();
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch (IOException) { }
+        }
+
     }
 
     private static void Measure(string name, Action action)
     {
-        for (int i = 0; i < 100; i++) { action(); }
+        for (int i = 0; i < 200; i++) { action(); }
         long before = GC.GetAllocatedBytesForCurrentThread();
         const int n = 10000;
         for (int i = 0; i < n; i++) { action(); }
-        Console.WriteLine($"{name,-70} {(GC.GetAllocatedBytesForCurrentThread() - before) / n,8} B/op");
+        Console.WriteLine($"{name,-80} {(GC.GetAllocatedBytesForCurrentThread() - before) / n,8} B/op");
+    }
+
+    /// <summary>The same operation from 32 concurrent callers, so a writer can group commit (the per-batch cost is shared by the batch).</summary>
+    private static async Task MeasureConcurrentAsync(string name, Func<Task> action)
+    {
+        const int callers = 32;
+        async Task Run(int each) { for (int i = 0; i < each; i++) { await action(); } }
+        await Task.WhenAll(Enumerable.Range(0, callers).Select(_ => Run(20)));
+        GC.Collect();
+        _sampler?.Reset();
+        long before = GC.GetTotalAllocatedBytes(precise: true);
+        const int each = 400;
+        await Task.WhenAll(Enumerable.Range(0, callers).Select(_ => Run(each)));
+        Console.WriteLine($"{name,-80} {(GC.GetTotalAllocatedBytes(precise: true) - before) / (callers * each),8} B/op");
+        _sampler?.Print(14);
+    }
+
+    private static async Task MeasureAsync(string name, Func<Task> action)
+    {
+        for (int i = 0; i < 300; i++) { await action(); }
+        GC.Collect();
+        _sampler?.Reset();
+        long before = GC.GetTotalAllocatedBytes(precise: true);
+        const int n = 20000;
+        for (int i = 0; i < n; i++) { await action(); }
+        Console.WriteLine($"{name,-80} {(GC.GetTotalAllocatedBytes(precise: true) - before) / n,8} B/op");
+        _sampler?.Print(14);
     }
 }

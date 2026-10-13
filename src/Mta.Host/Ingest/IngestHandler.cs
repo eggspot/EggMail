@@ -133,6 +133,7 @@ public sealed class IngestHandler : ISmtpServerHandler
         return ValueTask.FromResult(SmtpReplies.RecipientOk);
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<SmtpReply> OnMessageAsync(SmtpMessage message, CancellationToken ct)
     {
         try
@@ -152,6 +153,7 @@ public sealed class IngestHandler : ISmtpServerHandler
         }
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<SmtpReply> HandleSubmissionAsync(SmtpMessage message, CancellationToken ct)
     {
         if (message.Session.HandlerState is not State state)

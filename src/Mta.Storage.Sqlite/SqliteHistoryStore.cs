@@ -106,7 +106,7 @@ internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore, IMes
             .Set(6, m.Recipients.Count).Set(7, (long)m.Raw.Length).Set(8, s.Content is null ? 0 : 1)
             .ExecuteNonQuery();
 
-        SqliteCommand rcpt = ctx.Command(HistorySql.RecipientInsert).Set(0, day).Set(1, m.MessageId);
+        PreparedCommand rcpt = ctx.Command(HistorySql.RecipientInsert).Set(0, day).Set(1, m.MessageId);
         foreach (AcceptedRecipient r in m.Recipients)
         {
             rcpt.Set(2, AddressText.Format(r.Address).ToLowerInvariant()).ExecuteNonQuery();
@@ -121,8 +121,8 @@ internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore, IMes
         }
 
         ctx.Command(HistorySql.EventInsert)
-            .Set(0, day).Set(1, m.MessageId).Set(2, s.EventId).Set(3, null).Set(4, m.TenantId).Set(5, (long)MessageEventType.Queued).Set(6, received)
-            .Set(7, null).Set(8, null).Set(9, null).Set(10, null).Set(11, null).Set(12, null).Set(13, null)
+            .Set(0, day).Set(1, m.MessageId).Set(2, s.EventId).SetNull(3).Set(4, m.TenantId).Set(5, (long)MessageEventType.Queued).Set(6, received)
+            .SetNull(7).SetNull(8).SetNull(9).SetNull(10).SetNull(11).SetNull(12).SetNull(13)
             .ExecuteNonQuery();
         return 0;
     };
@@ -134,7 +134,7 @@ internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore, IMes
     {
         int day = StorageTime.DayNumber(s.MessageId);
         AttemptPlan plan = s.Plan;
-        SqliteCommand insert = ctx.Command(HistorySql.EventInsert);
+        PreparedCommand insert = ctx.Command(HistorySql.EventInsert);
         foreach (MessageEvent e in plan.Events)
         {
             insert.Set(0, day).Set(1, s.MessageId).Set(2, e.EventId).Set(3, e.DeliveryId).Set(4, e.TenantId).Set(5, (long)e.Type).Set(6, StorageTime.ToUnixMs(e.At))
@@ -146,7 +146,7 @@ internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore, IMes
         {
             int recipients, final, delivered, failed;
             string status;
-            using (SqliteDataReader r = ctx.Command(HistorySql.IndexCounts)
+            using (RawReader r = ctx.Command(HistorySql.IndexCounts)
                 .Set(0, plan.IsFinal ? 1 : 0).Set(1, plan.Delivered ? 1 : 0).Set(2, plan.Failed ? 1 : 0).Set(3, day).Set(4, s.MessageId).ExecuteReader())
             {
                 if (!r.Read())
