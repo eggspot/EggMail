@@ -33,7 +33,18 @@ public sealed record MessageDetailResponse(
     MessageContentResponse Content,
     bool RawRetained);
 
-public sealed record TlsResponse(bool Used, string? Version, string? Cipher, bool Verified, string? Policy, string? PeerSubject, string? PeerIssuer, string? PeerSha256, string? PolicyErrors, bool StartTlsAdvertised, bool PlaintextFallback);
+public sealed record TlsResponse(
+    bool Used,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Version,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Cipher,
+    bool Verified,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Policy,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? PeerSubject,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? PeerIssuer,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? PeerSha256,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? PolicyErrors,
+    bool StartTlsAdvertised,
+    bool PlaintextFallback);
 
 public sealed record MessageEventResponse(Guid Id, string Type, DateTimeOffset At, string? Recipient, int? SmtpCode, string? EnhancedCode, string? Message, string? MxHost, string? Route, TlsResponse? Tls);
 

@@ -87,18 +87,18 @@ public sealed record SwitchCutoverPatch(string Kind, string Text);
 /// </summary>
 public sealed record SwitchStatusReport(
     string State,
-    Guid? SwitchId = null,
-    SwitchDirection? Direction = null,
-    string? Mode = null,
-    IReadOnlyList<string>? Include = null,
-    SwitchProgress? Progress = null,
-    SwitchVerifyReport? VerifyReport = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] Guid? SwitchId = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] SwitchDirection? Direction = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Mode = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<string>? Include = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] SwitchProgress? Progress = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] SwitchVerifyReport? VerifyReport = null,
     SwitchCutoverPatch? CutoverPatch = null,
     bool OrchestratorManaged = false,
-    DateTimeOffset? StartedAt = null,
-    DateTimeOffset? UpdatedAt = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DateTimeOffset? StartedAt = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DateTimeOffset? UpdatedAt = null,
     string? Error = null,
-    [property: JsonPropertyName("available")] bool Available = true);
+    bool Available = true);
 
 /// <summary>
 /// The backend-switch engine (design section 4.6; decision 14: manual, symmetric, never automatic). The HTTP API is a thin layer over this interface and

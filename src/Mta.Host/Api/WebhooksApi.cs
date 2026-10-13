@@ -42,7 +42,7 @@ public sealed record WebhookResponse(
     bool SecretRotationPending,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Secret = null);
 
-public sealed record WebhookAttemptResponse(string Id, Guid OutboxId, string? EventType, DateTimeOffset At, int? Status, long DurationMs, string? ErrorClass, string? Snippet);
+public sealed record WebhookAttemptResponse(string Id, Guid OutboxId, [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? EventType, DateTimeOffset At, int? Status, long DurationMs, string? ErrorClass, string? Snippet);
 
 public sealed record OutboxResponse(Guid OutboxId, string? Status = null);
 

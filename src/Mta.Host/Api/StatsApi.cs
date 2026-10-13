@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -22,7 +23,7 @@ public sealed record StatsRowResponse(
 
 public sealed record StatsResponse(string Granularity, IReadOnlyList<StatsRowResponse> Rows);
 
-public sealed record RecentEventResponse(DateTimeOffset At, string Type, string RecipientDomain, string? SendingDomain, Guid TenantId, string? Code);
+public sealed record RecentEventResponse(DateTimeOffset At, string Type, string RecipientDomain, [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? SendingDomain, Guid TenantId, string? Code);
 
 /// <summary>Statistics and the content-free recent-events ring (scope <c>read</c>; available on every backend and in both history modes).</summary>
 public sealed class StatsApi(ApiAuthenticator auth, IStorage storage, ApiOptions options, IClock clock)
