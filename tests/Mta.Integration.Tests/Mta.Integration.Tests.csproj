@@ -9,6 +9,11 @@
     <PackageReference Include="xunit.runner.visualstudio" />
     <PackageReference Include="MailKit" />
     <PackageReference Include="MimeKit" />
+    <PackageReference Include="Npgsql" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The throwaway PostgreSQL cluster used by the storage tests; the pipeline tests run on PostgreSQL too when one is available. -->
+    <Compile Include="..\Mta.Storage.Postgres.Tests\Support\PostgresTestServer.cs" Link="Support\PostgresTestServer.cs" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Mta.Host\Mta.Host.csproj" />
