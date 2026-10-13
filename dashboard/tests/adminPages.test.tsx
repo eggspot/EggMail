@@ -4,7 +4,7 @@ import Certificates from '../src/pages/admin/Certificates';
 import Status from '../src/pages/admin/Status';
 import Tenants from '../src/pages/admin/Tenants';
 import type { AdminStatus, MaintenanceState, Tenant } from '../src/api/types';
-import { json, mockFetch, renderWithApp } from './helpers';
+import { json, mockFetch, problem, renderWithApp } from './helpers';
 
 const adminStatus: AdminStatus = {
   version: '0.1.0',
@@ -66,6 +66,19 @@ describe('Server status: maintenance', () => {
 
     mockFetch({ 'GET /api/v1/admin/status': adminStatus, 'GET /api/v1/admin/maintenance': { running: false, startedAt: null, finishedAt: null, error: null, reports: [] } });
     renderWithApp(<Status />, { role: 'admin' });
+    expect(await screen.findByText(/No maintenance run since the server started/)).toBeTruthy();
+  });
+
+  it('shows an error with a retry instead of spinning when the report cannot be loaded', async () => {
+    let fail = true;
+    mockFetch({
+      'GET /api/v1/admin/status': adminStatus,
+      'GET /api/v1/admin/maintenance': () => (fail ? problem(500, 'server_error') : { running: false, startedAt: null, finishedAt: null, error: null, reports: [] }),
+    });
+    renderWithApp(<Status />, { role: 'admin' });
+    expect(await screen.findByText('The maintenance report could not be loaded')).toBeTruthy();
+    fail = false;
+    fireEvent.click(within(screen.getByText('The maintenance report could not be loaded').closest('[role="alert"]') as HTMLElement).getByRole('button', { name: 'Try again' }));
     expect(await screen.findByText(/No maintenance run since the server started/)).toBeTruthy();
   });
 

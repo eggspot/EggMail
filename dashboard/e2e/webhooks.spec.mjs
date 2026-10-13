@@ -1,5 +1,22 @@
 import crypto from 'node:crypto';
-import { expect, test, unique } from './support/fixtures.mjs';
+import { test as base, expect, unique } from './support/fixtures.mjs';
+
+// The receiver is shared by the worker, and a delivery that failed in one test is retried later, possibly during another test:
+// every lookup is therefore limited to the unique URL (path and query) of the test's own endpoint, and a test that makes the
+// receiver fail cannot leave it failing for the next one.
+const test = base.extend({
+  receiverReset: [
+    async ({ stack }, use) => {
+      await use();
+      stack.webhooks.respondWith(200);
+    },
+    { auto: true },
+  ],
+});
+const receivedAt = (stack, url) => {
+  const target = new URL(url);
+  return stack.webhooks.requests.filter((r) => r.url === target.pathname + target.search);
+};
 
 /** Standard Webhooks: HMAC-SHA256 over "<id>.<timestamp>.<body>" with the base64 part of the whsec_ secret as key. */
 function signatureFor(secret, request) {
@@ -13,7 +30,6 @@ const endpointCard = (page, url) => page.locator('section.card').filter({ has: p
 test.describe('webhooks', () => {
   test('internal addresses are refused until an administrator allows them; then an endpoint is created and tested with a verifiable signature', async ({ adminPage: page, admin, tenant, stack }) => {
     const url = `${stack.webhooks.url}?t=${unique('')}`;
-    stack.webhooks.requests.length = 0;
     stack.webhooks.respondWith(200);
 
     // The SSRF guard refuses loopback, with the message on the URL field.
@@ -37,8 +53,8 @@ test.describe('webhooks', () => {
     // A test event reaches the receiver, signed with the secret that was shown.
     await card.getByRole('button', { name: 'Send test event' }).click();
     await expect(card.getByText('Test event sent.')).toBeVisible();
-    await expect.poll(() => stack.webhooks.requests.length, { timeout: 30_000 }).toBeGreaterThan(0);
-    const request = stack.webhooks.requests.at(-1);
+    await expect.poll(() => receivedAt(stack, url).length, { timeout: 30_000 }).toBeGreaterThan(0);
+    const request = receivedAt(stack, url).at(-1);
     expect(request.method).toBe('POST');
     expect(JSON.parse(request.body).type).toBe('webhook.test');
     expect(request.headers['webhook-signature'].split(' ')).toContain(signatureFor(secret, request));
@@ -51,7 +67,6 @@ test.describe('webhooks', () => {
     await admin.ok('PUT', '/api/v1/settings', { values: { 'Webhooks:AllowedNetworks': '127.0.0.0/8' } }, { tenantId: tenant.id });
     const url = `${stack.webhooks.url}?fail=${unique('')}`;
     await admin.ok('POST', '/api/v1/webhooks', { url, event_types: ['message.delivered'] }, { tenantId: tenant.id });
-    stack.webhooks.requests.length = 0;
 
     await page.goto('/webhooks');
     const card = endpointCard(page, url);
@@ -74,11 +89,11 @@ test.describe('webhooks', () => {
     await card.getByRole('button', { name: 'Send test event' }).click();
     const ok = attemptRows.filter({ hasText: '200' });
     await expect(ok.first()).toBeVisible({ timeout: 30_000 });
-    const before = stack.webhooks.requests.length;
+    const before = receivedAt(stack, url).length;
     await ok.first().getByRole('button', { name: /^Replay/ }).click();
     await page.getByRole('dialog').getByRole('button', { name: 'Replay delivery' }).click();
     await expect(page.getByText('Delivery re-queued.')).toBeVisible();
-    await expect.poll(() => stack.webhooks.requests.length, { timeout: 30_000 }).toBeGreaterThan(before);
+    await expect.poll(() => receivedAt(stack, url).length, { timeout: 30_000 }).toBeGreaterThan(before);
     // The replay is a new attempt in the log (the earlier failed delivery may also be retried meanwhile and succeed now).
     await expect.poll(() => attemptRows.filter({ hasText: '200' }).count(), { timeout: 30_000 }).toBeGreaterThanOrEqual(2);
   });
@@ -122,7 +137,6 @@ test.describe('webhooks', () => {
     const url = `${stack.webhooks.url}?rotate=${unique('')}`;
     const created = await admin.ok('POST', '/api/v1/webhooks', { url, event_types: ['message.delivered'] }, { tenantId: tenant.id });
     stack.webhooks.respondWith(200);
-    stack.webhooks.requests.length = 0;
 
     await page.goto('/webhooks');
     const card = endpointCard(page, url);
@@ -137,8 +151,8 @@ test.describe('webhooks', () => {
 
     // Deliveries carry a signature for the new and the previous secret.
     await card.getByRole('button', { name: 'Send test event' }).click();
-    await expect.poll(() => stack.webhooks.requests.length, { timeout: 30_000 }).toBeGreaterThan(0);
-    const both = stack.webhooks.requests.at(-1);
+    await expect.poll(() => receivedAt(stack, url).length, { timeout: 30_000 }).toBeGreaterThan(0);
+    const both = receivedAt(stack, url).at(-1);
     const signatures = both.headers['webhook-signature'].split(' ');
     expect(signatures).toContain(signatureFor(newSecret, both));
     expect(signatures).toContain(signatureFor(created.secret, both));
@@ -147,10 +161,10 @@ test.describe('webhooks', () => {
     await card.getByRole('button', { name: 'Remove previous secret' }).click();
     await page.getByRole('dialog').getByRole('button', { name: 'Remove previous secret' }).click();
     await expect(card.getByText('Secret rotation in progress')).toHaveCount(0);
-    stack.webhooks.requests.length = 0;
+    const beforeRemoval = receivedAt(stack, url).length;
     await card.getByRole('button', { name: 'Send test event' }).click();
-    await expect.poll(() => stack.webhooks.requests.length, { timeout: 30_000 }).toBeGreaterThan(0);
-    const only = stack.webhooks.requests.at(-1);
+    await expect.poll(() => receivedAt(stack, url).length, { timeout: 30_000 }).toBeGreaterThan(beforeRemoval);
+    const only = receivedAt(stack, url).at(-1);
     expect(only.headers['webhook-signature'].split(' ')).toEqual([signatureFor(newSecret, only)]);
   });
 
@@ -160,7 +174,6 @@ test.describe('webhooks', () => {
     const url = `${stack.webhooks.url}?events=${unique('')}`;
     const hook = await admin.ok('POST', '/api/v1/webhooks', { url, event_types: ['message.delivered'] }, { tenantId: tenant.id });
     stack.webhooks.respondWith(200);
-    stack.webhooks.requests.length = 0;
     const domain = await createVerifiedDomain(admin, stack, tenant);
     const recipientDomain = createRecipientDomain(stack);
     const key = (await admin.ok('POST', '/api/v1/api-keys', { name: 'hook-send', scopes: ['send'] }, { tenantId: tenant.id })).key;
@@ -168,8 +181,8 @@ test.describe('webhooks', () => {
     const sent = await sendViaApi(stack, key, { from: `hello@${domain.name}`, to: [`erin@${recipientDomain}`], subject, text: 'x' });
     expect(sent.status).toBe(202);
 
-    await expect.poll(() => stack.webhooks.requests.some((r) => JSON.parse(r.body).type === 'message.delivered'), { timeout: 60_000 }).toBe(true);
-    const request = stack.webhooks.requests.find((r) => JSON.parse(r.body).type === 'message.delivered');
+    await expect.poll(() => receivedAt(stack, url).some((r) => JSON.parse(r.body).type === 'message.delivered'), { timeout: 60_000 }).toBe(true);
+    const request = receivedAt(stack, url).find((r) => JSON.parse(r.body).type === 'message.delivered');
     expect(request.headers['webhook-signature'].split(' ')).toContain(signatureFor(hook.secret, request));
     expect(request.body).toContain(sent.body.id);
 

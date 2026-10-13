@@ -9,7 +9,7 @@ test.describe('sign-in, sign-out and CSRF', () => {
     await expect(page.locator('[data-warning="sqlite_sync_off"]')).toBeVisible();
 
     await signInThroughForm(page, baseURL, ADMIN_USER, 'definitely-not-the-password');
-    await expect(page.getByRole('alert').filter({ hasText: /not signed in|password|credentials|Invalid/i })).toBeVisible();
+    await expect(page.getByRole('alert').filter({ hasText: 'The user name or password is not correct.' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Sign out' })).toHaveCount(0);
 
     await page.getByLabel('Password').fill(ADMIN_PASSWORD);

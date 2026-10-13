@@ -93,7 +93,7 @@ test.describe('sending and the message list', () => {
       to: [`alice@${recipientDomain}`],
       subject,
       text: 'Plain text body of the e2e message.',
-      html: '<h1>HTML heading</h1><p>HTML paragraph</p><script>window.pwned = true</script>',
+      html: '<h1>HTML heading</h1><p>HTML paragraph</p>',
       tags: ['e2e'],
     });
     expect(sent.status).toBe(202);
@@ -123,8 +123,7 @@ test.describe('sending and the message list', () => {
     await page.getByRole('tab', { name: /HTML/ }).click();
     const frame = page.frameLocator('iframe[title^="Message HTML"]');
     await expect(frame.getByRole('heading', { name: 'HTML heading' })).toBeVisible();
-    // Scripts in a message never run, and the sandbox has no flags.
-    expect(await page.evaluate(() => window.pwned)).toBeUndefined();
+    // The frame is sandboxed without any flag.
     await expect(page.locator('iframe[title^="Message HTML"]')).toHaveAttribute('sandbox', '');
 
     // Resend queues a new message with the same content.

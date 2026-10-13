@@ -45,7 +45,23 @@ export async function sendViaApi(stack, key, message) {
   return { status: response.status, body: await response.json() };
 }
 
+/** Attaches the tail of a server's log to a failed test (the server writes it to a temp file that is deleted with the stack). */
+export async function attachServerLogOnFailure(testInfo, stack, name = 'server.log') {
+  if (testInfo.status === testInfo.expectedStatus) return;
+  try {
+    await testInfo.attach(name, { body: stack.log().slice(-200_000), contentType: 'text/plain' });
+  } catch { /* the log is only a help */ }
+}
+
 export const test = base.extend({
+  attachServerLog: [
+    async ({ stack }, use, testInfo) => {
+      await use();
+      await attachServerLogOnFailure(testInfo, stack);
+    },
+    { auto: true },
+  ],
+
   // One real server (and its fakes) per worker.
   stack: [
     async ({}, use) => {
@@ -82,7 +98,8 @@ export const test = base.extend({
   },
 
   // Fails a test on page errors, console errors and any Content-Security-Policy violation. Failed requests that a test provokes
-  // on purpose (401, 403, 404, 409, 429 ...) show up as "Failed to load resource" console lines and are not counted.
+  // on purpose (401, 403, 404, 409, 429 ...) show up as "Failed to load resource" console lines and are not counted. A 5xx is a
+  // server defect: it is never filtered here; a test that provokes one lists it in allowProblems.
   problems: [
     async ({ page, allowProblems }, use) => {
       const problems = [];
@@ -90,7 +107,7 @@ export const test = base.extend({
       page.on('console', (m) => {
         const text = m.text();
         if (m.type() !== 'error' && m.type() !== 'warning') return;
-        if (/Failed to load resource: the server responded with a status of [45]\d\d/.test(text)) return;
+        if (/Failed to load resource: the server responded with a status of 4\d\d/.test(text)) return;
         // A message that carries a <script> proves the sandbox: the browser reports that it refused to run it.
         if (/Blocked script execution in 'about:srcdoc' because the document's frame is sandboxed/.test(text)) return;
         problems.push(`console.${m.type()}: ${text}`);

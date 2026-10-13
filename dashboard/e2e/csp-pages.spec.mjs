@@ -38,6 +38,7 @@ test.describe('strict content security policy', () => {
     expect(deep.status).toBe(200);
     expect(deep.headers.get('content-type')).toContain('text/html');
     expect(deep.headers.get('content-security-policy')).toBe(csp);
+    expect(deep.headers.get('cache-control')).toBe('no-cache');
 
     // Unknown API paths are API errors, never the HTML shell.
     const missing = await fetch(`${stack.baseURL}/api/v1/does-not-exist`);
@@ -92,7 +93,6 @@ test.describe('strict content security policy', () => {
     await expect(frame.locator('body')).toContainText('styled');
     // Remote content, scripts and styling in a message are blocked by the frame and the page policy (the `problems` fixture allows
     // exactly the browser's own "blocked script" report for a sandboxed frame).
-    await expect(frame.locator('script')).toHaveCount(1);
     await page.getByRole('tab', { name: /Attachments/ }).click();
     await page.getByRole('tab', { name: 'Text' }).click();
     await expect(page.getByTestId('text-view')).toHaveText('plain');

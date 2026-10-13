@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { ApiClient } from './support/apiClient.mjs';
-import { test as base, expect, ADMIN_PASSWORD, ADMIN_USER, createRecipientDomain, createVerifiedDomain, sendViaApi, signInThroughForm, unique } from './support/fixtures.mjs';
+import { test as base, attachServerLogOnFailure, expect, ADMIN_PASSWORD, ADMIN_USER, createRecipientDomain, createVerifiedDomain, sendViaApi, signInThroughForm, unique } from './support/fixtures.mjs';
 import { provisionPostgres } from './support/postgres.mjs';
 import { startStack } from './support/stack.mjs';
 
@@ -30,6 +30,7 @@ const test = base.extend({
     const stack = await startStack({ name: 'switch', switchConnections: { pg: connectionString }, extraArgs: extraServerArgs });
     stack.postgresConnectionString = connectionString;
     await use(stack);
+    await attachServerLogOnFailure(testInfo, stack, 'switch-server.log');
     await stack.stop();
   },
 });
@@ -41,13 +42,12 @@ async function seed(stack) {
   const domain = await createVerifiedDomain(admin, stack, tenant);
   const recipientDomain = createRecipientDomain(stack);
   const key = (await admin.ok('POST', '/api/v1/api-keys', { name: 'carried key', scopes: ['send', 'read'] }, { tenantId: tenant.id })).key;
-  const webhook = await admin.ok('POST', '/api/v1/webhooks', { url: 'https://hooks.example.test/carried', event_types: ['message.delivered'] }, { tenantId: tenant.id }).catch(() => null);
   await admin.ok('POST', '/api/v1/suppressions', { address: `carried@${recipientDomain}`, reason: 'manual' }, { tenantId: tenant.id });
   const subject = unique('Carried message ');
   const sent = await sendViaApi(stack, key, { from: `hello@${domain.name}`, to: [`someone@${recipientDomain}`], subject, text: 'before the switch' });
   expect(sent.status).toBe(202);
   await expect.poll(async () => (await admin.ok('GET', `/api/v1/messages?subject=${encodeURIComponent(subject)}`, undefined, { tenantId: tenant.id })).items[0]?.status, { timeout: 60_000 }).toBe('delivered');
-  return { admin, tenant, domain, key, subject, recipientDomain, webhook };
+  return { admin, tenant, domain, key, subject, recipientDomain };
 }
 
 /** Runs the wizard from the first step to the verification report. */
@@ -137,7 +137,8 @@ test.describe('storage switch wizard (SQLite to PostgreSQL)', () => {
     expect((await data.admin.ok('GET', '/api/v1/admin/storage/switch')).state).toBe('rolled_back');
   });
 
-  test('a full switch: verify, confirm, activate (bootstrap file), restart on PostgreSQL, finalize; the data came along', async ({ ownStack: stack, page, context }) => {
+  test('a full switch: verify, confirm, activate (bootstrap file), restart on PostgreSQL, finalize; the data came along', async ({ ownStack: stack, page, context, allowProblems }) => {
+    allowProblems.push(/status of 503/); // finalize without SwitchSource:* is refused with 503 not_ready, on purpose (asserted below)
     const data = await seed(stack);
     await context.addCookies([{ name: 'eggmail_session', value: data.admin.sessionCookieValue, url: stack.baseURL, httpOnly: true, sameSite: 'Strict' }]);
     await startSwitchToPostgres(page, stack.baseURL);

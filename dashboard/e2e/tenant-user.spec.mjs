@@ -1,5 +1,5 @@
 import { ApiClient } from './support/apiClient.mjs';
-import { test as base, expect, ADMIN_PASSWORD, ADMIN_USER, signInThroughForm, unique } from './support/fixtures.mjs';
+import { test as base, attachServerLogOnFailure, expect, ADMIN_PASSWORD, ADMIN_USER, signInThroughForm, unique } from './support/fixtures.mjs';
 import { startStack } from './support/stack.mjs';
 
 const ALICE = { user: 'alice', password: 'alice-long-password-1', tenantName: 'Alice Corp' };
@@ -15,6 +15,13 @@ const test = base.extend({
       await stack.stop();
     },
     { scope: 'worker', timeout: 240_000 },
+  ],
+  accountsLog: [
+    async ({ accounts }, use, testInfo) => {
+      await use();
+      await attachServerLogOnFailure(testInfo, accounts, 'accounts-server.log');
+    },
+    { auto: true },
   ],
 });
 

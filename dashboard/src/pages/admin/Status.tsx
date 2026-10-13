@@ -174,7 +174,9 @@ export default function Status(_props: Record<string, unknown>) {
           </Card>
 
           <Card title="Maintenance">
-            {!job.data ? (
+            {job.error !== undefined && !job.data ? (
+              <ErrorNotice error={job.error} onRetry={job.reload} title="The maintenance report could not be loaded" />
+            ) : !job.data ? (
               <Loading />
             ) : job.data.running ? (
               <p role="status">

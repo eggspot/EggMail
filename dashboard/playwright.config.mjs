@@ -9,10 +9,13 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   retries: 0,
+  // A red run should stop early: every extra minute is billed.
+  maxFailures: process.env.CI ? 3 : 0,
+  globalSetup: './e2e/global-setup.mjs',
   forbidOnly: !!process.env.CI,
   timeout: 120_000,
   expect: { timeout: 15_000 },
-  reporter: process.env.CI ? [['list'], ['html', { open: 'never', outputFolder: 'e2e-report' }]] : [['list']],
+  reporter: [['list']],
   outputDir: 'e2e-results',
   use: {
     ...devices['Desktop Chrome'],

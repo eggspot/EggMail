@@ -36,15 +36,17 @@ function run(command, args, options) {
 
 let publishedAppDir;
 /**
- * Publishes the host once per test run (`dotnet publish`, incremental when CI already built Release) and puts the production
- * dashboard build into its wwwroot, which is exactly what the Docker image contains.
+ * The published host with the production dashboard build in its wwwroot, which is exactly what the Docker image contains.
+ * `global-setup.mjs` calls it once per run with `EGGMAIL_E2E_APP_DIR` pointing at an empty directory (`publish` true runs `dotnet
+ * publish`, incremental when CI already built Release). With an existing directory only wwwroot is refreshed.
  */
-export function publishApp() {
+export function publishApp(publish = false) {
   if (publishedAppDir) return publishedAppDir;
   const dist = path.join(dashboardDir, 'dist');
   if (!fs.existsSync(path.join(dist, 'index.html'))) throw new Error('dashboard/dist is missing: run `npm run build` first.');
-  const appDir = process.env.EGGMAIL_E2E_APP_DIR ?? path.join(os.tmpdir(), `eggmail-e2e-app-${process.pid}`);
-  if (!process.env.EGGMAIL_E2E_APP_DIR) {
+  const appDir = process.env.EGGMAIL_E2E_APP_DIR;
+  if (!appDir) throw new Error('EGGMAIL_E2E_APP_DIR is not set: the Playwright global setup publishes the host.');
+  if (publish) {
     run('dotnet', ['publish', path.join(repoRoot, 'src', 'Mta.Host', 'Mta.Host.csproj'), '-c', 'Release', '-o', appDir, '--nologo', '-v', 'q'], { cwd: repoRoot });
   }
   fs.rmSync(path.join(appDir, 'wwwroot'), { recursive: true, force: true });
@@ -66,7 +68,8 @@ export function publishApp() {
  * given the accounts, and started again.
  */
 export async function startStack({ name = 'main', tenantUsers = [], switchConnections = {}, extraArgs = [] } = {}) {
-  const appDir = publishApp();
+  const appDir = process.env.EGGMAIL_E2E_APP_DIR;
+  if (!appDir) throw new Error('EGGMAIL_E2E_APP_DIR is not set: the Playwright global setup publishes the host.');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), `eggmail-e2e-${name}-`));
   const dataDir = path.join(root, 'data');
   fs.mkdirSync(dataDir, { recursive: true });

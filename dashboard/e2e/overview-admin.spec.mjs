@@ -64,7 +64,7 @@ test.describe('server administration', () => {
     await page.goto('/admin/status');
     await expect(page.getByRole('heading', { name: 'Server status', exact: true })).toBeVisible();
     const server = page.locator('section.card').filter({ has: page.getByRole('heading', { name: 'Server', exact: true }) });
-    await expect(server).toContainText('0.1.0');
+    await expect(server).toContainText(/\d+\.\d+\.\d+/);
     await expect(server).toContainText('sqlite');
     await expect(page.locator('section.card').filter({ has: page.getByRole('heading', { name: 'Storage health' }) })).toContainText('healthy');
     await expect(page.getByRole('table', { name: 'Certificate expiry' })).toContainText('CN=mta.eggmail.test');
@@ -76,7 +76,8 @@ test.describe('server administration', () => {
     await expect(page.locator('.chip', { hasText: 'finished' })).toBeVisible();
   });
 
-  test('certificates: a PEM upload is installed and becomes the active one; a wrong key, a duplicate and ACME without configuration are refused clearly', async ({ adminPage: page }) => {
+  test('certificates: a PEM upload is installed and becomes the active one; a wrong key, a duplicate and ACME without configuration are refused clearly', async ({ adminPage: page, allowProblems }) => {
+    allowProblems.push(/status of 503/); // ACME is not configured: the server answers 503 not_ready, on purpose
     const first = makeCertificate(`${unique('up')}.certs.test`);
     const other = makeCertificate(`${unique('other')}.certs.test`);
     await page.goto('/admin/certificates');
