@@ -232,22 +232,29 @@ describe('storage switch machine', () => {
     expect((await mock.post('/api/v1/admin/storage/switch/rollback')).data.state).toBe('rolled_back');
   });
 
-  it('shows the cutover patch only for orchestrator-managed deployments', async () => {
+  it('produces the cutover patch at activation for orchestrator-managed deployments, and the bootstrap note otherwise', async () => {
     await admin();
     await startSwitch({ target: { ...pgTarget, orchestrated: true } });
     await waitForState('verified');
     await mock.post('/api/v1/admin/storage/switch/confirm');
+    expect((await mock.get('/api/v1/admin/storage/switch')).data.cutoverPatch).toBeNull(); // not before the activation
+    await mock.post('/api/v1/admin/storage/switch/activate');
     const s = (await mock.get('/api/v1/admin/storage/switch')).data;
     expect(s.orchestratorManaged).toBe(true);
+    expect(s.cutoverPatch.kind).toBe('patch');
     expect(s.cutoverPatch.text).toContain('Storage__Backend=Postgres');
     expect(s.cutoverPatch.text).not.toMatch(/password=/i);
 
-    await mock.post('/__mock/reset');
-    await mock.login('admin');
+    await mock.close(); // an activated switch moves the mock to the other backend; start again from a fresh server
+    await admin();
     await startSwitch();
     await waitForState('verified');
     await mock.post('/api/v1/admin/storage/switch/confirm');
-    expect((await mock.get('/api/v1/admin/storage/switch')).data.cutoverPatch).toBeNull();
+    await mock.post('/api/v1/admin/storage/switch/activate');
+    const plain = (await mock.get('/api/v1/admin/storage/switch')).data;
+    expect(plain.orchestratorManaged).toBe(false);
+    expect(plain.cutoverPatch.kind).toBe('bootstrap');
+    expect(plain.cutoverPatch.text).toContain('bootstrap file');
   });
 
   it('is SQLite to PostgreSQL and back (symmetric)', async () => {

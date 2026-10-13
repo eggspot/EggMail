@@ -58,11 +58,14 @@ export function publishApp() {
  * `mta admin create`) together with the fakes it talks to: a DNS server (the domain checks and the recipients' MX), an SMTP sink
  * (the recipients' mail server) and a webhook receiver.
  *
+ * `switchConnections` ({ name: npgsqlConnectionString }) become `SwitchTarget:Connections:<name>`, the PostgreSQL targets the storage
+ * switch can reach.
+ *
  * `tenantUsers` ([{ user, password, tenantName }]) are dashboard accounts of role `tenant`. `mta admin create` needs the tenant to
  * exist and the SQLite data directory to be free, so the server is started once to create the tenants through the API, stopped,
  * given the accounts, and started again.
  */
-export async function startStack({ name = 'main', tenantUsers = [] } = {}) {
+export async function startStack({ name = 'main', tenantUsers = [], switchConnections = {}, extraArgs = [] } = {}) {
   const appDir = publishApp();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), `eggmail-e2e-${name}-`));
   const dataDir = path.join(root, 'data');
@@ -95,6 +98,8 @@ export async function startStack({ name = 'main', tenantUsers = [] } = {}) {
     configArgs.push(`--Smtp:Listeners:${listener}:Port=${port}`, `--Smtp:Listeners:${listener}:BindAddress=127.0.0.1`);
   }
   configArgs.push('--Smtp:Listeners:submissions:Enabled=false', '--Smtp:Listeners:alternate:Enabled=false');
+  configArgs.push(...extraArgs);
+  for (const [connectionName, connectionString] of Object.entries(switchConnections)) configArgs.push(`--SwitchTarget:Connections:${connectionName}=${connectionString}`);
 
   const env = { ...process.env, MTA_ADMIN_PASSWORD: '', DOTNET_NOLOGO: '1', DOTNET_CLI_TELEMETRY_OPTOUT: '1' };
   const cli = (...args) => run('dotnet', [path.join(appDir, 'mta.dll'), ...args, ...configArgs], { cwd: appDir, env });
@@ -156,6 +161,21 @@ export async function startStack({ name = 'main', tenantUsers = [] } = {}) {
     sink,
     webhooks,
     log: () => fs.readFileSync(logPath, 'utf8'),
+    /** Stops the server and starts it again with the same arguments: what an operator does after a switch wrote the bootstrap file. */
+    async restart(...extraRestartArgs) {
+      await stopServer();
+      configArgs.push(...extraRestartArgs);
+      await startServer();
+    },
+    /** Stops the server and starts it again with other storage settings: what an operator does after applying a cutover patch. */
+    async restartWithStorage(...storageArgs) {
+      await stopServer();
+      for (let i = configArgs.length - 1; i >= 0; i--) {
+        if (configArgs[i].startsWith('--Sqlite:DataDirectory=') || configArgs[i].startsWith('--Storage:')) configArgs.splice(i, 1);
+      }
+      configArgs.push(...storageArgs);
+      await startServer();
+    },
     async stop() {
       await stopServer();
       fs.closeSync(logFd);

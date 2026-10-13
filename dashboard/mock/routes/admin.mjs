@@ -96,13 +96,16 @@ function switchStatus(state) {
     out.progress = { phase: 'done', percent: 100, rowsDone: 205000, rowsTotal: 205000 };
     out.verifyReport = verifyReportFor(sw);
   }
-  if (st === 'confirmed' && sw.orchestratorManaged) {
+  // Like the server: the activation produces the patch (orchestrator-managed) or the bootstrap-file note, so they exist from "active" on.
+  if (st === 'active' && sw.orchestratorManaged) {
     out.cutoverPatch = {
-      kind: 'environment',
+      kind: 'patch',
       text: sw.to === 'postgres'
         ? 'Storage__Backend=Postgres\nStorage__Postgres__ConnectionString=<from secret eggmail-pg-connection>\n'
         : 'Storage__Backend=Sqlite\nStorage__Sqlite__DataDirectory=' + (sw.target?.path || '/data') + '\n',
     };
+  } else if (st === 'active') {
+    out.cutoverPatch = { kind: 'bootstrap', text: 'The bootstrap file /data/bootstrap.json now points at the ' + (sw.to === 'postgres' ? 'postgres' : 'sqlite') + ' target. Restart the application; the target becomes Active when it starts.' };
   } else {
     out.cutoverPatch = null;
   }

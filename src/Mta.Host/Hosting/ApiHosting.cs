@@ -40,7 +40,7 @@ public static class ApiHosting
         services.AddSingleton<Mta.Host.Switching.ISwitchTargetResolver>(new Mta.Host.Switching.ConfiguredSwitchTargetResolver(source));
         if (source is Microsoft.Extensions.Configuration.IConfigurationRoot root)
         {
-            services.AddSingleton<Mta.Storage.Portability.ISwitchActivator>(new Mta.Host.Switching.SwitchActivator(root, ConfigLoader.ResolveBootstrapPath()));
+            services.AddSingleton<Mta.Storage.Portability.ISwitchActivator>(new Mta.Host.Switching.SwitchActivator(root, root[ConfigLoader.BootstrapPathKey] ?? ConfigLoader.ResolveBootstrapPath()));
         }
 
         services.AddSingleton<IStorageSwitchService>(sp => new Mta.Host.Switching.StorageSwitchService(

@@ -40,7 +40,8 @@ export function friendlyMessage(err: unknown): string {
 export function errorFootnote(err: unknown): string {
   if (!(err instanceof ApiError)) return '';
   const parts: string[] = [];
-  if (err.detail && !MESSAGES[err.code]) parts.push(err.detail);
+  // not_ready is also how the server refuses a step it cannot do on this instance, with the reason in the detail.
+  if (err.detail && (!MESSAGES[err.code] || err.code === 'not_ready')) parts.push(err.detail);
   if (err.requestId) parts.push(`request id ${err.requestId}`);
   return parts.join(' - ');
 }

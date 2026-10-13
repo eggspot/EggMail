@@ -388,6 +388,7 @@ export type SwitchState =
   | 'fenced'
   | 'exporting'
   | 'importing'
+  | 'verifying'
   | 'verified'
   | 'confirmed'
   | 'active'

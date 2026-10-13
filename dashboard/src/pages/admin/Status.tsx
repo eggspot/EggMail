@@ -6,7 +6,7 @@ import { PressureIndicators } from '../../components/PressureIndicators';
 import { Button, Card, Chip, ErrorNotice, KeyValue, Loading, Notice, PageHeader, StatusChip } from '../../components/ui';
 import { formatDateTime, formatDuration, formatNumber, formatRelative } from '../../lib/format';
 import { useAction, useApi, useDocumentTitle, usePolling } from '../../lib/hooks';
-import { STATE_LABEL } from '../../lib/switchFlow';
+import { stateLabel } from '../../lib/switchFlow';
 
 const REFRESH_MS = 10_000;
 
@@ -100,7 +100,7 @@ export default function Status(_props: Record<string, unknown>) {
                 [
                   'Storage switch',
                   <>
-                    <Chip tone={s.switch.state === 'none' ? 'neutral' : 'info'}>{STATE_LABEL[s.switch.state]}</Chip> <a href="/admin/storage">Open the storage switch</a>
+                    <Chip tone={s.switch.state === 'none' ? 'neutral' : 'info'}>{stateLabel(s.switch.state)}</Chip> <a href="/admin/storage">Open the storage switch</a>
                   </>,
                 ],
               ]}

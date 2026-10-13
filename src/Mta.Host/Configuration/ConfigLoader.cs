@@ -23,12 +23,40 @@ public static class ConfigLoader
 {
     public const string BootstrapFileName = "bootstrap.json";
 
+    /// <summary>The configuration key under which <see cref="Build"/> records where the bootstrap file is (or would be): the file a backend switch writes.</summary>
+    public const string BootstrapPathKey = "Mta:BootstrapFile";
+
     /// <summary>
-    /// Where the bootstrap file lives: in the data directory (the hint, else the <c>Sqlite__DataDirectory</c> environment variable,
-    /// else <c>/data</c>). It has to be findable before the storage is known, which is why it cannot depend on <c>Storage:*</c>.
+    /// Where the bootstrap file lives: in the data directory (the hint, else <c>--Sqlite:DataDirectory</c> on the command line, else the
+    /// <c>Sqlite__DataDirectory</c> environment variable, else <c>/data</c>; the same precedence the configuration itself uses). It has
+    /// to be findable before the storage is known, which is why it cannot depend on <c>Storage:*</c>. (The command line used to be
+    /// ignored here, so a server started with <c>--Sqlite:DataDirectory=/x</c> looked for, and a switch wrote, <c>/data/bootstrap.json</c>.)
     /// </summary>
-    public static string ResolveBootstrapPath(string? dataDirectoryHint = null) =>
-        Path.Combine(dataDirectoryHint ?? Environment.GetEnvironmentVariable("Sqlite__DataDirectory") ?? "/data", BootstrapFileName);
+    public static string ResolveBootstrapPath(string? dataDirectoryHint = null, IReadOnlyList<string>? args = null) =>
+        Path.Combine(dataDirectoryHint ?? DataDirectoryFromArguments(args) ?? Environment.GetEnvironmentVariable("Sqlite__DataDirectory") ?? "/data", BootstrapFileName);
+
+    /// <summary>The value of <c>Sqlite:DataDirectory</c> on the command line (<c>--Key=value</c>, <c>--Key value</c> or <c>/Key=value</c>), or null.</summary>
+    internal static string? DataDirectoryFromArguments(IReadOnlyList<string>? args)
+    {
+        const string key = "Sqlite:DataDirectory";
+        string? found = null;
+        for (int i = 0; args is not null && i < args.Count; i++)
+        {
+            string a = args[i];
+            string name = a.StartsWith("--", StringComparison.Ordinal) ? a[2..] : a.StartsWith('/') ? a[1..] : string.Empty;
+            int eq = name.IndexOf('=', StringComparison.Ordinal);
+            if (eq >= 0 && string.Equals(name[..eq], key, StringComparison.OrdinalIgnoreCase))
+            {
+                found = name[(eq + 1)..];
+            }
+            else if (eq < 0 && string.Equals(name, key, StringComparison.OrdinalIgnoreCase) && i + 1 < args.Count && !args[i + 1].StartsWith('-'))
+            {
+                found = args[++i];
+            }
+        }
+
+        return string.IsNullOrWhiteSpace(found) ? null : found;
+    }
 
     /// <summary>
     /// Builds the layered configuration for the process: appsettings (if present), the bootstrap file in the data directory
@@ -38,6 +66,8 @@ public static class ConfigLoader
     public static IConfigurationRoot Build(string[] args, string? dataDirectoryHint = null, string? appSettingsPath = null, IEnumerable<KeyValuePair<string, string?>>? storedSettings = null, string? bootstrapFileOverride = null)
     {
         var builder = new ConfigurationBuilder();
+        string bootstrapPath = ResolveBootstrapPath(dataDirectoryHint, args);
+        builder.AddInMemoryCollection([new KeyValuePair<string, string?>(BootstrapPathKey, bootstrapPath)]);   // lowest layer: it only records where the file is
         if (storedSettings is not null)
         {
             builder.AddInMemoryCollection(storedSettings);   // layer 4 of decision N: settings persisted in the config store, below every deployment layer
@@ -49,7 +79,7 @@ public static class ConfigLoader
         }
 
         // The override lets the migrate-storage command read the pointer as it was before an activation rewrote the file ("" = no bootstrap file).
-        string bootstrap = bootstrapFileOverride ?? ResolveBootstrapPath(dataDirectoryHint);
+        string bootstrap = bootstrapFileOverride ?? bootstrapPath;
         if (bootstrap.Length > 0 && File.Exists(bootstrap))
         {
             builder.AddJsonFile(bootstrap, optional: true, reloadOnChange: false);
