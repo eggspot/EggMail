@@ -13,6 +13,19 @@ public interface IConfigDbAccess<TContext> where TContext : DbContext, IConfigDb
     TContext CreateReadContext();
 
     /// <summary>
+    /// Runs one synchronous query on a read context and returns its result. The default runs it inline on the caller, which is right
+    /// when the database call is local (SQLite). A provider whose reads wait on the network overrides this to bound how many
+    /// run at once and to keep them off the caller's thread: the queries are synchronous, and dozens of delivery workers blocking
+    /// in them at the same moment starve the thread pool, which then cannot complete the async work that would free the pooled
+    /// connections they are waiting for.
+    /// </summary>
+    ValueTask<T> ReadAsync<T>(Func<TContext, T> query)
+    {
+        using TContext ctx = CreateReadContext();
+        return ValueTask.FromResult(query(ctx));
+    }
+
+    /// <summary>
     /// Runs <paramref name="work"/> with a context joined to an open transaction and commits when it returns. The work
     /// must call <c>SaveChanges</c> itself and may run more than once when a batch is retried, so it must be repeatable.
     /// </summary>
@@ -39,13 +52,12 @@ public sealed class EfConfigStore<TContext>(IConfigDbAccess<TContext> db) : ICon
     /// <summary>Drops cached state after rows were written behind the store's back (a backend switch import).</summary>
     public void NotifyExternalChange() => Interlocked.Increment(ref _webhookVersion);
 
-    // Reads are short synchronous queries on a fresh no-tracking context (SQLite has no real async I/O).
-    private ValueTask<T> Read<T>(Func<TContext, T> query)
+    // Reads are short synchronous queries on a fresh (or pooled) no-tracking context; the access decides where they run.
+    private async ValueTask<T> Read<T>(Func<TContext, T> query)
     {
         try
         {
-            using TContext ctx = db.CreateReadContext();
-            return ValueTask.FromResult(query(ctx));
+            return await db.ReadAsync(query).ConfigureAwait(false);
         }
         catch (Exception ex) when (db.TranslateException(ex) is { } translated)
         {

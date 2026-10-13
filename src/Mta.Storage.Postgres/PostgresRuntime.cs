@@ -107,13 +107,19 @@ internal sealed class PostgresRuntime
     }
 
     /// <summary>
-    /// The exception to throw for an availability failure. It also discards the idle pooled connections: after the server went
-    /// away they are dead, and Npgsql only notices on first use, which would otherwise fail one request per pooled connection.
+    /// The exception to throw for an availability failure. When the failure shows connections that broke (reset, closed, server
+    /// shutdown) it also discards the idle pooled connections: after the server went away they are dead, and Npgsql only notices on
+    /// first use, which would otherwise fail one request per pooled connection. A plain timeout (pool wait, connect or command) is
+    /// not evidence that the idle connections are dead, and discarding healthy ones would only make a busy moment worse.
     /// </summary>
     public StorageUnavailableException Unavailable(Exception inner)
     {
-        Data.Clear();
-        Owner.Clear();
+        if (PostgresErrors.IsBrokenConnection(inner))
+        {
+            Data.Clear();
+            Owner.Clear();
+        }
+
         return PostgresErrors.Unavailable(inner);
     }
 
@@ -149,7 +155,7 @@ internal sealed class PostgresRuntime
                 return Volatile.Read(ref _targets);
             }
 
-            var endpoints = await Task.Run(() => ConfigStore.GetWebhookEndpointsAsync(null, cancellationToken).AsTask(), cancellationToken).ConfigureAwait(false);
+            var endpoints = await ConfigStore.GetWebhookEndpointsAsync(null, cancellationToken).ConfigureAwait(false);
             WebhookTarget[] targets = endpoints.Where(e => e.Enabled).Select(e => new WebhookTarget(e.Id, e.TenantId, e.EventTypes)).ToArray();
             Volatile.Write(ref _targets, targets);
             Volatile.Write(ref _targetsVersion, version);
