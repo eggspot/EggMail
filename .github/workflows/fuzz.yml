@@ -28,6 +28,12 @@ on:
         description: Comma separated target names, or "all" (see `Mta.Fuzz.Harness list`)
         required: false
         default: all
+      selftest:
+        description: Fuzz a target with a planted defect instead (crash or hang), to prove that a finding fails the run. Leave as none.
+        required: false
+        default: none
+        type: choice
+        options: [none, crash, hang]
 
 permissions:
   contents: read
@@ -96,9 +102,15 @@ jobs:
         env:
           SECONDS_PER_TARGET: ${{ github.event.inputs.seconds_per_target || (github.event_name == 'push' && '45') || '300' }}
           TARGETS: ${{ github.event.inputs.targets || 'all' }}
+          SELFTEST: ${{ github.event.inputs.selftest || (github.event_name == 'push' && 'crash') || 'none' }}
         run: |
           set -u
           harness="$RUNNER_TEMP/fuzz/Mta.Fuzz.Harness.dll"
+          if [ "$SELFTEST" != "none" ]; then
+            # Pipeline self-test: a target with a planted defect (see SelfTestTarget.cs). The run is expected to FAIL.
+            export EGGMAIL_FUZZ_SELFTEST="$SELFTEST"
+            TARGETS=selftest
+          fi
           if [ "$TARGETS" = "all" ]; then
             targets=$(dotnet "$harness" list | awk '{print $1}')
           else
@@ -120,6 +132,8 @@ jobs:
             cp -r "fuzz/corpus/$t/." "$work/corpus/" 2>/dev/null || true
             extra=""
             if [ -d "fuzz/regressions/$t" ]; then extra="fuzz/regressions/$t"; fi
+            dict=""
+            if [ -f "$RUNNER_TEMP/dict/$t.dict" ]; then dict="-dict=$RUNNER_TEMP/dict/$t.dict"; fi
 
             # DOTNET_GCHeapHardLimit turns runaway allocation in the fuzzed process into an OutOfMemoryException (a finding) instead of
             # an OOM kill of the runner. EGGMAIL_FUZZ_LASTINPUT keeps the current input in a file for crashes that leave no exception.
@@ -129,7 +143,7 @@ jobs:
             DOTNET_GCHeapHardLimit=0x80000000 \
               "$RUNNER_TEMP/tools/libfuzzer-dotnet" \
                 -max_total_time="$SECONDS_PER_TARGET" -timeout=30 -max_len=65536 -print_final_stats=1 \
-                -dict="$RUNNER_TEMP/dict/$t.dict" \
+                $dict \
                 -artifact_prefix="findings/$t/" \
                 --target_path=dotnet --target_arg="$harness" \
                 "$work/corpus" $extra 2>&1 | tee "findings/$t/libfuzzer.log"
