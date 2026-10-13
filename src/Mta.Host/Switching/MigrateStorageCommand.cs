@@ -101,7 +101,7 @@ public static class MigrateStorageCommand
                 }
                 else
                 {
-                    p.Error = $"Unexpected argument '{a}'.";
+                    p.Error ??= $"Unexpected argument '{a}'.";
                 }
 
                 continue;
@@ -119,7 +119,11 @@ public static class MigrateStorageCommand
 
             if (name.Equals("passphrase", StringComparison.OrdinalIgnoreCase))
             {
-                p.Error = "The passphrase is never accepted on the command line (it would end up in the process list and shell history). Use --passphrase-file or --passphrase-env.";
+                p.Error ??= "The passphrase is never accepted on the command line (it would end up in the process list and shell history). Use --passphrase-file or --passphrase-env.";
+                if (inline is null && i + 1 < args.Length && !args[i + 1].StartsWith("--", StringComparison.Ordinal))
+                {
+                    i++; // its value is not a subcommand either
+                }
             }
             else if (ValueOptions.Contains(name))
             {
@@ -127,7 +131,7 @@ public static class MigrateStorageCommand
                 {
                     if (i + 1 >= args.Length)
                     {
-                        p.Error = $"--{name} needs a value.";
+                        p.Error ??= $"--{name} needs a value.";
                         continue;
                     }
 
@@ -146,7 +150,7 @@ public static class MigrateStorageCommand
             }
             else
             {
-                p.Error = $"Unknown option '{a}'.";
+                p.Error ??= $"Unknown option '{a}'.";
             }
         }
 
