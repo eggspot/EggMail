@@ -187,7 +187,6 @@ public sealed class DeliveryEngine
         }
         catch (Exception ex)
         {
-            // The leases expire and the deliveries come back; nothing is lost.
             _s.Log.Write(MtaLogLevel.Error, Source, $"group for message {items[0].MessageId} failed", ex);
         }
         finally
