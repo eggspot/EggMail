@@ -44,8 +44,11 @@ public sealed class SubmissionRequest
     /// <summary>Digest of the request that carries <see cref="IdempotencyKey"/>; storage returns the stored one on a duplicate so the caller can detect key reuse with another body.</summary>
     public string? IdempotencyFingerprint { get; init; }
 
-    /// <summary>The caller asks to keep the raw message with its attachments after delivery (needs the global switch too).</summary>
-    public bool StoreAttachments { get; init; }
+    /// <summary>
+    /// The per-send request to keep (true) or not keep (false) the raw message with its attachments after delivery; null when the submitter has no such flag (SMTP, or an API
+    /// request that did not set one), in which case the tenant's setting and then the global default decide (<see cref="AttachmentStoragePolicy"/>). Needs the master switch either way.
+    /// </summary>
+    public bool? StoreAttachments { get; init; }
 }
 
 public sealed record SubmissionResult(SubmissionStatus Status, Guid MessageId, SenderRejection? Rejection = null, string? Detail = null, string? IdempotencyFingerprint = null)
@@ -140,6 +143,10 @@ public sealed class SubmissionService
 
         byte[] raw = editor.ToArray();
         var content = ExtractContent(raw);
+
+        // The tenant's setting is only looked up when it can matter: the operator allows attachment storage and the message has attachments to keep.
+        bool retainRaw = _storageOptions.Content.AllowAttachmentStorage && content is { Attachments.Count: > 0 }
+            && await AttachmentStoragePolicy.ResolveAsync(_storage.Config, request.Tenant, request.StoreAttachments, _storageOptions.Content.StoreAttachments, ct).ConfigureAwait(false);
         var messageId = Ids.New(now);
         var accepted = new AcceptedMessage
         {
@@ -157,7 +164,7 @@ public sealed class SubmissionService
             Authenticated = request.Authenticated,
             SmtpUtf8 = request.SmtpUtf8,
             Content = content,
-            RetainRaw = request.StoreAttachments && _storageOptions.Content.AllowAttachmentStorage && content is { Attachments.Count: > 0 },
+            RetainRaw = retainRaw,
             SendingDomain = decision.SendingDomain?.Name ?? fromDomain,
         };
 

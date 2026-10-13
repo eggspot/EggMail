@@ -104,6 +104,9 @@ internal sealed class ApiFixtureOptions
     public bool Sqlite { get; init; }
     public HistoryMode History { get; init; } = HistoryMode.Full;
     public bool AllowAttachmentStorage { get; init; } = true;
+
+    /// <summary>The operator default <c>Content:StoreAttachments</c>.</summary>
+    public bool StoreAttachmentsByDefault { get; init; }
     public Action<ApiOptions>? ConfigureApi { get; init; }
     public Action<IServiceCollection>? ConfigureServices { get; init; }
 }
@@ -151,7 +154,7 @@ internal sealed class ApiFixture : IAsyncDisposable
         StorageOptions = new StorageOptions
         {
             History = new HistoryOptions { Mode = o.History },
-            Content = new ContentOptions { AllowAttachmentStorage = o.AllowAttachmentStorage },
+            Content = new ContentOptions { AllowAttachmentStorage = o.AllowAttachmentStorage, StoreAttachments = o.StoreAttachmentsByDefault },
             Sqlite = _directory is null ? new SqliteOptions() : new SqliteOptions { DataDirectory = _directory, StatsFlushInterval = TimeSpan.Zero },
         };
         Storage = _directory is null

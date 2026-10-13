@@ -390,7 +390,7 @@ public sealed class SendBudget(ApiOptions options)
 }
 
 /// <summary>The sending endpoints; both go through <see cref="SubmissionService"/>, the one path into the queue.</summary>
-public sealed class SendingApi(ApiAuthenticator auth, SubmissionService submission, ApiOptions options, IClock clock, StorageOptions storageOptions, SendBudget budget)
+public sealed class SendingApi(ApiAuthenticator auth, SubmissionService submission, ApiOptions options, IClock clock, SendBudget budget)
 {
     public void Map(RouteGroupBuilder api)
     {
@@ -432,7 +432,6 @@ public sealed class SendingApi(ApiAuthenticator auth, SubmissionService submissi
     private async Task<IResult> SubmitAsync(HttpContext context, ApiCaller caller, ComposedMessage message, string? idempotencyKey, string fingerprint, bool? storeAttachmentsFlag)
     {
         Tenant tenant = caller.Tenant!;
-        bool store = storeAttachmentsFlag ?? (tenant.StoreAttachments || storageOptions.Content.StoreAttachments);
         SubmissionResult result = await submission.SubmitAsync(new SubmissionRequest
         {
             Tenant = tenant,
@@ -445,7 +444,7 @@ public sealed class SendingApi(ApiAuthenticator auth, SubmissionService submissi
             SmtpUtf8 = message.SmtpUtf8,
             IdempotencyKey = idempotencyKey,
             IdempotencyFingerprint = idempotencyKey is null ? null : fingerprint,
-            StoreAttachments = store,
+            StoreAttachments = storeAttachmentsFlag,   // null: the submission service applies the tenant's setting, then the global default (design section 5)
         }, context.RequestAborted).ConfigureAwait(false);
 
         if (!result.IsAccepted)
