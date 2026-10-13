@@ -52,6 +52,20 @@ jobs:
         run: dotnet build EggMail.slnx -c Release --no-restore
       - name: Test
         run: dotnet test EggMail.slnx -c Release --no-build --logger "trx;LogFileName=test.trx" --results-directory TestResults
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - name: Dashboard (install without scripts, verify signatures, lint, test, build, CSP check)
+        working-directory: dashboard
+        run: |
+          npm ci --ignore-scripts
+          npm audit signatures
+          npm run lint
+          npm test
+          npm run build
+          npm run check-csp
       - name: Upload test results on failure
         if: failure()
         uses: actions/upload-artifact@v4

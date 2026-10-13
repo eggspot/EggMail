@@ -32,10 +32,12 @@ internal static class Cli
                 return await MigrateDbAsync(rest).ConfigureAwait(false);
             case "migrate-storage":
                 return await MigrateStorageCommand.RunAsync(rest, Console.Out, Console.Error).ConfigureAwait(false);
+            case "admin":
+                return await AdminCommand.RunAsync(rest, Console.Out, Console.Error).ConfigureAwait(false);
             case "serve":
                 return await ServeAsync(rest).ConfigureAwait(false);
             default:
-                Console.Error.WriteLine($"Unknown command '{command}'. Commands: serve (default), migrate-db, migrate-storage, --healthcheck, --version.");
+                Console.Error.WriteLine($"Unknown command '{command}'. Commands: serve (default), migrate-db, migrate-storage, admin, --healthcheck, --version.");
                 return 64;
         }
     }

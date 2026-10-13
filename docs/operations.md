@@ -45,6 +45,10 @@ Default listeners (container ports, publish them as 587, 465, 2525 and 25):
 | `bounce` | 2526 | STARTTLS offered | bounce: signed bounce addresses only, no AUTH |
 | `alternate-587`, `alternate-465` | 2587, 2465 | | off by default |
 
+## First administrator
+
+Set `Dashboard:BootstrapAdminPasswordFile` (a file holding the password, for example a mounted secret) and `Dashboard:BootstrapAdminUser`: when no administrator exists the server creates one at start. Or, with the server stopped (SQLite allows one process per data directory), run `mta admin create --user NAME --password-file FILE` (`--role tenant --tenant SLUG` for a tenant user; the password can also come from `MTA_ADMIN_PASSWORD`, never from the command line). Passwords need at least 10 characters.
+
 ## DNS records for a sending domain
 
 For each domain the dashboard/API shows the exact records: a DKIM TXT at `<selector>._domainkey.<domain>` (required), a CNAME `bounce.<domain>` to your bounce domain (required when `Delivery:BounceDomain` is set), plus advice for SPF (`v=spf1 ... ~all`) and DMARC. Sending is allowed once DKIM (and the return-path record) verify.
