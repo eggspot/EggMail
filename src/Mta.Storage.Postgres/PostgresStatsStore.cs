@@ -144,7 +144,7 @@ internal sealed class PostgresStatsStore : IStatsStore
     {
         try
         {
-            await using NpgsqlConnection c = await _rt.Data.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            await using NpgsqlConnection c = await _rt.Reader.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
             await using var cmd = new NpgsqlCommand(
                 "SELECT period_start, tenant_id, sending_domain, recipient_domain, accepted, delivered, deferred, hard_bounce, soft_bounce, expired, complained, rejected, suppressed " +
                 "FROM stat_aggregate WHERE daily = $1 AND period_start >= $2 AND period_start < $3 AND ($4::uuid IS NULL OR tenant_id = $4) " +
@@ -185,7 +185,7 @@ internal sealed class PostgresStatsStore : IStatsStore
     {
         try
         {
-            await using NpgsqlConnection c = await _rt.Data.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            await using NpgsqlConnection c = await _rt.Reader.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
             await using var cmd = new NpgsqlCommand(
                 "SELECT at, tenant_id, event_type, recipient_domain, detail FROM recent_event WHERE ($1::uuid IS NULL OR tenant_id = $1) ORDER BY seq DESC LIMIT $2", c);
             cmd.Parameters.Uuid(tenantId).Long(Math.Max(0, max));

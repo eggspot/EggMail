@@ -167,6 +167,10 @@ public static class ConfigLoader
                 OwnerConnectionString = c["Storage:Postgres:OwnerConnectionString"],
                 RuntimeConnectionString = c["Storage:Postgres:RuntimeConnectionString"],
                 AutoMigrate = !string.Equals(c["Mail:Database:Migrate"], "Never", StringComparison.OrdinalIgnoreCase),
+                ReadOnlyConnectionString = c["Storage:Postgres:ReadOnlyConnectionString"],
+                ReadOnlyStatementTimeoutSeconds = c.GetValue("Storage:Postgres:ReadOnlyStatementTimeoutSeconds", d.Postgres.ReadOnlyStatementTimeoutSeconds),
+                ReadOnlyIdleInTransactionTimeoutSeconds = c.GetValue("Storage:Postgres:ReadOnlyIdleInTransactionTimeoutSeconds", d.Postgres.ReadOnlyIdleInTransactionTimeoutSeconds),
+                ReadOnlyMaxPoolSize = c.GetValue("Storage:Postgres:ReadOnlyMaxPoolSize", d.Postgres.ReadOnlyMaxPoolSize),
                 MaxPoolSize = c.GetValue("Storage:Postgres:MaxPoolSize", d.Postgres.MaxPoolSize),
             },
         };
@@ -223,6 +227,19 @@ public static class ConfigLoader
         if (c.Storage.Backend == StorageBackend.Postgres && string.IsNullOrWhiteSpace(c.Storage.Postgres.RuntimeConnectionString))
         {
             errors.Add("Storage:Postgres:RuntimeConnectionString is required when Storage:Backend=Postgres.");
+        }
+
+        foreach (var (name, value) in new[]
+        {
+            ("Storage:Postgres:ReadOnlyStatementTimeoutSeconds", c.Storage.Postgres.ReadOnlyStatementTimeoutSeconds),
+            ("Storage:Postgres:ReadOnlyIdleInTransactionTimeoutSeconds", c.Storage.Postgres.ReadOnlyIdleInTransactionTimeoutSeconds),
+            ("Storage:Postgres:ReadOnlyMaxPoolSize", c.Storage.Postgres.ReadOnlyMaxPoolSize),
+        })
+        {
+            if (value < 1)
+            {
+                errors.Add($"{name} must be at least 1.");
+            }
         }
 
         if (c.Smtp.MaxRecipients is < 1 or > 1000)

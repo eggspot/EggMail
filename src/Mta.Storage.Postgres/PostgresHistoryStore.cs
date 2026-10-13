@@ -22,7 +22,7 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore, 
 
         try
         {
-            await using NpgsqlConnection c = await rt.Data.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            await using NpgsqlConnection c = await rt.Reader.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
             await using var cmd = new NpgsqlCommand(
                 "SELECT r.message_id, r.recipient FROM message_recipient r JOIN message_index m ON m.day = r.day AND m.message_id = r.message_id " +
                 "WHERE r.day = $1 AND r.message_id = $2 AND m.tenant_id = $3 ORDER BY r.recipient LIMIT $4", c);
@@ -307,7 +307,7 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore, 
         var keys = new List<(int Day, Guid Id)>();
         try
         {
-            await using NpgsqlConnection connection = await rt.Data.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            await using NpgsqlConnection connection = await rt.Reader.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
             cmd.Connection = connection;
             await using NpgsqlDataReader r = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
             while (await r.ReadAsync(cancellationToken).ConfigureAwait(false))
@@ -343,7 +343,7 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore, 
         int day = StorageTime.DayNumber(messageId);
         try
         {
-            await using NpgsqlConnection c = await rt.Data.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            await using NpgsqlConnection c = await rt.Reader.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
 
             MessageSummary summary;
             bool contentRecorded, rawRetained;
@@ -413,7 +413,7 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore, 
         DateTimeOffset now = rt.Clock.UtcNow;
         try
         {
-            await using NpgsqlConnection c = await rt.Data.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            await using NpgsqlConnection c = await rt.Reader.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
             await using var cmd = new NpgsqlCommand(
                 "SELECT e.event_id, e.delivery_id, e.tenant_id, e.type, e.at, e.recipient, e.smtp_code, e.enhanced_code, e.message, e.mx_host, e.route, e.tls_json " +
                 "FROM message_event e WHERE e.day = $1 AND e.message_id = $2 AND EXISTS (" +
@@ -447,7 +447,7 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore, 
         DateTimeOffset now = rt.Clock.UtcNow;
         try
         {
-            await using NpgsqlConnection c = await rt.Data.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            await using NpgsqlConnection c = await rt.Reader.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
             await using var cmd = new NpgsqlCommand(
                 "SELECT r.raw FROM message_raw_retained r JOIN message_index i ON i.day = r.day AND i.message_id = r.message_id " +
                 "WHERE r.day = $1 AND r.message_id = $2 AND r.tenant_id = $3 AND i.received_at > $4", c);

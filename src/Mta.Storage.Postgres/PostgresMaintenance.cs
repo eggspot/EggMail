@@ -269,6 +269,7 @@ internal sealed class PostgresMaintenance(PostgresRuntime rt, PostgresQueueStore
             ["role_split"] = rt.SingleRole ? "false" : "true",
             ["runtime_role"] = rt.RuntimeRole ?? "",
             ["owner_role"] = rt.OwnerRole ?? "",
+            ["read_only_role"] = rt.SeparateReader ? rt.ReadOnlyRole ?? "" : "",
             ["schema_version_expected"] = PostgresMigrator.CurrentVersion.ToString(CultureInfo.InvariantCulture),
         };
 
@@ -294,6 +295,19 @@ internal sealed class PostgresMaintenance(PostgresRuntime rt, PostgresQueueStore
             if (!ready)
             {
                 warnings.Add("postgres_schema_version_mismatch");
+            }
+
+            if (rt.SeparateReader && ready)
+            {
+                // The point of the read-only role is that it cannot change data or read secrets; say so when it can.
+                await using NpgsqlConnection c = await rt.Reader.OpenConnectionAsync(ct).ConfigureAwait(false);
+                await using var cmd = new NpgsqlCommand(
+                    "SELECT has_table_privilege(current_user, 'delivery_queue', 'INSERT') OR has_table_privilege(current_user, 'delivery_queue', 'UPDATE') " +
+                    "OR has_table_privilege(current_user, 'delivery_queue', 'DELETE') OR has_table_privilege(current_user, 'setting', 'SELECT')", c);
+                if ((bool)(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false))!)
+                {
+                    warnings.Add("postgres_read_only_role_can_write_or_read_secrets");
+                }
             }
 
             if (rt.IsFull && ready)

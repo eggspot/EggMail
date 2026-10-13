@@ -45,13 +45,19 @@ public static class PostgresMigrator
     /// <summary>The schema version this build expects (the highest embedded <c>V###__*.sql</c>).</summary>
     public static int CurrentVersion => Steps.Value[^1].Version;
 
+    /// <summary>The tables the read-only role may <c>SELECT</c>: what <c>IHistoryStore</c> and the statistics queries read, and nothing that holds a secret.</summary>
+    public static readonly string[] ReadOnlyTables = ["message_index", "message_recipient", "message_event", "message_content", "message_raw_retained", "stat_aggregate", "recent_event"];
+
     private static readonly Lazy<(int Version, string Description, string Sql)[]> Steps = new(LoadSteps);
 
     /// <summary>
     /// The idempotent migration script. <paramref name="runtimeRole"/> (when not null) gets <c>SELECT/INSERT/UPDATE/DELETE</c> on
     /// all tables and <c>USAGE</c> on sequences, plus default privileges for objects the owner creates later (partitions).
+    /// <paramref name="readOnlyRole"/> (when not null) gets <c>SELECT</c> on exactly the history and statistics tables the dashboard's queries read
+    /// (<see cref="ReadOnlyTables"/>) and nothing else: no write, and no access to the secret tables. Day partitions need no grant of their own, because a query
+    /// through the partitioned parent is checked against the parent.
     /// </summary>
-    public static string GenerateScript(string? runtimeRole = null)
+    public static string GenerateScript(string? runtimeRole = null, string? readOnlyRole = null)
     {
         var sb = new StringBuilder();
         sb.AppendLine("-- EggMail schema migration. Idempotent: safe to run repeatedly and from several nodes at once.");
@@ -79,17 +85,24 @@ public static class PostgresMigrator
             sb.AppendLine($"  EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO {roleInFormat}', current_user);");
         }
 
+        if (!string.IsNullOrWhiteSpace(readOnlyRole))
+        {
+            string role = QuoteIdentifier(readOnlyRole);
+            sb.AppendLine($"  GRANT USAGE ON SCHEMA public TO {role};");
+            sb.AppendLine($"  GRANT SELECT ON {string.Join(", ", ReadOnlyTables)} TO {role};");
+        }
+
         sb.AppendLine("END");
         sb.AppendLine("$eggmail_migrate$;");
         return sb.ToString();
     }
 
     /// <summary>Applies the migrations with the given (owner) connection string. Idempotent; concurrent callers are serialized by an advisory lock.</summary>
-    public static async Task MigrateAsync(string ownerConnectionString, string? runtimeRole, CancellationToken cancellationToken)
+    public static async Task MigrateAsync(string ownerConnectionString, string? runtimeRole, CancellationToken cancellationToken, string? readOnlyRole = null)
     {
         await using var connection = new NpgsqlConnection(ownerConnectionString);
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var command = new NpgsqlCommand(GenerateScript(runtimeRole), connection) { CommandTimeout = 300 };
+        await using var command = new NpgsqlCommand(GenerateScript(runtimeRole, readOnlyRole), connection) { CommandTimeout = 300 };
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 

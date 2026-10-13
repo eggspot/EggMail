@@ -101,6 +101,10 @@ internal static class Cli
                 {
                     OwnerConnectionString = options.Postgres.OwnerConnectionString,
                     RuntimeConnectionString = options.Postgres.RuntimeConnectionString,
+                    ReadOnlyConnectionString = options.Postgres.ReadOnlyConnectionString,
+                    ReadOnlyStatementTimeoutSeconds = options.Postgres.ReadOnlyStatementTimeoutSeconds,
+                    ReadOnlyIdleInTransactionTimeoutSeconds = options.Postgres.ReadOnlyIdleInTransactionTimeoutSeconds,
+                    ReadOnlyMaxPoolSize = options.Postgres.ReadOnlyMaxPoolSize,
                     AutoMigrate = true,
                     MaxPoolSize = options.Postgres.MaxPoolSize,
                     PartitionsAheadDays = options.Postgres.PartitionsAheadDays,

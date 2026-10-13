@@ -14,6 +14,10 @@ Settings come from (highest precedence first): command line, environment variabl
 | `Sqlite:SyncMode` | `Off` | `Off`, `Normal`, `Full` for queue and stats files. **`Off` is safe against a process kill but not against power loss or an OS crash**: files can corrupt and acknowledged mail can be lost. Use `Normal` or `Full`, or PostgreSQL, if you need that |
 | `Sqlite:ConfigSyncMode` | `Full` | Same for `config.db` (tenants, keys, certificates) |
 | `Storage:Postgres:OwnerConnectionString` / `RuntimeConnectionString` | none | Owner role runs migrations and partition DDL; runtime role does normal work |
+| `Storage:Postgres:ReadOnlyConnectionString` | none | Optional read-only role for the dashboard's queries (message search, detail, events, statistics); the migration grants it `SELECT` on the history and statistics tables only. Without it those queries use the runtime role |
+| `Storage:Postgres:ReadOnlyStatementTimeoutSeconds` | 5 | `statement_timeout` of the read-only connections; a query that runs longer is cancelled and answered `503 not_ready` |
+| `Storage:Postgres:ReadOnlyIdleInTransactionTimeoutSeconds` | 10 | `idle_in_transaction_session_timeout` of the read-only connections |
+| `Storage:Postgres:ReadOnlyMaxPoolSize` | 8 | Connection pool of the read-only role |
 | `History:Mode` | `Full` | `Full` keeps per-message history; `StatsOnly` keeps aggregates only |
 | `Content:RetentionDays` | 7 | 6 to 30; message bodies kept for the dashboard and resend |
 | `Retention:MetadataDays` | 30 | Per-message events; `0` keeps forever |
@@ -76,6 +80,18 @@ Checklist for the first real-CA run: a domain whose zone is in Cloudflare and a 
 Backups run while the server runs (`VACUUM INTO` per file) every `Backup:IntervalHours` into `<data>/backups/eggmail-backup-<UTC>/`; the newest `Backup:Keep` are kept. Put `Backup:Directory` on another disk when possible and copy backups off the host.
 
 To restore: stop EggMail, copy the files of one backup directory over the data directory (replace `config.db`, `queue.db`, `stats.db`, `history.db` together), start. The state returns to the moment of the backup; mail accepted since is lost. If a file is found corrupt at start (possible after power loss with `Sqlite:SyncMode=Off`) it is moved aside (quarantined), the instance starts with a fresh file, and a warning is shown. If `config.db` is quarantined the instance starts without tenants and keys: restore it from a backup. PostgreSQL: use `pg_dump` or your platform's backups.
+
+## PostgreSQL roles
+
+Three logins are supported (design section 4.3): the **owner** (migrations and partition DDL: `Storage:Postgres:OwnerConnectionString`), the **runtime** role (everything the application does: `RuntimeConnectionString`), and an optional **read-only** role for the dashboard's queries. To use the read-only role create it once, then restart (the start applies the grants, or run `mta migrate-db` when `Mail:Database:Migrate=Never`):
+
+```sql
+CREATE ROLE eggmail_ro LOGIN PASSWORD '...';
+ALTER ROLE eggmail_ro CONNECTION LIMIT 8;                  -- matches Storage:Postgres:ReadOnlyMaxPoolSize
+ALTER ROLE eggmail_ro SET statement_timeout = '5s';        -- optional: the application sets the same timeouts itself
+```
+
+and set `Storage:Postgres:ReadOnlyConnectionString` to a connection string for it. The role can read the history and statistics tables and nothing else: no write, no secrets, no queue. If it cannot, or the password is wrong, the start stops with the reason. Behind a pooler in transaction mode let the `options` startup parameter through (PgBouncer: `ignore_startup_parameters = options`).
 
 ## Monitoring
 
