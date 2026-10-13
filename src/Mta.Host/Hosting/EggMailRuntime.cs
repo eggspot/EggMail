@@ -115,9 +115,14 @@ public sealed class EggMailRuntime : IAsyncDisposable
             TlsPolicies = new TlsPolicyTable(deliveryOptions.DefaultTls),
             Pool = pool,
             Routes = routes,
-            Throttle = new DestinationThrottle(clock),
+            Throttle = new DestinationThrottle(clock, new DestinationThrottleOptions
+            {
+                Defaults = new ThrottleLimits(config.Delivery.Throttle.MaxConnections, config.Delivery.Throttle.MaxMessagesPerMinute, config.Delivery.Throttle.MaxMessagesPerConnection),
+                InitialConcurrentConnections = config.Delivery.Throttle.InitialConnections,
+                InitialMessagesPerMinute = config.Delivery.Throttle.InitialMessagesPerMinute,
+            }),
             Limits = limits,
-            Retry = new RetrySchedule(),
+            Retry = new RetrySchedule(BuildRetryOptions(config.Delivery)),
             Dkim = new ConfigDkimSignerProvider(storage.Config, secrets, clock, deliveryOptions.DkimCacheTtl),
             TlsReports = collector,
             Secrets = secrets,
@@ -149,6 +154,31 @@ public sealed class EggMailRuntime : IAsyncDisposable
         runtime._owned.Add(pool);
         runtime._owned.Add(smtp);
         return runtime;
+    }
+
+    /// <summary>The built-in ladder unless <c>Delivery:RetryDelays</c> overrides it (used by operators with unusual needs and by the chaos tests).</summary>
+    internal static RetryScheduleOptions? BuildRetryOptions(DeliverySection delivery)
+    {
+        if (delivery.RetryDelays.Count == 0)
+        {
+            return null;
+        }
+
+        var first = delivery.RetryDelays[0];
+        var last = delivery.RetryDelays[^1];
+        return new RetryScheduleOptions
+        {
+            Delays = delivery.RetryDelays,
+            RepeatInterval = last,
+            FinalAttemptMargin = TimeSpan.Zero,
+            FirstConnectionRetryDelay = first,
+            GreylistMinDelay = first,
+            GreylistMaxDelay = last,
+            ThrottleMinDelay = first,
+            MinHint = TimeSpan.FromMilliseconds(1),
+            MaxHint = last,
+            MaxDelay = last > TimeSpan.FromHours(8) ? last : TimeSpan.FromHours(8),
+        };
     }
 
     private static IDnsResolver CreateDns(MtaConfig config)
