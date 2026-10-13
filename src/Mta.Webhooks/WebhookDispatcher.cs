@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Sockets;
@@ -102,6 +103,7 @@ public sealed class WebhookDispatcher : IAsyncDisposable
             return 0;
         }
 
+        WebhookMetrics.Claimed.Add(batch.Count);
         await Task.WhenAll(batch.Select(item => ProcessAsync(item, cancellationToken))).ConfigureAwait(false);
         return batch.Count;
     }
@@ -144,6 +146,7 @@ public sealed class WebhookDispatcher : IAsyncDisposable
         {
             await _outbox.CompleteAsync(item.Id, new WebhookAttemptRecord(item.Id, now, null, TimeSpan.Zero, "endpoint_unavailable", null),
                 WebhookOutboxState.Failed, null, ct).ConfigureAwait(false);
+            CountFailed("endpoint_unavailable");
             return;
         }
 
@@ -158,9 +161,11 @@ public sealed class WebhookDispatcher : IAsyncDisposable
             _log.Write(MtaLogLevel.Error, "webhooks", $"endpoint {endpoint.Id}: secret cannot be unprotected", ex);
             await _outbox.CompleteAsync(item.Id, new WebhookAttemptRecord(item.Id, now, null, TimeSpan.Zero, "secret_unreadable", null),
                 WebhookOutboxState.Failed, null, ct).ConfigureAwait(false);
+            CountFailed("secret_unreadable");
             return;
         }
 
+        using Activity? span = WebhookTracing.Start(item);
         var started = _clock.Timestamp;
         int? status = null;
         string? errorClass = null;
@@ -192,9 +197,12 @@ public sealed class WebhookDispatcher : IAsyncDisposable
         }
 
         var duration = _clock.GetElapsedTime(started);
+        WebhookMetrics.DeliveryDuration.Record(duration.TotalSeconds);
+        WebhookTracing.Finish(span, status, errorClass);
         var attempt = new WebhookAttemptRecord(item.Id, now, status, duration, errorClass, snippet);
         if (errorClass is null)
         {
+            WebhookMetrics.Deliveries.Add(1, new KeyValuePair<string, object?>("outcome", "delivered"));
             await _outbox.CompleteAsync(item.Id, attempt, WebhookOutboxState.Delivered, null, ct).ConfigureAwait(false);
             if (endpoint.FailingSince is not null)
             {
@@ -206,6 +214,7 @@ public sealed class WebhookDispatcher : IAsyncDisposable
 
         if (errorClass == "gone")
         {
+            CountFailed(errorClass);
             await _outbox.CompleteAsync(item.Id, attempt, WebhookOutboxState.Failed, null, ct).ConfigureAwait(false);
             await DisableAsync(endpoint, "The receiver answered 410 Gone", now, ct).ConfigureAwait(false);
             return;
@@ -215,10 +224,13 @@ public sealed class WebhookDispatcher : IAsyncDisposable
         int failedAttempts = item.Attempt + 1;
         if (failedAttempts > _options.RetrySchedule.Count)
         {
+            CountFailed(errorClass);
             await _outbox.CompleteAsync(item.Id, attempt, WebhookOutboxState.Failed, null, ct).ConfigureAwait(false);
         }
         else
         {
+            WebhookMetrics.Deliveries.Add(1, new KeyValuePair<string, object?>("outcome", "retry"));
+            WebhookMetrics.Failures.Add(1, new KeyValuePair<string, object?>("reason", WebhookMetrics.ReasonOf(errorClass)));
             var delay = _options.RetrySchedule[failedAttempts - 1];
             if (errorClass == "throttled")
             {
@@ -240,8 +252,16 @@ public sealed class WebhookDispatcher : IAsyncDisposable
         }
     }
 
+    /// <summary>Counts an attempt that ended the item without delivery (it will not be tried again).</summary>
+    private static void CountFailed(string errorClass)
+    {
+        WebhookMetrics.Deliveries.Add(1, new KeyValuePair<string, object?>("outcome", "failed"));
+        WebhookMetrics.Failures.Add(1, new KeyValuePair<string, object?>("reason", WebhookMetrics.ReasonOf(errorClass)));
+    }
+
     private async ValueTask DisableAsync(WebhookEndpointRecord endpoint, string reason, DateTimeOffset now, CancellationToken ct)
     {
+        WebhookMetrics.EndpointsDisabled.Add(1);
         await _config.DisableWebhookEndpointAsync(endpoint.Id, reason, now, ct).ConfigureAwait(false);
         _log.Write(MtaLogLevel.Warning, "webhooks", $"endpoint {endpoint.Id} of tenant {endpoint.TenantId} disabled: {reason}");
         if (_notifier is not null)
@@ -309,6 +329,9 @@ public sealed class WebhookDispatcher : IAsyncDisposable
             PooledConnectionLifetime = TimeSpan.FromMinutes(2),
             ConnectTimeout = _options.Timeout,
             ConnectCallback = ConnectGuardedAsync,
+            // While our webhook span is the current activity the handler would add traceparent/tracestate to the request, handing customers'
+            // receivers our trace ids. Nothing of ours belongs on a request to a third party.
+            ActivityHeadersPropagator = DistributedContextPropagator.CreateNoOutputPropagator(),
         };
         return new HttpClient(handler, disposeHandler: _handlerOverride is null) { Timeout = Timeout.InfiniteTimeSpan };
     }
