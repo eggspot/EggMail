@@ -99,9 +99,55 @@ public sealed class MessageHeaderEditor
     /// <summary>The edited message as a new array.</summary>
     public byte[] ToArray()
     {
-        var writer = new ArrayBufferWriter<byte>(_message.Length + 1024);
-        WriteTo(writer);
-        return writer.WrittenSpan.ToArray();
+        // Build in a rented buffer and copy once into an exactly sized array (an ArrayBufferWriter plus ToArray would allocate the message twice).
+        var writer = new RentedBufferWriter(_message.Length + 1024);
+        try
+        {
+            WriteTo(writer);
+            return writer.WrittenSpan.ToArray();
+        }
+        finally
+        {
+            writer.Dispose();
+        }
+    }
+
+    private sealed class RentedBufferWriter(int initialCapacity) : IBufferWriter<byte>, IDisposable
+    {
+        private byte[] _buffer = ArrayPool<byte>.Shared.Rent(Math.Max(initialCapacity, 256));
+        private int _written;
+
+        public ReadOnlySpan<byte> WrittenSpan => _buffer.AsSpan(0, _written);
+
+        public void Advance(int count) => _written += count;
+
+        public Memory<byte> GetMemory(int sizeHint = 0)
+        {
+            Grow(sizeHint);
+            return _buffer.AsMemory(_written);
+        }
+
+        public Span<byte> GetSpan(int sizeHint = 0)
+        {
+            Grow(sizeHint);
+            return _buffer.AsSpan(_written);
+        }
+
+        private void Grow(int sizeHint)
+        {
+            int needed = _written + Math.Max(sizeHint, 1);
+            if (needed <= _buffer.Length)
+            {
+                return;
+            }
+
+            byte[] bigger = ArrayPool<byte>.Shared.Rent(Math.Max(needed, _buffer.Length * 2));
+            _buffer.AsSpan(0, _written).CopyTo(bigger);
+            ArrayPool<byte>.Shared.Return(_buffer);
+            _buffer = bigger;
+        }
+
+        public void Dispose() => ArrayPool<byte>.Shared.Return(_buffer);
     }
 
     /// <summary>Writes the edited message to <paramref name="writer"/> and returns the number of bytes written.</summary>
