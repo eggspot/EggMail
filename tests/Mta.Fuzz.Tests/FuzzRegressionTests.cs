@@ -16,7 +16,7 @@ public class FuzzRegressionTests
     /// <summary>Fixed so that every machine and every run replays exactly the same inputs. Change it (or add one) to widen the search.</summary>
     private const int MutationSeed = 20261013;
 
-    private static readonly TimeSpan HangLimit = TimeSpan.FromMinutes(3);
+    private static readonly TimeSpan HangLimit = TimeSpan.FromMinutes(10);
 
     public static IEnumerable<object[]> Targets() => FuzzTargets.All.Select(t => new object[] { t.Name });
 
@@ -54,10 +54,13 @@ public class FuzzRegressionTests
     {
         var target = FuzzTargets.Get(name);
         Assert.NotEmpty(target.Seeds);
-        foreach (byte[] seed in target.Seeds)
+        Guarded(target, progress =>
         {
-            RunOne(target, seed, "seed");
-        }
+            foreach (byte[] seed in target.Seeds)
+            {
+                RunOne(target, progress, seed, "seed");
+            }
+        });
     }
 
     [Theory]
@@ -65,18 +68,21 @@ public class FuzzRegressionTests
     public void Checked_in_corpus_and_regression_inputs_run_clean(string name)
     {
         var target = FuzzTargets.Get(name);
-        foreach (string directory in new[] { Path.Combine(RepoRoot(), "fuzz", "corpus", name), Path.Combine(RepoRoot(), "fuzz", "regressions", name) })
+        Guarded(target, progress =>
         {
-            if (!Directory.Exists(directory))
+            foreach (string directory in new[] { Path.Combine(RepoRoot(), "fuzz", "corpus", name), Path.Combine(RepoRoot(), "fuzz", "regressions", name) })
             {
-                continue;
-            }
+                if (!Directory.Exists(directory))
+                {
+                    continue;
+                }
 
-            foreach (string file in Directory.EnumerateFiles(directory).Order(StringComparer.Ordinal))
-            {
-                RunOne(target, File.ReadAllBytes(file), Path.GetRelativePath(RepoRoot(), file));
+                foreach (string file in Directory.EnumerateFiles(directory).Order(StringComparer.Ordinal))
+                {
+                    RunOne(target, progress, File.ReadAllBytes(file), Path.GetRelativePath(RepoRoot(), file));
+                }
             }
-        }
+        });
     }
 
     [Theory]
@@ -104,14 +110,17 @@ public class FuzzRegressionTests
             return;   // the session target opens a connection per input; its seeds are covered by the mutation run
         }
 
-        foreach (byte[] seed in target.Seeds)
+        Guarded(target, progress =>
         {
-            int step = Math.Max(1, seed.Length / 200);   // at most about 200 prefixes per seed
-            for (int length = 0; length < seed.Length; length += step)
+            foreach (byte[] seed in target.Seeds)
             {
-                RunOne(target, seed[..length], $"prefix {length} of a seed");
+                int step = Math.Max(1, seed.Length / 200);   // at most about 200 prefixes per seed
+                for (int length = 0; length < seed.Length; length += step)
+                {
+                    RunOne(target, progress, seed[..length], $"prefix {length} of a seed");
+                }
             }
-        }
+        });
     }
 
     [Theory]
@@ -120,41 +129,53 @@ public class FuzzRegressionTests
     {
         var target = FuzzTargets.Get(name);
         var mutator = new Mutator(MutationSeed, target.Seeds, target.Tokens, target.MaxInputLength);
-        for (int i = 0; i < target.MutationIterations; i++)
+        Guarded(target, progress =>
         {
-            RunOne(target, mutator.Next(), $"mutation {i} (seed {MutationSeed})");
-        }
+            for (int i = 0; i < target.MutationIterations; i++)
+            {
+                RunOne(target, progress, mutator.Next(), $"mutation {i} (seed {MutationSeed})");
+            }
+        });
     }
 
-    private static void RunOne(FuzzTarget target, byte[] input, string origin)
+    /// <summary>What the guarded worker is doing right now, so that a hang can name the input.</summary>
+    private sealed class Progress
     {
-        long allocated = 0;
-        Exception? failure = null;
-        var worker = Task.Factory.StartNew(() =>
-        {
-            long before = GC.GetAllocatedBytesForCurrentThread();
-            try
-            {
-                target.Run(input);
-            }
-            catch (Exception ex)
-            {
-                failure = ex;
-            }
+        public volatile string Origin = "start";
+        public volatile byte[] Input = [];
+    }
 
-            allocated = GC.GetAllocatedBytesForCurrentThread() - before;
-        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
-
+    /// <summary>
+    /// Runs the whole body on one dedicated thread (so allocation can be measured on that thread) and fails if it does not finish within a
+    /// limit far above any plausible load. One watchdog per test, not per input: a thread per input made this suite slow on small CI runners.
+    /// </summary>
+    private static void Guarded(FuzzTarget target, Action<Progress> body)
+    {
+        var progress = new Progress();
+        var worker = Task.Factory.StartNew(() => body(progress), CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
         if (!worker.Wait(HangLimit))
         {
-            throw new XunitException($"{target.Name}: hang on {origin}. {Describe(input)}");
+            throw new XunitException($"{target.Name}: hang (or far too slow) on {progress.Origin}. {Describe(progress.Input)}");
         }
 
-        if (failure is not null)
+        worker.GetAwaiter().GetResult();
+    }
+
+    private static void RunOne(FuzzTarget target, Progress progress, byte[] input, string origin)
+    {
+        progress.Origin = origin;
+        progress.Input = input;
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        try
         {
-            throw new XunitException($"{target.Name}: {failure.GetType().Name}: {failure.Message} on {origin}. {Describe(input)}\n{failure}");
+            target.Run(input);
+        }
+        catch (Exception ex)
+        {
+            throw new XunitException($"{target.Name}: {ex.GetType().Name}: {ex.Message} on {origin}. {Describe(input)}\n{ex}");
         }
 
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
         if (target.MeasureAllocation && allocated > target.AllocationBudget(input.Length))
         {
             throw new XunitException($"{target.Name}: allocated {allocated / 1024} KiB for {input.Length} input bytes on {origin} (budget {target.AllocationBudget(input.Length) / 1024} KiB). {Describe(input)}");

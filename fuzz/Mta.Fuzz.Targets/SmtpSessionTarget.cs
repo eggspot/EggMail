@@ -21,7 +21,7 @@ internal static class SmtpSessionTarget
     public static FuzzTarget Create() => new("smtp-session", "SMTP server session over loopback (state machine, DATA/BDAT, AUTH, STARTTLS, limits)", Run, Seeds())
     {
         Tokens = Tokens(),
-        MutationIterations = 5000,
+        MutationIterations = 10000,
         MeasureAllocation = false,
         MaxInputLength = 64 * 1024,
     };

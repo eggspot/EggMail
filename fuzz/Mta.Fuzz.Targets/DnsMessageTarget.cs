@@ -14,7 +14,7 @@ internal static class DnsMessageTarget
             [0xC0, 0x0C], [0xC0, 0x00], [0xC0, 0x0B], [0xFF, 0xFF], [0x00, 0x01], [0x00, 0x0F], [0x00, 0x10], [0x00, 0x1C], [0x00, 0x06], [0x00, 0x34],
             [0x3F], [0x40], [0x80], [0x00], Encoding.ASCII.GetBytes("xn--"), Encoding.ASCII.GetBytes("\\"), Encoding.ASCII.GetBytes(".."),
         ],
-        MutationIterations = 12000,
+        MutationIterations = 100000,
         MaxInputLength = 70_000,
     };
 

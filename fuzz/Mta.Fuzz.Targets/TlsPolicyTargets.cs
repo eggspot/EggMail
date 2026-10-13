@@ -10,7 +10,7 @@ internal static class MtaStsTarget
     public static FuzzTarget Create() => new("mta-sts", "MTA-STS policy file and TXT record parsers, MX pattern matching", Run, Seeds())
     {
         Tokens = Tokens(),
-        MutationIterations = 40000,
+        MutationIterations = 140000,
         MaxInputLength = 80 * 1024,
     };
 
@@ -74,7 +74,7 @@ internal static class TlsRptTarget
     public static FuzzTarget Create() => new("tls-rpt", "TLS-RPT TXT record and endpoint (mailto:/https:) parsers", Run, Seeds())
     {
         Tokens = Tokens(),
-        MutationIterations = 50000,
+        MutationIterations = 240000,
         MaxInputLength = 8 * 1024,
     };
 

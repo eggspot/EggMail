@@ -26,7 +26,7 @@ internal static class DkimTarget
     public static FuzzTarget Create() => new("dkim", "DKIM verifier (DKIM-Signature tag-value parser, canonicalization, hashing) and DKIM key record parser", Run, Seeds())
     {
         Tokens = Tokens(),
-        MutationIterations = 20000,
+        MutationIterations = 100000,
         MaxInputLength = 128 * 1024,
     };
 

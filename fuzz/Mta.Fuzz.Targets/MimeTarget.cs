@@ -11,7 +11,7 @@ internal static class MimeTarget
     public static FuzzTarget Create() => new("mime", "MIME parsers: header list, addresses, dates, RFC 2047, MIME tree, content extractor, validator, header editor, line endings", Run, Seeds())
     {
         Tokens = Tokens(),
-        MutationIterations = 12000,
+        MutationIterations = 70000,
         MaxInputLength = 128 * 1024,
     };
 

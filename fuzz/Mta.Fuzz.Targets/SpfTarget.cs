@@ -14,7 +14,7 @@ internal static class SpfTarget
     public static FuzzTarget Create() => new("spf", "SPF record parser, macro expansion and evaluator", Run, Seeds())
     {
         Tokens = Tokens(),
-        MutationIterations = 25000,
+        MutationIterations = 120000,
         MaxInputLength = 16 * 1024,
     };
 

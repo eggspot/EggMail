@@ -19,7 +19,7 @@ internal static class SmtpProtocolTarget
         Seeds())
     {
         Tokens = Tokens(),
-        MutationIterations = 25000,
+        MutationIterations = 70000,
     };
 
     private static IReadOnlyList<byte[]> Seeds() =>

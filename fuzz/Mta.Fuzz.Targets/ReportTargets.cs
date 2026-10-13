@@ -14,7 +14,7 @@ internal static class DsnArfTarget
     public static FuzzTarget Create() => new("dsn-arf", "Inbound DSN (RFC 3464) and ARF (RFC 5965) report parser", Run, Seeds())
     {
         Tokens = Tokens(),
-        MutationIterations = 20000,
+        MutationIterations = 120000,
         MaxInputLength = 128 * 1024,
     };
 
@@ -77,7 +77,7 @@ internal static class AuthHeadersTarget
     public static FuzzTarget Create() => new("auth-headers", "DMARC record, Authentication-Results and ARC chain parsers", Run, Seeds())
     {
         Tokens = Tokens(),
-        MutationIterations = 20000,
+        MutationIterations = 120000,
         MaxInputLength = 64 * 1024,
     };
 
@@ -143,7 +143,7 @@ internal static class DmarcAggregateTarget
     public static FuzzTarget Create() => new("dmarc-aggregate", "DMARC aggregate report reader (XML, gzip)", Run, Seeds())
     {
         Tokens = Tokens(),
-        MutationIterations = 15000,
+        MutationIterations = 70000,
         MaxInputLength = 128 * 1024,
     };
 
