@@ -118,7 +118,6 @@ internal static class Cli
             return 2;
         }
 
-        var config = loaded.Config;
         var builder = WebApplication.CreateBuilder(args);
         builder.Logging.ClearProviders().AddJsonConsole();
         builder.Logging.AddFilter("Microsoft.AspNetCore", LogLevel.Warning);
@@ -126,11 +125,12 @@ internal static class Cli
         using var startupFactory = LoggerFactory.Create(b => b.AddJsonConsole());
         var startupLog = new MtaLogAdapter(startupFactory);
         var clock = SystemClock.Instance;
-
         // One process owns a SQLite data directory (the offline migrate-storage commands take the same lock).
-        using DataDirectoryLock? directoryLock = config.Storage.Backend == StorageBackend.Sqlite ? DataDirectoryLock.Acquire(config.Storage.Sqlite.DataDirectory) : null;
-        var storage = StorageFactory.Create(config.Storage, clock, startupLog);
+        using DataDirectoryLock? directoryLock = loaded.Config.Storage.Backend == StorageBackend.Sqlite ? DataDirectoryLock.Acquire(loaded.Config.Storage.Sqlite.DataDirectory) : null;
+        var storage = StorageFactory.Create(loaded.Config.Storage, clock, startupLog);
         await storage.InitializeAsync(CancellationToken.None).ConfigureAwait(false);
+        (loaded, storage) = await SettingsLayering.ApplyAsync(args, loaded, storage, clock, startupLog, CancellationToken.None).ConfigureAwait(false);
+        var config = loaded.Config;
 
         // Backend switch startup gate (design 4.6): a confirmed target becomes Active, a fenced source or an unactivated target stays quiet.
         var gate = await StartupGate.EvaluateAsync(storage, clock, startupLog, CancellationToken.None).ConfigureAwait(false);
@@ -163,6 +163,7 @@ internal static class Cli
             builder.Services.AddHostedService<MaintenanceService>();
             builder.Services.AddHostedService<TlsReportService>();
             builder.Services.AddHostedService<BackupService>();
+            builder.Services.AddHostedService<SendingLimitsService>();
             builder.Services.AddHostedService(_ => new SwitchStateWatcher(runtime, switchControl, TimeSpan.FromSeconds(5)));
         }
         else

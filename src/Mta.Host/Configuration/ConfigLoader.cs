@@ -33,10 +33,16 @@ public static class ConfigLoader
     /// <summary>
     /// Builds the layered configuration for the process: appsettings (if present), the bootstrap file in the data directory
     /// (storage pointer written by the backend switch), environment variables, then the command line (highest precedence).
+    /// <paramref name="storedSettings"/> (the global settings kept in the config store) form the lowest layer, above the built-in defaults.
     /// </summary>
-    public static IConfigurationRoot Build(string[] args, string? dataDirectoryHint = null, string? appSettingsPath = null, string? bootstrapFileOverride = null)
+    public static IConfigurationRoot Build(string[] args, string? dataDirectoryHint = null, string? appSettingsPath = null, IEnumerable<KeyValuePair<string, string?>>? storedSettings = null, string? bootstrapFileOverride = null)
     {
         var builder = new ConfigurationBuilder();
+        if (storedSettings is not null)
+        {
+            builder.AddInMemoryCollection(storedSettings);   // layer 4 of decision N: settings persisted in the config store, below every deployment layer
+        }
+
         if (appSettingsPath is not null && File.Exists(appSettingsPath))
         {
             builder.AddJsonFile(appSettingsPath, optional: true, reloadOnChange: false);
@@ -87,6 +93,7 @@ public static class ConfigLoader
             Storage = storage,
             Dns = Bind<DnsSection>(configuration, "Dns"),
             Backup = Bind<BackupSection>(configuration, "Backup"),
+            Sending = Bind<SendingSection>(configuration, "Sending"),
             Delivery = Bind<DeliverySection>(configuration, "Delivery"),
             Webhooks = Bind<Mta.Webhooks.WebhookOptions>(configuration, "Webhooks"),
             Dashboard = Bind<DashboardSection>(configuration, "Dashboard"),

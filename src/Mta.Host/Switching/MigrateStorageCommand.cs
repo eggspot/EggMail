@@ -218,7 +218,7 @@ public static class MigrateStorageCommand
         // Once the pointer was rewritten by 'activate', the configuration on disk describes the target; the commands that still
         // concern the source (rollback, finalize, status) read the pointer as it was before.
         string? original = command is "activate" or "rollback" or "finalize" or "status" ? SwitchActivator.PendingOriginalBootstrap(bootstrapPath) : null;
-        IConfigurationRoot root = ConfigLoader.Build(p.ConfigArgs.ToArray(), Path.GetDirectoryName(Path.GetFullPath(bootstrapPath)), null, original);
+        IConfigurationRoot root = ConfigLoader.Build(p.ConfigArgs.ToArray(), Path.GetDirectoryName(Path.GetFullPath(bootstrapPath)), bootstrapFileOverride: original);
         LoadedConfig loaded = ConfigLoader.Load(root);
         if (!loaded.IsValid)
         {

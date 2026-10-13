@@ -51,6 +51,41 @@ const adminRoute = (C: ComponentType<any>) => (props: Record<string, unknown>) =
     <C {...props} />
   </AdminOnly>
 );
+/** An administrator who has not chosen a tenant yet (a fresh install has none) gets guidance instead of "X-Tenant-Id required" errors. */
+function NeedsTenant({ children }: { children: ComponentChildren }) {
+  const { isAdmin, tenantId, tenants } = useApp();
+  if (isAdmin && !tenantId) {
+    return (
+      <EmptyState title={tenants.length === 0 ? 'Create a tenant first' : 'Choose a tenant'}>
+        <p>
+          {tenants.length === 0
+            ? 'Nothing here is set up yet: every domain, key and message belongs to a tenant.'
+            : 'Pick a tenant in the header to see its data.'}{' '}
+          <a href="/admin/tenants">Open the tenants page</a>.
+        </p>
+      </EmptyState>
+    );
+  }
+  return <>{children}</>;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const tenantRoute = (C: ComponentType<any>) => (props: Record<string, unknown>) => (
+  <NeedsTenant>
+    <C {...props} />
+  </NeedsTenant>
+);
+const OverviewPage = tenantRoute(Overview);
+const MessagesPage = tenantRoute(Messages);
+const MessageDetailPage = tenantRoute(MessageDetail);
+const SendPage = tenantRoute(Send);
+const DomainsPage = tenantRoute(Domains);
+const DomainDetailPage = tenantRoute(DomainDetail);
+const WebhooksPage = tenantRoute(Webhooks);
+const SuppressionsPage = tenantRoute(Suppressions);
+const CredentialsPage = tenantRoute(Credentials);
+const StatisticsPage = tenantRoute(Statistics);
+const SettingsPage = tenantRoute(Settings);
 const TenantsPage = adminRoute(Tenants);
 const StatusPage = adminRoute(Status);
 const CertificatesPage = adminRoute(Certificates);
@@ -64,17 +99,17 @@ function Routes() {
     <ErrorBoundary resetKey={path}>
       <IsoErrorBoundary>
           <Router key={tenantId ?? 'none'}>
-            <Route path="/" component={Overview} />
-            <Route path="/messages" component={Messages} />
-            <Route path="/messages/:id" component={MessageDetail} />
-            <Route path="/send" component={Send} />
-            <Route path="/domains" component={Domains} />
-            <Route path="/domains/:id" component={DomainDetail} />
-            <Route path="/webhooks" component={Webhooks} />
-            <Route path="/suppressions" component={Suppressions} />
-            <Route path="/credentials" component={Credentials} />
-            <Route path="/statistics" component={Statistics} />
-            <Route path="/settings" component={Settings} />
+            <Route path="/" component={OverviewPage} />
+            <Route path="/messages" component={MessagesPage} />
+            <Route path="/messages/:id" component={MessageDetailPage} />
+            <Route path="/send" component={SendPage} />
+            <Route path="/domains" component={DomainsPage} />
+            <Route path="/domains/:id" component={DomainDetailPage} />
+            <Route path="/webhooks" component={WebhooksPage} />
+            <Route path="/suppressions" component={SuppressionsPage} />
+            <Route path="/credentials" component={CredentialsPage} />
+            <Route path="/statistics" component={StatisticsPage} />
+            <Route path="/settings" component={SettingsPage} />
             <Route path="/admin/tenants" component={TenantsPage} />
             <Route path="/admin/status" component={StatusPage} />
             <Route path="/admin/certificates" component={CertificatesPage} />
