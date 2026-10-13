@@ -93,7 +93,8 @@ public sealed class SwitchActivator(IConfigurationRoot configuration, string boo
     {
         foreach (IConfigurationProvider provider in configuration.Providers.Reverse())
         {
-            if (!provider.TryGet(key, out _) || IsBootstrap(provider))
+            // The bootstrap file is what the activation rewrites, and a value from the config store (below every deployment layer) is not a deployment lock.
+            if (!provider.TryGet(key, out _) || IsBootstrap(provider) || provider is Mta.Host.Configuration.StoredSettingsProvider)
             {
                 continue;
             }

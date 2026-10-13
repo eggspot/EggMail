@@ -25,7 +25,13 @@ Things that are easy to get wrong:
 
 ## Configuration
 
-Settings come from (highest precedence first): command line, environment variables, the bootstrap file on the data volume (`bootstrap.json`, written by a backend switch), `appsettings.json`, built-in defaults. Environment variables use `__` for nesting (`Delivery__RemotePort=25`). Values supplied by the deployment cannot be edited in the dashboard.
+Settings come from (highest precedence first): command line, environment variables, the bootstrap file on the data volume (`bootstrap.json`, written by a backend switch), `appsettings.json` next to the executable (`/app/appsettings.json` in the image; mount one there), the global settings saved through the dashboard (`/admin/settings`, stored in the database), built-in defaults. Environment variables use `__` for nesting (`Delivery__RemotePort=25`). Values supplied by the deployment cannot be edited in the dashboard. A value of the wrong type (`Smtp__MaxRecipients=many`) or out of range stops the start with a message naming the key; a saved dashboard setting that does not validate is ignored with a warning.
+
+Formats: durations are `[d.]hh:mm:ss` (`00:00:30`, `2.00:00:00`); sizes are bytes; lists are indexed (`Acme__Domains__0=a.example`) or, for the lists marked *list*, one value with entries separated by commas.
+
+The tables below list every key; the test `ConfigurationDocumentationTests` fails when a key the code reads is missing here, or a key named here is not read.
+
+### General, storage and retention
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -34,29 +40,162 @@ Settings come from (highest precedence first): command line, environment variabl
 | `Sqlite:DataDirectory` | `/data` | Where the database files live (mount a volume here) |
 | `Sqlite:SyncMode` | `Off` | `Off`, `Normal`, `Full` for queue and stats files. **`Off` is safe against a process kill but not against power loss or an OS crash**: files can corrupt and acknowledged mail can be lost. Use `Normal` or `Full`, or PostgreSQL, if you need that |
 | `Sqlite:ConfigSyncMode` | `Full` | Same for `config.db` (tenants, keys, certificates) |
-| `Storage:Postgres:OwnerConnectionString` / `RuntimeConnectionString` | none | Owner role runs migrations and partition DDL; runtime role does normal work |
+| `Sqlite:QueuePersistence` | `Persistent` | `Memory` keeps the queue only in memory (a restart loses queued mail; the dashboard warns) |
+| `Sqlite:QuickCheck` | true | Run `PRAGMA quick_check` at start; `false` runs the slower full `integrity_check` |
+| `Sqlite:StatsFlushInterval` | `00:00:10` | How often the in-memory statistics are written; a crash loses at most this window. `00:00:00` disables the timer |
+| `Sqlite:RetentionDeleteBatchSize` | 5000 | Rows per batched retention `DELETE` |
+| `Sqlite:RetentionDeletePause` | `00:00:00.020` | Pause between those batches so intake stays responsive |
+| `Storage:Postgres:OwnerConnectionString` | none | Owner role: runs migrations and partition DDL |
+| `Storage:Postgres:RuntimeConnectionString` | none | Runtime role: normal work (required for PostgreSQL). With only one of the two set it serves both roles and health warns |
+| `Storage:Postgres:MaxPoolSize` | 32 | Connection pool of the runtime role (the owner role has a small pool of its own) |
+| `Storage:Postgres:PartitionsAheadDays` | 7 | Day partitions of the history tables created ahead by maintenance |
+| `Storage:Postgres:StatsFlushInterval` | `00:00:10` | As `Sqlite:StatsFlushInterval` |
+| `Storage:Postgres:RetentionDeleteBatchSize` | 5000 | Rows per batched `DELETE` (tables that are not day partitioned) |
+| `Storage:Postgres:RetentionDeletePause` | `00:00:00.020` | Pause between those batches |
+| `Storage:Postgres:CommandTimeoutSeconds` | 30 | Command timeout of the hot-path statements (a `Command Timeout` in the connection string wins) |
+| `Mail:Database:Migrate` | `Auto` | `Auto` migrates the PostgreSQL schema at start (owner role); `Never` leaves it to `mta migrate-db` or the generated script |
 | `History:Mode` | `Full` | `Full` keeps per-message history; `StatsOnly` keeps aggregates only |
+| `History:RecentEvents` | 1000 | Size of the content-free recent-events ring behind the dashboard's live view (both modes) |
+| `Content:Mode` | `Retain` | `None` deletes message content at the final state |
 | `Content:RetentionDays` | 7 | 6 to 30; message bodies kept for the dashboard and resend |
+| `Content:StoreAttachments` | false | Default for keeping the raw message with its attachments (a tenant or a send can override it); has an effect only with `Content:AllowAttachmentStorage` |
+| `Content:AllowAttachmentStorage` | false | Master switch: without it no attachment is ever stored |
+| `Content:MaxStoredBodyBytes` | 262144 | Stored text/HTML bodies are truncated (and flagged) beyond this |
+| `Content:StoreSubject` | true | `false` stores no subject (subjects can contain personal data) |
 | `Retention:MetadataDays` | 30 | Per-message events; `0` keeps forever |
-| `Queue:MaxLifetime` | 5 days | After this a deferred delivery expires and bounces |
-| `Smtp:Listeners:<name>:*` | see below | Port, mode, role, auth, bind address, enabled |
-| `Smtp:MaxMessageSize`, `MaxRecipients`, `MaxConnections`, `MaxConnectionsPerIp` | 25 MiB, 50, 2000, 100 | Limits |
+| `Stats:HourlyRetentionDays` | 30 | Hourly statistics; `0` keeps forever |
+| `Stats:DailyRetentionDays` | 400 | Daily statistics; `0` keeps forever |
+| `Stats:RecipientDomainTopNHourly` | 20 | Recipient domains kept per hour and sending domain; the rest is counted as `other` |
+| `Stats:RecipientDomainTopNDaily` | 10 | The same for the daily rollup |
+| `Stats:MaxSeriesPerHour` | 200000 | Cap on distinct statistic series in one hour; the overflow goes to `other` |
+| `Queue:MaxLifetime` | `5.00:00:00` | After this a deferred delivery expires and bounces. Must be shorter than `Content:RetentionDays` while history is recorded |
+| `Queue:MaxLifetimeDays` | 5 | The same in whole days: the form the dashboard's settings page stores. If both are set, `Queue:MaxLifetime` wins |
+
+### SMTP and delivery
+
+| Key | Default | Meaning |
+|---|---|---|
+| `Smtp:Listeners:<name>:Port` | see below | Listener port (0 lets the system pick one) |
+| `Smtp:Listeners:<name>:BindAddress` | `::` | IP address to bind |
+| `Smtp:Listeners:<name>:Mode` | `StartTls` | `StartTls`, `Implicit` (TLS from the first byte) or `Plain` |
+| `Smtp:Listeners:<name>:Role` | `Submission` | `Submission` (tenant mail, AUTH) or `Bounce` (signed bounce addresses only) |
+| `Smtp:Listeners:<name>:AuthRequired` | true | |
+| `Smtp:Listeners:<name>:Enabled` | true | |
+| `Smtp:Listeners:<name>:AllowInsecureAuth` | false | Allow AUTH without TLS (loopback or internal networks only) |
+| `Smtp:MaxMessageSize` | 26214400 | Bytes (25 MiB); also the limit of a message sent through the API |
+| `Smtp:MaxRecipients` | 50 | Recipients per message (1 to 1000); also the API limit |
+| `Smtp:MaxConnections` | 2000 | Concurrent SMTP connections |
+| `Smtp:MaxConnectionsPerIp` | 100 | Concurrent connections from one address |
+| `Smtp:MaxInFlightBytes` | 536870912 | Message bytes the server holds in memory at once across all connections (512 MiB); beyond it a sender gets `452` and retries later |
+| `Smtp:Chunking` | true | Advertise `CHUNKING`/`BDAT` |
+| `Smtp:SmtpUtf8` | true | Advertise and accept `SMTPUTF8` |
 | `Delivery:BounceDomain` | none | Domain of signed bounce addresses (`b+token@...`). Needs an MX record pointing at this server's bounce listener (public port 25 → container 2526). Without it, bounces go to the original sender address |
+| `Delivery:HeloName` | `Hostname` | EHLO name of outbound connections |
 | `Delivery:Workers` | 8 × cores (min 32) | Concurrent delivery groups |
-| `Delivery:RetryDelays` | built-in ladder | Delays between retries; the last repeats |
-| `Delivery:Throttle:*` | 20 connections, 600 msg/min ceilings | Per-destination limits; they start lower and grow while the destination accepts |
-| `Delivery:RemotePort`, `Delivery:AllowPrivateMxAddresses` | 25, false | Lab settings only |
+| `Delivery:ClaimBatchSize` | 100 | Deliveries claimed from the queue at once |
+| `Delivery:ClaimLease` | `00:15:00` | A claimed delivery that is not reported back within this is handed out again (flagged `possible_duplicate`) |
+| `Delivery:PollInterval` | `00:00:00.250` | How often an idle engine looks for due deliveries |
+| `Delivery:MaxRecipientsPerTransaction` | 100 | Recipients of one destination domain sent in one SMTP transaction |
+| `Delivery:PreferChunking` | false | Use `BDAT` when the remote server offers it |
+| `Delivery:RetryDelays` | built-in ladder | Delays between retries (2 m, 5 m, 15 m, 30 m, 1 h, 2 h, 4 h); the last repeats |
+| `Delivery:Throttle:MaxConnections` | 20 | Ceiling of concurrent connections to one destination domain |
+| `Delivery:Throttle:MaxMessagesPerMinute` | 600 | Ceiling of messages per minute to one destination domain |
+| `Delivery:Throttle:MaxMessagesPerConnection` | 100 | Messages over one connection before it is closed |
+| `Delivery:Throttle:InitialConnections` | 5 | Connections allowed at first; grows while the destination keeps accepting |
+| `Delivery:Throttle:InitialMessagesPerMinute` | 120 | Messages per minute allowed at first; grows the same way |
+| `Delivery:RemotePort` | 25 | Destination port for direct MX delivery; lab setups only |
+| `Delivery:AllowPrivateMxAddresses` | false | Allow MX hosts that resolve to loopback or private addresses; lab setups only |
 | `Dns:Servers` | system resolvers | Resolvers (IP with optional port) |
-| `Dns:RequestDnssec`, `Dns:TrustAuthenticatedData` | true, false | DANE needs the AD bit from a trusted, local, validating resolver. With the default (`false`) DANE never applies. Turn it on only together with such a resolver: `deploy/compose/compose.unbound.yaml` (Compose) and `deploy/kubernetes/components/unbound` (Kubernetes) add an Unbound sidecar and set all three keys |
-| `Tls:CertificatePath`, `KeyPath`, `PfxPasswordFile` | none | Optional file override (for example cert-manager) |
-| `Tls:ReportingEnabled`, `ReportContact` | true | Daily TLS-RPT reports |
-| `Acme:Enabled`, `DirectoryUrl`, `Email`, `Domains`, `CloudflareApiToken(File)` | off | ACME with Cloudflare DNS-01 (verified against the Pebble test CA, not yet against a production CA; see [TLS certificates and ACME](#tls-certificates-and-acme)) |
-| `Acme:CertificateName`, `PropagationDelay`, `RenewAtRemainingFraction`, `CheckInterval` | `default`, 30 s, 1/3, 1 h | Name of the configured certificate row, wait after creating the TXT records, renew when this fraction of the lifetime is left, how often the renewal check runs |
-| `Tls:PollInterval` | 30 s | How often each replica polls the database for a changed certificate |
-| `Secrets:KeyProtection` | `None` | `Certificate` (with `CertificatePath`) for production. `None` stores the key ring unprotected and logs a warning |
-| `Backup:Enabled`, `IntervalHours`, `Keep`, `Directory` | true, 24, 3, `<data>/backups` | Scheduled SQLite backups |
-| `Dashboard:HttpPort`, `HttpsPort`, `HttpsEnabled` | 8080, 8443, true | Dashboard / API listeners |
-| `Webhooks:*` | see `WebhookOptions` | Timeouts, SSRF allow-list, retention |
+| `Dns:RequestDnssec` | true | Ask for DNSSEC records (needed for DANE) |
+| `Dns:TrustAuthenticatedData` | false | Trust the AD bit; only behind a local validating resolver. With the default DANE never applies. `deploy/compose/compose.unbound.yaml` (Compose) and `deploy/kubernetes/components/unbound` (Kubernetes) add an Unbound sidecar and set `Dns:Servers`, `Dns:RequestDnssec` and this key together |
+| `Sending:GlobalPerHour` | 0 | Most messages the server sends per UTC hour (0 = unlimited). Counters are in memory: a restart starts the hour at zero |
+| `Sending:GlobalPerDay` | 0 | The same per UTC day |
+| `Sending:TenantPerHour` | 0 | Default cap per tenant and hour; a tenant setting `Sending:PerHour` overrides it |
+| `Sending:TenantPerDay` | 0 | Default cap per tenant and day; tenant setting `Sending:PerDay` |
+| `Sending:DomainPerHour` | 0 | Default cap per sending domain and hour |
+| `Sending:DomainPerDay` | 0 | Default cap per sending domain and day |
+| `Sending:WarmupEnabled` | false | Limit each sending domain by the warm-up ramp (50, 100, 200 ... a day) from the day it was added |
+
+### TLS, certificates and secrets
+
+| Key | Default | Meaning |
+|---|---|---|
+| `Tls:CertificatePath` | none | Optional file override (for example cert-manager): PEM chain, or a PFX when `Tls:KeyPath` is empty. Wins over the database certificates for the same names |
+| `Tls:KeyPath` | none | PEM private key of the override |
+| `Tls:PfxPasswordFile` | none | File holding the PFX password |
+| `Tls:PollInterval` | `00:00:30` | How often replicas look for a changed certificate (database and override files) |
+| `Tls:ReportingEnabled` | true | Collect outbound TLS results and send daily TLS-RPT reports (RFC 8460) to domains that ask |
+| `Tls:ReportContact` | `postmaster@<Hostname>` | Contact in the reports |
+| `Acme:Enabled` | false | ACME with Cloudflare DNS-01 (verified against the Pebble test CA in CI, not yet against a production CA; see [TLS certificates and ACME](#tls-certificates-and-acme)). Needs `Acme:CloudflareApiToken` or `Acme:CloudflareApiTokenFile` |
+| `Acme:DirectoryUrl` | Let's Encrypt production | Use the staging directory while testing |
+| `Acme:Email` | none | Contact for the ACME account |
+| `Acme:Domains` | none | *List.* Names for the certificate renewed from configuration (wildcards need DNS-01, the only method). Certificates requested through the API are renewed as well |
+| `Acme:CertificateName` | `default` | Name of that certificate in the database |
+| `Acme:DnsProvider` | `Cloudflare` | The only provider so far |
+| `Acme:CloudflareApiToken` | none | API token with DNS edit rights (prefer the file form) |
+| `Acme:CloudflareApiTokenFile` | none | File holding that token |
+| `Acme:PropagationDelay` | `00:00:30` | Wait after publishing the challenge record |
+| `Acme:RenewAtRemainingFraction` | 0.3333 | Renew when this fraction of the lifetime remains (between 0 and 1) |
+| `Acme:CheckInterval` | `01:00:00` | How often the renewal service looks |
+| `Secrets:KeyProtection` | `None` | `Certificate` (with `Secrets:CertificatePath`) for production. `None` stores the key ring unprotected and logs a warning |
+| `Secrets:CertificatePath` | none | PFX that protects the Data Protection key ring (deployment configuration, never in the database) |
+| `Secrets:CertificatePasswordFile` | none | File holding its password |
+
+### HTTP API and dashboard
+
+| Key | Default | Meaning |
+|---|---|---|
+| `Dashboard:BindAddress` | `::` | IP address of the HTTP and HTTPS listeners |
+| `Dashboard:HttpPort` | 8080 | Plain HTTP (probes, internal) |
+| `Dashboard:HttpsPort` | 8443 | HTTPS with the certificate store; TLS 1.2 minimum, 1.3 on |
+| `Dashboard:HttpsEnabled` | true | |
+| `Dashboard:BootstrapAdminUser` | `admin` | User name created at start when no administrator exists |
+| `Dashboard:BootstrapAdminPasswordFile` | none | File holding that user's password (see below) |
+| `Api:MaxBodyBytes` | 1048576 | Largest JSON body of every endpoint except sending (checked while streaming) |
+| `Api:MaxSendBodyBytes` | 41943040 | Largest JSON body of `POST /messages` and `/messages/raw` (40 MiB; attachments are base64). The server request limit follows it (at least 64 MiB) |
+| `Api:MaxInFlightSendBytes` | 536870912 | Send-request bytes held in memory at once; beyond it the API answers `429` |
+| `Api:MaxAttachments` | 50 | Attachments per message |
+| `Api:MaxCustomHeaders` | 50 | Custom headers per message |
+| `Api:MaxTags` | 10 | Tags per message |
+| `Api:SessionLifetime` | `12:00:00` | Absolute lifetime of a dashboard session |
+| `Api:SessionIdleTimeout` | `02:00:00` | A session unused for this long ends |
+| `Api:CookieSecure` | `Auto` | `Auto` marks the session cookie `Secure` unless the request is plain HTTP from loopback; `Always`; `Never` |
+| `Api:MaxDomainsPerTenant` | 200 | |
+| `Api:MaxApiKeysPerTenant` | 100 | Active API keys |
+| `Api:MaxSmtpCredentialsPerTenant` | 100 | |
+| `Api:MaxWebhooksPerTenant` | 50 | |
+| `Api:MaxStatsRows` | 50000 | Rows one statistics query may return |
+| `Api:MetricsAllowedNetworks` | loopback and private ranges | *List.* Networks (CIDR) allowed to read `/metrics`; it carries no credentials, so keep it off the public internet |
+| `Api:SpfInclude` | none | `include:` host suggested to customers in their SPF record |
+| `Observability:MetricsEndpointEnabled` | true | Serve `/metrics` |
+| `Observability:OtlpEndpoint` | none | OTLP endpoint for metrics and traces |
+| `Webhooks:AllowHttp` | false | Allow plain `http` webhook endpoints (HTTPS only otherwise) |
+| `Webhooks:Timeout` | `00:00:15` | One delivery attempt |
+| `Webhooks:MaxConcurrency` | 32 | Concurrent webhook deliveries |
+| `Webhooks:MaxConcurrencyPerEndpoint` | 4 | So one slow endpoint cannot take all workers |
+| `Webhooks:BatchSize` | 64 | Deliveries claimed at once |
+| `Webhooks:PollInterval` | `00:00:00.500` | |
+| `Webhooks:Lease` | `00:02:00` | |
+| `Webhooks:DisableAfter` | `5.00:00:00` | An endpoint failing for this long is disabled and the tenant notified |
+| `Webhooks:RetrySchedule` | 5 s, 5 m, 30 m, 2 h, 5 h, 10 h, 10 h | Delays after attempt 1, 2, ... |
+| `Webhooks:ThrottleExtraDelay` | `00:01:00` | Extra delay when the receiver answers 429/502/504 |
+| `Webhooks:MaxResponseSnippetBytes` | 1024 | Response bytes kept in the attempt log |
+| `Webhooks:UserAgent` | `EggMail-Webhooks/1.0` | |
+| `Webhooks:OutboxRetentionDays` | 7 | Finished deliveries; `0` keeps forever |
+| `Webhooks:AttemptLogDays` | 7 | Attempt log; `0` keeps forever |
+
+### Backups and backend switch
+
+| Key | Default | Meaning |
+|---|---|---|
+| `Backup:Enabled` | true | Scheduled SQLite backups |
+| `Backup:IntervalHours` | 24 | |
+| `Backup:Keep` | 3 | Newest backups kept |
+| `Backup:Directory` | `<data>/backups` | Put it on another disk than the data |
+| `Switch:QuiesceTimeoutSeconds` | 30 | Seconds to wait for in-flight deliveries when a backend switch quiesces |
+| `Switch:BundleDirectory` | `<data>/switch` (or the temp directory) | Where the admin API writes switch bundles |
+| `SwitchTarget:*` | none | Overlay for the target of a backend switch, for example `SwitchTarget:Connections:<name>` (a named PostgreSQL connection) or `SwitchTarget:Storage:Postgres:RuntimeConnectionString`; the API never carries credentials |
+| `SwitchSource:*` | none | The same for the store an instance was switched away from (rollback) |
 
 Default listeners (container ports, publish them as 587, 465, 2525 and 25):
 
@@ -67,6 +206,8 @@ Default listeners (container ports, publish them as 587, 465, 2525 and 25):
 | `alternate` | 2525 | STARTTLS | submission |
 | `bounce` | 2526 | STARTTLS offered | bounce: signed bounce addresses only, no AUTH |
 | `alternate-587`, `alternate-465` | 2587, 2465 | | off by default |
+
+A listener named in configuration replaces the default of the same name member by member (`Smtp__Listeners__submission__Port=587`); a new name adds a listener.
 
 ## First administrator
 
@@ -108,7 +249,7 @@ Take a backup, pull the new image, restart. Schema changes run at start (SQLite:
 
 ## State kept across restarts
 
-Four things the server counts or learns while running are written to the database in the background, so a restart (and, on PostgreSQL, another replica) sees them: the last DNS check result of every record of a domain, the hourly and daily sending counters behind `Sending:*` caps and the warm-up, the TLS-RPT counters, and the reports that could not be delivered yet. They are flushed every 10 seconds (counters) and every minute (TLS-RPT) and when the process stops, so a graceful restart loses nothing and a crash loses at most that last interval (the caps may then be overshot by what was sent in those seconds). With several replicas on one PostgreSQL database the caps are shared with a lag of one flush interval and each daily TLS report is sent once. Global settings changed in the dashboard (`/admin/settings`) are stored at once and applied at the next start.
+Four things the server counts or learns while running are written to the database in the background, so a restart (and, on PostgreSQL, another replica) sees them: the last DNS check result of every record of a domain, the hourly and daily sending counters behind the sending caps (`Sending:GlobalPerHour` and the others) and the warm-up, the TLS-RPT counters, and the reports that could not be delivered yet. They are flushed every 10 seconds (counters) and every minute (TLS-RPT) and when the process stops, so a graceful restart loses nothing and a crash loses at most that last interval (the caps may then be overshot by what was sent in those seconds). With several replicas on one PostgreSQL database the caps are shared with a lag of one flush interval and each daily TLS report is sent once. Global settings changed in the dashboard (`/admin/settings`) are stored at once and applied at the next start.
 
 ## Graceful shutdown
 
