@@ -4,7 +4,7 @@ import type { AdminStatus } from '../../api/types';
 import { CertificateExpiry } from '../../components/CertificateExpiry';
 import { PressureIndicators } from '../../components/PressureIndicators';
 import { Button, Card, Chip, ErrorNotice, KeyValue, Loading, Notice, PageHeader, StatusChip } from '../../components/ui';
-import { formatDateTime, formatNumber, formatRelative } from '../../lib/format';
+import { formatDateTime, formatDuration, formatNumber, formatRelative } from '../../lib/format';
 import { useAction, useApi, useDocumentTitle, usePolling } from '../../lib/hooks';
 import { STATE_LABEL } from '../../lib/switchFlow';
 
@@ -35,11 +35,27 @@ export default function Status(_props: Record<string, unknown>) {
     REFRESH_MS,
   );
 
+  const job = useApi(() => api.maintenance(), []);
   const maintenance = useAction(async () => {
-    await api.runMaintenance();
-    setOutcome({ ok: true, text: 'Maintenance run started.' });
+    const r = await api.runMaintenance();
+    setOutcome({ ok: true, text: r?.status === 'running' ? 'Maintenance is already running.' : 'Maintenance run started.' });
     status.reload();
+    job.reload();
   });
+  // Follow a running maintenance job until it has finished.
+  usePolling(
+    async () => {
+      try {
+        const m = await api.maintenance();
+        job.setData(m);
+        return m.running;
+      } catch {
+        return true;
+      }
+    },
+    2_000,
+    job.data?.running === true,
+  );
 
   const s: AdminStatus | undefined = status.data;
   return (
@@ -154,6 +170,54 @@ export default function Status(_props: Record<string, unknown>) {
                   </tbody>
                 </table>
               </div>
+            )}
+          </Card>
+
+          <Card title="Maintenance">
+            {!job.data ? (
+              <Loading />
+            ) : job.data.running ? (
+              <p role="status">
+                <Chip tone="info">running</Chip> Started {job.data.startedAt ? formatRelative(job.data.startedAt) : 'just now'}.
+              </p>
+            ) : !job.data.finishedAt ? (
+              <p class="muted">No maintenance run since the server started. Retention and cleanup jobs also run on their own schedule.</p>
+            ) : (
+              <>
+                <p>
+                  {job.data.error ? <Chip tone="bad">failed</Chip> : <Chip tone="ok">finished</Chip>} Last run finished {formatDateTime(job.data.finishedAt)} ({formatRelative(job.data.finishedAt)}).
+                  {job.data.error && <> {job.data.error}</>}
+                </p>
+                {job.data.reports.length > 0 && (
+                  <div class="table-wrap">
+                    <table>
+                      <caption class="sr-only">Maintenance jobs of the last run</caption>
+                      <thead>
+                        <tr>
+                          <th scope="col">Job</th>
+                          <th scope="col" class="num">
+                            Rows affected
+                          </th>
+                          <th scope="col" class="num">
+                            Duration
+                          </th>
+                          <th scope="col">Detail</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {job.data.reports.map((r) => (
+                          <tr key={r.job}>
+                            <th scope="row">{r.job}</th>
+                            <td class="num">{formatNumber(r.rowsAffected)}</td>
+                            <td class="num">{formatDuration(r.durationMs)}</td>
+                            <td class="wrap">{r.detail ?? '-'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </>
             )}
           </Card>
 

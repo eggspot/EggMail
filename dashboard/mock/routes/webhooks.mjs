@@ -2,7 +2,7 @@
 import { randomBytes } from 'node:crypto';
 import { HttpError, minutesAgo, hoursAgo, newId, validate, iso } from '../lib.mjs';
 
-export const EVENT_TYPES = ['message.delivered', 'message.deferred', 'message.bounced', 'message.complained', 'message.expired', 'message.suppressed', 'webhook.test'];
+export const EVENT_TYPES = ['message.delivered', 'message.deferred', 'message.bounced', 'message.complained', 'message.expired', 'message.suppressed', 'webhook.endpoint.disabled', 'webhook.test'];
 
 const secret = () => 'whsec_' + randomBytes(24).toString('base64');
 
@@ -141,7 +141,19 @@ export function register(r) {
       const w = find(ctx);
       const sec = secret();
       store(ctx).secrets.set(w.id, sec);
+      w.secretRotationPending = true;
       return { ...w, secret: sec };
+    },
+    { tenant: true },
+  );
+
+  r.delete(
+    '/api/v1/webhooks/:id/previous-secret',
+    (ctx) => {
+      const w = find(ctx);
+      if (!w.secretRotationPending) throw new HttpError(404, 'not_found', 'No secret rotation is pending.');
+      w.secretRotationPending = false;
+      return undefined;
     },
     { tenant: true },
   );

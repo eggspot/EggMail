@@ -259,3 +259,23 @@ describe('storage switch machine', () => {
     expect(pre.data.checks.some((c) => c.severity === 'warning' && /synchronous=OFF/.test(c.message))).toBe(true);
   });
 });
+
+describe('mock maintenance and ACME state', () => {
+  it('reports no maintenance run until one was started, then its jobs', async () => {
+    await admin();
+    const before = (await mock.get('/api/v1/admin/maintenance')).data;
+    expect(before).toMatchObject({ running: false, finishedAt: null, reports: [] });
+    expect((await mock.post('/api/v1/admin/maintenance/run')).status).toBe(202);
+    const after = (await mock.get('/api/v1/admin/maintenance')).data;
+    expect(after.finishedAt).not.toBeNull();
+    expect(after.reports.length).toBeGreaterThan(0);
+  });
+
+  it('lists the ACME renewal state and marks it pending after a request', async () => {
+    await admin();
+    expect((await mock.get('/api/v1/admin/certificates/acme')).data[0]).toMatchObject({ certificateName: 'default', status: 'renewed' });
+    expect((await mock.post('/api/v1/admin/certificates/acme', { domains: ['mail.example.com'] })).status).toBe(202);
+    expect((await mock.get('/api/v1/admin/certificates/acme')).data[0].status).toBe('pending');
+  });
+});
+

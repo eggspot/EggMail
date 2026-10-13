@@ -223,7 +223,10 @@ export interface Webhook {
   event_types: string[];
   enabled: boolean;
   disabledReason?: string | null;
+  disabledAt?: string | null;
   createdAt?: string;
+  /** True after a secret rotation until the previous secret is removed (deliveries are signed with both). */
+  secretRotationPending?: boolean;
   /** Present only in the create and rotate-secret responses. */
   secret?: string;
 }
@@ -310,6 +313,8 @@ export interface SettingItem {
   description?: string;
   /** Set from deployment configuration; shown read-only. */
   locked?: boolean;
+  /** The stored value is read at the next start of the server. */
+  requiresRestart?: boolean;
 }
 
 export interface SettingsResponse {
@@ -341,6 +346,25 @@ export interface PressureIndicators {
   commitP99Ms: number;
   /** True when the advisory thresholds (queue over 1,000 for 5 min, p99 over about 100 ms) are exceeded. */
   advisory: boolean;
+}
+
+/** Renewal state of a certificate requested through ACME (GET /admin/certificates/acme). */
+export interface AcmeRenewal {
+  certificateName: string;
+  status: string;
+  lastAttemptAt?: string | null;
+  nextAttemptAt?: string | null;
+  failures?: number;
+  lastError?: string | null;
+}
+
+/** GET /admin/maintenance: the background storage maintenance. */
+export interface MaintenanceState {
+  running: boolean;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  error?: string | null;
+  reports: { job: string; durationMs: number; rowsAffected: number; detail?: string | null }[];
 }
 
 export interface AdminStatus {
