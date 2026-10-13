@@ -131,27 +131,42 @@ internal sealed class SocketTransport : IAsyncDisposable
         await reader.CompleteAsync(error).ConfigureAwait(false);
     }
 
-    /// <summary>Performs the server-side TLS handshake on a fresh connection (implicit TLS) or after STARTTLS.</summary>
+    private bool _plaintextStopped;
+
+    /// <summary>
+    /// Stops reading plaintext from the socket and reports whether any bytes had already arrived behind the STARTTLS line. Call this BEFORE
+    /// sending "220 Ready to start TLS": a client may start its handshake the instant it sees that reply, and a plaintext reader that is
+    /// still running would swallow the ClientHello (and the injection guard would then refuse the connection). Bytes present at this point
+    /// were sent before the reply existed, so they are pipelined plaintext (CVE-2011-0411 family). Returns false in that case.
+    /// </summary>
+    public async ValueTask<bool> StopPlaintextReadingAsync()
+    {
+        if (_input is null || _plaintextStopped)
+        {
+            return true;
+        }
+
+        _plaintextStopped = true;
+        await _pumpCts.CancelAsync().ConfigureAwait(false);
+        await _inputPump.ConfigureAwait(false);
+        bool leftover = _input.Reader.TryRead(out var pending) && !pending.Buffer.IsEmpty;
+        await _input.Reader.CompleteAsync().ConfigureAwait(false);
+        return !leftover;
+    }
+
+    /// <summary>Performs the server-side TLS handshake on a fresh connection (implicit TLS) or after STARTTLS (after <see cref="StopPlaintextReadingAsync"/> and the 220 reply).</summary>
     public async Task<bool> UpgradeToTlsAsync(ServerOptionsSelectionCallback optionsCallback, TimeSpan timeout, CancellationToken cancellationToken)
     {
         if (_input is not null && _output is not null)
         {
-            // 1. Stop reading plaintext BEFORE the "220 Ready to start TLS" reply goes out. A client may start its handshake the instant it
-            // sees 220; if the plaintext reader were still running it could swallow the ClientHello and the guard below would take it for
-            // injected commands. Bytes that are already in the pipe at this point arrived before the reply was sent, so they really are
-            // pipelined plaintext (CVE-2011-0411 family).
-            await _pumpCts.CancelAsync().ConfigureAwait(false);
-            await _inputPump.ConfigureAwait(false);
-            bool leftover = _input.Reader.TryRead(out var pending) && !pending.Buffer.IsEmpty;
-            await _input.Reader.CompleteAsync().ConfigureAwait(false);
-
-            // 2. Now flush the pending output (the 220 reply) and stop the output pump.
-            await _output.Writer.CompleteAsync().ConfigureAwait(false);
-            await _outputPump.ConfigureAwait(false);
-            if (leftover)
+            if (!await StopPlaintextReadingAsync().ConfigureAwait(false))
             {
                 return false;
             }
+
+            // Flush the pending output (the 220 reply) and stop the output pump.
+            await _output.Writer.CompleteAsync().ConfigureAwait(false);
+            await _outputPump.ConfigureAwait(false);
         }
 
         var ssl = new SslStream(_network, leaveInnerStreamOpen: true);

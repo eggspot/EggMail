@@ -185,6 +185,61 @@ public class TlsAndAuthTests
 
 public class StarttlsRaceTests
 {
+    /// <summary>A real TLS ClientHello recorded once (the handshake itself is never completed with it).</summary>
+    private static async Task<byte[]> RecordClientHelloAsync()
+    {
+        using var listener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var accept = Task.Run(async () =>
+        {
+            using var peer = await listener.AcceptTcpClientAsync();
+            byte[] buffer = new byte[4096];
+            int n = await peer.GetStream().ReadAsync(buffer);
+            return buffer.AsSpan(0, n).ToArray();
+        });
+        using var client = new System.Net.Sockets.TcpClient();
+        await client.ConnectAsync(IPAddress.Loopback, ((IPEndPoint)listener.LocalEndpoint).Port);
+        using var ssl = new System.Net.Security.SslStream(client.GetStream(), false, (_, _, _, _) => true);
+        _ = Task.Run(async () => { try { await ssl.AuthenticateAsClientAsync("localhost"); } catch { } });
+        return await accept;
+    }
+
+    [Fact]
+    public async Task A_ClientHello_written_in_the_same_instant_as_220_is_read_gets_a_ServerHello_not_a_closed_connection()
+    {
+        // A native TLS client (OpenSSL, Python) sends its ClientHello within microseconds of seeing 220. The server must not have a plaintext
+        // reader running at that moment. The first TLS record back must be the ServerHello (content type 0x16), never EOF.
+        byte[] hello = await RecordClientHelloAsync();
+        await using var f = new ServerFixture();
+        for (int i = 0; i < 40; i++)
+        {
+            using var tcp = new System.Net.Sockets.TcpClient();
+            await tcp.ConnectAsync(IPAddress.Loopback, f.PlainPort);
+            var stream = tcp.GetStream();
+            byte[] buffer = new byte[4096];
+            await ReadUntilAsync(stream, buffer, "220");                          // greeting
+            await stream.WriteAsync("EHLO x.test\r\n"u8.ToArray());
+            await ReadUntilAsync(stream, buffer, "250 STARTTLS");
+            await stream.WriteAsync("STARTTLS\r\n"u8.ToArray());
+            await ReadUntilAsync(stream, buffer, "220");
+            await stream.WriteAsync(hello);
+            using var cts = new CancellationTokenSource(5000);
+            int n = await stream.ReadAsync(buffer, cts.Token);
+            Assert.True(n > 0 && buffer[0] == 0x16, $"iteration {i}: expected a TLS record, got {(n == 0 ? "EOF" : "0x" + buffer[0].ToString("x2"))}");
+        }
+    }
+
+    private static async Task ReadUntilAsync(System.Net.Sockets.NetworkStream stream, byte[] buffer, string marker)
+    {
+        var text = new StringBuilder();
+        while (!text.ToString().Contains(marker))
+        {
+            int n = await stream.ReadAsync(buffer);
+            Assert.True(n > 0, "connection closed while waiting for " + marker);
+            text.Append(Encoding.ASCII.GetString(buffer, 0, n));
+        }
+    }
+
     [Fact]
     public async Task A_client_that_starts_the_handshake_the_instant_it_sees_220_is_never_mistaken_for_an_injection()
     {
