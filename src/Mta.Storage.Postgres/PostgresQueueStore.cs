@@ -24,12 +24,12 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
         "id, message_id, tenant_id, envelope_from, recipient, recipient_domain, attempt, created_at, expires_at, lease_until, last_error, possible_duplicate, sending_domain, source, due_at";
 
     private const string ClaimSql =
-        "UPDATE delivery_queue SET lease_owner = $1, lease_until = $2 WHERE id IN (" +
+        "UPDATE delivery_queue SET lease_owner = $1, lease_until = $2, possible_duplicate = possible_duplicate OR lease_owner IS NOT NULL WHERE id IN (" +
         "SELECT id FROM delivery_queue WHERE transfer_switch_id IS NULL AND due_at <= $3 AND lease_until <= $3 AND expires_at > $3 ORDER BY due_at, id LIMIT $4 FOR UPDATE SKIP LOCKED) " +
         "RETURNING " + ClaimColumns;
 
     private const string ClaimExpiredSql =
-        "UPDATE delivery_queue SET lease_owner = $1, lease_until = $2 WHERE id IN (" +
+        "UPDATE delivery_queue SET lease_owner = $1, lease_until = $2, possible_duplicate = possible_duplicate OR lease_owner IS NOT NULL WHERE id IN (" +
         "SELECT id FROM delivery_queue WHERE transfer_switch_id IS NULL AND expires_at <= $3 AND lease_until <= $3 ORDER BY expires_at, id LIMIT $4 FOR UPDATE SKIP LOCKED) " +
         "RETURNING " + ClaimColumns;
 
@@ -499,7 +499,7 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
         await ExecuteAsync("UPDATE delivery_queue SET lease_until = $3 WHERE id = $1 AND lease_owner = $2", p => p.Uuid(deliveryId).Text(owner).Time(until), cancellationToken).ConfigureAwait(false) > 0;
 
     public async ValueTask<int> ReleaseExpiredLeasesAsync(DateTimeOffset now, CancellationToken cancellationToken) =>
-        await ExecuteAsync("UPDATE delivery_queue SET lease_owner = NULL, lease_until = 'epoch'::timestamptz WHERE lease_owner IS NOT NULL AND lease_until <= $1", p => p.Time(now), cancellationToken).ConfigureAwait(false);
+        await ExecuteAsync("UPDATE delivery_queue SET lease_owner = NULL, lease_until = 'epoch'::timestamptz, possible_duplicate = true WHERE lease_owner IS NOT NULL AND lease_until <= $1", p => p.Time(now), cancellationToken).ConfigureAwait(false);
 
     public async ValueTask<int> ReleaseOwnedLeasesAsync(string owner, CancellationToken cancellationToken) =>
         await ExecuteAsync("UPDATE delivery_queue SET lease_owner = NULL, lease_until = 'epoch'::timestamptz WHERE lease_owner = $1", p => p.Text(owner), cancellationToken).ConfigureAwait(false);

@@ -58,3 +58,11 @@ Running status of the implementation, updated in every pull request. **Productio
 - `IWebhookOutbox.EnqueueAsync` (events that are not tied to a delivery attempt: asynchronous bounces, complaints).
 - The VERP token carries the sending domain's id; the bounce domain and per-domain return-path host are configuration.
 - API keys have a fixed positional layout (`egm_` + 8 character id + `_` + 43 character secret); a syntax check by counting underscores was wrong because base64url can contain `_`.
+
+## Hardening done after interop and drills (2026-10-13)
+
+- **Interop with independent clients found a real bug:** Python's `smtplib` failed its first STARTTLS after every cold start (8 of 8 on `main`) because the 220 reply was sent while the plaintext reader was still running; fixed and covered by a deterministic regression test (PRs #46, #54). `openssl s_client -starttls smtp` and `smtplib` (AUTH, 2.4 MB attachment, UTF-8 subject, spoofed From refused) now pass; outbound delivery was checked against Python's `smtpd` as the remote peer (DKIM-signed, VERP sender, one transaction for two recipients).
+- **Soak, 14 minutes, real process, SQLite `Off`, history `Full`:** 3.17 million messages accepted at about 3,770 msg/s (P99 8.3 ms) and delivered to a sink at the same time; the sink received exactly what was accepted; memory stayed at 396 to 412 MB, file descriptors and threads flat, no errors in the log. This is a short run on one laptop, not the 7-day soak of the plan.
+- **DoS probes against the real process:** 400 connections from one address (100 greeted, 300 refused), a 100 KB command line (`500 Line too long`), 150 slow-loris connections, a stranger recipient on the bounce listener (`550`): memory flat (191 to 197 MB), the server stayed healthy.
+- **Crash drill:** `kill -9` during load, restart: every acknowledged message was delivered; deliveries in flight at the kill were sent again (at-least-once). They were **not** flagged `possible_duplicate`; now a delivery reclaimed from a lease whose holder never reported is flagged (storage conformance on all three backends).
+- **Delivery robustness:** a group that fails before sending is handed back at once instead of waiting out a 15 minute lease; recording a result is retried; a result that cannot be recorded is never handed back (it would be sent twice).

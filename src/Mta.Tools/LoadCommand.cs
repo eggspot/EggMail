@@ -138,8 +138,26 @@ internal static class LoadCommand
         private int _readPos;
         private int _readLen;
 
+        /// <summary>Runs sessions until the work or time is used up. A server that ends a session (message limit per session, a refusal) is reconnected to; twenty sessions in a row without an accepted message stop the worker.</summary>
         public async Task RunAsync(Func<bool> next, long deadline, CancellationToken ct)
         {
+            int idleSessions = 0;
+            while (!ct.IsCancellationRequested && Stopwatch.GetTimestamp() < deadline && idleSessions < 20)
+            {
+                long before = Interlocked.Read(ref Accepted);
+                if (!await RunSessionAsync(next, deadline, ct))
+                {
+                    return;
+                }
+
+                idleSessions = Interlocked.Read(ref Accepted) > before ? 0 : idleSessions + 1;
+            }
+        }
+
+        /// <summary>One connection. Returns true when it ended abnormally (the caller may reconnect), false when the work is done.</summary>
+        private async Task<bool> RunSessionAsync(Func<bool> next, long deadline, CancellationToken ct)
+        {
+            bool abnormal = false;
             try
             {
                 await ConnectAsync(ct);
@@ -179,7 +197,7 @@ internal static class LoadCommand
                         }
                     }
 
-                    if (!ok) { Failed++; break; }
+                    if (!ok) { Failed++; abnormal = true; break; }
                     await _stream.WriteAsync(message, ct);
                     await _stream.WriteAsync(dot, ct);
                     ok = await ExpectAsync(250, ct);
@@ -192,6 +210,7 @@ internal static class LoadCommand
                     else
                     {
                         Failed++;
+                        abnormal = true;
                         break;
                     }
                 }
@@ -201,11 +220,17 @@ internal static class LoadCommand
             catch (Exception ex) when (ex is IOException or SocketException or OperationCanceledException or System.Security.Authentication.AuthenticationException)
             {
                 Interlocked.Increment(ref Failed);
+                abnormal = true;
             }
+
+            try { _stream?.Dispose(); } catch (Exception ex) when (ex is IOException or ObjectDisposedException) { }
+            return abnormal;
         }
 
         private async Task ConnectAsync(CancellationToken ct)
         {
+            _readPos = 0;
+            _readLen = 0;
             var tcp = new TcpClient { NoDelay = true };
             await tcp.ConnectAsync(cfg.Host, cfg.Port, ct);
             _stream = tcp.GetStream();
