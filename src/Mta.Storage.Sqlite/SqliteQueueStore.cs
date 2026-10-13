@@ -30,13 +30,13 @@ internal static class QueueSql
         "id, message_id, tenant_id, envelope_from, recipient, recipient_domain, attempt, created_at, expires_at, lease_until, last_error, possible_duplicate, sending_domain, source, due_at";
 
     public static readonly Stmt Claim = new(
-        "UPDATE delivery_queue SET lease_owner = @owner, lease_until = @until WHERE id IN (" +
+        "UPDATE delivery_queue SET lease_owner = @owner, lease_until = @until, possible_duplicate = CASE WHEN lease_owner IS NOT NULL THEN 1 ELSE possible_duplicate END WHERE id IN (" +
         "SELECT id FROM delivery_queue WHERE transfer_switch_id IS NULL AND due_at <= @now AND lease_until <= @now AND expires_at > @now ORDER BY due_at, id LIMIT @max) " +
         "RETURNING " + ClaimColumns,
         "@owner", "@until", "@now", "@max");
 
     public static readonly Stmt ClaimExpired = new(
-        "UPDATE delivery_queue SET lease_owner = @owner, lease_until = @until WHERE id IN (" +
+        "UPDATE delivery_queue SET lease_owner = @owner, lease_until = @until, possible_duplicate = CASE WHEN lease_owner IS NOT NULL THEN 1 ELSE possible_duplicate END WHERE id IN (" +
         "SELECT id FROM delivery_queue WHERE transfer_switch_id IS NULL AND expires_at <= @now AND lease_until <= @now ORDER BY expires_at, id LIMIT @max) " +
         "RETURNING " + ClaimColumns,
         "@owner", "@until", "@now", "@max");
@@ -79,12 +79,12 @@ internal static class QueueSql
     public static readonly Stmt ExtendLease = new("UPDATE delivery_queue SET lease_until = @until WHERE id = @id AND lease_owner = @owner", "@id", "@owner", "@until");
 
     public static readonly Stmt ReleaseExpired = new(
-        "UPDATE delivery_queue SET lease_owner = NULL, lease_until = 0 WHERE lease_owner IS NOT NULL AND lease_until <= @now", "@now");
+        "UPDATE delivery_queue SET lease_owner = NULL, lease_until = 0, possible_duplicate = 1 WHERE lease_owner IS NOT NULL AND lease_until <= @now", "@now");
 
     public static readonly Stmt ReleaseOwned = new("UPDATE delivery_queue SET lease_owner = NULL, lease_until = 0 WHERE lease_owner = @owner", "@owner");
 
     public static readonly Stmt ClearDeliveryLeases = new(
-        "UPDATE delivery_queue SET lease_owner = NULL, lease_until = 0 WHERE lease_owner IS NOT NULL OR lease_until <> 0");
+        "UPDATE delivery_queue SET possible_duplicate = CASE WHEN lease_owner IS NOT NULL THEN 1 ELSE possible_duplicate END, lease_owner = NULL, lease_until = 0 WHERE lease_owner IS NOT NULL OR lease_until <> 0");
 
     public static readonly Stmt ClearOutboxLeases = new(
         "UPDATE webhook_outbox SET lease_owner = NULL, lease_until = 0 WHERE lease_owner IS NOT NULL OR lease_until <> 0");

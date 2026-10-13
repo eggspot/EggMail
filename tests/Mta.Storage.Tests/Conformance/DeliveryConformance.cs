@@ -119,6 +119,36 @@ public abstract class DeliveryConformance : StorageTestBase
     }
 
     [Fact]
+    public async Task A_delivery_whose_holder_never_reported_is_flagged_possible_duplicate_when_it_is_claimed_again()
+    {
+        await AcceptAsync(Msg(to: ["a@example.org"]));
+        var first = Assert.Single(await ClaimAsync(owner: "worker-1", lease: TimeSpan.FromMinutes(1)));
+        Assert.False(first.PossibleDuplicate);
+
+        Clock.Advance(TimeSpan.FromMinutes(2));                         // the holder died: its lease simply expires
+        var second = Assert.Single(await ClaimAsync(owner: "worker-2"));
+
+        Assert.Equal(first.DeliveryId, second.DeliveryId);
+        Assert.True(second.PossibleDuplicate, "the first holder may have sent the message before it died");
+    }
+
+    [Fact]
+    public async Task Releasing_expired_leases_flags_possible_duplicate_but_a_graceful_release_does_not()
+    {
+        await AcceptAsync(Msg(to: ["a@example.org", "b@example.org"]));
+        var claimed = await ClaimAsync(owner: "worker-1", max: 2, lease: TimeSpan.FromMinutes(1));
+        Assert.Equal(2, claimed.Count);
+        Assert.Equal(2, await Storage.Deliveries.ReleaseOwnedLeasesAsync("worker-1", CancellationToken.None));
+        var graceful = await ClaimAsync(owner: "worker-2", max: 2, lease: TimeSpan.FromMinutes(1));
+        Assert.All(graceful, d => Assert.False(d.PossibleDuplicate));
+
+        Clock.Advance(TimeSpan.FromMinutes(2));
+        Assert.Equal(2, await Storage.Deliveries.ReleaseExpiredLeasesAsync(Clock.UtcNow, CancellationToken.None));
+        var afterCrash = await ClaimAsync(owner: "worker-3", max: 2);
+        Assert.All(afterCrash, d => Assert.True(d.PossibleDuplicate));
+    }
+
+    [Fact]
     public async Task ReleaseExpiredLeases_only_touches_expired_leases()
     {
         await AcceptAsync(Msg(to: ["a@example.org", "b@example.org"]));

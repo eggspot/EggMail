@@ -326,6 +326,11 @@ internal sealed class MemoryDeliveries(MemoryState s) : IDeliveryStore
             var result = new List<ClaimedDelivery>();
             foreach (var d in rows.Take(Math.Max(0, max)))
             {
+                if (d.LeaseOwner is not null)
+                {
+                    d.PossibleDuplicate = true;   // the previous holder never reported: it may have sent the message
+                }
+
                 d.LeaseOwner = owner;
                 d.LeaseUntil = until;
                 result.Add(ToClaimed(d));
@@ -590,6 +595,7 @@ internal sealed class MemoryDeliveries(MemoryState s) : IDeliveryStore
             int n = 0;
             foreach (var d in s.Deliveries.Values.Where(d => d.LeaseOwner is not null && d.LeaseUntil <= now))
             {
+                d.PossibleDuplicate = true;       // the holder died or stalled without reporting: the message may have been sent
                 d.LeaseOwner = null;
                 d.LeaseUntil = StorageTime.Epoch;
                 n++;

@@ -87,9 +87,10 @@ public sealed class DeliveryProcessor
     private async Task ProcessTransactionAsync(ClaimedDelivery[] group, CancellationToken ct)
     {
         var results = new List<Result>(group.Length);
+        var progress = new Progress();
         try
         {
-            await ProcessTransactionCoreAsync(group, results, ct).ConfigureAwait(false);
+            await ProcessTransactionCoreAsync(group, results, progress, ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -99,9 +100,53 @@ public sealed class DeliveryProcessor
             results.AddRange(group.Where(d => !done.Contains(d.DeliveryId)).Select(d => Aborted(d, now, mayHaveBeenSent: false)));
             await RecordAsync(results, CancellationToken.None).ConfigureAwait(false);
         }
+        catch (Exception ex) when (ex is not OperationCanceledException && !progress.Recording)
+        {
+            // Failed before anything was sent or recorded (a storage hiccup while reading the message or checking suppression, a bug):
+            // hand the deliveries back at once instead of leaving them leased for the whole lease time.
+            _s.Log.Write(MtaLogLevel.Error, Source, $"group for message {group[0].MessageId} failed before sending", ex);
+            await ReturnToQueueAsync(group).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // The attempt was made but its result could not be stored even after retries. Do not hand the deliveries back (that would send
+            // again with no flag): the leases expire, and a delivery reclaimed from an expired lease is flagged possible_duplicate.
+            _s.Log.Write(MtaLogLevel.Error, Source, $"results of the group for message {group[0].MessageId} could not be recorded; the leases will expire", ex);
+        }
     }
 
-    private async Task ProcessTransactionCoreAsync(ClaimedDelivery[] group, List<Result> results, CancellationToken ct)
+    private sealed class Progress
+    {
+        public bool Recording;
+    }
+
+    /// <summary>Gives deliveries back with a short hold and no counted attempt. If the storage is still down the lease stays as the safety net.</summary>
+    private async Task ReturnToQueueAsync(IEnumerable<ClaimedDelivery> items)
+    {
+        var now = _s.Clock.UtcNow;
+        foreach (var d in items)
+        {
+            try
+            {
+                await _s.Storage.Deliveries.RecordAttemptAsync(new DeliveryAttempt
+                {
+                    DeliveryId = d.DeliveryId,
+                    Outcome = DeliveryOutcome.Deferred,
+                    At = now,
+                    Message = "internal error while processing the delivery; it will be tried again",
+                    NextAttemptAt = now.AddSeconds(30),
+                    CountAttempt = false,
+                    PossibleDuplicate = d.PossibleDuplicate,
+                }, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _s.Log.Write(MtaLogLevel.Warning, Source, $"could not return delivery {d.DeliveryId} to the queue; its lease will expire", ex);
+            }
+        }
+    }
+
+    private async Task ProcessTransactionCoreAsync(ClaimedDelivery[] group, List<Result> results, Progress progress, CancellationToken ct)
     {
         var first = group[0];
         var now = _s.Clock.UtcNow;
@@ -131,7 +176,8 @@ public sealed class DeliveryProcessor
         Trace($"group {first.MessageId:N}/{first.RecipientDomain}: {results.Count} result(s), reporting bounces");
         await ReportBouncesAsync(results, ct).ConfigureAwait(false);
         Trace($"group {first.MessageId:N}/{first.RecipientDomain}: recording");
-        await RecordAsync(results, CancellationToken.None).ConfigureAwait(false);
+        progress.Recording = true;
+        await RecordWithRetryAsync(results).ConfigureAwait(false);
         Trace($"group {first.MessageId:N}/{first.RecipientDomain}: recorded");
     }
 
@@ -945,6 +991,25 @@ public sealed class DeliveryProcessor
     }
 
     // ---------------------------------------------------------------- recording
+
+    /// <summary>Storing results is retried a few times: the message may already be sent, so losing the result would send it twice.</summary>
+    private async Task RecordWithRetryAsync(List<Result> results)
+    {
+        TimeSpan[] waits = [TimeSpan.FromMilliseconds(250), TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(3)];
+        for (int attempt = 0; ; attempt++)
+        {
+            try
+            {
+                await RecordAsync(results, CancellationToken.None).ConfigureAwait(false);
+                return;
+            }
+            catch (Exception ex) when (attempt < waits.Length && ex is not OperationCanceledException)
+            {
+                _s.Log.Write(MtaLogLevel.Warning, Source, $"recording results failed (attempt {attempt + 1}); retrying", ex);
+                await Task.Delay(waits[attempt]).ConfigureAwait(false);
+            }
+        }
+    }
 
     private async Task RecordAsync(List<Result> results, CancellationToken ct)
     {
