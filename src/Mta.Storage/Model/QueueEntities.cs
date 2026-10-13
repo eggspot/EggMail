@@ -88,4 +88,7 @@ public sealed class IdempotencyKeyEntity
     public Guid MessageId { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset ExpiresAt { get; set; }
+
+    /// <summary>Digest of the request that used the key (addition); null when the caller did not supply one.</summary>
+    public string? Fingerprint { get; set; }
 }

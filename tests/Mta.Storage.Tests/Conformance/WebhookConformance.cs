@@ -34,6 +34,29 @@ public abstract class WebhookConformance : StorageTestBase
         new(item.Id, at, status, TimeSpan.FromMilliseconds(35), error, snippet);
 
     [Fact]
+    public async Task Targeted_enqueue_reaches_only_the_named_enabled_endpoint_of_the_tenant_whatever_it_subscribes_to()
+    {
+        Guid narrow = await AddEndpointAsync(TenantA, true, "message.bounced");
+        Guid disabled = await AddEndpointAsync(TenantA, false, "*");
+        Guid foreign = await AddEndpointAsync(TenantB, true, "*");
+        var draft = Draft("webhook.test", "{\"hello\":true}");
+
+        Guid? id = await Storage.Webhooks.EnqueueForEndpointAsync(TenantA, narrow, draft, Clock.UtcNow, CancellationToken.None);
+        Assert.NotNull(id);
+        Assert.Null(await Storage.Webhooks.EnqueueForEndpointAsync(TenantA, disabled, draft, Clock.UtcNow, CancellationToken.None));
+        Assert.Null(await Storage.Webhooks.EnqueueForEndpointAsync(TenantA, foreign, draft, Clock.UtcNow, CancellationToken.None));
+        Assert.Null(await Storage.Webhooks.EnqueueForEndpointAsync(TenantA, Ids.New(), draft, Clock.UtcNow, CancellationToken.None));
+
+        var items = await ClaimDueAsync();
+        var item = Assert.Single(items);
+        Assert.Equal(id, item.Id);
+        Assert.Equal(narrow, item.EndpointId);
+        Assert.Equal("webhook.test", item.EventType);
+        Assert.Equal(draft.EventId, item.EventId);
+        Assert.Equal("{\"hello\":true}", item.PayloadJson);
+    }
+
+    [Fact]
     public async Task Claim_respects_max_due_time_and_leases()
     {
         await SeedAsync(3);

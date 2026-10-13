@@ -44,6 +44,30 @@ public sealed class SmtpCredentialEntity
     public DateTimeOffset CreatedAt { get; set; }
 }
 
+public sealed class DashboardUserEntity
+{
+    public Guid Id { get; set; }
+
+    /// <summary>Lower-case, unique.</summary>
+    public string UserName { get; set; } = "";
+    public string PasswordHash { get; set; } = "";
+    public DashboardRole Role { get; set; }
+    public Guid? TenantId { get; set; }
+    public bool Enabled { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+}
+
+public sealed class DashboardSessionEntity
+{
+    /// <summary>SHA-256 digest of the session secret held by the browser (primary key).</summary>
+    public byte[] IdHash { get; set; } = [];
+    public Guid UserId { get; set; }
+    public string CsrfToken { get; set; } = "";
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset LastSeenAt { get; set; }
+    public DateTimeOffset ExpiresAt { get; set; }
+}
+
 public sealed class DomainEntity
 {
     public Guid Id { get; set; }

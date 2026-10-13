@@ -57,6 +57,33 @@ public static class ConfigMapping
 
     public static SmtpCredential ToRecord(this SmtpCredentialEntity e) => new(e.Id, e.TenantId, e.UserName, e.PasswordHash, e.Enabled, e.CreatedAt);
 
+    public static string NormalizeUserName(string userName) => userName.Trim().ToLowerInvariant();
+
+    public static DashboardUserEntity ToEntity(this DashboardUser u) => new()
+    {
+        Id = u.Id,
+        UserName = NormalizeUserName(u.UserName),
+        PasswordHash = u.PasswordHash,
+        Role = u.Role,
+        TenantId = u.TenantId,
+        Enabled = u.Enabled,
+        CreatedAt = N(u.CreatedAt),
+    };
+
+    public static DashboardUser ToRecord(this DashboardUserEntity e) => new(e.Id, e.UserName, e.PasswordHash, e.Role, e.TenantId, e.Enabled, e.CreatedAt);
+
+    public static DashboardSessionEntity ToEntity(this DashboardSession s) => new()
+    {
+        IdHash = s.IdHash,
+        UserId = s.UserId,
+        CsrfToken = s.CsrfToken,
+        CreatedAt = N(s.CreatedAt),
+        LastSeenAt = N(s.LastSeenAt),
+        ExpiresAt = N(s.ExpiresAt),
+    };
+
+    public static DashboardSession ToRecord(this DashboardSessionEntity e) => new(e.IdHash, e.UserId, e.CsrfToken, e.CreatedAt, e.LastSeenAt, e.ExpiresAt);
+
     public static DomainEntity ToEntity(this DomainRecord d) => new()
     {
         Id = d.Id,

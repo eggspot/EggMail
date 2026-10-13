@@ -95,7 +95,7 @@ public class FilesAndPragmaTests : SqliteTestBase
             Assert.Equal(2, ScalarLong(w.File.Path!, "PRAGMA auto_vacuum"));
             Assert.Equal(5000, await WriterScalarAsync(w.File.Name, "PRAGMA busy_timeout"));
             Assert.Equal(64L * 1024 * 1024, await WriterScalarAsync(w.File.Name, "PRAGMA journal_size_limit"));
-            Assert.Equal(1, ScalarLong(w.File.Path!, "PRAGMA user_version"));
+            Assert.Equal(SqliteFile.SchemaVersion, ScalarLong(w.File.Path!, "PRAGMA user_version"));
         }
     }
 
@@ -198,6 +198,46 @@ public class FilesAndPragmaTests : SqliteTestBase
                 Assert.Equal(modelColumns, actual.Order(StringComparer.Ordinal).ToList());
             }
         }
+    }
+
+    [Fact]
+    public async Task A_version_1_database_is_upgraded_with_the_api_tables_and_the_idempotency_fingerprint()
+    {
+        await Storage.DisposeAsync();
+        void Run(string file, params string[] sql)
+        {
+            using var c = new SqliteConnection($"Data Source={PathOf(file)};Pooling=False");
+            c.Open();
+            foreach (string statement in sql)
+            {
+                using SqliteCommand cmd = c.CreateCommand();
+                cmd.CommandText = statement;
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        // Turn the files back into what version 1 created.
+        Run("config.db", "DROP TABLE dashboard_session", "DROP TABLE dashboard_user", "PRAGMA user_version = 1");
+        Run("queue.db", "ALTER TABLE api_idempotency_key DROP COLUMN fingerprint", "PRAGMA user_version = 1");
+
+        await ReopenAsync();
+        Assert.Equal(SqliteFile.SchemaVersion, ScalarLong(PathOf("config.db"), "PRAGMA user_version"));
+        Assert.Equal(SqliteFile.SchemaVersion, ScalarLong(PathOf("queue.db"), "PRAGMA user_version"));
+
+        var user = new DashboardUser(Guid.NewGuid(), "Upgraded", "hash", DashboardRole.Admin, null, true, Clock.UtcNow);
+        await Storage.Config.UpsertDashboardUserAsync(user, default);
+        Assert.Equal(user.Id, (await Storage.Config.FindDashboardUserAsync("upgraded", default))!.Id);
+        await Assert.ThrowsAsync<StorageConflictException>(async () => await Storage.Config.UpsertDashboardUserAsync(user with { Id = Guid.NewGuid() }, default));
+
+        AcceptedMessage first = Msg(idempotencyKey: "k");
+        AcceptedMessage withPrint = new()
+        {
+            MessageId = first.MessageId, TenantId = first.TenantId, Source = first.Source, EnvelopeFrom = first.EnvelopeFrom, Recipients = first.Recipients, Raw = first.Raw,
+            ReceivedAt = first.ReceivedAt, ExpiresAt = first.ExpiresAt, IdempotencyKey = "k", IdempotencyFingerprint = "sha256:x", Content = first.Content, SendingDomain = first.SendingDomain,
+        };
+        await Storage.Intake.AcceptAsync(withPrint, default);
+        IntakeResult dup = await Storage.Intake.AcceptAsync(Msg(idempotencyKey: "k"), default);
+        Assert.Equal("sha256:x", dup.IdempotencyFingerprint);
     }
 
     [Fact]

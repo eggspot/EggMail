@@ -71,6 +71,17 @@ public static class StorageModel
             e.HasIndex(x => x.UserName).IsUnique();
             e.HasIndex(x => x.TenantId);
         });
+        mb.Entity<DashboardUserEntity>(e =>
+        {
+            e.ToTable("dashboard_user").HasKey(x => x.Id);
+            e.HasIndex(x => x.UserName).IsUnique();
+        });
+        mb.Entity<DashboardSessionEntity>(e =>
+        {
+            e.ToTable("dashboard_session").HasKey(x => x.IdHash);
+            e.HasIndex(x => x.UserId);
+            e.HasIndex(x => x.ExpiresAt);
+        });
         mb.Entity<DomainEntity>(e =>
         {
             e.ToTable("domain").HasKey(x => x.Id);

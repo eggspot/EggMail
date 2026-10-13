@@ -199,7 +199,7 @@ public class RoleSplitTests : StorageTestBase
             Assert.Single(await ready.Deliveries.ClaimAsync("w", 10, Clock.UtcNow, TimeSpan.FromMinutes(1), CancellationToken.None));
             StorageHealth health = await ready.Maintenance.GetHealthAsync(CancellationToken.None);
             Assert.True(health.Ready);
-            Assert.Equal("1", health.Details["schema_version"]);
+            Assert.Equal(PostgresMigrator.CurrentVersion.ToString(System.Globalization.CultureInfo.InvariantCulture), health.Details["schema_version"]);
         }
         finally
         {

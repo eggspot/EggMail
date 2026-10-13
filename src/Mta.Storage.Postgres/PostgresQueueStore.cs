@@ -118,21 +118,27 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
                 for (int attempt = 0; ; attempt++)
                 {
                     await using var upsert = new NpgsqlCommand(
-                        "INSERT INTO api_idempotency_key (tenant_id, idempotency_key, message_id, created_at, expires_at) VALUES ($1, $2, $3, $4, $5) " +
-                        "ON CONFLICT (tenant_id, idempotency_key) DO UPDATE SET message_id = excluded.message_id, created_at = excluded.created_at, expires_at = excluded.expires_at " +
-                        "WHERE api_idempotency_key.expires_at <= $6", connection, tx);
-                    upsert.Parameters.Uuid(m.TenantId).Text(key).Uuid(m.MessageId).Time(now).Time(now + rt.Options.Queue.IdempotencyKeyLifetime).Time(now);
+                        "INSERT INTO api_idempotency_key (tenant_id, idempotency_key, message_id, created_at, expires_at, fingerprint) VALUES ($1, $2, $3, $4, $5, $6) " +
+                        "ON CONFLICT (tenant_id, idempotency_key) DO UPDATE SET message_id = excluded.message_id, created_at = excluded.created_at, expires_at = excluded.expires_at, fingerprint = excluded.fingerprint " +
+                        "WHERE api_idempotency_key.expires_at <= $7", connection, tx);
+                    upsert.Parameters.Uuid(m.TenantId).Text(key).Uuid(m.MessageId).Time(now).Time(now + rt.Options.Queue.IdempotencyKeyLifetime).Text(m.IdempotencyFingerprint).Time(now);
                     if (await upsert.ExecuteNonQueryAsync(ct).ConfigureAwait(false) > 0)
                     {
                         break; // the key is ours
                     }
 
-                    await using var get = new NpgsqlCommand("SELECT message_id FROM api_idempotency_key WHERE tenant_id = $1 AND idempotency_key = $2", connection, tx);
+                    await using var get = new NpgsqlCommand("SELECT message_id, fingerprint FROM api_idempotency_key WHERE tenant_id = $1 AND idempotency_key = $2", connection, tx);
                     get.Parameters.Uuid(m.TenantId).Text(key);
-                    if (await get.ExecuteScalarAsync(ct).ConfigureAwait(false) is Guid existing)
+                    await using (NpgsqlDataReader found = await get.ExecuteReaderAsync(ct).ConfigureAwait(false))
                     {
-                        await tx.RollbackAsync(ct).ConfigureAwait(false);
-                        return new IntakeResult(IntakeStatus.DuplicateIdempotencyKey, existing);
+                        if (await found.ReadAsync(ct).ConfigureAwait(false))
+                        {
+                            Guid existing = found.GetGuid(0);
+                            string? fingerprint = found.IsDBNull(1) ? null : found.GetString(1);
+                            await found.CloseAsync().ConfigureAwait(false);
+                            await tx.RollbackAsync(ct).ConfigureAwait(false);
+                            return new IntakeResult(IntakeStatus.DuplicateIdempotencyKey, existing, fingerprint);
+                        }
                     }
 
                     if (attempt >= 2)
@@ -643,6 +649,32 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
             await using var batch = new NpgsqlBatch(connection);
             AppendOutboxFanOut(batch, [draft], targets, tenantId, now);
             return await batch.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
+        {
+            throw rt.Unavailable(ex);
+        }
+    }
+
+    public async ValueTask<Guid?> EnqueueForEndpointAsync(Guid tenantId, Guid endpointId, WebhookEventDraft draft, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(draft);
+        try
+        {
+            bool known = (await rt.GetWebhookTargetsAsync(cancellationToken).ConfigureAwait(false)).Any(t => t.TenantId == tenantId && t.EndpointId == endpointId);
+            if (!known)
+            {
+                return null;
+            }
+
+            Guid id = Ids.New(now);
+            await using NpgsqlConnection connection = await rt.Data.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            await using var cmd = new NpgsqlCommand(
+                "INSERT INTO webhook_outbox (id, endpoint_id, tenant_id, event_type, event_id, payload_json, attempt, next_attempt_at, state, lease_owner, lease_until, created_at, finished_at) " +
+                "VALUES ($1, $2, $3, $4, $5, $6, 0, $7, 0, NULL, 'epoch'::timestamptz, $7, NULL)", connection);
+            cmd.Parameters.Uuid(id).Uuid(endpointId).Uuid(tenantId).Text(draft.EventType).Uuid(draft.EventId).Text(draft.PayloadJson).Time(now);
+            await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            return id;
         }
         catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
         {

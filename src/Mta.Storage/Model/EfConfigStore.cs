@@ -149,6 +149,67 @@ public sealed class EfConfigStore<TContext>(IConfigDbAccess<TContext> db) : ICon
     public async ValueTask<IReadOnlyList<SmtpCredential>> GetSmtpCredentialsAsync(Guid tenantId, CancellationToken ct) =>
         await Read<IReadOnlyList<SmtpCredential>>(c => c.SmtpCredentials.AsNoTracking().Where(x => x.TenantId == tenantId).OrderBy(x => x.UserName).AsEnumerable().Select(x => x.ToRecord()).ToList()).ConfigureAwait(false);
 
+    public async ValueTask<bool> DeleteSmtpCredentialAsync(Guid tenantId, Guid credentialId, CancellationToken ct) =>
+        await Write(c => c.SmtpCredentials.Where(x => x.Id == credentialId && x.TenantId == tenantId).ExecuteDelete() > 0, ct).ConfigureAwait(false);
+
+    // Dashboard users and sessions (Set<T>() keeps the context interfaces unchanged for providers that implement them)
+
+    public async ValueTask<IReadOnlyList<DashboardUser>> GetDashboardUsersAsync(CancellationToken ct) =>
+        await Read<IReadOnlyList<DashboardUser>>(c => c.Set<DashboardUserEntity>().AsNoTracking().OrderBy(u => u.UserName).AsEnumerable().Select(u => u.ToRecord()).ToList()).ConfigureAwait(false);
+
+    public async ValueTask<DashboardUser?> GetDashboardUserAsync(Guid id, CancellationToken ct) =>
+        await Read(c => c.Set<DashboardUserEntity>().AsNoTracking().Where(u => u.Id == id).AsEnumerable().Select(u => u.ToRecord()).FirstOrDefault()).ConfigureAwait(false);
+
+    public async ValueTask<DashboardUser?> FindDashboardUserAsync(string userName, CancellationToken ct)
+    {
+        string n = ConfigMapping.NormalizeUserName(userName);
+        return await Read(c => c.Set<DashboardUserEntity>().AsNoTracking().Where(u => u.UserName == n).AsEnumerable().Select(u => u.ToRecord()).FirstOrDefault()).ConfigureAwait(false);
+    }
+
+    public async ValueTask UpsertDashboardUserAsync(DashboardUser user, CancellationToken ct)
+    {
+        var e = user.ToEntity();
+        await Write(c => Upsert(c, e, e.Id), ct).ConfigureAwait(false);
+    }
+
+    public async ValueTask<bool> DeleteDashboardUserAsync(Guid id, CancellationToken ct) =>
+        await Write(c =>
+        {
+            c.Set<DashboardSessionEntity>().Where(s => s.UserId == id).ExecuteDelete();
+            return c.Set<DashboardUserEntity>().Where(u => u.Id == id).ExecuteDelete() > 0;
+        }, ct).ConfigureAwait(false);
+
+    public async ValueTask AddDashboardSessionAsync(DashboardSession session, CancellationToken ct)
+    {
+        var e = session.ToEntity();
+        await Write(c =>
+        {
+            c.Set<DashboardSessionEntity>().Add(e);
+            c.SaveChanges();
+        }, ct).ConfigureAwait(false);
+    }
+
+    public async ValueTask<DashboardSession?> FindDashboardSessionAsync(byte[] idHash, CancellationToken ct) =>
+        await Read(c => c.Set<DashboardSessionEntity>().AsNoTracking().Where(s => s.IdHash == idHash).AsEnumerable().Select(s => s.ToRecord()).FirstOrDefault()).ConfigureAwait(false);
+
+    public async ValueTask TouchDashboardSessionAsync(byte[] idHash, DateTimeOffset lastSeenAt, CancellationToken ct)
+    {
+        DateTimeOffset when = StorageTime.Normalize(lastSeenAt);
+        await Write(c => c.Set<DashboardSessionEntity>().Where(s => s.IdHash == idHash).ExecuteUpdate(u => u.SetProperty(s => s.LastSeenAt, when)), ct).ConfigureAwait(false);
+    }
+
+    public async ValueTask<bool> DeleteDashboardSessionAsync(byte[] idHash, CancellationToken ct) =>
+        await Write(c => c.Set<DashboardSessionEntity>().Where(s => s.IdHash == idHash).ExecuteDelete() > 0, ct).ConfigureAwait(false);
+
+    public async ValueTask<int> DeleteDashboardSessionsOfUserAsync(Guid userId, CancellationToken ct) =>
+        await Write(c => c.Set<DashboardSessionEntity>().Where(s => s.UserId == userId).ExecuteDelete(), ct).ConfigureAwait(false);
+
+    public async ValueTask<int> DeleteExpiredDashboardSessionsAsync(DateTimeOffset now, CancellationToken ct)
+    {
+        DateTimeOffset n = StorageTime.Normalize(now);
+        return await Write(c => c.Set<DashboardSessionEntity>().Where(s => s.ExpiresAt <= n).ExecuteDelete(), ct).ConfigureAwait(false);
+    }
+
     // Domains and DKIM
 
     public async ValueTask<IReadOnlyList<DomainRecord>> GetDomainsAsync(Guid? tenantId, CancellationToken ct) =>
@@ -211,6 +272,9 @@ public sealed class EfConfigStore<TContext>(IConfigDbAccess<TContext> db) : ICon
             c.DkimKeys.Where(k => k.Id == keyId).ExecuteUpdate(u => u.SetProperty(k => k.Active, true).SetProperty(k => k.RetiredAt, (DateTimeOffset?)null));
         }, ct).ConfigureAwait(false);
     }
+
+    public async ValueTask<bool> DeletePendingDkimKeyAsync(Guid domainId, Guid keyId, CancellationToken ct) =>
+        await Write(c => c.DkimKeys.Where(k => k.Id == keyId && k.DomainId == domainId && !k.Active && k.RetiredAt == null).ExecuteDelete() > 0, ct).ConfigureAwait(false);
 
     // Suppressions
 
