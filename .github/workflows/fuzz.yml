@@ -15,7 +15,7 @@ on:
   # `gh workflow run` cannot start this one from a feature branch. A push of this file to the feature branch runs it with a short budget.
   push:
     branches: [test/fuzzing-ci]
-    paths: ['.github/workflows/fuzz.yml']
+    paths: ['.github/workflows/fuzz.yml', 'fuzz/**']
   schedule:
     - cron: '23 3 * * 0'
   workflow_dispatch:

@@ -8,7 +8,7 @@ namespace Mta.Fuzz.Harness;
 /// Command line driver.
 /// <code>
 ///   Mta.Fuzz.Harness list
-///   Mta.Fuzz.Harness libfuzzer                       # target from EGGMAIL_FUZZ_TARGET; started by libfuzzer-dotnet (see .github/workflows/fuzz.yml)
+///   Mta.Fuzz.Harness libfuzzer                       # target from EGGMAIL_FUZZ_TARGET; libfuzzer-dotnet starts the dll with no arguments, which means the same (see .github/workflows/fuzz.yml)
 ///   Mta.Fuzz.Harness replay  &lt;target&gt; &lt;file|dir&gt;...   # runs inputs once each (crash artifacts, the checked-in corpus); exit code 1 on a finding
 ///   Mta.Fuzz.Harness export-corpus &lt;dir&gt;             # writes the built-in seeds as fuzz/corpus/&lt;target&gt;/&lt;hash&gt;
 ///   Mta.Fuzz.Harness export-dict   &lt;dir&gt;             # writes libFuzzer dictionaries (&lt;target&gt;.dict) from the mutator tokens
@@ -21,7 +21,9 @@ internal static class Program
     {
         if (args.Length == 0)
         {
-            return Usage();
+            // libfuzzer-dotnet starts "dotnet <this dll>" with no further arguments (it supports a single --target_arg); the target
+            // comes from the environment then.
+            return Environment.GetEnvironmentVariable("EGGMAIL_FUZZ_TARGET") is { Length: > 0 } ? LibFuzzer() : Usage();
         }
 
         // Assemblies instrumented by SharpFuzz write coverage into a shared buffer that only the fuzzing entry points set up. Give every other
