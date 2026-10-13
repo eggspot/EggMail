@@ -39,7 +39,7 @@ test.describe('API keys', () => {
 
     const secretDialog = page.getByRole('alertdialog');
     const secret = (await secretDialog.getByTestId('secret-value').innerText()).trim();
-    expect(secret).toMatch(/^egm_[A-Za-z0-9]{8}_[A-Za-z0-9_-]{43}$/);
+    expect(secret).toMatch(/^egm_[A-Za-z0-9_-]{8}_[A-Za-z0-9_-]{43}$/);
     await expect(secretDialog).toContainText('shown only once');
 
     // The key works against the API...

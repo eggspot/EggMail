@@ -213,8 +213,9 @@ test.describe('storage switch wizard (SQLite to PostgreSQL)', () => {
       await expect(patch).toBeVisible();
       await expect(patch).toContainText('Postgres');
       await expect(patch).not.toContainText(PASSPHRASE);
-      const password = /Password=([^;]*)/.exec(stack.postgresConnectionString)?.[1];
-      if (password) await expect(patch).not.toContainText(password);
+      // The connection string is referenced by secret name, never printed (the password itself may be a common word, so look for the string).
+      await expect(patch).not.toContainText(stack.postgresConnectionString);
+      await expect(patch).not.toContainText(/Password=/i);
       expect(fs.existsSync(path.join(stack.dataDir, 'bootstrap.json'))).toBe(false);
     });
   });
