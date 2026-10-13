@@ -41,7 +41,7 @@ Under `Sqlite:DataDirectory`: `queue.db`, `stats.db`, `config.db`, and `history.
 | `busy_timeout` | `Sqlite:BusyTimeout` (5 s) | wait for a lock before `SQLITE_BUSY` |
 | `journal_size_limit` | `Sqlite:JournalSizeLimitBytes` (64 MiB) | the WAL is truncated to at most this after a checkpoint |
 | `cache_size` | 16 MiB (writer only) | page cache of the writer connection |
-| `user_version` | 3 | schema version; versions 1 and 2 are upgraded in place (2: dashboard tables and fingerprint; 3: backend switch column and tables), a newer version is refused, an unversioned database with tables is refused |
+| `user_version` | 4 | schema version; versions 1 to 3 are upgraded in place (2: dashboard tables and fingerprint; 3: backend switch column and tables; 4: `delivery_queue.smtp_utf8`), a newer version is refused, an unversioned database with tables is refused |
 
 `Cache=Shared` is never used. Reads use separate short pooled connections (the only exception is the in-memory queue, whose reads run on its writer). Every connection of a file is private; WAL means readers see a committed snapshot.
 
@@ -102,7 +102,7 @@ Idempotent, safe to call repeatedly. In order: flush statistics; metadata retent
 
 ## Backend switch support
 
-Every backend implements `IStorage.Transfer` (`IStorageTransfer`): streaming export of the 28 tables that move, idempotent chunked import with progress records, the persisted switch state with the gate behind it (a fenced source and an unactivated target refuse accept, claims and maintenance), and the transfer marks. The model gained `delivery_queue.transfer_switch_id`, `webhook_outbox.transfer_switch_id` and the four `transfer_chunk_*` tables (SQLite schema version 3 with in-place upgrades from 1 and 2; PostgreSQL migration `V003__backend_switch.sql`). A provider adds `ITransferDbAccess` (a read context, a write transaction, and for day-partitioned history `PrepareHistoryDaysAsync`) and must exclude held rows in its claim SQL and consult the gate; `TransferConformance` checks all of it. Details in [switch.md](switch.md).
+Every backend implements `IStorage.Transfer` (`IStorageTransfer`): streaming export of the 28 tables that move, idempotent chunked import with progress records, the persisted switch state with the gate behind it (a fenced source and an unactivated target refuse accept, claims and maintenance), and the transfer marks. The model gained `delivery_queue.transfer_switch_id`, `webhook_outbox.transfer_switch_id` and the four `transfer_chunk_*` tables (SQLite schema version 3 with in-place upgrades from 1 and 2; PostgreSQL migration `V003__backend_switch.sql`). Version 4 (PostgreSQL `V004__smtp_utf8.sql`) added `delivery_queue.smtp_utf8`, the intake-time decision that a message's header section is internationalized (`AcceptedMessage.SmtpUtf8` to `ClaimedDelivery.SmtpUtf8`; it moves with the queued rows in a backend switch; old rows read false). A provider adds `ITransferDbAccess` (a read context, a write transaction, and for day-partitioned history `PrepareHistoryDaysAsync`) and must exclude held rows in its claim SQL and consult the gate; `TransferConformance` checks all of it. Details in [switch.md](switch.md).
 
 ## Contract additions (all documented in the PR)
 

@@ -16,6 +16,7 @@ All input is hostile. Every parser is bounded by `MimeLimits`, runs in time line
 | Dates | `MimeDate.Format` / `TryFormat` / `TryParse` |
 | Tree | `MimeMessage.Parse` -> `MimePart` (headers, content type, lazy `Body`, `Children`, `DecodeBodyTo`, `GetDecodedBytes`, `GetDecodedLength`, `GetText`) |
 | Transfer coding | `Base64Decoder`, `QuotedPrintableDecoder` (streaming, lenient), `BodyDecoder`, `TransferEncoder` (base64, quoted-printable, choice) |
+| 8BITMIME downgrade | `EightBitDowngrader.Downgrade` -> `EightBitDowngradeResult` (`NotNeeded`, `Downgraded`, `Impossible` + reason) |
 | History extraction | `MessageContentExtractor.Extract` -> `ExtractedContent`, `AttachmentInfo` |
 | Building | `MessageBuilder`, `MessageBuilderOptions`, `BuilderAttachment`, `HeaderPolicy`, `BuiltMessage`, `HeaderFolder`, `HeaderValidator` |
 | Editing raw bytes | `MessageHeaderEditor` (prepend, append, remove, replace, raw fields), `LineEndings.ToCrlf`, `MessageInspector` (`Inspect`, `HasUtf8Headers`, `HasEightBitBody`, `ContainsBareLf`, `ContainsBareCr`) |
@@ -27,6 +28,17 @@ All input is hostile. Every parser is bounded by `MimeLimits`, runs in time line
 * **DKIM**: `MimeHeader.Raw` (exact bytes, no final CRLF), `GetUnfoldedValueBytes()`, order preserved; duplicates are all present for bottom-up selection. `MessageHeaderEditor.PrependRaw` inserts the pre-folded `DKIM-Signature`.
 * **DMARC**: `AddressList.Parse(headers[From])` -> `Mailbox.Domain` (lower-case A-label), `MultipleFromWithoutSender` and `InvalidFrom` issues.
 * **HTTP API / history**: `MessageBuilder` (compose), `MessageContentExtractor` (subject, text, html, attachment index, truncation flags).
+
+## 8BITMIME downgrade
+
+`EightBitDowngrader.Downgrade(message, writer)` produces the 7-bit form of a message with an 8-bit body for a server that does not offer 8BITMIME (RFC 6152). It parses the MIME tree, re-encodes only the leaves that need it and copies every other byte unchanged (headers, boundaries, 7-bit parts), so the result differs from the input exactly where it has to.
+
+* **Leaf entities** with 8-bit bytes (labelled `8bit`, `binary`, or `7bit` while holding 8-bit bytes): `text/*` becomes quoted-printable when mostly ASCII and base64 otherwise (`TransferEncoder.ChooseForText`), anything else and `binary` become base64. The `Content-Transfer-Encoding` field is replaced (added if missing, duplicates dropped). At the message root, `MIME-Version: 1.0` is added when missing and, for a message with no `Content-Type` and a valid UTF-8 body, `Content-Type: text/plain; charset=utf-8`.
+* **Composite entities** are never encoded as a whole (RFC 2045 section 6.4): `multipart/*` and embedded `message/rfc822` keep their structure and are processed recursively; an `8bit`/`binary` label on them becomes `7bit`.
+* `message/global` and `message/global-*` (RFC 6532 section 3.7, RFC 6533: internationalized messages and delivery status reports) are encoded as a whole, as those RFCs allow. `MimePart` decodes such a part when it is quoted-printable or base64.
+* **Refused (`Impossible`, with a reason fit for a bounce message):** 8-bit bytes in the header fields of a nested part or of an embedded message (header downgrading, RFC 6857, is experimental and not implemented), in a preamble, epilogue or delimiter line; a part declaring quoted-printable, base64 or an unknown encoding that nevertheless holds 8-bit bytes; `message/*` types other than `rfc822` and `global*`; structure the parser had to keep opaque (no boundary, duplicate boundary, `MaxDepth`/`MaxParts` exceeded) while holding 8-bit bytes; header blocks beyond `MaxHeaderCount`/`MaxHeaderBytes`. A truncated multipart (no closing delimiter) is converted normally.
+* The headers of the message itself may hold UTF-8 (SMTPUTF8) and are left alone; only the transfer-encoding fields change.
+* Tests: structure and decoded content are compared with MimeKit (fixed corpus and random trees), plus the refusal cases.
 
 ## Limits (`MimeLimits`, all configurable; defaults)
 

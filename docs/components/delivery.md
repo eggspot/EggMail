@@ -9,13 +9,37 @@ Per group, in order:
 1. Expired deliveries are recorded as `Expired`; suppressed recipients as `Suppressed` (nothing is sent).
 2. The raw message is read from the spool; a missing message is a permanent failure.
 3. `SendingLimits.TryReserve`, then `DestinationThrottle.TryAcquire`. A refusal holds the deliveries (`Deferred` with `CountAttempt=false`: no attempt is counted, no event, no webhook).
-4. DKIM: `IDkimSignerProvider` (config store: the domain or its nearest registered parent, newest active key; cached) signs the message at delivery. No key means the message goes out unsigned.
-5. Envelope sender: a signed VERP bounce address when a bounce domain is configured (not for bounces themselves), else the original sender.
-6. Routes from `RoutePlanner`: direct MX, then opted-in relays. For direct delivery MX hosts are tried in order (circuit breaker per host); each host gets a TLS decision from `OutboundTlsPolicyResolver` (MTA-STS, DANE, per-domain level overrides from `TlsPolicyTable`). A blocked or failed TLS negotiation moves on to the next MX host; a connect failure moves on to the next address; once a server answers, the answer decides.
+4. DKIM: `IDkimSignerProvider` (config store: the domain or its nearest registered parent, newest active key; cached) supplies the signer. No key means the message goes out unsigned. The signature is made later, per server, over the bytes that are actually transmitted (step 6).
+5. Envelope sender: a signed VERP bounce address when a bounce domain is configured (not for bounces themselves), else the original sender. A bounce domain written as a U-label is accepted and goes on the wire as its A-label.
+6. Routes from `RoutePlanner`: direct MX, then opted-in relays. For direct delivery MX hosts are tried in order (circuit breaker per host); each host gets a TLS decision from `OutboundTlsPolicyResolver` (MTA-STS, DANE, per-domain level overrides from `TlsPolicyTable`). A blocked or failed TLS negotiation moves on to the next MX host; a connect failure moves on to the next address; once a server answers, the answer decides. What is sent is decided per connection, after the EHLO, by `OutboundTransaction.Plan` (see "8-bit and internationalized mail").
 7. Per recipient the reply is classified (`ReplyClassifier`): 2xx at end of data delivers, permanent classes fail (only `PermanentRecipient` suppresses), the rest are deferred with `RetrySchedule` or expire when the next retry would pass the delivery's lifetime.
 8. Results are recorded with `RecordAttemptAsync` (storage writes the event, statistics and webhook outbox rows in the same commit). For permanent failures and expiries of SMTP-submitted mail a bounce message (RFC 3464) is queued **before** recording, because recording the last recipient frees the stored message.
 
 A connection lost after the end of data was sent is deferred with the `possible_duplicate` flag. `QuiesceAsync` stops claiming, waits up to the timeout, cancels what is left (recorded as `AbortedBySwitch`, requeued unchanged, flagged possible duplicate only when the end of the message data had begun to be written, see `SmtpClientConnection.EndOfDataStarted`) and releases the leases (decision R).
+
+## 8-bit and internationalized mail
+
+`OutboundTransaction` (internal to `Mta.Delivery`) holds one transaction's stored message, envelope and DKIM signer, and turns the answer of each server's EHLO into the bytes and MAIL FROM parameters actually used. Each variant is built at most once per transaction (a second MX host reuses it). Standards: RFC 6152 (8BITMIME), RFC 6531/6532/6533 (SMTPUTF8, UTF-8 headers, internationalized DSN), RFC 2045 section 6.4, RFC 3463 status codes.
+
+| Message | Server | Result |
+|---|---|---|
+| 8-bit body | offers `8BITMIME` | `BODY=8BITMIME`, bytes unchanged (signed as they are) |
+| 8-bit body | no `8BITMIME` | body converted to 7-bit by `EightBitDowngrader` (`Mta.Mime`), no `BODY` parameter, **then** signed; if no safe conversion exists: permanent `554 5.6.1` naming the reason |
+| 7-bit body | any | no `BODY` parameter |
+| valid UTF-8 in the header section (also when every address is ASCII), or the persisted flag `ClaimedDelivery.SmtpUtf8` | offers `SMTPUTF8` | `SMTPUTF8` declared |
+| same | no `SMTPUTF8` | nothing is sent: permanent `554 5.6.9` (headers are not downgraded: RFC 6857 is experimental) |
+| sender with a non-ASCII local part | no `SMTPUTF8` | permanent `553 5.6.7` for the whole transaction (a bounce domain makes the sender an ASCII VERP address, which avoids it) |
+| recipient with a non-ASCII local part | no `SMTPUTF8` | only that recipient fails (`553 5.6.7`); the others in the group are sent without `SMTPUTF8` |
+
+* "Needs SMTPUTF8" is decided by `EmailAddress.RequiresSmtpUtf8` (non-ASCII local part), not `IsInternational`: a domain is held as an A-label, so `user@bücher.example` is plain ASCII on the wire.
+* The persisted flag (`AcceptedMessage.SmtpUtf8`, column `delivery_queue.smtp_utf8`, schema version 4 / PostgreSQL `V004`) is decided at intake from the message bytes (`MessageInspector.HasValidUtf8Headers`), not from the submitter's MAIL FROM parameter; delivery also re-checks the stored bytes, so rows queued before the upgrade are handled. UTF-8 that is not valid (8-bit headers in a legacy charset) is not announced as SMTPUTF8 and is sent as is.
+* 5.6.x replies are classified `PermanentContent`: the message bounces, the recipient is **not** suppressed. The bounce (DSN) carries the text. A server that lacks an extension does not fail the delivery while another MX host of the domain is untried: the refusal is remembered and the next host is asked; it is final only when every host that answered refused (an unreachable host makes the result a retry instead). A partial refusal (some recipients only) is final for those recipients.
+* Conversion rules are in [mime.md](mime.md#8bitmime-downgrade); the DKIM-signed bytes are exactly the converted bytes (the conversion changes the body and the `Content-Transfer-Encoding` fields, which a signature made before it would not survive).
+* Bounce messages for internationalized recipients use RFC 6533: `message/global-delivery-status` with `Final-Recipient: utf-8; ...` (see `DsnBuilder`), `message/global-headers` or `message/global` for the returned original when its headers hold UTF-8, and the DSN is queued with the SMTPUTF8 flag when its own header section holds UTF-8 (an internationalized sender). Such a report is itself 8-bit and goes through the same conversion for servers without `8BITMIME`.
+
+## TLS-RPT sending address
+
+`sending-mta-ip` in TLS-RPT failure details is the local address of the TCP connection (`SmtpClientConnection.LocalIpAddress`, also carried by `SmtpClientException.LocalAddress` for failures during setup). When a policy blocks an MX host before any connection exists, it is the address the operating system would use to reach it (a UDP "connect" probe that sends nothing). Successful sessions are only counted, as RFC 8460 asks.
 
 ## Inbound
 
@@ -23,7 +47,9 @@ A connection lost after the end of data was sent is deferred with the `possible_
 
 ## Known gaps
 
-- 8-bit message bodies are sent as they are even when the receiving server does not advertise `8BITMIME` (no downgrade to quoted-printable). `SMTPUTF8` is honoured: a server without it gets a permanent failure for internationalized addresses.
+- Header downgrading (RFC 6857, experimental) is not implemented: a message with UTF-8 header fields cannot be delivered to a server without `SMTPUTF8`; it bounces with `5.6.9`. The `8BITMIME` conversion does not touch 8-bit header fields of nested parts or embedded messages either (it refuses, see mime.md).
+- `BINARYMIME`/`CHUNKING` are not used for binary bodies: a `binary`-encoded part is base64-encoded when the server lacks `8BITMIME` and sent as 8-bit otherwise.
+- The capability fallback to the next MX host is tested with two loopback servers (IPv4 and IPv6 loopback on the same port); that test returns early on a machine without IPv6.
 - Throttle state, circuit breakers and sending counters are per process (see `components/policy.md`).
 
 See [../progress.md](../progress.md): per-process throttle state, no TLS-RPT counting yet, async bounces are not linked to history events.

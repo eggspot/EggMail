@@ -203,6 +203,52 @@ public class EightBitAndInternationalDeliveryTests
     }
 
     [Fact]
+    public async Task A_second_mx_that_offers_SMTPUTF8_takes_the_message_the_first_mx_could_not()
+    {
+        if (!System.Net.Sockets.Socket.OSSupportsIPv6)
+        {
+            return;   // the second server listens on the IPv6 loopback address, on the same port
+        }
+
+        await using var f = new DeliveryFixture(smtpUtf8: false);
+        var second = new RemoteServer();
+        await using var secondServer = new Mta.Smtp.Server.SmtpServer(new Mta.Smtp.Server.SmtpServerOptions
+        {
+            Hostname = "mx2.dual.example",
+            Listeners = [new Mta.Smtp.Server.SmtpListenerOptions { Name = "mx2", BindAddress = System.Net.IPAddress.IPv6Loopback, Port = f.Port, Mode = Mta.Smtp.Server.ListenerMode.Plain, AuthRequired = false, Role = Mta.Smtp.Server.ListenerRole.Bounce }],
+        }, second);
+        secondServer.Start();
+        f.Dns.AddMx("dual.example", 10, "mx1.dual.example").AddA("mx1.dual.example", "127.0.0.1")
+            .AddMx("dual.example", 20, "mx2.dual.example").AddAaaa("mx2.dual.example", "::1");
+        string headers = "From: Jürgen <sender@example.org>\r\nTo: rcpt@dual.example\r\nSubject: Grüße\r\nMessage-ID: <d@example.org>\r\nDate: Mon, 12 Oct 2026 08:00:00 +0000\r\n";
+        var id = await f.EnqueueRawAsync(EightBitMessage(headers), ["rcpt@dual.example"]);
+
+        var events = await f.WaitForEventAsync(id, MessageEventType.Delivered);
+
+        Assert.DoesNotContain(events, e => e.Type == MessageEventType.Bounced);
+        Assert.Empty(f.Remote.Messages);
+        var msg = Assert.Single(second.Messages);
+        Assert.True(msg.SmtpUtf8);
+        Assert.Equal("mx2.dual.example", events.Single(e => e.Type == MessageEventType.Delivered).MxHost);
+    }
+
+    [Fact]
+    public async Task The_message_bounces_when_every_mx_that_answers_lacks_the_extension_but_waits_when_one_is_unreachable()
+    {
+        await using var f = new DeliveryFixture(smtpUtf8: false);
+        AllowBounces(f);
+        f.Dns.AddMx("flaky.example", 10, "mx1.flaky.example").AddA("mx1.flaky.example", "127.0.0.1")
+            .AddMx("flaky.example", 20, "mx2.flaky.example").AddA("mx2.flaky.example", "127.0.0.9");   // nothing listens there
+        string headers = "From: Jürgen <sender@example.org>\r\nTo: rcpt@flaky.example\r\nSubject: Grüße\r\nMessage-ID: <d@example.org>\r\nDate: Mon, 12 Oct 2026 08:00:00 +0000\r\n";
+        var id = await f.EnqueueRawAsync(EightBitMessage(headers), ["rcpt@flaky.example"]);
+
+        var events = await f.WaitForEventAsync(id, MessageEventType.Deferred);
+
+        Assert.DoesNotContain(events, e => e.Type == MessageEventType.Bounced);   // not final: the second host may take it later
+        Assert.Empty(f.Remote.Messages);
+    }
+
+    [Fact]
     public async Task The_persisted_smtputf8_flag_alone_makes_delivery_require_the_extension()
     {
         await using var f = new DeliveryFixture(smtpUtf8: false);
