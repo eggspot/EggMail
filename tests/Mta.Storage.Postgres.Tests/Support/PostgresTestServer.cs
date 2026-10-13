@@ -293,11 +293,27 @@ internal sealed class PostgresTestServer
         }
     }
 
-    /// <summary>Creates the template database and migrates it once; every test database is a cheap copy of it.</summary>
+    /// <summary>
+    /// Creates the template database and migrates it once; every test database is a cheap copy of it. Several test processes can share one server
+    /// (CI runs the PostgreSQL and the integration test assemblies against the same <c>EGGMAIL_TEST_POSTGRES</c>), so this is serialized with an advisory
+    /// lock and a template that is already current is reused: dropping it under a process that is creating databases from it made their
+    /// <c>CREATE DATABASE ... TEMPLATE</c> fail with "template database does not exist".
+    /// </summary>
     private async Task PrepareTemplateAsync()
     {
         await using var admin = new NpgsqlConnection(_adminConnectionString);
         await admin.OpenAsync();
+        await using (var gate = new NpgsqlCommand("SELECT pg_advisory_lock(7461001)", admin))
+        {
+            await gate.ExecuteNonQueryAsync();   // released when this connection closes
+        }
+
+        string templateConnection = new NpgsqlConnectionStringBuilder(_adminConnectionString) { Database = TemplateDatabase, Pooling = false }.ConnectionString;
+        if (await TemplateIsCurrentAsync(admin, templateConnection))
+        {
+            return;
+        }
+
         await using (var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS {TemplateDatabase} WITH (FORCE)", admin))
         {
             await drop.ExecuteNonQueryAsync();
@@ -308,8 +324,30 @@ internal sealed class PostgresTestServer
             await create.ExecuteNonQueryAsync();
         }
 
-        string templateConnection = new NpgsqlConnectionStringBuilder(_adminConnectionString) { Database = TemplateDatabase, Pooling = false }.ConnectionString;
         await PostgresMigrator.MigrateAsync(templateConnection, null, CancellationToken.None);
+    }
+
+    private static async Task<bool> TemplateIsCurrentAsync(NpgsqlConnection admin, string templateConnection)
+    {
+        await using (var exists = new NpgsqlCommand($"SELECT 1 FROM pg_database WHERE datname = '{TemplateDatabase}'", admin))
+        {
+            if (await exists.ExecuteScalarAsync() is null)
+            {
+                return false;
+            }
+        }
+
+        try
+        {
+            await using var template = new NpgsqlConnection(templateConnection);
+            await template.OpenAsync();
+            await using var version = new NpgsqlCommand("SELECT COALESCE(MAX(version), 0) FROM eggmail_schema_version", template);
+            return Convert.ToInt32(await version.ExecuteScalarAsync(), CultureInfo.InvariantCulture) == PostgresMigrator.CurrentVersion;
+        }
+        catch (PostgresException)
+        {
+            return false;   // half-built by a process that died
+        }
     }
 
     private static void StopStaleClusters()
