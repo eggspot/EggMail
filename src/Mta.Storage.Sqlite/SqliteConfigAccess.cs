@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Mta.Storage.Model;
 
 namespace Mta.Storage.Sqlite;
@@ -9,16 +10,20 @@ namespace Mta.Storage.Sqlite;
 /// </summary>
 internal sealed class SqliteConfigAccess(SqliteFile file, IStorageModelHooks hooks) : IConfigDbAccess<ConfigDbContext>
 {
-    private readonly DbContextOptions<ConfigDbContext> _readOptions = new DbContextOptionsBuilder<ConfigDbContext>()
-        .UseSqlite(file.ReaderConnectionString)
-        .UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking)
-        .Options;
+    // Reads are on the hot path (suppression check per recipient): pooled contexts avoid building a service scope per query.
+    private readonly PooledDbContextFactory<ConfigReadContext> _readPool = new(
+        new DbContextOptionsBuilder<ConfigReadContext>()
+            .UseSqlite(file.ReaderConnectionString)
+            .UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking)
+            .UseModelHooks(hooks)
+            .Options,
+        poolSize: 128);
 
     private DbContextOptions<ConfigDbContext>? _writeOptions; // built on the writer thread, bound to its connection
 
     public SqliteFileWriter Writer { get; set; } = null!;
 
-    public ConfigDbContext CreateReadContext() => new(_readOptions, hooks);
+    public ConfigDbContext CreateReadContext() => _readPool.CreateDbContext();
 
     public ValueTask<T> WriteAsync<T>(Func<ConfigDbContext, T> work, CancellationToken cancellationToken) =>
         Writer.SubmitAsync((work, this), static (ctx, s) =>

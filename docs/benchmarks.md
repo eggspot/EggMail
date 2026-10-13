@@ -107,7 +107,7 @@ What the first runs were good for was finding allocation hot spots with the buil
 |---|---|---|
 | The sender check read the tenant's domains with an EF query per message | about 66 KB allocated per message (of 104 KB) | fixed: cached for 5 s in `SubmissionService` (a domain that is added, verified or paused takes effect within that time) |
 | Header repair copied the message three times | about 4 KB per 2 KB message | fixed: one editor pass including the `Received` field |
-| The delivery path creates an EF context per recipient (suppression check) and per group | about 110 KB per message, mostly EF service scopes | open: needs pooled contexts or direct SQL for the hot reads |
+| The delivery path created an EF context (and its service scope) for every config read, for example the suppression check per recipient | about 40 KB per message end to end (148 KB down to 109 KB) | fixed for SQLite: config reads use pooled contexts (`ConfigReadContext`); the PostgreSQL provider still creates a context per read |
 | Content extraction for history (`History:Mode=Full`, `Content:Mode=Retain`) | roughly halves ingest throughput in the quick runs | open: extraction runs inline in the SMTP session; moving it off the accept path or limiting it is an option |
 | `Microsoft.Data.Sqlite` parameter binding | about 10 % of ingest allocations | open |
 
