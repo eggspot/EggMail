@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "recordedOn": "PLACEHOLDER from a development machine until bench-gate has run on the merged code",
+  "recordedOn": "GitHub-hosted ubuntu-latest runner (4 logical cores, Ubuntu 24.04, .NET 10.0.12), bench-gate run 38462613098, 2026-10-13, on main plus the deployment branch (after the allocation work of decisions 64 to 68). The pipeline value is a single run; the same code varied by about 2 percent between runs.",
   "thresholds": {
     "microPercent": 5,
     "pipelinePercent": 10
@@ -19,7 +19,7 @@
   },
   "pipeline": {
     "sqlite-off-full": {
-      "bytesPerMessage": 32793,
+      "bytesPerMessage": 11180,
       "messages": 20000,
       "connections": 8,
       "sizeBytes": 2048,
