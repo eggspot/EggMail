@@ -137,18 +137,24 @@ jobs:
 
             # DOTNET_GCHeapHardLimit turns runaway allocation in the fuzzed process into an OutOfMemoryException (a finding) instead of
             # an OOM kill of the runner. EGGMAIL_FUZZ_LASTINPUT keeps the current input in a file for crashes that leave no exception.
+            # The output goes to a file, not through a pipe: after a libFuzzer timeout the fuzzed dotnet process is orphaned and keeps
+            # its inherited stdout open, which would block a `| tee` forever (seen in the first hang self-test). The orphan is killed
+            # afterwards, and an outer timeout stops a target that does not end by itself.
             set +e
             EGGMAIL_FUZZ_TARGET="$t" \
             EGGMAIL_FUZZ_LASTINPUT="$PWD/findings/$t/last-input" \
             DOTNET_GCHeapHardLimit=0x80000000 \
+              timeout --kill-after=15 $((SECONDS_PER_TARGET + 180)) \
               "$RUNNER_TEMP/tools/libfuzzer-dotnet" \
                 -max_total_time="$SECONDS_PER_TARGET" -timeout=30 -max_len=65536 -print_final_stats=1 \
                 $dict \
                 -artifact_prefix="findings/$t/" \
                 --target_path=dotnet --target_arg="$harness" \
-                "$work/corpus" $extra 2>&1 | tee "findings/$t/libfuzzer.log"
-            status=${PIPESTATUS[0]}
+                "$work/corpus" $extra > "findings/$t/libfuzzer.log" 2>&1
+            status=$?
+            pkill -f "Mta.Fuzz.Harness.dll" || true
             set -e
+            tail -n 200 "findings/$t/libfuzzer.log"
 
             execs=$(grep -oP 'stat::number_of_executed_units:\s*\K\d+' "findings/$t/libfuzzer.log" | tail -1 || true)
             found=$(ls "findings/$t" | grep -cE '^(crash|timeout|oom|leak)-' || true)
