@@ -97,6 +97,12 @@ public sealed class DeliverySection
     public int MaxRecipientsPerTransaction { get; init; } = 100;
     public bool PreferChunking { get; init; }
 
+    /// <summary>Per-destination connection and rate limits (adaptive: they start low and grow while the destination keeps accepting).</summary>
+    public ThrottleSection Throttle { get; init; } = new();
+
+    /// <summary>Delays between retries after the 1st, 2nd, ... failed attempt; the last one repeats until the delivery expires. Empty keeps the built-in ladder (2 m, 5 m, 15 m, 30 m, 1 h, 2 h, 4 h).</summary>
+    public List<TimeSpan> RetryDelays { get; init; } = [];
+
     /// <summary>Destination port for direct MX delivery. Only change for lab setups; the Internet uses 25.</summary>
     public int RemotePort { get; init; } = 25;
 
@@ -114,6 +120,24 @@ public sealed class DnsSection
 
     /// <summary>Trust the AD bit of answers. Only safe when the configured resolver is local or otherwise trusted and validates DNSSEC.</summary>
     public bool TrustAuthenticatedData { get; init; }
+}
+
+public sealed class ThrottleSection
+{
+    /// <summary>Ceiling of concurrent connections to one destination domain.</summary>
+    public int MaxConnections { get; init; } = 20;
+
+    /// <summary>Ceiling of messages per minute to one destination domain.</summary>
+    public double MaxMessagesPerMinute { get; init; } = 600;
+
+    /// <summary>Messages sent over one connection before it is closed.</summary>
+    public int MaxMessagesPerConnection { get; init; } = 100;
+
+    /// <summary>Connections allowed at first, before the destination has shown it accepts more.</summary>
+    public int InitialConnections { get; init; } = 5;
+
+    /// <summary>Messages per minute allowed at first.</summary>
+    public double InitialMessagesPerMinute { get; init; } = 120;
 }
 
 public sealed class DashboardSection

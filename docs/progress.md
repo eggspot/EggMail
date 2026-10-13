@@ -30,6 +30,7 @@ Running status of the implementation, updated in every pull request. **Productio
 | HTTP API (docs/api.md) | not started | |
 | Domain verification service (scheduler over the planner/checker and `VerificationSchedule`) | not started | |
 | TLS-RPT: session recording in the delivery engine (MTA-STS/DANE domains only), daily report sender (HTTPS POST or mailto through the normal queue; retries in memory) | this PR | 7 recorder tests, 2 sender tests; **not verified against a real reporting endpoint** |
+| Chaos pipeline test: randomized refusals, greylisting and cut connections after end-of-data against an unreliable remote; invariants: one final state per recipient, no loss, duplicates only when flagged `possible_duplicate`, bounces explained and suppressed | this PR | runs in `dotnet test` (about 150 messages, 3 s); `EGGMAIL_CHAOS_MESSAGES` / `EGGMAIL_CHAOS_SEED` scale it (25 consecutive 1,000-message runs passed) |
 | `mta admin create` and `mta migrate-storage` commands (need the API's dashboard users and the switch engine) | not started | |
 | Backend switch engine (export/import, quiesce, fence, activation, rollback, history migration) | not started | |
 | Dashboard hosting, TLS-RPT/DMARC report sending, metrics endpoint wiring | not started | |
