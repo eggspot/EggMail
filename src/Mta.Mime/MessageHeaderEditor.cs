@@ -18,8 +18,11 @@ public sealed class MessageHeaderEditor
 {
     private readonly ReadOnlyMemory<byte> _message;
 
-    // Created on first use: most edits touch one or two things, and an editor is created for every submitted message.
-    private List<ReadOnlyMemory<byte>>? _prepended;
+    // Created on first use: most edits touch one or two things, and an editor is created for every submitted message. The first prepended
+    // field lives in the editor itself (the usual edit adds exactly one, the Received field); only further ones need a list.
+    private ReadOnlyMemory<byte> _firstPrepended;
+    private bool _hasFirstPrepended;
+    private List<ReadOnlyMemory<byte>>? _morePrepended;
     private List<ReadOnlyMemory<byte>>? _appended;
     private List<Rule>? _rules;
 
@@ -39,7 +42,7 @@ public sealed class MessageHeaderEditor
     /// <exception cref="HeaderInjectionException">Name or value contains CR, LF, NUL or other control characters (or non-ASCII when not allowed).</exception>
     public MessageHeaderEditor Prepend(string name, string value, bool allowUtf8 = false)
     {
-        (_prepended ??= []).Add(Format(name, value, allowUtf8));
+        AddPrepended(Format(name, value, allowUtf8));
         return this;
     }
 
@@ -52,7 +55,7 @@ public sealed class MessageHeaderEditor
     public MessageHeaderEditor PrependRaw(ReadOnlySpan<byte> field)
     {
         ValidateRawField(field);
-        (_prepended ??= []).Add(field.ToArray());
+        AddPrepended(field.ToArray());
         return this;
     }
 
@@ -63,8 +66,20 @@ public sealed class MessageHeaderEditor
     public MessageHeaderEditor PrependRawWithoutCopy(ReadOnlyMemory<byte> field)
     {
         ValidateRawField(field.Span);
-        (_prepended ??= []).Add(field);
+        AddPrepended(field);
         return this;
+    }
+
+    private void AddPrepended(ReadOnlyMemory<byte> field)
+    {
+        if (!_hasFirstPrepended)
+        {
+            _firstPrepended = field;
+            _hasFirstPrepended = true;
+            return;
+        }
+
+        (_morePrepended ??= []).Add(field);
     }
 
     /// <summary>Adds <c>name: value</c> after the last current header (just before the empty line).</summary>
@@ -169,12 +184,18 @@ public sealed class MessageHeaderEditor
         ArgumentNullException.ThrowIfNull(writer);
         var data = _message.Span;
         long total = 0;
-        if (_prepended is { } prepended)
+        // Each prepended field goes above the earlier ones: the last one added is written first.
+        if (_morePrepended is { } more)
         {
-            for (int i = prepended.Count - 1; i >= 0; i--)
+            for (int i = more.Count - 1; i >= 0; i--)
             {
-                total += Put(writer, prepended[i].Span);
+                total += Put(writer, more[i].Span);
             }
+        }
+
+        if (_hasFirstPrepended)
+        {
+            total += Put(writer, _firstPrepended.Span);
         }
 
         if (_rules is { } rules)

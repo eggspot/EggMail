@@ -73,7 +73,13 @@ public static class ContentRules
         ContentOptions c = options.Content;
         string? text = Truncate(content.Text, c.MaxStoredBodyBytes, out bool t1);
         string? html = Truncate(content.Html, c.MaxStoredBodyBytes, out bool t2);
-        return new MessageContent(c.StoreSubject ? content.Subject : null, text, html, content.Attachments, content.Truncated || t1 || t2);
+        string? subject = c.StoreSubject ? content.Subject : null;
+        if (!t1 && !t2 && ReferenceEquals(subject, content.Subject))
+        {
+            return content;   // nothing to cut or drop: the record is immutable, so it is passed on as it is
+        }
+
+        return new MessageContent(subject, text, html, content.Attachments, content.Truncated || t1 || t2);
     }
 
     /// <summary>Truncates to at most <paramref name="maxBytes"/> UTF-8 bytes without splitting a character.</summary>

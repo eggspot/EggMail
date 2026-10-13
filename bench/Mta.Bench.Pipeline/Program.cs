@@ -20,7 +20,8 @@ using Mta.Storage.Sqlite;
 //   dotnet run -c Release --project bench/Mta.Bench.Pipeline -- --sync off --messages 50000 --connections 32 --size 2048
 //   options: --backend sqlite|postgres (postgres needs EGGMAIL_BENCH_POSTGRES=<connection string of an empty database>)
 //            --sync off|normal|full   --history full|statsonly   --messages N   --connections N   --size BYTES   --rcpt N
-//            --deliver true|false (default true: also drain the queue to the sink)   --split true (start delivery after ingest so each phase is measured alone)   --label TEXT   --json out.json
+//            --micro true [--only TEXT] [--alloc-profile true]: per-step allocation of the ingest path;  --micro-delivery true: per-step allocation of the delivery path;  --sink-only true: the SMTP server alone
+//            --tls true|false (default true: STARTTLS; false measures the server without TLS)   --deliver true|false (default true: also drain the queue to the sink)   --split true (start delivery after ingest so each phase is measured alone)   --label TEXT   --json out.json
 var opt = Args.Parse(args);
 if (opt.Get("micro-delivery", "false") == "true")
 {
@@ -30,7 +31,7 @@ if (opt.Get("micro-delivery", "false") == "true")
 
 if (opt.Get("micro", "false") == "true")
 {
-    await Micro.RunAsync(opt.Get("alloc-profile", "false") == "true");
+    await Micro.RunAsync(opt.Get("alloc-profile", "false") == "true", opt.Get("only", ""));
     return 0;
 }
 
@@ -48,6 +49,7 @@ int connections = int.Parse(opt.Get("connections", "32"));
 int size = int.Parse(opt.Get("size", "2048"));
 int rcpt = int.Parse(opt.Get("rcpt", "1"));
 bool deliver = bool.Parse(opt.Get("deliver", "true"));
+bool tls = opt.Get("tls", "true") == "true";   // false: the submission listener is plain text with AUTH allowed, to measure the server without the TLS stack
 bool split = opt.Get("split", "false") == "true";   // start the delivery engine only after ingest finished, so each phase is measured on its own
 string label = opt.Get("label", $"{backend}-{(backend == "sqlite" ? sync.ToString() : "pg")}-{history}");
 
@@ -82,7 +84,7 @@ var config = new MtaConfig
     Smtp = new SmtpSection
     {
         MaxConnections = 4096, MaxConnectionsPerIp = 4096,
-        Listeners = new Dictionary<string, ListenerSection> { ["submission"] = new() { Port = 0, BindAddress = "127.0.0.1", Mode = ListenerMode.StartTls, AuthRequired = true } },
+        Listeners = new Dictionary<string, ListenerSection> { ["submission"] = new() { Port = 0, BindAddress = "127.0.0.1", Mode = tls ? ListenerMode.StartTls : ListenerMode.Plain, AuthRequired = true, AllowInsecureAuth = !tls } },
     },
     Delivery = new DeliverySection
     {
@@ -124,7 +126,7 @@ string loadJson = Path.Combine(dir, "load.json");
 long allocBefore = GC.GetTotalAllocatedBytes(precise: true);
 var cpuBefore = Process.GetCurrentProcess().TotalProcessorTime;
 var wall = Stopwatch.StartNew();
-var psi = new ProcessStartInfo("dotnet", $"\"{tools}\" load --port {port} --starttls --auth bench:bench-pass --connections {connections} --messages {messages} --size {size} --rcpt {rcpt} --json \"{loadJson}\" --label \"{label}\"")
+var psi = new ProcessStartInfo("dotnet", $"\"{tools}\" load --port {port} {(tls ? "--starttls " : "")}--auth bench:bench-pass --connections {connections} --messages {messages} --size {size} --rcpt {rcpt} --json \"{loadJson}\" --label \"{label}\"")
 {
     RedirectStandardOutput = true,
     RedirectStandardError = true,
@@ -331,8 +333,13 @@ internal static class Micro
 
     private static AllocationSampler? _sampler;
 
-    public static async Task RunAsync(bool profile)
+    private static string _only = "";
+
+    private static bool Wanted(string name) => _only.Length == 0 || name.Contains(_only, StringComparison.OrdinalIgnoreCase);
+
+    public static async Task RunAsync(bool profile, string only = "")
     {
+        _only = only;
         using var allocProfile = profile ? new AllocationSampler() : null;
         _sampler = allocProfile;
         byte[] raw = System.Text.Encoding.ASCII.GetBytes(Head + new string('x', 1800) + "\r\n");
@@ -359,7 +366,8 @@ internal static class Micro
         var parsedOnce = Mta.Mime.MimeMessage.Parse(raw);
         Measure("MessageContentExtractor.Extract(raw) (parses itself)", () => { Mta.Mime.MessageContentExtractor.Extract(raw, 262144); });
         Measure("MessageContentExtractor.Extract(parsed message)", () => { Mta.Mime.MessageContentExtractor.Extract(parsedOnce, 262144); });
-        Measure("AddressList.Parse(From) + GetCommonDomain", () => { Mta.Mime.AddressList.Parse("Tester <news@bench.test>").GetCommonDomain(out _); });
+        Measure("AddressList.Parse(From) + GetCommonDomain (the full parser, as before)", () => { Mta.Mime.AddressList.Parse("Tester <news@bench.test>").GetCommonDomain(out _); });
+        Measure("AddressList.GetCommonDomain(From header) (the simple-address shortcut)", () => { Mta.Mime.AddressList.GetCommonDomain(parsedOnce.Headers[0], null, out _); });
         Measure("Ids.New + EmailAddress.Parse x2", () => { Mta.Core.Ids.New(); Mta.Core.EmailAddress.Parse("rcpt0@dest.test"); Mta.Core.EmailAddress.Parse("load0@bench.test"); });
 
         var tenant = new Mta.Storage.Tenant(Guid.NewGuid(), "T", "t", true, DateTimeOffset.UtcNow, false);
@@ -398,16 +406,35 @@ internal static class Micro
 
     private static void Measure(string name, Action action)
     {
+        if (!Wanted(name))
+        {
+            return;
+        }
+
         for (int i = 0; i < 200; i++) { action(); }
-        long before = GC.GetAllocatedBytesForCurrentThread();
         const int n = 10000;
-        for (int i = 0; i < n; i++) { action(); }
-        Console.WriteLine($"{name,-80} {(GC.GetAllocatedBytesForCurrentThread() - before) / n,8} B/op");
+        long bytes = 0;
+        double best = double.MaxValue;
+        for (int pass = 0; pass < 3; pass++)   // the fastest of three passes: the machine is shared and noisy
+        {
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            long started = Stopwatch.GetTimestamp();
+            for (int i = 0; i < n; i++) { action(); }
+            best = Math.Min(best, Stopwatch.GetElapsedTime(started).TotalMicroseconds / n);
+            bytes = (GC.GetAllocatedBytesForCurrentThread() - before) / n;
+        }
+
+        Console.WriteLine($"{name,-80} {bytes,8} B/op {best,8:F2} us/op");
     }
 
     /// <summary>The same operation from 32 concurrent callers, so a writer can group commit (the per-batch cost is shared by the batch).</summary>
     private static async Task MeasureConcurrentAsync(string name, Func<Task> action)
     {
+        if (!Wanted(name))
+        {
+            return;
+        }
+
         const int callers = 32;
         async Task Run(int each) { for (int i = 0; i < each; i++) { await action(); } }
         await Task.WhenAll(Enumerable.Range(0, callers).Select(_ => Run(20)));
@@ -415,20 +442,45 @@ internal static class Micro
         _sampler?.Reset();
         long before = GC.GetTotalAllocatedBytes(precise: true);
         const int each = 400;
-        await Task.WhenAll(Enumerable.Range(0, callers).Select(_ => Run(each)));
-        Console.WriteLine($"{name,-80} {(GC.GetTotalAllocatedBytes(precise: true) - before) / (callers * each),8} B/op");
+        double best = double.MaxValue;
+        long bytes = 0;
+        for (int pass = 0; pass < 3; pass++)
+        {
+            GC.Collect();
+            before = GC.GetTotalAllocatedBytes(precise: true);
+            long started = Stopwatch.GetTimestamp();
+            await Task.WhenAll(Enumerable.Range(0, callers).Select(_ => Run(each)));
+            best = Math.Min(best, Stopwatch.GetElapsedTime(started).TotalMicroseconds / (callers * each));
+            bytes = (GC.GetTotalAllocatedBytes(precise: true) - before) / (callers * each);
+        }
+
+        Console.WriteLine($"{name,-80} {bytes,8} B/op {best,8:F2} us/op (wall time per message)");
         _sampler?.Print(14);
     }
 
     private static async Task MeasureAsync(string name, Func<Task> action)
     {
+        if (!Wanted(name))
+        {
+            return;
+        }
+
         for (int i = 0; i < 300; i++) { await action(); }
-        GC.Collect();
-        _sampler?.Reset();
-        long before = GC.GetTotalAllocatedBytes(precise: true);
         const int n = 20000;
-        for (int i = 0; i < n; i++) { await action(); }
-        Console.WriteLine($"{name,-80} {(GC.GetTotalAllocatedBytes(precise: true) - before) / n,8} B/op");
+        long bytes = 0;
+        double best = double.MaxValue;
+        for (int pass = 0; pass < 3; pass++)   // the fastest of three passes: the machine is shared and noisy
+        {
+            GC.Collect();
+            _sampler?.Reset();
+            long before = GC.GetTotalAllocatedBytes(precise: true);
+            long started = Stopwatch.GetTimestamp();
+            for (int i = 0; i < n; i++) { await action(); }
+            best = Math.Min(best, Stopwatch.GetElapsedTime(started).TotalMicroseconds / n);
+            bytes = (GC.GetTotalAllocatedBytes(precise: true) - before) / n;
+        }
+
+        Console.WriteLine($"{name,-80} {bytes,8} B/op {best,8:F2} us/op");
         _sampler?.Print(14);
     }
 }

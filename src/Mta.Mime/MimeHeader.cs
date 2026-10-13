@@ -5,7 +5,7 @@ using System.Text.Unicode;
 namespace Mta.Mime;
 
 /// <summary>Header field names that this library recognizes without allocating a string.</summary>
-public enum HeaderId
+public enum HeaderId : byte
 {
     Unknown = 0,
     From,
