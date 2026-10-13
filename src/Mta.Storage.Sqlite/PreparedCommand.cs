@@ -1,6 +1,8 @@
 using System.Buffers;
 using System.Text;
 using Microsoft.Data.Sqlite;
+using Mta.Core;
+using Mta.Storage.Logic;
 using SQLitePCL;
 
 namespace Mta.Storage.Sqlite;
@@ -114,6 +116,40 @@ internal sealed class PreparedCommand : IDisposable
             ArrayPool<byte>.Shared.Return(rented);
         }
 
+        return this;
+    }
+
+    /// <summary>
+    /// Binds <see cref="AddressText.Format"/> of the address (optionally lower-cased, like <c>Format(a).ToLowerInvariant()</c>) without building the string.
+    /// </summary>
+    public PreparedCommand SetAddress(int index, in EmailAddress address, bool lowerCase = false)
+    {
+        if (address.IsNull)
+        {
+            BindText(index, default);
+            return this;
+        }
+
+        int length = address.LocalPart.Length + 1 + address.Domain.Length;
+        if (length > 512)
+        {
+            string text = AddressText.Format(address);
+            return Set(index, lowerCase ? text.ToLowerInvariant() : text);
+        }
+
+        Span<char> chars = stackalloc char[length];
+        address.LocalPart.CopyTo(chars);
+        chars[address.LocalPart.Length] = '@';
+        address.Domain.CopyTo(chars[(address.LocalPart.Length + 1)..]);
+        if (lowerCase)
+        {
+            Span<char> lower = stackalloc char[length];   // the span overload refuses to convert in place
+            chars.ToLowerInvariant(lower);
+            chars = lower;
+        }
+
+        Span<byte> utf8 = stackalloc byte[length * 3];
+        BindText(index, utf8[..Encoding.UTF8.GetBytes(chars, utf8)]);
         return this;
     }
 
@@ -252,7 +288,7 @@ internal sealed class RawReader : IDisposable
 
     public int? GetNullableInt(int ordinal) => IsDBNull(ordinal) ? null : GetInt32(ordinal);
 
-    public DateTimeOffset GetInstant(int ordinal) => Logic.StorageTime.FromUnixMs(GetInt64(ordinal));
+    public DateTimeOffset GetInstant(int ordinal) => StorageTime.FromUnixMs(GetInt64(ordinal));
 
     public DateTimeOffset? GetNullableInstant(int ordinal) => IsDBNull(ordinal) ? null : GetInstant(ordinal);
 

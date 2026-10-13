@@ -75,7 +75,7 @@ public interface IDeliveryStore
 
 public sealed record QueueStats(long Queued, long Leased, long Deferred, DateTimeOffset? OldestDueAt, long SpoolBytes);
 
-public sealed record StatKey(DateTimeOffset HourStart, Guid TenantId, string SendingDomain, string RecipientDomain);
+public readonly record struct StatKey(DateTimeOffset HourStart, Guid TenantId, string SendingDomain, string RecipientDomain);
 
 [Flags]
 public enum StatCounter : byte

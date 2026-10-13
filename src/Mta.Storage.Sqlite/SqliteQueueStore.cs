@@ -226,13 +226,12 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
             .Set(4, m.Recipients.Count).Set(5, m.RetainRaw ? 1 : 0).Set(6, received)
             .ExecuteNonQuery();
 
-        string from = AddressText.Format(m.EnvelopeFrom);
         long expires = StorageTime.ToUnixMs(m.ExpiresAt);
         PreparedCommand insert = ctx.Command(QueueSql.DeliveryInsert);
         foreach (AcceptedRecipient r in m.Recipients)
         {
-            insert.Set(0, r.DeliveryId).Set(1, m.MessageId).Set(2, m.TenantId).Set(3, from)
-                .Set(4, AddressText.Format(r.Address)).Set(5, r.Address.Domain).Set(6, m.SendingDomain)
+            insert.Set(0, r.DeliveryId).Set(1, m.MessageId).Set(2, m.TenantId).SetAddress(3, m.EnvelopeFrom)
+                .SetAddress(4, r.Address).Set(5, r.Address.Domain).Set(6, m.SendingDomain)
                 .Set(7, (long)m.Source).Set(8, received).Set(9, expires)
                 .ExecuteNonQuery();
         }

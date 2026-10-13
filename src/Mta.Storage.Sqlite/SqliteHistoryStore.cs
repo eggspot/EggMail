@@ -102,14 +102,14 @@ internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore, IMes
         int day = StorageTime.DayNumber(m.MessageId);
         long received = StorageTime.ToUnixMs(m.ReceivedAt);
         ctx.Command(HistorySql.IndexInsert)
-            .Set(0, day).Set(1, m.MessageId).Set(2, m.TenantId).Set(3, received).Set(4, s.Subject).Set(5, AddressText.Format(m.EnvelopeFrom))
+            .Set(0, day).Set(1, m.MessageId).Set(2, m.TenantId).Set(3, received).Set(4, s.Subject).SetAddress(5, m.EnvelopeFrom)
             .Set(6, m.Recipients.Count).Set(7, (long)m.Raw.Length).Set(8, s.Content is null ? 0 : 1)
             .ExecuteNonQuery();
 
         PreparedCommand rcpt = ctx.Command(HistorySql.RecipientInsert).Set(0, day).Set(1, m.MessageId);
         foreach (AcceptedRecipient r in m.Recipients)
         {
-            rcpt.Set(2, AddressText.Format(r.Address).ToLowerInvariant()).ExecuteNonQuery();
+            rcpt.SetAddress(2, r.Address, lowerCase: true).ExecuteNonQuery();
         }
 
         if (s.Content is { } c)

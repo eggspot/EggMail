@@ -313,6 +313,52 @@ internal static class HeaderText
         }
     }
 
+    /// <summary>
+    /// The same text as <see cref="GetValue"/> for a pure-ASCII value, written into <paramref name="destination"/> instead of a new string
+    /// (fold line breaks removed, white space trimmed). Returns false, writing nothing useful, when the value has a non-ASCII byte or is longer
+    /// than the destination; the caller then falls back to <see cref="GetValue"/>.
+    /// </summary>
+    public static bool TryGetAsciiValue(ReadOnlySpan<byte> rawValue, Span<char> destination, out int length)
+    {
+        length = 0;
+        if (rawValue.Length > destination.Length || !System.Text.Ascii.IsValid(rawValue))
+        {
+            return false;
+        }
+
+        int n = 0;
+        for (int i = 0; i < rawValue.Length; i++)
+        {
+            byte b = rawValue[i];
+            if (b == (byte)'\n' || (b == (byte)'\r' && i + 1 < rawValue.Length && rawValue[i + 1] == (byte)'\n'))
+            {
+                continue;
+            }
+
+            destination[n++] = (char)b;
+        }
+
+        int start = 0;
+        int end = n;
+        while (start < end && destination[start] is ' ' or '\t')
+        {
+            start++;
+        }
+
+        while (end > start && destination[end - 1] is ' ' or '\t')
+        {
+            end--;
+        }
+
+        if (start > 0)
+        {
+            destination[start..end].CopyTo(destination);
+        }
+
+        length = end - start;
+        return true;
+    }
+
     public static ReadOnlySpan<byte> TrimWsp(ReadOnlySpan<byte> s)
     {
         int start = 0;

@@ -138,7 +138,8 @@ public static class StorageJson
     public static List<string> DeserializeStrings(string? json) =>
         string.IsNullOrEmpty(json) ? [] : JsonSerializer.Deserialize(json, StorageJsonContext.Default.ListString) ?? [];
 
-    public static string SerializeAttachments(IReadOnlyList<AttachmentInfo> values) => JsonSerializer.Serialize(values.ToArray(), StorageJsonContext.Default.AttachmentInfoArray);
+    public static string SerializeAttachments(IReadOnlyList<AttachmentInfo> values) =>
+        values.Count == 0 ? "[]" : JsonSerializer.Serialize(values.ToArray(), StorageJsonContext.Default.AttachmentInfoArray);
 
     public static List<AttachmentInfo> DeserializeAttachments(string? json) =>
         string.IsNullOrEmpty(json) ? [] : JsonSerializer.Deserialize(json, StorageJsonContext.Default.ListAttachmentInfo) ?? [];

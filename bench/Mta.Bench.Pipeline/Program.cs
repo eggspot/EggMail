@@ -20,8 +20,14 @@ using Mta.Storage.Sqlite;
 //   dotnet run -c Release --project bench/Mta.Bench.Pipeline -- --sync off --messages 50000 --connections 32 --size 2048
 //   options: --backend sqlite|postgres (postgres needs EGGMAIL_BENCH_POSTGRES=<connection string of an empty database>)
 //            --sync off|normal|full   --history full|statsonly   --messages N   --connections N   --size BYTES   --rcpt N
-//            --deliver true|false (default true: also drain the queue to the sink)   --label TEXT   --json out.json
+//            --deliver true|false (default true: also drain the queue to the sink)   --split true (start delivery after ingest so each phase is measured alone)   --label TEXT   --json out.json
 var opt = Args.Parse(args);
+if (opt.Get("micro-delivery", "false") == "true")
+{
+    await MicroDelivery.RunAsync();
+    return 0;
+}
+
 if (opt.Get("micro", "false") == "true")
 {
     await Micro.RunAsync(opt.Get("alloc-profile", "false") == "true");
@@ -29,6 +35,11 @@ if (opt.Get("micro", "false") == "true")
 }
 
 using var allocProfile = opt.Get("alloc-profile", "false") == "true" ? new AllocationSampler() : null;
+if (opt.Get("sink-only", "false") == "true")
+{
+    return await SinkOnly.RunAsync(opt, allocProfile);
+}
+
 string backend = opt.Get("backend", "sqlite");
 var sync = Enum.Parse<SqliteSyncMode>(opt.Get("sync", "off"), ignoreCase: true);
 var history = Enum.Parse<HistoryMode>(opt.Get("history", "full"), ignoreCase: true);
@@ -37,6 +48,7 @@ int connections = int.Parse(opt.Get("connections", "32"));
 int size = int.Parse(opt.Get("size", "2048"));
 int rcpt = int.Parse(opt.Get("rcpt", "1"));
 bool deliver = bool.Parse(opt.Get("deliver", "true"));
+bool split = opt.Get("split", "false") == "true";   // start the delivery engine only after ingest finished, so each phase is measured on its own
 string label = opt.Get("label", $"{backend}-{(backend == "sqlite" ? sync.ToString() : "pg")}-{history}");
 
 string dir = Directory.CreateTempSubdirectory("eggmail-bench-").FullName;
@@ -96,7 +108,7 @@ runtime.SmtpServer.Start();
 int port = runtime.SmtpServer.LocalEndPoints["submission"].Port;
 using var stop = new CancellationTokenSource();
 Task? engine = null;
-if (deliver)
+if (deliver && !split)
 {
     engine = Task.Run(() => runtime.Delivery.RunAsync(stop.Token));
 }
@@ -133,6 +145,23 @@ var cpuAfterIngest = Process.GetCurrentProcess().TotalProcessorTime;
 
 double endToEndSeconds = ingestSeconds;
 long expected = (long)messages * rcpt;
+double deliverySeconds = 0;
+if (deliver && split)
+{
+    if (allocProfile is not null)
+    {
+        Console.WriteLine("ingest phase:");
+        allocProfile.Print(25);
+        allocProfile.Reset();
+    }
+
+    GC.Collect();
+    allocAfterIngest = GC.GetTotalAllocatedBytes(precise: true);
+    cpuAfterIngest = Process.GetCurrentProcess().TotalProcessorTime;
+    wall.Restart();
+    engine = Task.Run(() => runtime.Delivery.RunAsync(stop.Token));
+}
+
 if (deliver)
 {
     var deadline = DateTime.UtcNow.AddMinutes(10);
@@ -142,7 +171,11 @@ if (deliver)
     }
 
     endToEndSeconds = wall.Elapsed.TotalSeconds;
+    deliverySeconds = endToEndSeconds;
 }
+
+long allocAfterDelivery = GC.GetTotalAllocatedBytes(precise: true);
+var cpuAfterDelivery = Process.GetCurrentProcess().TotalProcessorTime;
 
 using var loadDoc = JsonDocument.Parse(File.ReadAllText(loadJson));
 var l = loadDoc.RootElement;
@@ -166,7 +199,21 @@ var result = new
         ServerAllocatedBytesPerMessage = accepted == 0 ? 0 : (allocAfterIngest - allocBefore) / accepted,
         ServerCpuMsPer1000Messages = accepted == 0 ? 0 : Math.Round((cpuAfterIngest - cpuBefore).TotalMilliseconds / accepted * 1000, 1),
     },
-    EndToEnd = deliver ? new { DeliveredRecipients = Interlocked.Read(ref sink.Recipients), Seconds = Math.Round(endToEndSeconds, 2), RecipientsPerSecond = Math.Round(Interlocked.Read(ref sink.Recipients) / endToEndSeconds, 1) } : null,
+    EndToEnd = deliver ? new
+    {
+        DeliveredRecipients = Interlocked.Read(ref sink.Recipients),
+        Seconds = Math.Round(endToEndSeconds, 2),
+        RecipientsPerSecond = Math.Round(Interlocked.Read(ref sink.Recipients) / endToEndSeconds, 1),
+        ServerAllocatedBytesPerMessage = split ? 0 : accepted == 0 ? 0 : (allocAfterDelivery - allocBefore) / accepted,
+        ServerCpuMsPer1000Messages = split ? 0 : accepted == 0 ? 0 : Math.Round((cpuAfterDelivery - cpuBefore).TotalMilliseconds / accepted * 1000, 1),
+        DeliveryPhaseOnly = split ? new
+        {
+            Seconds = Math.Round(deliverySeconds, 2),
+            RecipientsPerSecond = Math.Round(Interlocked.Read(ref sink.Recipients) / deliverySeconds, 1),
+            ServerAllocatedBytesPerMessage = accepted == 0 ? 0 : (allocAfterDelivery - allocAfterIngest) / accepted,
+            ServerCpuMsPer1000Messages = accepted == 0 ? 0 : Math.Round((cpuAfterDelivery - cpuAfterIngest).TotalMilliseconds / accepted * 1000, 1),
+        } : null,
+    } : null,
     Gen2Collections = GC.CollectionCount(2),
 };
 string json = JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true });
@@ -382,5 +429,49 @@ internal static class Micro
         for (int i = 0; i < n; i++) { await action(); }
         Console.WriteLine($"{name,-80} {(GC.GetTotalAllocatedBytes(precise: true) - before) / n,8} B/op");
         _sampler?.Print(14);
+    }
+}
+
+/// <summary>
+/// The SMTP server protocol path alone: the load generator talks plain SMTP to the counting sink, so the allocation per message is that of
+/// the session, the DATA reader and the reply (no storage, no authentication, no TLS). Run with <c>--sink-only true</c>.
+/// </summary>
+internal static class SinkOnly
+{
+    public static async Task<int> RunAsync(Args opt, AllocationSampler? allocProfile)
+    {
+        int messages = int.Parse(opt.Get("messages", "50000"));
+        int connections = int.Parse(opt.Get("connections", "32"));
+        int size = int.Parse(opt.Get("size", "2048"));
+        var sink = new CountingSink();
+        await using var server = new SmtpServer(new SmtpServerOptions
+        {
+            Hostname = "sink.bench",
+            MaxMessageSize = 64L * 1024 * 1024,
+            MaxRecipients = 1000,
+            Listeners = [new SmtpListenerOptions { Name = "sink", BindAddress = IPAddress.Loopback, Port = 0, Mode = ListenerMode.Plain, AuthRequired = false, Role = ListenerRole.Bounce }],
+        }, sink);
+        server.Start();
+        string tools = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "src", "Mta.Tools", "bin", "Release", "net10.0", "mta-tools.dll"));
+        string loadJson = Path.Combine(Path.GetTempPath(), "eggmail-sink-load-" + Guid.NewGuid().ToString("N") + ".json");
+        GC.Collect();
+        allocProfile?.Reset();
+        long before = GC.GetTotalAllocatedBytes(precise: true);
+        var cpuBefore = Process.GetCurrentProcess().TotalProcessorTime;
+        var psi = new ProcessStartInfo("dotnet", $"\"{tools}\" load --port {server.LocalEndPoints["sink"].Port} --connections {connections} --messages {messages} --size {size} --json \"{loadJson}\" --label sink-only") { RedirectStandardOutput = true, RedirectStandardError = true };
+        using (var load = Process.Start(psi)!)
+        {
+            await load.StandardOutput.ReadToEndAsync();
+            await load.WaitForExitAsync();
+        }
+
+        long bytes = GC.GetTotalAllocatedBytes(precise: true) - before;
+        var cpu = Process.GetCurrentProcess().TotalProcessorTime - cpuBefore;
+        using var doc = JsonDocument.Parse(File.ReadAllText(loadJson));
+        long accepted = doc.RootElement.GetProperty("Accepted").GetInt64();
+        Console.WriteLine($"SMTP server protocol path (plain, no storage): {accepted} messages of {size} bytes, {doc.RootElement.GetProperty("MessagesPerSecond").GetDouble():F0} msg/s, {bytes / Math.Max(1, accepted)} B/message, {cpu.TotalMilliseconds / Math.Max(1, accepted) * 1000:F1} cpu-ms/1000 messages");
+        allocProfile?.Print(20);
+        File.Delete(loadJson);
+        return 0;
     }
 }

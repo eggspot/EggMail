@@ -42,9 +42,9 @@ public sealed class SmtpReply
             throw new ArgumentException("A reply needs at least one line.", nameof(lines));
         }
 
-        foreach (string l in lines)
+        for (int i = 0; i < lines.Count; i++)   // by index: enumerating an IReadOnlyList allocates its enumerator
         {
-            if (l.AsSpan().IndexOfAny('\r', '\n', '\0') >= 0)
+            if (lines[i].AsSpan().IndexOfAny('\r', '\n', '\0') >= 0)
             {
                 throw new ArgumentException("Reply text must not contain CR, LF or NUL.", nameof(lines));
             }

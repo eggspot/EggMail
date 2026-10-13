@@ -277,14 +277,14 @@ public sealed class MimeMessage
             var contentType = defaultType;
             if (headers.TryGetFirst(HeaderId.ContentType, out var ctHeader))
             {
-                contentType = ContentType.Parse(ctHeader.GetValue(_limits.MaxHeaderValueBytes), _limits);
+                contentType = ContentType.ParseHeader(ctHeader, _limits);
                 an |= contentType.Anomalies;
             }
 
             var cte = ContentTransferEncoding.SevenBit;
             if (headers.TryGetFirst(HeaderId.ContentTransferEncoding, out var cteHeader))
             {
-                cte = ContentTransferEncodings.Parse(cteHeader.GetValue(256));
+                cte = ContentTransferEncodings.ParseHeader(cteHeader);
                 if (cte == ContentTransferEncoding.Unknown)
                 {
                     an |= MimeAnomaly.UnknownTransferEncoding;

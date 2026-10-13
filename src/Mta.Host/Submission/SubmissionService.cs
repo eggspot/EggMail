@@ -293,7 +293,7 @@ public sealed class SubmissionService
             return null;
         }
 
-        switch (AddressList.Parse(from).GetCommonDomain(out string? domain))
+        switch (AddressList.GetCommonDomain(from, null, out string? domain))
         {
             case CommonDomainResult.Single:
                 return domain;
