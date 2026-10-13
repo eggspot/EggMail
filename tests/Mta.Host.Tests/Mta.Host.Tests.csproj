@@ -9,6 +9,7 @@
     <PackageReference Include="xunit.runner.visualstudio" />
     <PackageReference Include="MailKit" />
     <PackageReference Include="MimeKit" />
+    <PackageReference Include="Microsoft.AspNetCore.TestHost" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Mta.Host\Mta.Host.csproj" />

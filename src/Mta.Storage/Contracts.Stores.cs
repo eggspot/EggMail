@@ -195,6 +195,16 @@ public interface IHistoryStore
     ValueTask<byte[]?> GetRetainedRawAsync(Guid tenantId, Guid messageId, CancellationToken cancellationToken);
 }
 
+/// <summary>
+/// Optional capability of an <see cref="IHistoryStore"/>: the recipients of several messages in one call, so list views can show them
+/// without loading message content. Callers test for it with <c>is</c>; a provider without it simply shows no recipients in lists.
+/// </summary>
+public interface IMessageRecipientLookup
+{
+    /// <summary>Recipients (lower-case, sorted) of the given messages of <paramref name="tenantId"/>, at most <paramref name="maxPerMessage"/> each. Unknown or foreign ids are absent.</summary>
+    ValueTask<IReadOnlyDictionary<Guid, IReadOnlyList<string>>> GetRecipientsAsync(Guid tenantId, IReadOnlyCollection<Guid> messageIds, int maxPerMessage, CancellationToken cancellationToken);
+}
+
 public enum WebhookOutboxState : byte
 {
     Pending = 0,
@@ -240,6 +250,14 @@ public interface IWebhookOutbox
 
     /// <summary>Re-queues a finished or failed outbox item for manual replay.</summary>
     ValueTask<bool> ReplayAsync(Guid tenantId, Guid outboxId, DateTimeOffset now, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Queues one event for exactly one enabled endpoint of the tenant, whatever it subscribes to (the API's "send test event").
+    /// Returns the new outbox id, or null when the endpoint is unknown, disabled or belongs to another tenant. A default interface
+    /// member so providers written before this addition keep compiling; the default reports "not supported" by throwing.
+    /// </summary>
+    ValueTask<Guid?> EnqueueForEndpointAsync(Guid tenantId, Guid endpointId, WebhookEventDraft draft, DateTimeOffset now, CancellationToken cancellationToken) =>
+        throw new NotSupportedException("This storage provider does not support targeted webhook events.");
 }
 
 public sealed record MaintenanceReport(string Job, TimeSpan Duration, long RowsAffected, string? Detail);

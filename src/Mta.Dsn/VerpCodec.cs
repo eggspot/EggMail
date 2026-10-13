@@ -178,6 +178,7 @@ public sealed class VerpCodec
             }
         }
 
-        return n == output.Length;
+        // Canonical form only: the unused trailing bits must be zero, otherwise several strings would decode to the same token.
+        return n == output.Length && (buffer & ((1 << bits) - 1)) == 0;
     }
 }

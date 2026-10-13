@@ -81,26 +81,74 @@ public sealed class AcmeRenewalService
         }
     }
 
-    /// <summary>Issues or renews if needed. Returns true if a new certificate was stored.</summary>
+    /// <summary>
+    /// Issues or renews if needed. Returns true if a new certificate was stored. Renews the configured certificate and then every other active
+    /// ACME certificate that was requested through the API (<see cref="RequestAsync"/>), each for the names it was issued for.
+    /// </summary>
     public async Task<bool> CheckOnceAsync(CancellationToken ct)
     {
-        if (!_options.Enabled || _options.Domains.Count == 0)
+        if (!_options.Enabled)
         {
             return false;
         }
 
-        string name = _options.CertificateName;
+        bool issued = false;
+        if (_options.Domains.Count > 0)
+        {
+            issued |= await RenewAsync(_options.CertificateName, _options.Domains, force: false, ct).ConfigureAwait(false);
+        }
+
+        var others = (await _config.GetCertificatesAsync(ct).ConfigureAwait(false))
+            .Where(c => c.Active && c.Source == "acme" && c.Name != _options.CertificateName)
+            .GroupBy(c => c.Name)
+            .Select(g => g.OrderByDescending(c => c.NotAfter).First())
+            .ToList();
+        foreach (var certificate in others)
+        {
+            issued |= await RenewAsync(certificate.Name, certificate.Subjects, force: false, ct).ConfigureAwait(false);
+        }
+
+        return issued;
+    }
+
+    /// <summary>
+    /// Orders a certificate for <paramref name="domains"/> now (the dashboard's "request a certificate"), ignoring the renewal schedule and
+    /// failure backoff. A set equal to the configured names renews the configured certificate; any other set is stored as <c>acme:&lt;first name&gt;</c>
+    /// and renewed with the others by <see cref="CheckOnceAsync"/>. Returns true when a certificate was stored; failures are recorded in the
+    /// renewal state (<see cref="IConfigStore.GetAcmeRenewalsAsync"/>).
+    /// </summary>
+    public async Task<bool> RequestAsync(IReadOnlyList<string> domains, CancellationToken ct)
+    {
+        if (!_options.Enabled)
+        {
+            throw new AcmeException("ACME is not enabled on this server (Acme:Enabled).");
+        }
+
+        ArgumentNullException.ThrowIfNull(domains);
+        var wanted = domains.Select(d => d.Trim().ToLowerInvariant()).Distinct().OrderBy(d => d, StringComparer.Ordinal).ToList();
+        var configured = _options.Domains.Select(d => d.ToLowerInvariant()).OrderBy(d => d, StringComparer.Ordinal).ToList();
+        // One name per set of names: a different set must never replace the row of another. The first name is for people, the hash tells sets apart.
+        string name = wanted.SequenceEqual(configured)
+            ? _options.CertificateName
+            : wanted.Count == 1
+                ? "acme:" + wanted[0]
+                : "acme:" + wanted[0] + "+" + Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(string.Join('\n', wanted))))[..8];
+        return await RenewAsync(name, wanted, force: true, ct).ConfigureAwait(false);
+    }
+
+    private async Task<bool> RenewAsync(string name, IReadOnlyList<string> domains, bool force, CancellationToken ct)
+    {
         var now = _clock.UtcNow;
         var current = (await _config.GetCertificatesAsync(ct).ConfigureAwait(false))
             .Where(c => c.Active && c.Source == "acme" && c.Name == name)
             .OrderByDescending(c => c.NotAfter).FirstOrDefault();
-        if (!NeedsRenewal(current, _options.Domains, now, _options.RenewAtRemainingFraction))
+        if (!force && !NeedsRenewal(current, domains, now, _options.RenewAtRemainingFraction))
         {
             return false;
         }
 
         var renewal = (await _config.GetAcmeRenewalsAsync(ct).ConfigureAwait(false)).FirstOrDefault(r => r.CertificateName == name);
-        if (renewal?.NextAttemptAt is { } next && next > now)
+        if (!force && renewal?.NextAttemptAt is { } next && next > now)
         {
             return false;
         }
@@ -114,12 +162,12 @@ public sealed class AcmeRenewalService
 
         try
         {
-            _log.Write(MtaLogLevel.Information, "acme", $"ordering certificate '{name}' for {string.Join(", ", _options.Domains)}");
+            _log.Write(MtaLogLevel.Information, "acme", $"ordering certificate '{name}' for {string.Join(", ", domains)}");
             await _config.UpsertAcmeRenewalAsync(new AcmeRenewalRecord(name, "ordering", now, null, renewal?.Failures ?? 0, renewal?.LastError, null, renewal?.AriJson), ct).ConfigureAwait(false);
 
             var account = await _config.GetAcmeAccountAsync(_options.DirectoryUrl, ct).ConfigureAwait(false);
             string? accountKey = account is null ? null : Encoding.UTF8.GetString(_protector.Unprotect(account.AccountKeyProtected, SecretPurposes.AcmeAccountKey));
-            var request = new AcmeOrderRequest(_options.DirectoryUrl, _options.Email ?? "", _options.Domains, accountKey, _options.PropagationDelay);
+            var request = new AcmeOrderRequest(_options.DirectoryUrl, _options.Email ?? "", domains, accountKey, _options.PropagationDelay);
             var issued = await _runner.IssueAsync(request, _dns, ct).ConfigureAwait(false);
 
             if (account is null)
@@ -131,16 +179,12 @@ public sealed class AcmeRenewalService
             var leaf = new System.Security.Cryptography.X509Certificates.X509Certificate2Collection();
             leaf.ImportFromPem(issued.ChainPem);
             var first = leaf[0];
+            // A renewal replaces the row of the certificate it renews (the name is unique), so the old one is not left active next to it.
             var record = new CertificateRecord(
-                Ids.New(), name, _options.Domains.Select(d => d.ToLowerInvariant()).ToList(), first.NotBefore.ToUniversalTime(), first.NotAfter.ToUniversalTime(),
+                current?.Id ?? Ids.New(), name, domains.Select(d => d.ToLowerInvariant()).ToList(), first.NotBefore.ToUniversalTime(), first.NotAfter.ToUniversalTime(),
                 issued.ChainPem, _protector.Protect(issued.PrivateKeyPkcs8, SecretPurposes.TlsPrivateKey), "acme", first.Thumbprint, Active: true,
                 Version: _clock.UtcNow.ToUnixTimeMilliseconds(), CreatedAt: now);
             await _config.UpsertCertificateAsync(record, ct).ConfigureAwait(false);
-            if (current is not null)
-            {
-                await _config.UpsertCertificateAsync(current with { Active = false, Version = record.Version + 1 }, ct).ConfigureAwait(false);
-            }
-
             await _config.UpsertAcmeRenewalAsync(new AcmeRenewalRecord(name, "issued", now, null, 0, null, null, null), ct).ConfigureAwait(false);
             _log.Write(MtaLogLevel.Information, "acme", $"certificate '{name}' issued, valid until {record.NotAfter:u}");
             return true;

@@ -8,13 +8,13 @@ namespace Mta.Storage.Sqlite;
 internal static class QueueSql
 {
     public static readonly Stmt IdempotencyUpsert = new(
-        "INSERT INTO api_idempotency_key (tenant_id, idempotency_key, message_id, created_at, expires_at) VALUES (@t, @k, @m, @c, @e) " +
-        "ON CONFLICT (tenant_id, idempotency_key) DO UPDATE SET message_id = excluded.message_id, created_at = excluded.created_at, expires_at = excluded.expires_at " +
+        "INSERT INTO api_idempotency_key (tenant_id, idempotency_key, message_id, created_at, expires_at, fingerprint) VALUES (@t, @k, @m, @c, @e, @f) " +
+        "ON CONFLICT (tenant_id, idempotency_key) DO UPDATE SET message_id = excluded.message_id, created_at = excluded.created_at, expires_at = excluded.expires_at, fingerprint = excluded.fingerprint " +
         "WHERE api_idempotency_key.expires_at <= @now",
-        "@t", "@k", "@m", "@c", "@e", "@now");
+        "@t", "@k", "@m", "@c", "@e", "@f", "@now");
 
     public static readonly Stmt IdempotencyGet = new(
-        "SELECT message_id FROM api_idempotency_key WHERE tenant_id = @t AND idempotency_key = @k",
+        "SELECT message_id, fingerprint FROM api_idempotency_key WHERE tenant_id = @t AND idempotency_key = @k",
         "@t", "@k");
 
     public static readonly Stmt SpoolInsert = new(
@@ -206,14 +206,14 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
         if (m.IdempotencyKey is { } key)
         {
             int changed = ctx.Command(QueueSql.IdempotencyUpsert)
-                .Set(0, m.TenantId).Set(1, key).Set(2, m.MessageId).Set(3, s.NowMs).Set(4, s.KeyExpiresMs).Set(5, s.NowMs)
+                .Set(0, m.TenantId).Set(1, key).Set(2, m.MessageId).Set(3, s.NowMs).Set(4, s.KeyExpiresMs).Set(5, m.IdempotencyFingerprint).Set(6, s.NowMs)
                 .ExecuteNonQuery();
             if (changed == 0)
             {
                 using SqliteDataReader r = ctx.Command(QueueSql.IdempotencyGet).Set(0, m.TenantId).Set(1, key).ExecuteReader();
                 if (r.Read())
                 {
-                    return new IntakeResult(IntakeStatus.DuplicateIdempotencyKey, r.GetGuid(0));
+                    return new IntakeResult(IntakeStatus.DuplicateIdempotencyKey, r.GetGuid(0), r.GetNullableString(1));
                 }
             }
         }
@@ -641,6 +641,23 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
             }
 
             return s.targets.Length;
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async ValueTask<Guid?> EnqueueForEndpointAsync(Guid tenantId, Guid endpointId, WebhookEventDraft draft, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        bool known = (await rt.GetWebhookTargetsAsync(cancellationToken).ConfigureAwait(false)).Any(t => t.TenantId == tenantId && t.EndpointId == endpointId);
+        if (!known)
+        {
+            return null;
+        }
+
+        return await rt.QueueWriter.SubmitAsync((endpointId, draft, tenantId, now), static (ctx, s) =>
+        {
+            Guid id = Ids.New(s.now);
+            ctx.Command(QueueSql.OutboxInsert).Set(0, id).Set(1, s.endpointId).Set(2, s.tenantId).Set(3, s.draft.EventType).Set(4, s.draft.EventId).Set(5, s.draft.PayloadJson).Set(6, StorageTime.ToUnixMs(s.now))
+                .ExecuteNonQuery();
+            return (Guid?)id;
         }, cancellationToken).ConfigureAwait(false);
     }
 

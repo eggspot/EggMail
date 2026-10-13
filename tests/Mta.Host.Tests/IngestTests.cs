@@ -197,3 +197,26 @@ public class IngestTests : IAsyncLifetime
         Assert.False(await _storage.Config.IsSuppressedAsync(TenantId, "gone@dest.example", default));
     }
 }
+
+public class EndpointDisabledNotifierTests
+{
+    [Fact]
+    public async Task Other_subscribed_endpoints_of_the_tenant_get_an_endpoint_disabled_event()
+    {
+        await using var storage = new InMemoryStorage(new StorageOptions());
+        await storage.InitializeAsync(default);
+        var tenant = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        var broken = new WebhookEndpointRecord(Ids.New(), tenant, "https://broken.example/hook", [1], [WebhookEventFactory.Delivered], false, "410 Gone", now, now, now);
+        var watcher = new WebhookEndpointRecord(Ids.New(), tenant, "https://ops.example/hook", [1], [WebhookEventFactory.EndpointDisabled], true, null, null, now, null);
+        await storage.Config.UpsertWebhookEndpointAsync(broken, default);
+        await storage.Config.UpsertWebhookEndpointAsync(watcher, default);
+
+        await new EndpointDisabledNotifier(storage, SystemClock.Instance, NullMtaLog.Instance).EndpointDisabledAsync(broken, "410 Gone", default);
+
+        var item = Assert.Single(await storage.Webhooks.ClaimDueAsync("t", 10, DateTimeOffset.UtcNow.AddSeconds(1), TimeSpan.FromMinutes(1), default));
+        Assert.Equal(watcher.Id, item.EndpointId);
+        Assert.Equal(WebhookEventFactory.EndpointDisabled, item.EventType);
+        Assert.Contains("broken.example", item.PayloadJson);
+    }
+}

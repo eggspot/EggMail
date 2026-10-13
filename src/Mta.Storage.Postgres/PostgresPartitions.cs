@@ -64,18 +64,36 @@ internal sealed class PostgresPartitions(NpgsqlDataSource owner)
             foreach (string table in Tables)
             {
                 string name = NameOf(table, day);
-                // CREATE TABLE IF NOT EXISTS … PARTITION OF is a no-op notice when the partition exists.
-                await using var create = new NpgsqlCommand(
-                    $"CREATE TABLE IF NOT EXISTS {name} PARTITION OF {table} FOR VALUES FROM ({day.ToString(CultureInfo.InvariantCulture)}) TO ({(day + 1).ToString(CultureInfo.InvariantCulture)})",
-                    connection, tx);
-                await using var exists = new NpgsqlCommand("SELECT to_regclass($1) IS NOT NULL", connection, tx);
-                exists.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = name });
-                bool before = (bool)(await exists.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
-                if (!before)
+                await using var state = new NpgsqlCommand(
+                    "SELECT to_regclass($1) IS NOT NULL, EXISTS (SELECT 1 FROM pg_inherits WHERE inhrelid = to_regclass($1))", connection, tx);
+                state.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = name });
+                bool exists, attached;
+                await using (NpgsqlDataReader r = await state.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
                 {
-                    await create.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-                    created++;
+                    await r.ReadAsync(cancellationToken).ConfigureAwait(false);
+                    exists = r.GetBoolean(0);
+                    attached = r.GetBoolean(1);
                 }
+
+                if (attached)
+                {
+                    continue;
+                }
+
+                // CREATE TABLE … PARTITION OF takes an ACCESS EXCLUSIVE lock on the parent, which queues behind every open
+                // transaction that touched it and blocks every new one: with writers that hold history rows and wait for one another
+                // that is a deadlock. A standalone table plus ATTACH PARTITION only needs SHARE UPDATE EXCLUSIVE, which does not
+                // conflict with inserts and updates. The new table is empty, so the attach has nothing to validate.
+                if (!exists)
+                {
+                    await using var create = new NpgsqlCommand($"CREATE TABLE {name} (LIKE {table} INCLUDING DEFAULTS INCLUDING INDEXES)", connection, tx);
+                    await create.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+                await using var attach = new NpgsqlCommand(
+                    $"ALTER TABLE {table} ATTACH PARTITION {name} FOR VALUES FROM ({day.ToString(CultureInfo.InvariantCulture)}) TO ({(day + 1).ToString(CultureInfo.InvariantCulture)})", connection, tx);
+                await attach.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                created++;
             }
         }
 
