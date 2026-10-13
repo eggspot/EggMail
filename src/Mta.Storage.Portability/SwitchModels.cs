@@ -183,6 +183,9 @@ public interface ISwitchActivator
 
     /// <summary>Undoes what <see cref="ActivateAsync"/> did (restores the previous bootstrap file) when a switch is rolled back.</summary>
     Task RestoreAsync(Guid switchId, CancellationToken cancellationToken);
+
+    /// <summary>Drops what was kept for a rollback once the switch is finalized.</summary>
+    Task ForgetAsync(Guid switchId, CancellationToken cancellationToken);
 }
 
 /// <summary>

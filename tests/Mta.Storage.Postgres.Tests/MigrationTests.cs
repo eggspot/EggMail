@@ -77,7 +77,7 @@ public class MigrationTests : PgTestBase
         Assert.Equal(0, await ScalarAsync<long>(
             "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND data_type = 'text' AND collation_name IS DISTINCT FROM 'C' AND table_name <> 'eggmail_schema_version'"));
         Assert.Equal(0, await ScalarAsync<long>(
-            "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND column_name LIKE '%\\_id' AND data_type <> 'uuid' AND column_name NOT IN ('outbox_id') AND table_name NOT IN ('eggmail_schema_version')"));
+            "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND column_name LIKE '%\\_id' AND data_type <> 'uuid' AND column_name NOT IN ('outbox_id', 'chunk_id') AND table_name NOT IN ('eggmail_schema_version')"));
     }
 
     [Fact]
@@ -102,7 +102,7 @@ public class MigrationTests : PgTestBase
             await PostgresMigrator.MigrateAsync(Db.ConnectionString, null, CancellationToken.None);
         }
 
-        Assert.Equal(1, await ScalarAsync<long>("SELECT count(*) FROM eggmail_schema_version"));
+        Assert.Equal(PostgresMigrator.CurrentVersion, await ScalarAsync<long>("SELECT count(*) FROM eggmail_schema_version"));
         Assert.Equal(PostgresMigrator.CurrentVersion, await ScalarAsync<int>("SELECT max(version) FROM eggmail_schema_version"));
         Assert.Equal(PostgresMigrator.CurrentVersion, await PostgresMigrator.GetDatabaseVersionAsync(Pg.Runtime.Data, CancellationToken.None));
     }
@@ -132,7 +132,7 @@ public class MigrationTests : PgTestBase
             await using var check = new NpgsqlConnection(connection);
             await check.OpenAsync();
             await using var count = new NpgsqlCommand("SELECT count(*) FROM eggmail_schema_version", check);
-            Assert.Equal(1L, await count.ExecuteScalarAsync());
+            Assert.Equal((long)PostgresMigrator.CurrentVersion, await count.ExecuteScalarAsync());
         }
         finally
         {

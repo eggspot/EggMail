@@ -209,7 +209,12 @@ public static class MigrateStorageCommand
 
         string command = p.Subcommand.ToLowerInvariant();
         string? bootstrapFile = p.Get("bootstrap-file");
-        IConfigurationRoot root = ConfigLoader.Build(p.ConfigArgs.ToArray(), bootstrapFile is null ? null : Path.GetDirectoryName(Path.GetFullPath(bootstrapFile)));
+        string bootstrapPath = bootstrapFile ?? ConfigLoader.ResolveBootstrapPath();
+
+        // Once the pointer was rewritten by 'activate', the configuration on disk describes the target; the commands that still
+        // concern the source (rollback, finalize, status) read the pointer as it was before.
+        string? original = command is "activate" or "rollback" or "finalize" or "status" ? SwitchActivator.PendingOriginalBootstrap(bootstrapPath) : null;
+        IConfigurationRoot root = ConfigLoader.Build(p.ConfigArgs.ToArray(), Path.GetDirectoryName(Path.GetFullPath(bootstrapPath)), null, original);
         LoadedConfig loaded = ConfigLoader.Load(root);
         if (!loaded.IsValid)
         {
@@ -271,7 +276,7 @@ public static class MigrateStorageCommand
         {
             await using Opened? source = openSource is null ? null : await OpenAsync(openSource, cancellationToken).ConfigureAwait(false);
             await using Opened? target = openTarget is null ? null : await OpenAsync(openTarget, cancellationToken).ConfigureAwait(false);
-            var activator = new SwitchActivator(root, bootstrapFile ?? ConfigLoader.ResolveBootstrapPath());
+            var activator = new SwitchActivator(root, bootstrapPath, original);
             var engine = new StorageSwitchEngine(source?.Endpoint, target?.Endpoint, OfflineHostControl.Instance, activator, SystemClock.Instance, NullMtaLog.Instance,
                 new SwitchOptions { AppVersion = typeof(MigrateStorageCommand).Assembly.GetName().Version?.ToString(3) ?? "0.0.0" });
             var ctx = new CommandContext(p, output, error, getEnvironment, sourceConfig, engine, cancellationToken);

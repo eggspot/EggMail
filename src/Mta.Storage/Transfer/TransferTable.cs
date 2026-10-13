@@ -145,6 +145,9 @@ public abstract class TransferTable
 
     public abstract IReadOnlyList<ITransferSecret> Secrets { get; }
 
+    /// <summary>The history day key of a row (per-day tables only).</summary>
+    public abstract int DayOf(object row);
+
     public abstract ITransferBody? Body { get; }
 
     /// <summary>The bundle directory (<c>config</c>, <c>stats</c>, <c>queue</c> or <c>history</c>).</summary>
@@ -242,6 +245,10 @@ public sealed class TransferTable<T> : TransferTable where T : class, new()
     public override IReadOnlyList<ITransferSecret> Secrets => _spec.Secrets;
 
     public override ITransferBody? Body => _spec.Body;
+
+    public override int DayOf(object row) => (_dayOf ??= _spec.Day?.Compile() ?? throw new InvalidOperationException($"{Name} is not a per-day table."))((T)row);
+
+    private Func<T, int>? _dayOf;
 
     private static JsonSerializerOptions BuildOptions(List<string> excludes)
     {

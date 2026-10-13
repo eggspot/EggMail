@@ -55,6 +55,9 @@ internal sealed class PostgresRuntime
 
     public StatsAggregator Aggregator { get; }
 
+    /// <summary>The backend switch gate: closed on a fenced source and on a target that is not activated yet.</summary>
+    public Mta.Storage.Transfer.SwitchGate Fence { get; } = new();
+
     public bool IsFull => Options.History.Mode == HistoryMode.Full;
 
     /// <summary>Normal operation: claims, intake, history, statistics, configuration.</summary>

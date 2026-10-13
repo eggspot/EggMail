@@ -183,3 +183,31 @@ public class PgConfig : ConfigConformance
         await _pg.DisposeAsync();
     }
 }
+
+public class PgTransferFull : TransferConformance
+{
+    private readonly PgHarness _pg = new();
+
+    protected override Task<IStorage> CreateAsync(StorageOptions options) => _pg.CreateAsync(options, Clock);
+
+    public override async Task DisposeAsync()
+    {
+        await base.DisposeAsync();
+        await _pg.DisposeAsync();
+    }
+}
+
+public class PgTransferStatsOnly : TransferConformance
+{
+    private readonly PgHarness _pg = new();
+
+    protected override HistoryMode Mode => HistoryMode.StatsOnly;
+
+    protected override Task<IStorage> CreateAsync(StorageOptions options) => _pg.CreateAsync(options, Clock);
+
+    public override async Task DisposeAsync()
+    {
+        await base.DisposeAsync();
+        await _pg.DisposeAsync();
+    }
+}

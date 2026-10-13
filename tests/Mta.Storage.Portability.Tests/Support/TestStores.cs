@@ -13,6 +13,7 @@ public enum StoreKind
 {
     InMemory,
     Sqlite,
+    Postgres,
 }
 
 /// <summary><see cref="ISecretProtector"/> over a standalone Data Protection key ring, like each deployment's own ring.</summary>
@@ -52,9 +53,13 @@ public sealed class RingProtector : ISecretProtector
 public sealed class TestStore : IAsyncDisposable
 {
     private readonly StorageOptions _options;
+    private readonly Func<StorageOptions, IStorage>? _reopen;
+    private readonly IAsyncDisposable? _owned;
 
-    private TestStore(StoreKind kind, string root, string name, IStorage storage, StorageOptions options, RingProtector protector, bool protectedAtRest)
+    private TestStore(StoreKind kind, string root, string name, IStorage storage, StorageOptions options, RingProtector protector, bool protectedAtRest, Func<StorageOptions, IStorage>? reopen = null, IAsyncDisposable? owned = null)
     {
+        _reopen = reopen;
+        _owned = owned;
         Kind = kind;
         Root = root;
         Name = name;
@@ -77,6 +82,8 @@ public sealed class TestStore : IAsyncDisposable
     public bool ProtectedAtRest { get; }
 
     public string? DataDirectory => Kind == StoreKind.Sqlite ? System.IO.Path.Combine(Root, Name) : null;
+
+    public StorageOptions Options => _options;
 
     public IStorageTransfer Transfer => Storage.Transfer!;
 
@@ -103,20 +110,35 @@ public sealed class TestStore : IAsyncDisposable
         return new TestStore(kind, root, name, storage, options, ring, certificateRing);
     }
 
-    /// <summary>Closes the store and opens it again over the same files (SQLite only): what a restart does.</summary>
+    /// <summary>Wraps a storage created by a test project that knows the backend (PostgreSQL), with its own secret ring. <paramref name="owned"/> is disposed last (drops the database).</summary>
+    public static async Task<TestStore> WrapAsync(StoreKind kind, IStorage storage, StorageOptions options, string root, string name, Func<StorageOptions, IStorage> reopen, IAsyncDisposable? owned, bool certificateRing = true)
+    {
+        await storage.InitializeAsync(CancellationToken.None);
+        RingProtector ring = RingProtector.Create(System.IO.Path.Combine(root, name + "-ring"), certificateRing ? RingProtector.NewCertificate() : null);
+        return new TestStore(kind, root, name, storage, options, ring, certificateRing, reopen, owned);
+    }
+
+    /// <summary>Closes the store and opens it again over the same data (not in-memory): what a restart does.</summary>
     public async Task ReopenAsync()
     {
-        if (Kind != StoreKind.Sqlite)
+        if (Kind == StoreKind.InMemory)
         {
-            throw new InvalidOperationException("Only a SQLite store survives a restart.");
+            throw new InvalidOperationException("An in-memory store does not survive a restart.");
         }
 
         await Storage.DisposeAsync();
-        Storage = SqliteStorage.Create(_options);
+        Storage = _reopen is not null ? _reopen(_options) : SqliteStorage.Create(_options);
         await Storage.InitializeAsync(CancellationToken.None);
     }
 
-    public async ValueTask DisposeAsync() => await Storage.DisposeAsync();
+    public async ValueTask DisposeAsync()
+    {
+        await Storage.DisposeAsync();
+        if (_owned is not null)
+        {
+            await _owned.DisposeAsync();
+        }
+    }
 }
 
 /// <summary>Fills a store through its public APIs: configuration with real protected secrets, mail in every state, history over several days.</summary>

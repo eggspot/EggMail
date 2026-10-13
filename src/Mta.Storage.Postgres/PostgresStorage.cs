@@ -1,6 +1,7 @@
 using Mta.Core;
 using Mta.Storage.Logic;
 using Mta.Storage.Model;
+using Mta.Storage.Transfer;
 using Npgsql;
 
 namespace Mta.Storage.Postgres;
@@ -31,6 +32,7 @@ public sealed class PostgresStorage : IStorage
     private CancellationTokenSource? _flushCts;
     private Task? _flushLoop;
     private PostgresMaintenance? _maintenance;
+    private EfStorageTransfer? _transfer;
     private int _initialized;
     private int _disposed;
 
@@ -71,6 +73,8 @@ public sealed class PostgresStorage : IStorage
     public IWebhookOutbox Webhooks => _queue;
 
     public IStorageMaintenance Maintenance => _maintenance ?? throw NotInitialized();
+
+    public IStorageTransfer Transfer => _transfer ?? throw NotInitialized();
 
     /// <summary>The shared runtime state (data sources, partition manager) for the PostgreSQL-specific tests.</summary>
     internal PostgresRuntime Runtime => _rt;
@@ -121,6 +125,22 @@ public sealed class PostgresStorage : IStorage
         }
 
         _maintenance = new PostgresMaintenance(_rt, _queue, _stats);
+        try
+        {
+            // A backend switch may have closed this store (a fenced source, a target that is not activated yet); the state is persisted.
+            _transfer = new EfStorageTransfer(new PostgresTransferAccess(_rt, PostgresModelHooks.Instance), _rt.ConfigStore, _rt.Fence, _rt.Clock);
+            _rt.Fence.Apply(await _rt.ConfigStore.GetSwitchStateAsync(cancellationToken).ConfigureAwait(false));
+            if (_rt.Fence.IsClosed)
+            {
+                _rt.Log.Write(MtaLogLevel.Warning, "storage.postgres", _rt.Fence.Reason!);
+            }
+        }
+        catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
+        {
+            await DisposeAsync().ConfigureAwait(false);
+            throw _rt.Unavailable(ex);
+        }
+
         if (_rt.SingleRole)
         {
             _rt.Log.Write(MtaLogLevel.Warning, "storage.postgres", "One PostgreSQL connection string serves as both owner and runtime role. Use separate roles (Postgres:OwnerConnectionString / RuntimeConnectionString) so the application cannot alter the schema.");

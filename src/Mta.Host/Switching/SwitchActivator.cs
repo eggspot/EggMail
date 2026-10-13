@@ -24,7 +24,7 @@ public sealed record PointerSetting(string Key, string Value, bool Secret)
 /// pointer is written into the bootstrap file on the data volume (the previous file is kept for rollback). Otherwise a cutover
 /// patch is produced for the operator, and secrets are referenced by name, never printed.
 /// </summary>
-public sealed class SwitchActivator(IConfigurationRoot configuration, string bootstrapPath) : ISwitchActivator
+public sealed class SwitchActivator(IConfigurationRoot configuration, string bootstrapPath, string? loadedBootstrapPath = null) : ISwitchActivator
 {
     private const string SecretName = "eggmail-storage";
 
@@ -113,7 +113,8 @@ public sealed class SwitchActivator(IConfigurationRoot configuration, string boo
     private bool IsBootstrap(IConfigurationProvider provider) =>
         provider is FileConfigurationProvider file
         && file.Source.FileProvider?.GetFileInfo(file.Source.Path ?? string.Empty).PhysicalPath is { } physical
-        && string.Equals(Path.GetFullPath(physical), Path.GetFullPath(bootstrapPath), StringComparison.Ordinal);
+        && (string.Equals(Path.GetFullPath(physical), Path.GetFullPath(bootstrapPath), StringComparison.Ordinal)
+            || (loadedBootstrapPath is { Length: > 0 } && string.Equals(Path.GetFullPath(physical), Path.GetFullPath(loadedBootstrapPath), StringComparison.Ordinal)));
 
     public async Task<SwitchActivation> ActivateAsync(SwitchActivationRequest request, CancellationToken cancellationToken)
     {
@@ -193,6 +194,35 @@ public sealed class SwitchActivator(IConfigurationRoot configuration, string boo
         }
 
         current[path[^1]] = value;
+    }
+
+    /// <summary>
+    /// After an activation rewrote the bootstrap file, the pointer a later command (rollback, finalize, status) must read is the one
+    /// from before: the kept copy (its path), or "" when there was no file. Null when no activation is pending.
+    /// </summary>
+    public static string? PendingOriginalBootstrap(string bootstrapPath)
+    {
+        string? directory = Path.GetDirectoryName(Path.GetFullPath(bootstrapPath));
+        if (directory is null || !Directory.Exists(directory))
+        {
+            return null;
+        }
+
+        string name = Path.GetFileName(bootstrapPath);
+        string? kept = Directory.EnumerateFiles(directory, name + ".pre-*").FirstOrDefault();
+        if (kept is not null)
+        {
+            return kept;
+        }
+
+        return Directory.EnumerateFiles(directory, name + ".none-*").Any() ? string.Empty : null;
+    }
+
+    public Task ForgetAsync(Guid switchId, CancellationToken cancellationToken)
+    {
+        File.Delete(BackupPath(switchId));
+        File.Delete(AbsentMarkerPath(switchId));
+        return Task.CompletedTask;
     }
 
     public Task RestoreAsync(Guid switchId, CancellationToken cancellationToken)

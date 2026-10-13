@@ -31,7 +31,7 @@ public static class ConfigLoader
     /// Builds the layered configuration for the process: appsettings (if present), the bootstrap file in the data directory
     /// (storage pointer written by the backend switch), environment variables, then the command line (highest precedence).
     /// </summary>
-    public static IConfigurationRoot Build(string[] args, string? dataDirectoryHint = null, string? appSettingsPath = null)
+    public static IConfigurationRoot Build(string[] args, string? dataDirectoryHint = null, string? appSettingsPath = null, string? bootstrapFileOverride = null)
     {
         var builder = new ConfigurationBuilder();
         if (appSettingsPath is not null && File.Exists(appSettingsPath))
@@ -39,8 +39,9 @@ public static class ConfigLoader
             builder.AddJsonFile(appSettingsPath, optional: true, reloadOnChange: false);
         }
 
-        string bootstrap = ResolveBootstrapPath(dataDirectoryHint);
-        if (File.Exists(bootstrap))
+        // The override lets the migrate-storage command read the pointer as it was before an activation rewrote the file ("" = no bootstrap file).
+        string bootstrap = bootstrapFileOverride ?? ResolveBootstrapPath(dataDirectoryHint);
+        if (bootstrap.Length > 0 && File.Exists(bootstrap))
         {
             builder.AddJsonFile(bootstrap, optional: true, reloadOnChange: false);
         }

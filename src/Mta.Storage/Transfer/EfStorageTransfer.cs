@@ -25,6 +25,13 @@ public interface ITransferDbAccess
     /// returns. The work may run more than once when a batch is retried, so it must be repeatable; it saves its own changes.
     /// </summary>
     ValueTask<T> WriteAsync<T>(TransferPart part, Func<DbContext, CancellationToken, Task<T>> work, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Called before history rows of the days <paramref name="firstDay"/> to <paramref name="lastDay"/> are written. A provider whose
+    /// history tables are partitioned by day (PostgreSQL) makes sure the partitions exist, including old days that the
+    /// application would no longer create. The default does nothing.
+    /// </summary>
+    ValueTask PrepareHistoryDaysAsync(int firstDay, int lastDay, CancellationToken cancellationToken) => default;
 }
 
 /// <summary>
@@ -146,6 +153,19 @@ public sealed class EfStorageTransfer(ITransferDbAccess access, IConfigStore con
         Require(part);
         ChunkRecords records = ChunkRecords.For(part);
         DateTimeOffset now = clock.UtcNow;
+        if (chunk.Table.PerDay && rows.Count > 0)
+        {
+            int first = int.MaxValue, last = int.MinValue;
+            foreach (object row in rows)
+            {
+                int day = chunk.Table.DayOf(row);
+                first = Math.Min(first, day);
+                last = Math.Max(last, day);
+            }
+
+            await access.PrepareHistoryDaysAsync(first, last, cancellationToken).ConfigureAwait(false);
+        }
+
         return await access.WriteAsync(part, async (ctx, ct) =>
         {
             TransferChunkEntity? existing = await records.FindAsync(ctx, chunk.SwitchId, chunk.ChunkId, ct).ConfigureAwait(false);
@@ -207,7 +227,14 @@ public sealed class EfStorageTransfer(ITransferDbAccess access, IConfigStore con
         }
     }
 
-    public ValueTask<SwitchStateRecord?> GetStateAsync(CancellationToken cancellationToken) => config.GetSwitchStateAsync(cancellationToken);
+    public async ValueTask<SwitchStateRecord?> GetStateAsync(CancellationToken cancellationToken)
+    {
+        SwitchStateRecord? state = await config.GetSwitchStateAsync(cancellationToken).ConfigureAwait(false);
+
+        // Another process (the CLI, another replica) may have changed the state: whoever reads it keeps this process's gate current.
+        gate.Apply(state);
+        return state;
+    }
 
     public async ValueTask SetStateAsync(SwitchStateRecord state, CancellationToken cancellationToken)
     {

@@ -21,6 +21,14 @@ public sealed class RecordingActivator : ISwitchActivator
         Restored = true;
         return Task.CompletedTask;
     }
+
+    public bool Forgotten { get; private set; }
+
+    public Task ForgetAsync(Guid switchId, CancellationToken cancellationToken)
+    {
+        Forgotten = true;
+        return Task.CompletedTask;
+    }
 }
 
 /// <summary>Cancels a token when a progress notification matches (to kill an operation midway).</summary>
@@ -68,6 +76,12 @@ public abstract class SwitchTestBase : IAsyncLifetime
         catch (IOException)
         {
         }
+    }
+
+    protected TestStore Track(TestStore store)
+    {
+        _stores.Add(store);
+        return store;
     }
 
     protected T Own<T>(T disposable) where T : IAsyncDisposable

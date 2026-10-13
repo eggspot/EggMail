@@ -402,6 +402,11 @@ public sealed partial class StorageSwitchEngine : IStorageSwitchEngine
             }
 
             await SourceTransfer.SetStateAsync(NewState(source.SwitchId, SwitchRoles.Source, SwitchStates.Finalized, detail), ct).ConfigureAwait(false);
+            if (_activator is not null)
+            {
+                await _activator.ForgetAsync(source.SwitchId, ct).ConfigureAwait(false);
+            }
+
             if (deleteBundle && bundle is not null && Directory.Exists(bundle))
             {
                 Directory.Delete(bundle, recursive: true);
