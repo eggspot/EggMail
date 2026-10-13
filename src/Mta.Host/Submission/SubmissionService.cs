@@ -83,6 +83,7 @@ public sealed class SubmissionService
     private readonly SenderPolicy _policy;
     private readonly StorageOptions _storageOptions;
     private readonly SubmissionOptions _options;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, (bool? Row, long ExpiresAt, long Version)> _attachmentRowCache = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, (IReadOnlyList<DomainRecord> Domains, long ExpiresAt, long Version)> _domainCache = new();
 
     public SubmissionService(IStorage storage, IClock clock, SenderPolicy policy, StorageOptions storageOptions, SubmissionOptions? options = null)
@@ -155,7 +156,7 @@ public sealed class SubmissionService
 
         // The tenant's setting is only looked up when it can matter: the operator allows attachment storage and the message has attachments to keep.
         bool retainRaw = _storageOptions.Content.AllowAttachmentStorage && content is { Attachments.Count: > 0 }
-            && await AttachmentStoragePolicy.ResolveAsync(_storage.Config, request.Tenant, request.StoreAttachments, _storageOptions.Content.StoreAttachments, ct).ConfigureAwait(false);
+            && (request.StoreAttachments ?? AttachmentStoragePolicy.Combine(request.Tenant, await GetAttachmentRowAsync(request.Tenant.Id, ct).ConfigureAwait(false)) ?? _storageOptions.Content.StoreAttachments);
         var messageId = Ids.New(now);
         var accepted = new AcceptedMessage
         {
@@ -199,6 +200,21 @@ public sealed class SubmissionService
         var domains = await _storage.Config.GetDomainsAsync(tenantId, ct).ConfigureAwait(false);
         _domainCache[tenantId] = (domains, now + (long)(_options.DomainCacheTtl.TotalSeconds * System.Diagnostics.Stopwatch.Frequency), version);
         return domains;
+    }
+
+    /// <summary>The tenant's attachment-storage row, cached briefly like the domain list (a change made through this process shows at once: <see cref="AttachmentStoragePolicy.Bump"/>).</summary>
+    private async ValueTask<bool?> GetAttachmentRowAsync(Guid tenantId, CancellationToken ct)
+    {
+        long now = _clock.Timestamp;
+        long version = AttachmentStoragePolicy.Version;
+        if (_attachmentRowCache.TryGetValue(tenantId, out var cached) && now < cached.ExpiresAt && cached.Version == version)
+        {
+            return cached.Row;
+        }
+
+        bool? row = AttachmentStoragePolicy.RowSetting(tenantId, await _storage.Config.GetSettingsAsync(tenantId, ct).ConfigureAwait(false));
+        _attachmentRowCache[tenantId] = (row, now + (long)(_options.DomainCacheTtl.TotalSeconds * System.Diagnostics.Stopwatch.Frequency), version);
+        return row;
     }
 
     private MessageContent? ExtractContent(byte[] raw)

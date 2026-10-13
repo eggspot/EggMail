@@ -15,24 +15,25 @@ public static class AttachmentStoragePolicy
 {
     public const string StoreAttachmentsKey = "Content:StoreAttachments";
 
-    /// <summary>The tenant's own choice, or null when it never chose (inherit the global default).</summary>
-    public static bool? TenantSetting(Tenant tenant, IEnumerable<SettingRecord> tenantSettings)
-    {
-        SettingRecord? row = tenantSettings.FirstOrDefault(s => s.TenantId == tenant.Id && string.Equals(s.Key, StoreAttachmentsKey, StringComparison.Ordinal));
-        if (row is not null && TryBoolean(row.ValueJson, out bool chosen))
-        {
-            return chosen;
-        }
+    private static long _version;
 
-        return tenant.StoreAttachments ? true : null;
+    /// <summary>Changes whenever this process changes a tenant's choice, so the submission cache does not serve the old one (another replica's change shows within the cache time).</summary>
+    public static long Version => Interlocked.Read(ref _version);
+
+    public static void Bump() => Interlocked.Increment(ref _version);
+
+    /// <summary>The tenant's own choice from the tenant-scoped settings row, or null when the row is absent.</summary>
+    public static bool? RowSetting(Guid tenantId, IEnumerable<SettingRecord> tenantSettings)
+    {
+        SettingRecord? row = tenantSettings.FirstOrDefault(s => s.TenantId == tenantId && string.Equals(s.Key, StoreAttachmentsKey, StringComparison.Ordinal));
+        return row is not null && TryBoolean(row.ValueJson, out bool chosen) ? chosen : null;
     }
 
-    public static async ValueTask<bool?> GetTenantSettingAsync(IConfigStore config, Tenant tenant, CancellationToken ct) =>
-        TenantSetting(tenant, await config.GetSettingsAsync(tenant.Id, ct).ConfigureAwait(false));
+    /// <summary>The row if there is one; else the older column counts as a choice only when it is true.</summary>
+    public static bool? Combine(Tenant tenant, bool? rowSetting) => rowSetting ?? (tenant.StoreAttachments ? true : null);
 
-    /// <summary>The value before the master switch: <paramref name="perSendFlag"/>, else the tenant's setting, else <paramref name="globalDefault"/>.</summary>
-    public static async ValueTask<bool> ResolveAsync(IConfigStore config, Tenant tenant, bool? perSendFlag, bool globalDefault, CancellationToken ct) =>
-        perSendFlag ?? await GetTenantSettingAsync(config, tenant, ct).ConfigureAwait(false) ?? globalDefault;
+    /// <summary>The tenant's own choice, or null when it never chose (inherit the global default).</summary>
+    public static bool? TenantSetting(Tenant tenant, IEnumerable<SettingRecord> tenantSettings) => Combine(tenant, RowSetting(tenant.Id, tenantSettings));
 
     private static bool TryBoolean(string json, out bool value)
     {

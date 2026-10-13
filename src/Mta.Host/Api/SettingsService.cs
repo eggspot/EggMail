@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Mta.Core;
+using Mta.Host.Submission;
 using Mta.Storage;
 using Mta.Webhooks;
 
@@ -52,7 +53,7 @@ public sealed class SettingsUpdateRequest
 /// </summary>
 public sealed class SettingsService
 {
-    public const string StoreAttachmentsKey = Mta.Host.Submission.AttachmentStoragePolicy.StoreAttachmentsKey;
+    public const string StoreAttachmentsKey = AttachmentStoragePolicy.StoreAttachmentsKey;
     public const string WebhookAllowlistKey = "Webhooks:AllowedNetworks";
 
     private static readonly IReadOnlyList<SettingDefinition> TenantCatalog =
@@ -119,7 +120,7 @@ public sealed class SettingsService
         {
             JsonElement value = d.Key switch
             {
-                StoreAttachmentsKey => Element(Mta.Host.Submission.AttachmentStoragePolicy.TenantSetting(tenant, stored.Values) ?? _storageOptions.Content.StoreAttachments),   // not chosen yet: the operator default applies
+                StoreAttachmentsKey => Element(AttachmentStoragePolicy.TenantSetting(tenant, stored.Values) ?? _storageOptions.Content.StoreAttachments),   // not chosen yet: the operator default applies
                 "Smtp:MaxRecipients" => Element((long)_options.MaxRecipients),
                 _ => stored.TryGetValue(d.Key, out SettingRecord? s) ? Parse(s.ValueJson) : Element(""),
             };
@@ -166,6 +167,10 @@ public sealed class SettingsService
             }
 
             await Config.SetSettingAsync(new SettingRecord(d.Key, tenant.Id, value.GetRawText(), _clock.UtcNow), ct).ConfigureAwait(false);
+            if (d.Key == StoreAttachmentsKey)
+            {
+                AttachmentStoragePolicy.Bump();
+            }
         }
 
         if (updated != tenant)
