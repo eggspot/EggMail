@@ -22,12 +22,12 @@ internal static class QueueSql
         "@m", "@t", "@raw", "@size", "@n", "@retain", "@rcv");
 
     public static readonly Stmt DeliveryInsert = new(
-        "INSERT INTO delivery_queue (id, message_id, tenant_id, envelope_from, recipient, recipient_domain, sending_domain, source, attempt, due_at, created_at, expires_at, lease_owner, lease_until, last_error, possible_duplicate) " +
-        "VALUES (@id, @m, @t, @from, @rcpt, @dom, @sd, @src, 0, @due, @due, @exp, NULL, 0, NULL, 0)",
-        "@id", "@m", "@t", "@from", "@rcpt", "@dom", "@sd", "@src", "@due", "@exp");
+        "INSERT INTO delivery_queue (id, message_id, tenant_id, envelope_from, recipient, recipient_domain, sending_domain, source, attempt, due_at, created_at, expires_at, lease_owner, lease_until, last_error, possible_duplicate, smtp_utf8) " +
+        "VALUES (@id, @m, @t, @from, @rcpt, @dom, @sd, @src, 0, @due, @due, @exp, NULL, 0, NULL, 0, @utf8)",
+        "@id", "@m", "@t", "@from", "@rcpt", "@dom", "@sd", "@src", "@due", "@exp", "@utf8");
 
     private const string ClaimColumns =
-        "id, message_id, tenant_id, envelope_from, recipient, recipient_domain, attempt, created_at, expires_at, lease_until, last_error, possible_duplicate, sending_domain, source, due_at";
+        "id, message_id, tenant_id, envelope_from, recipient, recipient_domain, attempt, created_at, expires_at, lease_until, last_error, possible_duplicate, sending_domain, source, due_at, smtp_utf8";
 
     public static readonly Stmt Claim = new(
         "UPDATE delivery_queue SET lease_owner = @owner, lease_until = @until, possible_duplicate = CASE WHEN lease_owner IS NOT NULL THEN 1 ELSE possible_duplicate END WHERE id IN (" +
@@ -232,7 +232,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
         {
             insert.Set(0, r.DeliveryId).Set(1, m.MessageId).Set(2, m.TenantId).Set(3, from)
                 .Set(4, AddressText.Format(r.Address)).Set(5, r.Address.Domain).Set(6, m.SendingDomain)
-                .Set(7, (long)m.Source).Set(8, received).Set(9, expires)
+                .Set(7, (long)m.Source).Set(8, received).Set(9, expires).Set(10, m.SmtpUtf8 ? 1 : 0)
                 .ExecuteNonQuery();
         }
 
@@ -295,6 +295,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
                 PossibleDuplicate = r.GetFlag(11),
                 SendingDomain = r.GetNullableString(12),
                 Source = (MessageSource)r.GetInt32(13),
+                SmtpUtf8 = r.GetFlag(15),
             }));
         }
 

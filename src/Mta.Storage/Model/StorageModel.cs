@@ -41,9 +41,9 @@ public static class StorageModel
     /// <summary>
     /// The version of the persisted schema (SQLite <c>PRAGMA user_version</c>), recorded in switch bundles. Version 2 added the dashboard
     /// users, sessions and the idempotency fingerprint (HTTP API); version 3 the backend switch hold column and the
-    /// <c>transfer_chunk_*</c> progress tables.
+    /// <c>transfer_chunk_*</c> progress tables; version 4 the <c>smtp_utf8</c> column on queued deliveries (internationalized headers).
     /// </summary>
-    public const int SchemaVersion = 3;
+    public const int SchemaVersion = 4;
 
     /// <summary>
     /// Entity annotation requesting a <c>WITHOUT ROWID</c> table on SQLite (small rows whose primary key is the

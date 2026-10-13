@@ -127,7 +127,8 @@ public abstract class StorageTestBase : IAsyncLifetime
         string? sendingDomain = "example.com",
         MessageContent? content = null,
         bool noContent = false,
-        MessageSource source = MessageSource.Api)
+        MessageSource source = MessageSource.Api,
+        bool smtpUtf8 = false)
     {
         DateTimeOffset at = received ?? Clock.UtcNow;
         string[] recipients = to ?? ["alice@example.org"];
@@ -150,6 +151,7 @@ public abstract class StorageTestBase : IAsyncLifetime
             Content = noContent ? null : content ?? new MessageContent(subject, "plain body text", "<p>html body</p>", [new AttachmentInfo("a.pdf", "application/pdf", 1234, null)], false),
             RetainRaw = retainRaw,
             SendingDomain = sendingDomain,
+            SmtpUtf8 = smtpUtf8,
         };
     }
 

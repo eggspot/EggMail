@@ -37,6 +37,12 @@ public sealed class SmtpClientConnection : IAsyncDisposable
 
     public SmtpRemoteTarget Target => _target;
 
+    /// <summary>
+    /// The local IP address of the connection (the source address the remote server sees; what TLS-RPT calls the sending MTA IP),
+    /// known once the TCP connection is established and kept after the connection is closed. Null before that.
+    /// </summary>
+    public IPAddress? LocalIpAddress { get; private set; }
+
     public DateTimeOffset LastUsedAt { get; private set; }
 
     public int TransactionsCompleted { get; private set; }
@@ -72,6 +78,12 @@ public sealed class SmtpClientConnection : IAsyncDisposable
             SmtpClientMetrics.Connections.Add(1);
             return c;
         }
+        catch (SmtpClientException ex)
+        {
+            ex.LocalAddress = c.LocalIpAddress;
+            await c.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
         catch
         {
             await c.DisposeAsync().ConfigureAwait(false);
@@ -102,6 +114,7 @@ public sealed class SmtpClientConnection : IAsyncDisposable
             throw new SmtpConnectionException(SmtpStage.Connect, $"Connect to {_target.Host} ({_target.Address}:{_target.Port}) failed: {ex.SocketErrorCode}", ex);
         }
 
+        LocalIpAddress = (_socket.LocalEndPoint as IPEndPoint)?.Address;
         var network = new NetworkStream(_socket, ownsSocket: false);
         AttachStream(network);
 

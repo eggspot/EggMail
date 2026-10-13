@@ -51,6 +51,12 @@ public sealed class AcceptedMessage
 
     public string? RemoteAddress { get; init; }
     public string? Authenticated { get; init; }
+
+    /// <summary>
+    /// The header section of <see cref="Raw"/> is internationalized (RFC 6532: UTF-8 in header fields), so delivering it needs the SMTPUTF8
+    /// extension on every outbound transaction, or fails. Whether an envelope address needs SMTPUTF8 is a per-transaction question that
+    /// delivery answers from the addresses themselves. Persisted with each delivery row and returned as <see cref="ClaimedDelivery.SmtpUtf8"/>.
+    /// </summary>
     public bool SmtpUtf8 { get; init; }
 
     /// <summary>Extracted content, or null when not recorded (StatsOnly, Content:Mode=None, or extraction skipped).</summary>
@@ -99,6 +105,9 @@ public sealed class ClaimedDelivery
 
     public string? SendingDomain { get; init; }
     public MessageSource Source { get; init; }
+
+    /// <summary>The message's headers are internationalized: sending it needs SMTPUTF8 (see <see cref="AcceptedMessage.SmtpUtf8"/>).</summary>
+    public bool SmtpUtf8 { get; init; }
 }
 
 public enum DeliveryOutcome : byte

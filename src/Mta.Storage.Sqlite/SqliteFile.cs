@@ -164,13 +164,18 @@ internal sealed class SqliteFile
 
         if (version >= 1)
         {
-            // One step per version, each in its own transaction: a file at 1 goes through 2 to 3, a file at 2 goes to 3.
+            // One step per version, each in its own transaction: a file at 1 goes through 2 and 3 to 4, a file at 2 goes through 3 to 4.
             if (version == 1)
             {
                 UpgradeFromV1(connection);
             }
 
-            UpgradeFromV2(connection);
+            if (version <= 2)
+            {
+                UpgradeFromV2(connection);
+            }
+
+            UpgradeFromV3(connection);
             return;
         }
 
@@ -274,6 +279,25 @@ internal sealed class SqliteFile
 
         Run(create.Value);
         Run("PRAGMA user_version=3");
+        tx.Commit();
+    }
+
+    /// <summary>Version 4 added <c>delivery_queue.smtp_utf8</c> (the message's headers are internationalized); existing rows get false.</summary>
+    private void UpgradeFromV3(SqliteConnection connection)
+    {
+        using var tx = connection.BeginTransaction();
+        if (Kind == SqliteFileKind.Queue)
+        {
+            using var alter = connection.CreateCommand();
+            alter.Transaction = tx;
+            alter.CommandText = "ALTER TABLE \"delivery_queue\" ADD COLUMN \"smtp_utf8\" INTEGER NOT NULL DEFAULT 0";
+            alter.ExecuteNonQuery();
+        }
+
+        using var cmd = connection.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = "PRAGMA user_version=4";
+        cmd.ExecuteNonQuery();
         tx.Commit();
     }
 

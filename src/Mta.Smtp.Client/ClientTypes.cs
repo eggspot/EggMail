@@ -170,6 +170,9 @@ public sealed class SmtpSendResult
 public class SmtpClientException : Exception
 {
     public SmtpClientException(string message, Exception? inner = null) : base(message, inner) { }
+
+    /// <summary>The local IP address of the connection this failure happened on, when the TCP connection had been established (for TLS-RPT).</summary>
+    public IPAddress? LocalAddress { get; internal set; }
 }
 
 /// <summary>Network-level failure (refused, unreachable, reset, timeout) at <see cref="Stage"/>.</summary>
