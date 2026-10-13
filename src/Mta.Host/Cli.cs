@@ -9,6 +9,7 @@ using Mta.Core;
 using Mta.Host.Configuration;
 using Mta.Host.Hosting;
 using Mta.Host.Switching;
+using Mta.Host.Tls;
 using Mta.Observability;
 using Mta.Storage;
 
@@ -184,7 +185,7 @@ internal static class Cli
             k.Listen(bind, config.Dashboard.HttpPort);
             if (config.Dashboard.HttpsEnabled)
             {
-                k.Listen(bind, config.Dashboard.HttpsPort, l => l.UseHttps(https => https.ServerCertificateSelector = (_, name) => runtime.Certificates.GetCertificate(name)));
+                k.Listen(bind, config.Dashboard.HttpsPort, l => l.UseCertificateStore(runtime.Certificates));
             }
 
             k.Limits.MaxRequestBodySize = 64L * 1024 * 1024;

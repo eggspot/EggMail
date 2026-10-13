@@ -167,13 +167,22 @@ public sealed class AcmeRenewalService
 
             var account = await _config.GetAcmeAccountAsync(_options.DirectoryUrl, ct).ConfigureAwait(false);
             string? accountKey = account is null ? null : Encoding.UTF8.GetString(_protector.Unprotect(account.AccountKeyProtected, SecretPurposes.AcmeAccountKey));
-            var request = new AcmeOrderRequest(_options.DirectoryUrl, _options.Email ?? "", domains, accountKey, _options.PropagationDelay);
-            var issued = await _runner.IssueAsync(request, _dns, ct).ConfigureAwait(false);
-
-            if (account is null)
+            // The account is stored the moment the CA has created it, not after the order: a failed order (a DNS record that never appears) must
+            // not strand an account whose key is lost, because every retry would then register another one and CAs rate-limit registrations.
+            bool accountSaved = account is not null;
+            async Task SaveAccountAsync(AcmeAccountCreated created, CancellationToken token)
             {
                 await _config.UpsertAcmeAccountAsync(new AcmeAccountRecord(Ids.New(), _options.DirectoryUrl, _options.Email ?? "",
-                    _protector.Protect(Encoding.UTF8.GetBytes(issued.AccountKeyPem), SecretPurposes.AcmeAccountKey), issued.AccountUrl, now), ct).ConfigureAwait(false);
+                    _protector.Protect(Encoding.UTF8.GetBytes(created.AccountKeyPem), SecretPurposes.AcmeAccountKey), created.AccountUrl, now), token).ConfigureAwait(false);
+                accountSaved = true;
+            }
+
+            var request = new AcmeOrderRequest(_options.DirectoryUrl, _options.Email ?? "", domains, accountKey, _options.PropagationDelay, SaveAccountAsync);
+            var issued = await _runner.IssueAsync(request, _dns, ct).ConfigureAwait(false);
+            if (!accountSaved)
+            {
+                // A runner that does not report accounts as they are created (the fake in tests): store it with the result.
+                await SaveAccountAsync(new AcmeAccountCreated(issued.AccountKeyPem, issued.AccountUrl), ct).ConfigureAwait(false);
             }
 
             var leaf = new System.Security.Cryptography.X509Certificates.X509Certificate2Collection();
@@ -189,8 +198,10 @@ public sealed class AcmeRenewalService
             _log.Write(MtaLogLevel.Information, "acme", $"certificate '{name}' issued, valid until {record.NotAfter:u}");
             return true;
         }
-        catch (Exception ex) when (ex is AcmeException or HttpRequestException or TimeoutException)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
+            // Any failure of the attempt (the CA refusing, unreachable or too slow, the DNS provider failing, an unreadable chain) is recorded and
+            // backed off, never thrown: an exception escaping here would end the renewal loop until the next restart.
             int failures = (renewal?.Failures ?? 0) + 1;
             var retryAt = now + Backoff(failures);
             await _config.UpsertAcmeRenewalAsync(new AcmeRenewalRecord(name, "failed", now, retryAt, failures, ex.Message, null, null), ct).ConfigureAwait(false);
