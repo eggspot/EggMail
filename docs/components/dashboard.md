@@ -2,7 +2,7 @@
 
 A Preact + Vite + TypeScript single-page app that talks to the HTTP API of [api.md](../api.md) on the same origin. It is an admin surface and is built to the supply-chain rules of [design.md §9.3](../design.md#93-dashboard-supply-chain). Nothing in `dashboard/` depends on .NET code: the host serves the static build, and a dependency-free mock API (`dashboard/mock`) stands in for the host during development and tests.
 
-## Direct dependencies (8, exact versions pinned, `package-lock.json` committed)
+## Direct dependencies (9, exact versions pinned, `package-lock.json` committed)
 
 | Package | Version | Kind | Why |
 |---|---|---|---|
@@ -14,8 +14,9 @@ A Preact + Vite + TypeScript single-page app that talks to the HTTP API of [api.
 | `vitest` | 5.0.3 | dev | tests |
 | `@testing-library/preact` | 3.2.4 | dev | component tests |
 | `jsdom` | 30.1.1 | dev | DOM for tests |
+| `@playwright/test` | 1.63.0 | dev | real-browser end-to-end tests (Chromium only; the browser is downloaded by `npx playwright install`, never by an install script) |
 
-No UI kit, no chart library (the charts are small hand-written SVG components), no state library (hooks and context), no icon or font packages (system fonts, no external requests). `dashboard/.npmrc` sets `ignore-scripts=true` and `save-exact=true`. All versions were published at least 7 days before they were pinned (design §9.3, "minimum release age"). Preact 11 was released shortly before this work and is deliberately not used yet; TypeScript 7 likewise.
+No UI kit, no chart library (the charts are small hand-written SVG components), no state library (hooks and context), no icon or font packages (system fonts, no external requests). `dashboard/.npmrc` sets `ignore-scripts=true` and `save-exact=true`. All versions were published at least 7 days before they were pinned (design §9.3, "minimum release age"; Playwright 1.64 was 6 days old, so 1.63.0 is used). Preact 11 was released shortly before this work and is deliberately not used yet; TypeScript 7 likewise.
 
 ## Layout
 
@@ -35,6 +36,8 @@ dashboard/
   mock/                          dependency-free mock API (see below)
   scripts/                       lint.mjs, check-csp.mjs, size.mjs
   tests/                         Vitest unit, component and mock-contract tests
+  e2e/                           Playwright end-to-end tests against the real server (see "End-to-end tests")
+  playwright.config.mjs          Chromium only, one worker
 ```
 
 ## Running it
@@ -52,6 +55,7 @@ npm run typecheck     # tsc --noEmit
 npm run lint          # tsc --noEmit + scripts/lint.mjs (security and CSP rules)
 npm run check-csp     # fails if dist/ has inline script/style, style= attributes, eval, external URLs
 npm run size          # raw and gzip sizes of dist/
+npm run e2e           # build, then the Playwright end-to-end tests against the real server (needs the .NET SDK, see below)
 ```
 
 Sign in to the mock as `admin` / `eggmail` (role `admin`, acts on a tenant chosen in the header) or `tenant` / `eggmail` (role `tenant`, tenant "Acme Corp").
