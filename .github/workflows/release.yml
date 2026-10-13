@@ -24,7 +24,7 @@ permissions:
 env:
   IMAGE: ghcr.io/eggspot/eggmail
   # Dockerfile build argument: AOT-precompile the application assemblies (ReadyToRun). See docs/decisions.md ("ReadyToRun").
-  READYTORUN: 'false'
+  READYTORUN: 'true'
   DOTNET_NOLOGO: 1
   DOTNET_CLI_TELEMETRY_OPTOUT: 1
 

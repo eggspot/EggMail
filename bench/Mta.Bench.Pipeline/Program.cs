@@ -103,7 +103,7 @@ if (deliver)
     engine = Task.Run(() => runtime.Delivery.RunAsync(stop.Token));
 }
 
-string tools = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "src", "Mta.Tools", "bin", "Release", "net10.0", "mta-tools.dll"));
+string tools = Environment.GetEnvironmentVariable("EGGMAIL_BENCH_TOOLS") ?? Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "src", "Mta.Tools", "bin", "Release", "net10.0", "mta-tools.dll"));
 if (!File.Exists(tools))
 {
     Console.Error.WriteLine("Build the load generator first: dotnet build -c Release src/Mta.Tools   (expected " + tools + ")");

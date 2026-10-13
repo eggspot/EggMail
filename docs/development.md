@@ -40,4 +40,4 @@ Defaults: SQLite backend in `Sqlite:DataDirectory` (default `/data`), SMTP on 55
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` builds and tests on Linux with a Postgres service. GitHub Actions is currently disabled for the repository by the organization, so contributors must run `dotnet test EggMail.slnx` locally before merging ([open-questions.md](open-questions.md)).
+`.github/workflows/ci.yml` builds and tests on Linux with a PostgreSQL 17 container and runs the dashboard checks; it must be green before a pull request is merged. `release.yml` publishes the image and smoke-tests it ([release.md](release.md)); `bench-gate.yml` (weekly allocation gate) and `bench-throughput.yml` (manual) are described in [benchmarks.md](benchmarks.md). The deployment smoke tests in `deploy/smoke/` need Docker and are meant for Actions, but `deploy/smoke/smoke.py` runs against a locally started `mta serve` too (see its docstring).

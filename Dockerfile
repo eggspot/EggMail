@@ -16,7 +16,8 @@ RUN npm run build
 FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 ARG TARGETARCH
 ARG VERSION=0.0.0-dev
-ARG READYTORUN=false
+# ReadyToRun precompiles the application assemblies: about 30 percent faster cold start for about 24 MiB more on disk (docs/release.md, DESIGN-DECIDED).
+ARG READYTORUN=true
 WORKDIR /src
 COPY global.json Directory.Build.props Directory.Packages.props ./
 COPY src/ src/

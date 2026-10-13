@@ -73,6 +73,10 @@ jobs:
           echo "cores: $(nproc)"; grep -m1 'model name' /proc/cpuinfo || true; free -m | head -2; df -h . | tail -1
           mount | grep -E ' / ' || true
 
+      - name: Publish the harness with ReadyToRun (for the JIT versus ReadyToRun throughput comparison)
+        if: ${{ inputs.readytorun || github.event_name == 'push' }}
+        run: dotnet publish bench/Mta.Bench.Pipeline -c Release -r linux-x64 --self-contained false -p:PublishReadyToRun=true -o publish-bench-r2r -v q
+
       - name: Ingest runs
         env:
           MESSAGES: ${{ inputs.messages || '30000' }}
@@ -83,15 +87,23 @@ jobs:
           mkdir -p results
           harness=(dotnet bench/Mta.Bench.Pipeline/bin/Release/net10.0/Mta.Bench.Pipeline.dll)
           common=(--connections 16 --size 2048 --messages "${MESSAGES}")
+          runner=("${harness[@]}")
           run_config() { # run_config <name> <harness arguments...>
             name=$1; shift
             for n in $(seq 1 "$RUNS"); do
               echo "== $name run $n"
-              "${harness[@]}" "$@" --label "$name" --json "results/${name}.run${n}.json" | tail -n 40
+              "${runner[@]}" "$@" --label "$name" --json "results/${name}.run${n}.json" | tail -n 40
             done
           }
           # SQLite, the default backend: non-durable (Sqlite:SyncMode=Off, the default) and its durable pair (Full), History:Mode=Full.
           run_config sqlite-off-full      --sync off  --history full      --deliver false "${common[@]}"
+          if [ -d publish-bench-r2r ]; then
+            # The same configuration with the application assemblies precompiled (ReadyToRun), run right after the JIT one.
+            runner=(dotnet publish-bench-r2r/Mta.Bench.Pipeline.dll)
+            EGGMAIL_BENCH_TOOLS="$PWD/src/Mta.Tools/bin/Release/net10.0/mta-tools.dll" \
+              run_config sqlite-off-full-r2r --sync off --history full --deliver false "${common[@]}"
+            runner=("${harness[@]}")
+          fi
           run_config sqlite-full-full     --sync full --history full      --deliver false "${common[@]}"
           run_config sqlite-off-statsonly --sync off  --history statsonly --deliver false "${common[@]}"
           # With delivery to the counting sink (end-to-end recipients per second); fewer messages: delivery is the slow part.

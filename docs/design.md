@@ -373,9 +373,9 @@ Rationale: patching the deployment is the operator's job and cannot be done safe
 - *Effective values travel in the pointer.* They are deployment configuration, not rows, so the activation carries every effective source setting that differs from the built-in default (bootstrap file, or cutover patch), instead of writing them into the `setting` table.
 - *One process per SQLite directory.* A lock file proves the server is stopped before the offline `mta migrate-storage` commands open the files.
 - *Abort flag precision.* `SmtpClientConnection.EndOfDataStarted` tells the delivery engine whether the end-of-data terminator of the current transaction had begun to be written when a quiesce cancelled it; only then is the requeued delivery flagged `possible_duplicate` (item 4 above).
-- Not yet built: the dashboard flow (the admin API endpoints are `StorageSwitchService` over `IStorageSwitchEngine`).
+- *The dashboard flow is built* (`dashboard/src/pages/admin/StorageSwitch.tsx`, a guided wizard over the admin API: choose direction and mode, preflight, start with the export passphrase and the typed confirmation, progress, verify, confirm, activate, finalize or roll back; every state change is an explicit click and a reload resumes at the step the server reports). The admin API endpoints are `StorageSwitchService` over `IStorageSwitchEngine`. It has been run against the mock engine of the dashboard tests and the API against the real engine in process, but the two have not been driven together in a browser.
 
-Effort: the switch engine, quiesce and fence, resumable history migration, Data Protection bundle protection, the orchestrator-aware cutover, the CLI and the dashboard flow ([plan.md](plan.md)); engine, fence, history migration, bundle protection, cutover and CLI are built, the dashboard flow is not.
+Effort: the switch engine, quiesce and fence, resumable history migration, Data Protection bundle protection, the orchestrator-aware cutover, the CLI and the dashboard flow ([plan.md](plan.md)); engine, fence, history migration, bundle protection, cutover, CLI, admin API and dashboard flow are built; what is not verified is the whole flow driven from a browser against a real orchestrator.
 
 ## 5. History and content retention
 

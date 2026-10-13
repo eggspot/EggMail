@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "recordedOn": "local development machine (placeholder until the first run of the bench-gate workflow on GitHub)",
+  "recordedOn": "GitHub-hosted ubuntu-latest runner (4 logical cores, Ubuntu 24.04, .NET 10.0.12), bench-gate run 38424885755, 2026-10-13. Pipeline value is a single run; the same code varied by about 2 percent between runs on a laptop.",
   "thresholds": {
     "microPercent": 5,
     "pipelinePercent": 10
@@ -11,11 +11,11 @@
     "MessageContentExtractor.Extract": 5464,
     "AddressList.Parse(From)": 864,
     "Ids.New + EmailAddress.Parse x2": 152,
-    "SubmissionService.SubmitAsync (InMemory storage, history Full)": 16567
+    "SubmissionService.SubmitAsync (InMemory storage, history Full)": 16568
   },
   "pipeline": {
     "sqlite-off-full": {
-      "bytesPerMessage": 33500,
+      "bytesPerMessage": 32793,
       "messages": 20000,
       "connections": 8,
       "sizeBytes": 2048,

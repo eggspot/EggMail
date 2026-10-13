@@ -2,6 +2,27 @@
 
 How to run EggMail. Everything here is about behaviour that exists in the code; items that are not built yet are marked.
 
+## Deploying
+
+Tested deployment files are in `deploy/` (the release workflow runs them against every published image; [release.md](release.md)):
+
+| Deployment | Files | Notes |
+|---|---|---|
+| Docker Compose, SQLite (default) | `deploy/compose/compose.yaml` | One container, one volume at `/data`, one replica. Read-only root filesystem, no capabilities, 60 s stop grace |
+| Docker Compose, PostgreSQL | `deploy/compose/compose.postgres.yaml` | EggMail plus `postgres:17`; one database role for both duties (use a managed PostgreSQL with an owner and a runtime role in production) |
+| DANE: local validating resolver | `deploy/compose/compose.unbound.yaml` (add with a second `-f`), `deploy/kubernetes/components/unbound` | Unbound sidecar, sets `Dns:Servers`, `Dns:RequestDnssec` and `Dns:TrustAuthenticatedData` together |
+| Kubernetes, SQLite | `deploy/kubernetes/sqlite` | StatefulSet (one replica, ReadWriteOnce claim), `fsGroup` for the volume, startup/liveness (`/healthz`) and readiness (`/readyz`) probes |
+| Kubernetes, PostgreSQL | `deploy/kubernetes/postgres` | Deployment (raise `replicas` for availability), connection strings from a Secret |
+| Both Kubernetes variants | `deploy/kubernetes/base` | Services (SMTP as a LoadBalancer with `externalTrafficPolicy: Local` so client addresses survive), NetworkPolicy of design 7.1, ConfigMap |
+
+Things that are easy to get wrong:
+
+- **Healthcheck command.** The chiseled image has no shell and `/app` is not on `PATH`: use `["CMD", "/app/mta", "--healthcheck"]` (the `HEALTHCHECK` of the image does). `["CMD", "mta", "--healthcheck"]` fails with "executable file not found in $PATH". The release workflow checks this on every build (`deploy/smoke/image.sh`).
+- **First administrator.** Compose: a file secret read through `Dashboard__BootstrapAdminPasswordFile` (the file must be readable by uid 1654: Compose does not apply `uid` or `mode` to file secrets outside Swarm). Kubernetes: a Secret mounted at `/run/secrets/eggmail`. Or `mta admin create` while the SQLite server is stopped.
+- **Volume ownership.** The image prepares `/data` for uid 1654; a new Kubernetes volume is owned by root, hence `fsGroup: 1654` in the StatefulSet.
+- **Inbound port 25 for bounces** needs a public MX record and a platform that offers inbound 25 (many load balancers do not).
+- **Kubernetes NetworkPolicy** is enforced only by a CNI that implements it; the smoke test applies the policy on kind but does not test enforcement.
+
 ## Configuration
 
 Settings come from (highest precedence first): command line, environment variables, the bootstrap file on the data volume (`bootstrap.json`, written by a backend switch), `appsettings.json`, built-in defaults. Environment variables use `__` for nesting (`Delivery__RemotePort=25`). Values supplied by the deployment cannot be edited in the dashboard.
@@ -26,7 +47,7 @@ Settings come from (highest precedence first): command line, environment variabl
 | `Delivery:Throttle:*` | 20 connections, 600 msg/min ceilings | Per-destination limits; they start lower and grow while the destination accepts |
 | `Delivery:RemotePort`, `Delivery:AllowPrivateMxAddresses` | 25, false | Lab settings only |
 | `Dns:Servers` | system resolvers | Resolvers (IP with optional port) |
-| `Dns:RequestDnssec`, `Dns:TrustAuthenticatedData` | true, false | DANE needs DNSSEC answers from a trusted validating resolver |
+| `Dns:RequestDnssec`, `Dns:TrustAuthenticatedData` | true, false | DANE needs the AD bit from a trusted, local, validating resolver. With the default (`false`) DANE never applies. Turn it on only together with such a resolver: `deploy/compose/compose.unbound.yaml` (Compose) and `deploy/kubernetes/components/unbound` (Kubernetes) add an Unbound sidecar and set all three keys |
 | `Tls:CertificatePath`, `KeyPath`, `PfxPasswordFile` | none | Optional file override (for example cert-manager) |
 | `Tls:ReportingEnabled`, `ReportContact` | true | Daily TLS-RPT reports |
 | `Acme:Enabled`, `DirectoryUrl`, `Email`, `Domains`, `CloudflareApiToken(File)` | off | ACME with Cloudflare DNS-01 (not verified against a real CA) |
@@ -63,11 +84,11 @@ To restore: stop EggMail, copy the files of one backup directory over the data d
 
 ## Monitoring
 
-`/healthz` (liveness), `/readyz` (readiness and warnings) and `/metrics` (Prometheus text, admin network only) are served by the HTTP layer *(the API pull request provides `/readyz` and `/metrics`; `/healthz` exists already)*. Meters: `Mta.Smtp.Server`, `Mta.Smtp.Client`, `Mta.Delivery` (attempts by outcome, holds, bounces, group duration), `Mta.Webhooks`, and storage meters. Alert on queue depth and oldest due delivery, repeated `deferred` outcomes to one domain, certificate expiry, the `sqlite_sync_off` warning being unintended, and failed backups.
+`/healthz` (liveness), `/readyz` (readiness and warnings) and `/metrics` (Prometheus text, loopback and private networks only) are served by the HTTP layer. The meters that exist are `Mta.Smtp.Server`, `Mta.Smtp.Client` and `Mta.Delivery` (attempts by outcome, holds, bounces, group duration); there are no webhook or storage meters yet (queue depth, the oldest due delivery and storage health are in `GET /api/v1/admin/status`). Alert on queue depth and oldest due delivery, repeated `deferred` outcomes to one domain, certificate expiry, the `sqlite_sync_off` warning being unintended, and failed backups.
 
 ## Upgrades
 
-Take a backup, pull the new image, restart. Schema changes run at start (SQLite: automatic; PostgreSQL: `Mail:Database:Migrate`, owner role). Roll back by restoring the backup and starting the old image. Backend switching (SQLite ⇄ PostgreSQL) is a separate, manual procedure (`docs/design.md` section 4.6; the engine is being built).
+Take a backup, pull the new image, restart. Schema changes run at start (SQLite: automatic; PostgreSQL: `Mail:Database:Migrate`, owner role). Roll back by restoring the backup and starting the old image. Backend switching (SQLite ⇄ PostgreSQL) is a separate, manual procedure (`docs/design.md` section 4.6; engine, CLI, admin API and dashboard wizard are built, see [components/switch.md](components/switch.md)).
 
 ## Graceful shutdown
 
