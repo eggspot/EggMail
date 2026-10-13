@@ -397,6 +397,7 @@ public class ApiDomainsTests : IAsyncLifetime
         string id = d.GetProperty("id").GetString()!;
         await VerifyAsync(id);
 
+        _f.Clock.Advance(TimeSpan.FromDays(1)); // rotations happen long after creation; keys are ordered by creation time
         Reply rotated = await _a.PostAsync($"/api/v1/domains/{id}/dkim/rotate");
         Assert.Equal(HttpStatusCode.OK, rotated.Status);
         Assert.Equal("verified", rotated.Str("status"));
@@ -442,6 +443,7 @@ public class ApiDomainsTests : IAsyncLifetime
         Assert.Equal(2, later["dkimKeys"].GetArrayLength());
 
         // Selector names are never reused: the next rotation is -3.
+        _f.Clock.Advance(TimeSpan.FromDays(1));
         Reply third = await _a.PostAsync($"/api/v1/domains/{id}/dkim/rotate");
         Assert.Equal("egg202610-3", third["dkim"].GetProperty("selector").GetString());
     }

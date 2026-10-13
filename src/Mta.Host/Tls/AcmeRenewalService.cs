@@ -174,16 +174,12 @@ public sealed class AcmeRenewalService
             var leaf = new System.Security.Cryptography.X509Certificates.X509Certificate2Collection();
             leaf.ImportFromPem(issued.ChainPem);
             var first = leaf[0];
+            // A renewal replaces the row of the certificate it renews (the name is unique), so the old one is not left active next to it.
             var record = new CertificateRecord(
-                Ids.New(), name, domains.Select(d => d.ToLowerInvariant()).ToList(), first.NotBefore.ToUniversalTime(), first.NotAfter.ToUniversalTime(),
+                current?.Id ?? Ids.New(), name, domains.Select(d => d.ToLowerInvariant()).ToList(), first.NotBefore.ToUniversalTime(), first.NotAfter.ToUniversalTime(),
                 issued.ChainPem, _protector.Protect(issued.PrivateKeyPkcs8, SecretPurposes.TlsPrivateKey), "acme", first.Thumbprint, Active: true,
                 Version: _clock.UtcNow.ToUnixTimeMilliseconds(), CreatedAt: now);
             await _config.UpsertCertificateAsync(record, ct).ConfigureAwait(false);
-            if (current is not null)
-            {
-                await _config.UpsertCertificateAsync(current with { Active = false, Version = record.Version + 1 }, ct).ConfigureAwait(false);
-            }
-
             await _config.UpsertAcmeRenewalAsync(new AcmeRenewalRecord(name, "issued", now, null, 0, null, null, null), ct).ConfigureAwait(false);
             _log.Write(MtaLogLevel.Information, "acme", $"certificate '{name}' issued, valid until {record.NotAfter:u}");
             return true;
