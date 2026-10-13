@@ -119,6 +119,111 @@ public class DsnBuilderTests
         Assert.Contains("Käse unbekannt", text.Text);
     }
 
+    private static DsnRequest International(string[] recipients, string diagnostic = "553 5.6.7 the receiving server does not support SMTPUTF8", byte[]? original = null, DsnReturnContent ret = DsnReturnContent.Headers, string to = "sender@example.org") => new()
+    {
+        ReportingMta = "mx.eggmail.test",
+        To = EmailAddress.Parse(to),
+        Action = DsnAction.Failed,
+        ArrivalDate = Now,
+        Now = Now,
+        OriginalMessage = original ?? Original,
+        ReturnContent = ret,
+        UniqueToken = "fixedtoken",
+        Recipients = recipients.Select(r => new DsnRecipient(EmailAddress.Parse(r), "5.6.7", diagnostic, "mx.dest.example", Now)).ToList(),
+    };
+
+    [Fact]
+    public void An_internationalized_recipient_gets_a_global_delivery_status_with_the_utf8_address_type()
+    {
+        byte[] dsn = DsnBuilder.Build(International(["пользователь@dest.example", "plain@dest.example"]));
+
+        var parsed = Mta.Mime.MimeMessage.Parse(dsn);
+        var status = parsed.Root.Children[1];
+        Assert.Equal("message/global-delivery-status", status.ContentType.MimeType);
+        string text = Encoding.UTF8.GetString(status.Body.Span);
+        Assert.Contains("Final-Recipient: utf-8; пользователь@dest.example\r\n", text, StringComparison.Ordinal);
+        Assert.Contains("Final-Recipient: rfc822; plain@dest.example\r\n", text, StringComparison.Ordinal);   // ASCII addresses keep the RFC 3464 type
+        Assert.Contains("Status: 5.6.7", text, StringComparison.Ordinal);
+        Assert.Equal(3, parsed.Root.Children.Count);
+        Assert.Equal("text/rfc822-headers", parsed.Root.Children[2].ContentType.MimeType);   // the original had ASCII headers
+
+        var report = InboundReportParser.Parse(dsn);
+        Assert.Equal(2, report.Recipients.Count);
+        Assert.Contains(report.Recipients, r => r.FinalRecipient == "пользователь@dest.example" && r.IsPermanentFailure && r.Status == "5.6.7");
+    }
+
+    [Fact]
+    public void A_report_about_ascii_recipients_is_a_plain_rfc3464_report()
+    {
+        byte[] dsn = DsnBuilder.Build(Request());
+        var parsed = Mta.Mime.MimeMessage.Parse(dsn);
+        Assert.Equal("message/delivery-status", parsed.Root.Children[1].ContentType.MimeType);
+        Assert.False(Mta.Mime.MessageInspector.HasEightBitBody(dsn));
+        Assert.False(Mta.Mime.MessageInspector.HasUtf8Headers(dsn));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Reports_use_crlf_line_endings_only_so_they_can_be_transmitted(bool international)
+    {
+        byte[] dsn = DsnBuilder.Build(international ? International(["пользователь@dest.example"]) : Request());
+        var inspection = Mta.Mime.MessageInspector.Inspect(dsn);
+        Assert.False(inspection.HasBareLf);
+        Assert.False(inspection.HasBareCr);
+        Assert.False(inspection.HasNul);
+    }
+
+    [Fact]
+    public void Utf8_diagnostic_text_from_a_remote_server_also_switches_to_the_global_form()
+    {
+        var req = Request(diagnostic: "550 5.1.1 Benutzer nicht gefunden: Käse");
+        var parsed = Mta.Mime.MimeMessage.Parse(DsnBuilder.Build(req));
+        var status = parsed.Root.Children[1];
+        Assert.Equal("message/global-delivery-status", status.ContentType.MimeType);
+        Assert.Contains("Diagnostic-Code: smtp; 550 5.1.1 Benutzer nicht gefunden: Käse", Encoding.UTF8.GetString(status.Body.Span), StringComparison.Ordinal);
+        Assert.Contains("Final-Recipient: rfc822; rcpt@dest.example", Encoding.UTF8.GetString(status.Body.Span), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_returned_original_with_utf8_headers_is_message_global_headers_or_message_global()
+    {
+        byte[] original = Encoding.UTF8.GetBytes("From: Jürgen <j@example.org>\r\nTo: rcpt@dest.example\r\nSubject: Grüße\r\nMessage-ID: <u@example.org>\r\n\r\nGrüße aus München\r\n");
+
+        var headersOnly = Mta.Mime.MimeMessage.Parse(DsnBuilder.Build(International(["rcpt@dest.example"], original: original)));
+        Assert.Equal("message/global-delivery-status", headersOnly.Root.Children[1].ContentType.MimeType);
+        var returnedHeaders = headersOnly.Root.Children[2];
+        Assert.Equal("message/global-headers", returnedHeaders.ContentType.MimeType);
+        Assert.Contains("Subject: Grüße", Encoding.UTF8.GetString(returnedHeaders.Body.Span), StringComparison.Ordinal);
+        Assert.DoesNotContain("aus München", Encoding.UTF8.GetString(returnedHeaders.Body.Span), StringComparison.Ordinal);
+
+        var full = Mta.Mime.MimeMessage.Parse(DsnBuilder.Build(International(["rcpt@dest.example"], original: original, ret: DsnReturnContent.Full)));
+        var returned = full.Root.Children[2];
+        Assert.Equal("message/global", returned.ContentType.MimeType);
+        Assert.Contains("aus München", Encoding.UTF8.GetString(returned.Body.Span), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void An_internationalized_sender_puts_utf8_in_the_report_headers()
+    {
+        byte[] dsn = DsnBuilder.Build(International(["rcpt@dest.example"], to: "пользователь@example.org"));
+        Assert.True(Mta.Mime.MessageInspector.HasValidUtf8Headers(dsn));
+        var parsed = Mta.Mime.MimeMessage.Parse(dsn);
+        Assert.Contains("To: <пользователь@example.org>", Encoding.UTF8.GetString(parsed.Headers.HeaderBlock.Span), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void The_global_report_survives_the_8bit_to_7bit_conversion_and_still_parses()
+    {
+        byte[] dsn = DsnBuilder.Build(International(["пользователь@dest.example"]));
+        var writer = new System.Buffers.ArrayBufferWriter<byte>();
+        var result = Mta.Mime.EightBitDowngrader.Downgrade(dsn, writer);
+        Assert.Equal(Mta.Mime.EightBitDowngradeStatus.Downgraded, result.Status);
+
+        var report = InboundReportParser.Parse(writer.WrittenMemory);
+        Assert.Contains(report.Recipients, r => r.FinalRecipient == "пользователь@dest.example" && r.IsPermanentFailure);
+    }
+
     [Fact]
     public void Requires_at_least_one_recipient()
     {

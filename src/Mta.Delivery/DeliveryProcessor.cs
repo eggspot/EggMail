@@ -214,11 +214,10 @@ public sealed class DeliveryProcessor
             return;
         }
 
-        byte[]? rented = null;
+        OutboundTransaction? transaction = null;
         try
         {
             using var lease = tr.Lease!;
-            ReadOnlyMemory<byte> message;
             DkimSigner? signer = null;
             try
             {
@@ -229,21 +228,9 @@ public sealed class DeliveryProcessor
                 _s.Log.Write(MtaLogLevel.Warning, Source, $"DKIM key unavailable for {first.SendingDomain}; sending unsigned", ex);
             }
 
-            if (signer is null)
-            {
-                message = raw;
-            }
-            else
-            {
-                var signature = signer.SignToBytes(raw);
-                rented = ArrayPool<byte>.Shared.Rent(signature.Length + raw.Length);
-                signature.Span.CopyTo(rented);
-                raw.CopyTo(rented.AsSpan(signature.Length));
-                message = rented.AsMemory(0, signature.Length + raw.Length);
-            }
-
-            var envelope = new SmtpEnvelope(await ChooseEnvelopeFromAsync(first, now, ct).ConfigureAwait(false), pending.Select(d => d.Recipient).ToArray(), pending.Any(d => d.Recipient.IsInternational) || first.EnvelopeFrom.IsInternational, EightBit: false);
-            var attempt = await RunRoutesAsync(first, envelope, message, ct).ConfigureAwait(false);
+            // What goes on the wire (and so what DKIM signs) is decided per server, after its EHLO: see OutboundTransaction.
+            transaction = new OutboundTransaction(raw, signer, first.SmtpUtf8, await ChooseEnvelopeFromAsync(first, now, ct).ConfigureAwait(false), pending.Select(d => d.Recipient).ToArray());
+            var attempt = await RunRoutesAsync(first, transaction, ct).ConfigureAwait(false);
             Interpret(pending, attempt, results);
 
             lease.Report(attempt.Route switch
@@ -261,10 +248,7 @@ public sealed class DeliveryProcessor
         }
         finally
         {
-            if (rented is not null)
-            {
-                ArrayPool<byte>.Shared.Return(rented);
-            }
+            transaction?.Dispose();
         }
     }
 
@@ -282,7 +266,8 @@ public sealed class DeliveryProcessor
         // The token carries the sending domain's id so a bounce can be attributed without a lookup of the message.
         Guid domainId = await FindDomainIdAsync(d.SendingDomain, ct).ConfigureAwait(false);
         string address = _s.Verp.CreateAddress(d.TenantId, domainId, _options.BounceDomain!, now);
-        return EmailAddress.TryParse(address, allowUtf8: false, out var parsed) ? parsed : d.EnvelopeFrom;
+        // allowUtf8: a bounce domain configured as a U-label is accepted and put on the wire in its A-label form (the local part is ASCII).
+        return EmailAddress.TryParse(address, allowUtf8: true, out var parsed) ? parsed : d.EnvelopeFrom;
     }
 
     private async ValueTask<Guid> FindDomainIdAsync(string? sendingDomain, CancellationToken ct)
@@ -324,10 +309,19 @@ public sealed class DeliveryProcessor
         public TlsFailure? TlsFailure { get; set; }
         public RemoteCertificateValidator? Validator { get; set; }
         public string? ReceivingIp { get; set; }
+
+        /// <summary>The local IP of the connection (TLS-RPT <c>sending-mta-ip</c>); null when no connection was made.</summary>
+        public string? SendingIp { get; set; }
+
+        /// <summary>The server cannot be sent this message at all because of a missing extension (SMTPUTF8, 8BITMIME with no safe conversion); another MX may differ.</summary>
+        public bool CapabilityRefusal { get; set; }
+
+        /// <summary>Recipients that were left out of the transaction because the server cannot take their address.</summary>
+        public IReadOnlyDictionary<EmailAddress, SmtpReply>? RecipientRefusals { get; set; }
         public bool Connected => Route is not (RouteAttemptResult.ConnectTimeout or RouteAttemptResult.ConnectRefused);
     }
 
-    private async Task<AttemptResult> RunRoutesAsync(ClaimedDelivery first, SmtpEnvelope envelope, ReadOnlyMemory<byte> message, CancellationToken ct)
+    private async Task<AttemptResult> RunRoutesAsync(ClaimedDelivery first, OutboundTransaction tx, CancellationToken ct)
     {
         var plan = _s.Routes.Plan(first.RecipientDomain);
         if (plan.IsEmpty)
@@ -353,8 +347,8 @@ public sealed class DeliveryProcessor
             }
 
             var result = step.IsDirect
-                ? await TryDirectAsync(first, envelope, message, ct).ConfigureAwait(false)
-                : await TryRelayAsync(first, step.Relay!, envelope, message, ct).ConfigureAwait(false);
+                ? await TryDirectAsync(first, tx, ct).ConfigureAwait(false)
+                : await TryRelayAsync(first, step.Relay!, tx, ct).ConfigureAwait(false);
             result.RouteName = step.Name;
             _s.Routes.ReportAttempt(step, result.Route);
             last = result;
@@ -378,7 +372,7 @@ public sealed class DeliveryProcessor
         };
     }
 
-    private async Task<AttemptResult> TryDirectAsync(ClaimedDelivery first, SmtpEnvelope envelope, ReadOnlyMemory<byte> message, CancellationToken ct)
+    private async Task<AttemptResult> TryDirectAsync(ClaimedDelivery first, OutboundTransaction tx, CancellationToken ct)
     {
         var mx = await _s.Mx.ResolveAsync(first.RecipientDomain, ct).ConfigureAwait(false);
         switch (mx.Status)
@@ -394,6 +388,7 @@ public sealed class DeliveryProcessor
 
         var domainTls = await _s.Tls.ResolveDomainAsync(first.RecipientDomain, _s.TlsPolicies.For(first.RecipientDomain), ct).ConfigureAwait(false);
         AttemptResult? lastFailure = null;
+        AttemptResult? capabilityRefusal = null;
         int hosts = 0;
         foreach (var exchanger in mx.Exchangers)
         {
@@ -411,7 +406,7 @@ public sealed class DeliveryProcessor
             var decision = await _s.Tls.ResolveForMxAsync(domainTls, exchanger.Host, mx.MxAuthenticated, _options.RemotePort, ct).ConfigureAwait(false);
             if (decision.IsBlocked)
             {
-                TlsReportRecorder.RecordBlocked(_s.TlsReports, decision, sendingIp: null);
+                TlsReportRecorder.RecordBlocked(_s.TlsReports, decision, ProbeSourceAddress(exchanger.Addresses.FirstOrDefault()));
                 lastFailure = new AttemptResult
                 {
                     Route = RouteAttemptResult.TlsPolicyFailure,
@@ -438,7 +433,7 @@ public sealed class DeliveryProcessor
                     Port = _options.RemotePort,
                     Tls = BuildTlsPolicy(decision, exchanger.Host, out var validator),
                 };
-                var result = await SendOnceAsync(target, envelope, message, ct).ConfigureAwait(false);
+                var result = await SendOnceAsync(target, tx, ct).ConfigureAwait(false);
                 result.MxHost = exchanger.Host;
                 result.Decision = decision;
                 result.Validator = validator;
@@ -449,6 +444,14 @@ public sealed class DeliveryProcessor
                     _s.Routes.ReportMxHost(exchanger.Host, result.Route);
                     lastFailure = result;
                     continue;
+                }
+
+                if (result.CapabilityRefusal)
+                {
+                    // This server cannot take the message (no SMTPUTF8, or no safe 8-bit conversion); a later MX of the domain may. The server itself is healthy.
+                    _s.Routes.ReportMxHost(exchanger.Host, RouteAttemptResult.Delivered);
+                    capabilityRefusal = result;
+                    break;
                 }
 
                 if (result.Route == RouteAttemptResult.TlsPolicyFailure || result.Stage == ClientSmtpStage.Banner)
@@ -464,7 +467,28 @@ public sealed class DeliveryProcessor
             }
         }
 
-        return lastFailure ?? Synthetic(RouteAttemptResult.ConnectRefused, 451, "4.4.1", "no mail host is currently reachable");
+        // Permanent only when every host that was reached refused for lack of an extension; an unreachable one might still take it later.
+        return lastFailure ?? capabilityRefusal ?? Synthetic(RouteAttemptResult.ConnectRefused, 451, "4.4.1", "no mail host is currently reachable");
+    }
+
+    /// <summary>The local address the operating system would use to reach <paramref name="destination"/> (a UDP "connect" sends nothing), or null.</summary>
+    private static string? ProbeSourceAddress(IPAddress? destination)
+    {
+        if (destination is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            using var probe = new Socket(destination.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
+            probe.Connect(new IPEndPoint(destination, 9));
+            return (probe.LocalEndPoint as IPEndPoint)?.Address.ToString();
+        }
+        catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
+        {
+            return null;
+        }
     }
 
     private void ReportTls(string recipientDomain, TlsPolicyDecision decision, AttemptResult result)
@@ -480,10 +504,10 @@ public sealed class DeliveryProcessor
             return;
         }
 
-        TlsReportRecorder.RecordSession(_s.TlsReports, decision, result.ReceivingIp, sendingIp: null, result.TlsFailure, result.Validator?.Outcome, result.Tls?.Used ?? false);
+        TlsReportRecorder.RecordSession(_s.TlsReports, decision, result.ReceivingIp, result.SendingIp, result.TlsFailure, result.Validator?.Outcome, result.Tls?.Used ?? false);
     }
 
-    private async Task<AttemptResult> TryRelayAsync(ClaimedDelivery first, RelayRouteRecord relay, SmtpEnvelope envelope, ReadOnlyMemory<byte> message, CancellationToken ct)
+    private async Task<AttemptResult> TryRelayAsync(ClaimedDelivery first, RelayRouteRecord relay, OutboundTransaction tx, CancellationToken ct)
     {
         var addresses = await _s.Mx.ResolveHostAsync(relay.Host, ct).ConfigureAwait(false);
         if (addresses.Addresses.Count == 0)
@@ -511,7 +535,7 @@ public sealed class DeliveryProcessor
         foreach (var address in addresses.Addresses.Take(_options.MaxAddressesPerHost))
         {
             var target = new SmtpRemoteTarget { Host = relay.Host, Address = address, Port = relay.Port, Tls = tls, Credentials = credentials };
-            var result = await SendOnceAsync(target, envelope, message, ct).ConfigureAwait(false);
+            var result = await SendOnceAsync(target, tx, ct).ConfigureAwait(false);
             result.MxHost = relay.Host;
             if (result.Route is RouteAttemptResult.ConnectTimeout or RouteAttemptResult.ConnectRefused)
             {
@@ -544,7 +568,7 @@ public sealed class DeliveryProcessor
         };
     }
 
-    private async Task<AttemptResult> SendOnceAsync(SmtpRemoteTarget target, SmtpEnvelope envelope, ReadOnlyMemory<byte> message, CancellationToken ct)
+    private async Task<AttemptResult> SendOnceAsync(SmtpRemoteTarget target, OutboundTransaction tx, CancellationToken ct)
     {
         long started = Stopwatch.GetTimestamp();
         PooledConnection? pooled = null;
@@ -554,11 +578,30 @@ public sealed class DeliveryProcessor
         {
             pooled = await _s.Pool.RentAsync(target, ct).ConfigureAwait(false);
             var tlsSession = pooled.Connection.TlsSession;
-            Trace($"#{seq} send {envelope.Recipients.Count} recipient(s) via {target.Host}");
+            string? sendingIp = pooled.Connection.LocalIpAddress?.ToString();
+            var plan = tx.Plan(pooled.Connection.Capabilities);
+            if (plan.Envelope is null)
+            {
+                var refusal = plan.WholeRefusal!;
+                Trace($"#{seq} {target.Host} cannot take the message: {refusal}");
+                return new AttemptResult
+                {
+                    Route = RouteAttemptResult.PermanentReply,
+                    Reply = refusal,
+                    Error = string.Join(' ', refusal.Lines),
+                    Tls = tlsSession,
+                    Duration = Stopwatch.GetElapsedTime(started),
+                    Stage = ClientSmtpStage.MailFrom,
+                    SendingIp = sendingIp,
+                    CapabilityRefusal = true,
+                };
+            }
+
+            Trace($"#{seq} send {plan.Envelope.Recipients.Count} recipient(s) via {target.Host}");
             try
             {
-                var send = await pooled.Connection.SendAsync(envelope, message, ct).ConfigureAwait(false);
-                Trace($"#{seq} sent via {target.Host}: delivered={send.Delivered} stage={send.Stage} endOfData={send.EndOfDataSent}");
+                var send = await pooled.Connection.SendAsync(plan.Envelope, plan.Message, ct).ConfigureAwait(false);
+                Trace($"#{seq} sent via {target.Host}: delivered={send.Delivered} stage={send.Stage} endOfData={send.EndOfDataSent}" + (send.Delivered ? string.Empty : $" reply={send.SenderRejection ?? send.DataRejection ?? send.FinalReply}"));
                 return new AttemptResult
                 {
                     Route = Bucket(send),
@@ -567,18 +610,20 @@ public sealed class DeliveryProcessor
                     Duration = Stopwatch.GetElapsedTime(started),
                     EndOfDataSent = send.EndOfDataSent,
                     Stage = send.Stage,
+                    SendingIp = sendingIp,
+                    RecipientRefusals = plan.RecipientRefusals,
                 };
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 pooled.Discard();
-                return new AttemptResult { Route = RouteAttemptResult.ConnectionDropped, Aborted = true, EndOfDataSent = pooled.Connection.EndOfDataStarted, Tls = tlsSession, Stage = ClientSmtpStage.Data, Duration = Stopwatch.GetElapsedTime(started) };
+                return new AttemptResult { Route = RouteAttemptResult.ConnectionDropped, Aborted = true, EndOfDataSent = pooled.Connection.EndOfDataStarted, Tls = tlsSession, Stage = ClientSmtpStage.Data, Duration = Stopwatch.GetElapsedTime(started), SendingIp = sendingIp };
             }
             catch (SmtpConnectionException ex)
             {
                 Trace($"#{seq} connection failed at {ex.Stage}: {ex.Message}");
                 pooled.Discard();
-                return Dropped(ex, tlsSession, started);
+                return Dropped(ex, tlsSession, started, sendingIp);
             }
             catch (Exception ex) when (ex is IOException or SocketException or SmtpProtocolException or ObjectDisposedException)
             {
@@ -591,6 +636,7 @@ public sealed class DeliveryProcessor
                     Tls = tlsSession,
                     Stage = ClientSmtpStage.Data,
                     Duration = Stopwatch.GetElapsedTime(started),
+                    SendingIp = sendingIp,
                 };
             }
         }
@@ -609,6 +655,7 @@ public sealed class DeliveryProcessor
                 Tls = ex.Session,
                 Stage = ClientSmtpStage.StartTls,
                 Duration = Stopwatch.GetElapsedTime(started),
+                SendingIp = ex.LocalAddress?.ToString(),
             };
         }
         catch (SmtpGreetingRejectedException ex)
@@ -620,11 +667,12 @@ public sealed class DeliveryProcessor
                 Error = ex.Message,
                 Stage = ex.Stage == ClientSmtpStage.Banner ? ClientSmtpStage.Banner : ex.Stage,
                 Duration = Stopwatch.GetElapsedTime(started),
+                SendingIp = ex.LocalAddress?.ToString(),
             };
         }
         catch (SmtpConnectionException ex)
         {
-            return Dropped(ex, null, started);
+            return Dropped(ex, null, started, ex.LocalAddress?.ToString());
         }
         catch (Exception ex) when (ex is SocketException or IOException or SmtpClientException or TimeoutException)
         {
@@ -656,7 +704,7 @@ public sealed class DeliveryProcessor
         }
     }
 
-    private static AttemptResult Dropped(SmtpConnectionException ex, SmtpTlsSession? tls, long started)
+    private static AttemptResult Dropped(SmtpConnectionException ex, SmtpTlsSession? tls, long started, string? sendingIp)
     {
         bool beforeSession = ex.Stage is ClientSmtpStage.Connect;
         var route = beforeSession
@@ -671,6 +719,7 @@ public sealed class DeliveryProcessor
             Stage = ex.Stage,
             EndOfDataSent = ex.EndOfDataSent,
             Duration = Stopwatch.GetElapsedTime(started),
+            SendingIp = sendingIp,
         };
     }
 
@@ -747,6 +796,12 @@ public sealed class DeliveryProcessor
             {
                 reply = LocalFailureReply(send.LocalFailure);
                 stage = PolicySmtpStage.MailFrom;
+            }
+            else if (a.RecipientRefusals is { } refusals && refusals.TryGetValue(d.Recipient, out var refusal))
+            {
+                // Left out of the transaction because the server cannot take this address (no SMTPUTF8); the others were sent.
+                reply = refusal;
+                stage = PolicySmtpStage.RcptTo;
             }
             else if (send.SenderRejection is { } senderRejection)
             {

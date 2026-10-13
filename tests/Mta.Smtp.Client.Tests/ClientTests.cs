@@ -95,6 +95,39 @@ public class ClientTests
         var policy = new SmtpTlsPolicy { Mode = SmtpTlsMode.StartTls, Require = true, TargetHost = "localhost", ValidationCallback = (_, _, _, e) => e == System.Net.Security.SslPolicyErrors.None };
         var ex = await Assert.ThrowsAsync<SmtpTlsException>(async () => await SmtpClientConnection.ConnectAsync(server.Target(policy), Options));
         Assert.Equal(TlsFailure.HandshakeFailed, ex.Failure);
+        Assert.Equal(IPAddress.Loopback, ex.LocalAddress);   // the source address of the failed session, for TLS-RPT
+    }
+
+    [Fact]
+    public async Task The_local_address_of_the_connection_is_known_after_connect()
+    {
+        await using var server = new RealServer();
+        await using var conn = await SmtpClientConnection.ConnectAsync(server.Target(SmtpTlsPolicy.Disabled), Options);
+        Assert.Equal(IPAddress.Loopback, conn.LocalIpAddress);
+    }
+
+    [Fact]
+    public async Task Eight_bit_and_smtputf8_parameters_are_declared_when_asked_for_and_offered()
+    {
+        await using var server = new RealServer();
+        await using var conn = await SmtpClientConnection.ConnectAsync(server.Target(SmtpTlsPolicy.Disabled), Options);
+        Assert.True(conn.Capabilities.EightBitMime && conn.Capabilities.SmtpUtf8);
+        var result = await conn.SendAsync(new SmtpEnvelope(EmailAddress.Parse("üser@example.org"), [EmailAddress.Parse("rcpt@dest.example")], SmtpUtf8: true, EightBit: true), Msg("Grüße\r\n"));
+        Assert.True(result.Delivered);
+        var m = Assert.Single(server.Handler.Messages);
+        Assert.Equal("üser@example.org", m.From.ToString());
+        Assert.Contains("Grüße", Encoding.UTF8.GetString(m.Body), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_server_without_8bitmime_is_not_sent_a_body_declared_8bit()
+    {
+        await using var server = new RealServer(o => new SmtpServerOptions { Hostname = o.Hostname, Certificates = o.Certificates, Listeners = o.Listeners, AuthFailureDelay = TimeSpan.Zero, EightBitMime = false });
+        await using var conn = await SmtpClientConnection.ConnectAsync(server.Target(SmtpTlsPolicy.Disabled), Options);
+        Assert.False(conn.Capabilities.EightBitMime);
+        var result = await conn.SendAsync(new SmtpEnvelope(EmailAddress.Parse("s@example.org"), [EmailAddress.Parse("rcpt@dest.example")], false, EightBit: true), Msg("Grüße\r\n"));
+        Assert.Equal(LocalFailure.EightBitNotSupported, result.LocalFailure);
+        Assert.Empty(server.Handler.Messages);
     }
 
     [Fact]

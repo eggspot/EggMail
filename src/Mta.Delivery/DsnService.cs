@@ -70,6 +70,7 @@ public sealed class DsnService
                 Raw = dsn,
                 ReceivedAt = now,
                 ExpiresAt = now + _options.DsnLifetime,
+                SmtpUtf8 = Mta.Mime.MessageInspector.HasValidUtf8Headers(dsn),   // the sender's address is in the To field
             }, ct).ConfigureAwait(false);
             DeliveryMetrics.Bounces.Add(1);
         }
