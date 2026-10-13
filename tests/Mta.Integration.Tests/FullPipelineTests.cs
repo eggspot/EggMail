@@ -94,6 +94,7 @@ public sealed class FullPipelineTests : IAsyncLifetime
                     ["submission"] = new() { Port = 0, BindAddress = "127.0.0.1", Mode = ListenerMode.StartTls, AuthRequired = true },
                 },
             },
+            Webhooks = new Mta.Webhooks.WebhookOptions { AllowHttp = true, PollInterval = TimeSpan.FromMilliseconds(100) },
             Delivery = new DeliverySection { BounceDomain = "bounces.egg.test", RemotePort = remotePort, AllowPrivateMxAddresses = true, PollInterval = TimeSpan.FromMilliseconds(30) },
         };
         var storage = SqliteStorage.Create(config.Storage);
@@ -209,5 +210,46 @@ public sealed class FullPipelineTests : IAsyncLifetime
         await SendAsync("gone@dest.example");
         await Task.Delay(500);
         Assert.Equal(before, _internet.Received.Count);
+    }
+
+    [Fact]
+    public async Task A_delivered_message_produces_a_signed_webhook_to_the_tenants_endpoint()
+    {
+        using var listener = new HttpListener();
+        int port;
+        while (true)
+        {
+            port = Random.Shared.Next(20000, 40000);
+            listener.Prefixes.Clear();
+            listener.Prefixes.Add($"http://127.0.0.1:{port}/hook/");
+            try { listener.Start(); break; } catch (HttpListenerException) { }
+        }
+
+        var received = new TaskCompletionSource<(Dictionary<string, string> Headers, byte[] Body)>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _ = Task.Run(async () =>
+        {
+            var context = await listener.GetContextAsync();
+            using var ms = new MemoryStream();
+            await context.Request.InputStream.CopyToAsync(ms);
+            received.TrySetResult((context.Request.Headers.AllKeys.ToDictionary(k => k!, k => context.Request.Headers[k]!, StringComparer.OrdinalIgnoreCase), ms.ToArray()));
+            context.Response.StatusCode = 200;
+            context.Response.Close();
+        });
+
+        string secret = Mta.Webhooks.StandardWebhooksSigner.GenerateSecret();
+        await _runtime.Storage.Config.UpsertWebhookEndpointAsync(new WebhookEndpointRecord(
+            Ids.New(), TenantId, $"http://127.0.0.1:{port}/hook/", _runtime.Secrets.Protect(Encoding.UTF8.GetBytes(secret), SecretPurposes.WebhookSecret),
+            [Mta.Webhooks.WebhookEventFactory.Delivered], true, null, null, DateTimeOffset.UtcNow, null), default);
+        _runtime.Webhooks.AllowlistProvider = _ => [Mta.Webhooks.IpNetwork.Parse("127.0.0.0/8")];
+        var dispatcher = Task.Run(() => _runtime.Webhooks.RunAsync(_stop.Token));
+
+        await SendAsync("rcpt@dest.example");
+
+        var (headers, body) = await received.Task.WaitAsync(TimeSpan.FromSeconds(20));
+        Assert.True(Mta.Webhooks.StandardWebhooksSigner.Verify(headers["webhook-id"], headers["webhook-timestamp"], headers["webhook-signature"], body, [secret], DateTimeOffset.UtcNow));
+        using var json = System.Text.Json.JsonDocument.Parse(body);
+        Assert.Equal("message.delivered", json.RootElement.GetProperty("type").GetString());
+        Assert.Equal("rcpt@dest.example", json.RootElement.GetProperty("data").GetProperty("recipient").GetString());
+        listener.Stop();
     }
 }
