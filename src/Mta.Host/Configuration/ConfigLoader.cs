@@ -21,6 +21,13 @@ public static class ConfigLoader
     public const string BootstrapFileName = "bootstrap.json";
 
     /// <summary>
+    /// Where the bootstrap file lives: in the data directory (the hint, else the <c>Sqlite__DataDirectory</c> environment variable,
+    /// else <c>/data</c>). It has to be findable before the storage is known, which is why it cannot depend on <c>Storage:*</c>.
+    /// </summary>
+    public static string ResolveBootstrapPath(string? dataDirectoryHint = null) =>
+        Path.Combine(dataDirectoryHint ?? Environment.GetEnvironmentVariable("Sqlite__DataDirectory") ?? "/data", BootstrapFileName);
+
+    /// <summary>
     /// Builds the layered configuration for the process: appsettings (if present), the bootstrap file in the data directory
     /// (storage pointer written by the backend switch), environment variables, then the command line (highest precedence).
     /// </summary>
@@ -32,8 +39,7 @@ public static class ConfigLoader
             builder.AddJsonFile(appSettingsPath, optional: true, reloadOnChange: false);
         }
 
-        string dataDir = dataDirectoryHint ?? Environment.GetEnvironmentVariable("Sqlite__DataDirectory") ?? "/data";
-        string bootstrap = Path.Combine(dataDir, BootstrapFileName);
+        string bootstrap = ResolveBootstrapPath(dataDirectoryHint);
         if (File.Exists(bootstrap))
         {
             builder.AddJsonFile(bootstrap, optional: true, reloadOnChange: false);

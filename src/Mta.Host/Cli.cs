@@ -8,11 +8,13 @@ using Microsoft.Extensions.Logging;
 using Mta.Core;
 using Mta.Host.Configuration;
 using Mta.Host.Hosting;
+using Mta.Host.Switching;
 using Mta.Observability;
+using Mta.Storage;
 
 namespace Mta.Host;
 
-/// <summary>The <c>mta</c> command line: <c>serve</c> (default), <c>--healthcheck</c>, <c>migrate-db</c>, <c>--version</c>.</summary>
+/// <summary>The <c>mta</c> command line: <c>serve</c> (default), <c>--healthcheck</c>, <c>migrate-db</c>, <c>migrate-storage</c>, <c>--version</c>.</summary>
 internal static class Cli
 {
     public static async Task<int> RunAsync(string[] args)
@@ -28,10 +30,12 @@ internal static class Cli
                 return await HealthCheckAsync(rest).ConfigureAwait(false);
             case "migrate-db":
                 return await MigrateDbAsync(rest).ConfigureAwait(false);
+            case "migrate-storage":
+                return await MigrateStorageCommand.RunAsync(rest, Console.Out, Console.Error).ConfigureAwait(false);
             case "serve":
                 return await ServeAsync(rest).ConfigureAwait(false);
             default:
-                Console.Error.WriteLine($"Unknown command '{command}'. Commands: serve (default), migrate-db, --healthcheck, --version.");
+                Console.Error.WriteLine($"Unknown command '{command}'. Commands: serve (default), migrate-db, migrate-storage, --healthcheck, --version.");
                 return 64;
         }
     }
@@ -99,8 +103,14 @@ internal static class Cli
         using var startupFactory = LoggerFactory.Create(b => b.AddJsonConsole());
         var startupLog = new MtaLogAdapter(startupFactory);
         var clock = SystemClock.Instance;
+
+        // One process owns a SQLite data directory (the offline migrate-storage commands take the same lock).
+        using DataDirectoryLock? directoryLock = config.Storage.Backend == StorageBackend.Sqlite ? DataDirectoryLock.Acquire(config.Storage.Sqlite.DataDirectory) : null;
         var storage = StorageFactory.Create(config.Storage, clock, startupLog);
         await storage.InitializeAsync(CancellationToken.None).ConfigureAwait(false);
+
+        // Backend switch startup gate (design 4.6): a confirmed target becomes Active, a fenced source or an unactivated target stays quiet.
+        var gate = await StartupGate.EvaluateAsync(storage, clock, startupLog, CancellationToken.None).ConfigureAwait(false);
         await using var runtime = await EggMailRuntime.CreateAsync(config, storage, clock, startupLog, CancellationToken.None).ConfigureAwait(false);
 
         builder.Services.AddSingleton(loaded);
@@ -109,12 +119,32 @@ internal static class Cli
         builder.Services.AddSingleton(storage);
         builder.Services.AddSingleton<IClock>(clock);
         builder.Services.AddMtaObservability(new ObservabilityOptions { OtlpEndpoint = config.Observability.OtlpEndpoint, ServiceVersion = typeof(Cli).Assembly.GetName().Version?.ToString(3) ?? "0.0.0" });
-        builder.Services.AddHostedService<SmtpListenerService>();
-        builder.Services.AddHostedService<DeliveryService>();
-        builder.Services.AddHostedService<WebhookService>();
-        builder.Services.AddHostedService<CertificateService>();
-        builder.Services.AddHostedService<MaintenanceService>();
-        builder.Services.AddHostedService<TlsReportService>();
+        var switchState = new SwitchRuntimeState(gate);
+        var switchControl = new HostSwitchControl(runtime, switchState);
+        builder.Services.AddSingleton(gate);
+        builder.Services.AddSingleton(switchState);
+        builder.Services.AddSingleton<Mta.Storage.Portability.ISwitchHostControl>(switchControl);
+        if (!gate.AcceptMail)
+        {
+            runtime.SmtpServer.AcceptingMail = false; // listeners answer 421, the API answers 503 (SwitchRuntimeState.AcceptingApi)
+        }
+
+        if (gate.Mode == StartupMode.Normal || gate.Mode == StartupMode.Draining)
+        {
+            builder.Services.AddHostedService<SmtpListenerService>();
+            builder.Services.AddHostedService<DeliveryService>();
+            builder.Services.AddHostedService<WebhookService>();
+            builder.Services.AddHostedService<CertificateService>();
+            builder.Services.AddHostedService<MaintenanceService>();
+            builder.Services.AddHostedService<TlsReportService>();
+            builder.Services.AddHostedService(_ => new SwitchStateWatcher(runtime, switchControl, TimeSpan.FromSeconds(5)));
+        }
+        else
+        {
+            // A fenced source or a target that is not active: dashboard and API only. No listeners, no dispatch, no maintenance, no
+            // certificate renewal (the old data stays exactly as it is until the switch is finalized or rolled back).
+            startupLog.Write(MtaLogLevel.Warning, "switch", "starting restricted: " + gate.Banner);
+        }
         builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(45));
 
         builder.WebHost.ConfigureKestrel(k =>
