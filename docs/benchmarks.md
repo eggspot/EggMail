@@ -111,6 +111,98 @@ What the first runs were good for was finding allocation hot spots with the buil
 | Content extraction for history (`History:Mode=Full`, `Content:Mode=Retain`) | roughly halves ingest throughput in the quick runs | open: extraction runs inline in the SMTP session; moving it off the accept path or limiting it is an option |
 | `Microsoft.Data.Sqlite` parameter binding | about 10 % of ingest allocations | open |
 
-Current budget status: the design budget of under 2 KB per ingested message excluding body buffers is **not met** (about 22 to 36 KB per 2 KB message depending on history mode, measured as total process allocation per message). It is a gate to close, not a claim.
+Current budget status: the design budget of under 2 KB per ingested message excluding body buffers is **not met** (about 22 to 36 KB per 2 KB message depending on history mode, measured as total process allocation per message). It is a gate to close, not a claim. *(First round; superseded by the second round below, which also covers the delivery path.)*
 
-Per-step allocation of the ingest path (`dotnet run -c Release --project bench/Mta.Bench.Pipeline -- --micro true`, 2 KB message): `MimeMessage.Parse` 1.5 KB, header editing 6.3 KB, content extraction for history 5.5 KB, whole `SubmissionService.SubmitAsync` 19.6 KB. The message is parsed three times per submission (sender check, editor, extractor); parsing once and sharing it is the next saving. The 2 KB budget remains unmet.
+Per-step allocation of the ingest path (`dotnet run -c Release --project bench/Mta.Bench.Pipeline -- --micro true`, 2 KB message): `MimeMessage.Parse` 1.5 KB, header editing 6.3 KB, content extraction for history 5.5 KB, whole `SubmissionService.SubmitAsync` 19.6 KB. The message is parsed three times per submission (sender check, editor, extractor); parsing once and sharing it is the next saving. The 2 KB budget remains unmet. *(Done in the second round, below.)*
+
+
+## Allocation work, second round (2026-10-13)
+
+Parse once, native SQLite statements, and a pass over the delivery path. Everything below was measured with the harness in `bench/Mta.Bench.Pipeline` on one 10-core Apple-silicon laptop that was **shared with other builds and test runs throughout** (the load average was between 13 and 40 for the whole session). **Allocation figures are exact and repeatable** (bytes counted by the runtime, no sampling). **Time and throughput figures are not** exact: in the first, shared window they moved by a factor of two or three between runs of the same build; the throughput table below comes from a second, quiet window with six alternating runs of each build, and is still not a result. Dev-machine observations, not claims; the publication rules above still apply.
+
+"Before" is `main` at commit `0cab93f` built and run with the same harness (its harness was patched only to print the same columns). "After" is this branch.
+
+### What the budget measures
+
+The design budget is "under 2 KB per ingested message, excluding body buffers". The following are counted as body buffers because their size is the size of the message and the protocol path cannot avoid them: the stored copy of the message (one array of the message size plus the server-added `Received` field), the history copy of the text and HTML bodies as .NET strings (two bytes per character; only with `History:Mode=Full` and `Content:Retain`), and on delivery the message read back from the spool (one array). Everything else counts. Because those are proportional to the message, the fixed cost is measured with a message that has almost no body ("tiny", 214 bytes with its headers) next to the 2 KB one.
+
+### Ingest, per step (`--micro true`, bytes allocated per operation; before to after)
+
+| Step | Before | After | What changed |
+|---|---|---|---|
+| `MimeMessage.Parse` (2 KB message) | 1,536 | 672 | header array sized for the block; the Content-Type and Content-Transfer-Encoding values are read from the bytes without building the value string; shared strings for the media types, parameter names and charset names every message uses; a reusable work list for parameters; 32-byte header records |
+| Sender check (`From` header to domain) | 864 | 80 | a single address, with or without a plain display name, is answered from its bytes; anything else (quotes, comments, encoded words, groups, folding, non-ASCII) goes through the full address parser; a differential test compares both on 40,000 generated values |
+| Header repair (remove Bcc, add Message-ID and Date, prepend Received) | 3,232 | 2,256 to 2,672 | lazy lists, the `Received` field is referenced instead of copied, no rule object when there is no Bcc; the rest is the 2.1 KB stored message |
+| Content extraction for history | 5,424 | 3,808 | works on the parse already made (1.5 KB of the old figure was a second parse); the rest is the 3.6 KB text string |
+| `SubmissionService.SubmitAsync`, InMemory, 2 KB / tiny | 16,619 / 8,576 | 10,464 / 3,272 | parse once, no LINQ or closures in the path, in-memory intake without LINQ |
+| `SubmissionService.SubmitAsync`, SQLite, one caller, 2 KB / tiny | 26,621 / 19,403 | 10,358 / 4,967 | native statements, see below |
+| `SubmissionService.SubmitAsync`, SQLite, 32 concurrent callers (group commit), 2 KB / tiny | 24,098 / 16,873 | 7,878 / 2,585 | the same |
+
+Wall time per message in the same micro-benchmark (fastest of three passes, shared machine): SQLite with 32 callers 24.2 us to 18.5 us (2 KB) and 17.5 us to 15.1 us (tiny); one caller 126 us to 88 us (2 KB) and 97 us to 89 us (tiny); InMemory unchanged (7.2 us and 3.4 us; that backend is dominated by its own bookkeeping).
+
+### The SMTP server alone (`--sink-only true`: plain text, no storage, no TLS, no authentication)
+
+4,058 B/message to **1,090 B/message** (2 KB message). What changed: pooled async state machines on the session's `ValueTask` methods; one `Received` builder per session that caches the parts that only change with the greeting name, the TLS state or the authenticated user (the field is written into one exactly sized array instead of through three strings and two builders); the message handed to the handler as a single-segment sequence; the discard writer created only when needed; no enumerators over the reply list; MAIL and RCPT paths decoded in stack memory. This is under the 2 KB budget.
+
+### The whole pipeline (SQLite, `Sqlite:SyncMode=Off`, `History:Mode=Full`, 32 connections, one recipient, authenticated; process allocation per message)
+
+| | Before | After |
+|---|---|---|
+| Ingest, 2 KB, STARTTLS and AUTH (`--tls true`) | 33.4 KB | **11.0 KB** |
+| Ingest, 2 KB, plain text (`--tls false`) | not measurable (the old harness always used TLS) | 10.3 KB |
+| Ingest, 200-byte message, plain text | not measurable | **4.8 KB** |
+| Delivery to a sink MX, per recipient (`--split true`, DKIM signing on) | 66.0 KB | **25.5 KB** |
+
+Throughput and CPU, measured in a second, quiet window (six alternating before/after runs of `--sync off --history full --messages 30000 --connections 32 --size 2048 --deliver true --split true`, so ingest and delivery are each measured alone; the machine had no other significant load at the start, its one-minute load average was 2.3 before the first run and rose to about 14 by the last, which is mostly the harness itself: ten cores, 32 connections, 64 delivery workers):
+
+| | Before, six runs | After, six runs | Median change |
+|---|---|---|---|
+| Ingest, msg/s | 14.9k, 16.7k, 14.8k, 15.7k, 15.7k, 16.0k (median 15.7k) | 16.0k, 18.0k, 17.0k, 17.2k, 17.1k, 17.6k (median 17.2k) | +9 % |
+| Ingest, process CPU ms per 1,000 messages | 328, 304, 332, 331, 320, 318 (median 324) | 294, 300, 299, 295, 306, 303 (median 300) | -8 % |
+| Delivery, recipients/s | 4,224, 4,248, 4,204, 4,151, 4,213, 4,192 (median 4,208) | 4,614, 4,540, 4,487, 4,392, 4,546, 3,471 (median 4,513) | +7 % |
+| Delivery, process CPU ms per 1,000 messages | 2,007, 1,965, 1,932, 1,981, 1,946, 1,970 (median 1,967) | 1,862, 1,875, 1,876, 1,848, 1,869, 1,819 (median 1,866) | -5 % |
+
+The allocation figures are identical from run to run; the throughput ranges of the two builds overlap slightly for ingest (before up to 16.7k, after from 16.0k) and the medians differ by 9 %. Delivery is bound by RSA-2048 signing (about 0.83 ms of the 1.8 ms CPU per message), and one after-run (3.5k) shows what a disturbed run looks like. An earlier set of runs on the same machine under a load average of 13 to 40 (other builds and tests running) gave ingest 13.4k, 14.6k, 15.0k before and 5.2k, 17.9k, 8.4k after: nothing can be concluded from runs taken while the machine is shared, and they are not used. These are still one laptop, loopback and a counting sink: the direction (fewer bytes, less CPU, no regression) is supported by these runs, the size of the gain is not a published result.
+
+### Where the remaining ingest allocation goes (plain text, tiny message, SQLite: 4.8 KB)
+
+About 1.1 KB is the SMTP session (`SmtpMessage`, `MailFromInfo`, the recipient array, the `Received` array, the reply, pooled state machines that miss the pool under concurrency, the strings of the two `EmailAddress` values). About 2.5 KB is `SubmitAsync` and the storage intake: the parse tree (about 0.7 KB: `MimeMessage`, `MimePart`, `HeaderList`, `ContentType`, the header record array), the extracted content record and its strings, `SubmissionRequest`, `AcceptedMessage` and the recipient array, two writer commands (queue and history) with their states, the stat key, the Message-ID string kept for history, and the strings the history row needs. The rest is the handler, authentication state and the reply text.
+
+**The 2 KB budget is not met for the whole path**: 4.8 KB with a tiny body (about 4.2 KB once the unavoidable per-message copies are taken out) and 10.3 KB with a 2 KB body, of which 5.7 KB are the two body copies. The SMTP protocol path alone is under it (1.1 KB). Getting the rest under 2 KB means removing about 2 KB more, and what is left is structure, not tuning: a reusable parser context instead of a fresh object graph per message (about 0.6 KB), a cache of parsed `EmailAddress` values per session (about 0.15 KB), pooled writer commands (about 0.25 KB), one object for the request and the accepted message (about 0.3 KB), and giving history the body as UTF-8 bytes instead of a string. Each is an API change across packages and none was done in this round. The budget is **not revised**; 4.8 KB is the floor of the current design, not a new target.
+
+### Delivery path, per delivery (`--micro-delivery true`; SQLite, bytes allocated; before to after)
+
+| Step | Before | After | What changed |
+|---|---|---|---|
+| Suppression check per recipient | 15,270 | 57 | a prepared statement on an open read connection instead of an EF query on a pooled context (EF registered the provider's SQL functions again on every connection open) |
+| Read the raw message from the spool | 3,634 | 2,146 (the message itself is 2,009) | the same read sessions |
+| Claim (per delivery, batches of 64) | 1,763 | 630 | native statement, no LINQ |
+| Record a delivered attempt, one at a time | 12,648 | 4,743 | native statements, pooled state machines |
+| Record a delivered attempt, 32 concurrent | 9,853 | 2,204 | the same, shared transaction |
+| InMemory claim (4,000 queued) | 90,583 | 378 | one pass for the first `max` due rows instead of a list of all of them |
+
+Inside the processor: no webhook event payload is built for an attempt when no enabled endpoint of the tenant subscribes to the event type (about 6 KB of JSON that the fan-out threw away; the check uses the same endpoint list as the fan-out, so it only says no when the fan-out would have queued nothing); trace lines are formatted only when debug logging is on; no LINQ or closures on the group path; a precomputed `outcome` tag for the attempts counter; pooled async builders on the private methods. In the SMTP client: one reusable timeout source per connection instead of a linked source and a timer for every reply read, MAIL and RCPT lines written into stack memory, a reply parser that reads a line in place and shares the usual enhanced status strings, and the pool key built once per target.
+
+What is still large on delivery (25.5 KB per recipient, of which the 2 KB message array and the sink MX running in this process, about 1.1 KB, are part): the MX lookup per delivery (`MxResolver` builds tasks, lists and arrays for every call; the harness's static resolver adds LINQ of its own), the MTA-STS policy lookup (a task, a timeout source and a continuation per call), the TLS policy decision objects, the VERP envelope sender (a handful of strings), the attempt and history event objects, the JSON of the TLS state stored with every event, the NOOP before and the RSET after every reuse of a pooled connection (two extra round trips and their allocations; protocol behaviour, left as it is), and the DKIM signature header (907 B). These are the next candidates; a short-lived per-domain cache of the resolved MX and the policy decision would remove most of the first three but changes when a DNS change is noticed, so it needs a decision first.
+
+### How to reproduce and profile
+
+```sh
+dotnet build -c Release src/Mta.Tools
+dotnet run -c Release --project bench/Mta.Bench.Pipeline -- --micro true [--only "SQLite"] [--alloc-profile true]   # per-step ingest allocation and time
+dotnet run -c Release --project bench/Mta.Bench.Pipeline -- --micro-delivery true                                   # per-step delivery allocation
+dotnet run -c Release --project bench/Mta.Bench.Pipeline -- --sink-only true --messages 40000                       # the SMTP server alone
+dotnet run -c Release --project bench/Mta.Bench.Pipeline -- --sync off --history full --messages 20000 --size 2048 --deliver true --split true   # ingest, then delivery, each measured alone
+#   --tls false  measures the server without the TLS stack;  --size 200  the fixed cost per message
+```
+
+The `--alloc-profile` sampler (one `GCAllocationTick` per about 100 KB) shows types but not who allocated them, and it aliases on a periodic single-thread loop. For attribution with call stacks, record an EventPipe trace of the harness process and aggregate it with `bench/Mta.Bench.AllocStacks` (a developer tool that references the TraceEvent package; it is deliberately **not** in `EggMail.slnx`, so CI neither restores nor builds it and billed minutes are unchanged; `dotnet run --project` builds it on demand):
+
+```sh
+DOTNET_EnableEventPipe=1 DOTNET_EventPipeOutputPath=/tmp/pipeline.nettrace DOTNET_EventPipeConfig='Microsoft-Windows-DotNETRuntime:0x39:5' \
+  dotnet bench/Mta.Bench.Pipeline/bin/Release/net10.0/Mta.Bench.Pipeline.dll --sync off --history full --messages 8000 --deliver true --split true
+dotnet run -c Release --project bench/Mta.Bench.AllocStacks -- /tmp/pipeline.nettrace 4 60 - method      # the first Mta.* frame and the type, by bytes
+#   modes: stack (leaf type and its frames), method (above), owner (by type); the optional fourth argument filters the lines
+```
+
+Start the application's dll directly (not through `dotnet run`: the SDK host would write into the same trace file); the harness already removes `DOTNET_EnableEventPipe` from the load generator's environment. The aggregation is by bytes: a share times the run's total allocation divided by the message count is the cost per message.

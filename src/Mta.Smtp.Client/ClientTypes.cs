@@ -59,7 +59,9 @@ public sealed class SmtpRemoteTarget
     public IPAddress? LocalAddress { get; init; }
 
     /// <summary>Identity of this target in the connection pool (host, address, port, TLS policy, credentials).</summary>
-    public string PoolKey => $"{Host}|{Address}|{Port}|{Tls.Mode}|{Tls.Require}|{Credentials?.UserName}";
+    public string PoolKey => _poolKey ??= $"{Host}|{Address}|{Port}|{Tls.Mode}|{Tls.Require}|{Credentials?.UserName}";
+
+    private string? _poolKey;   // the properties are init-only, so the key never changes; it was rebuilt on every rent, return and dispose
 }
 
 public sealed class SmtpClientOptions

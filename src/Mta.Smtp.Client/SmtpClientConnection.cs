@@ -2,6 +2,7 @@ using System.Buffers;
 using System.IO.Pipelines;
 using System.Net;
 using System.Net.Security;
+using System.Runtime.CompilerServices;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
@@ -26,6 +27,10 @@ public sealed class SmtpClientConnection : IAsyncDisposable
     private PipeWriter _writer = null!;
     private bool _broken;
     private bool _quit;
+
+    // One linked source serves every timed read and write of a transaction (a source plus its timer per reply was the largest allocation of the client).
+    private CancellationTokenSource? _timeoutSource;
+    private CancellationToken _timeoutSourceFor;
 
     /// <summary>Capabilities from the latest EHLO (after STARTTLS the post-TLS list).</summary>
     public SmtpCapabilities Capabilities { get; private set; } = SmtpCapabilities.None;
@@ -69,6 +74,7 @@ public sealed class SmtpClientConnection : IAsyncDisposable
     /// Connects and negotiates up to the point where mail can be sent. Throws <see cref="SmtpConnectionException"/>,
     /// <see cref="SmtpGreetingRejectedException"/>, <see cref="SmtpTlsException"/> or <see cref="SmtpProtocolException"/>.
     /// </summary>
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     public static async ValueTask<SmtpClientConnection> ConnectAsync(SmtpRemoteTarget target, SmtpClientOptions options, IClock? clock = null, CancellationToken cancellationToken = default)
     {
         var c = new SmtpClientConnection(target, options, clock ?? SystemClock.Instance);
@@ -91,6 +97,7 @@ public sealed class SmtpClientConnection : IAsyncDisposable
         }
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask OpenAsync(CancellationToken ct)
     {
         _socket = new Socket(_target.Address.AddressFamily, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
@@ -165,10 +172,41 @@ public sealed class SmtpClientConnection : IAsyncDisposable
 
     // ------------------------------------------------------------ low-level I/O
 
+    /// <summary>The reusable timeout source for <paramref name="ct"/>, armed to fire after <paramref name="timeout"/>; call <see cref="DisarmTimeout"/> when the operation is over.</summary>
+    private CancellationTokenSource ArmTimeout(CancellationToken ct, TimeSpan timeout)
+    {
+        CancellationTokenSource? cts = _timeoutSource;
+        if (cts is null || cts.IsCancellationRequested || _timeoutSourceFor != ct)
+        {
+            cts?.Dispose();
+            cts = _timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            _timeoutSourceFor = ct;
+        }
+
+        cts.CancelAfter(timeout);
+        return cts;
+    }
+
+    /// <summary>
+    /// Ends the timed operation. <see cref="CancellationTokenSource.TryReset"/> stops the timer and fails when it has already fired, so a
+    /// timer callback that is in flight can never cancel the NEXT operation that reuses the source: in that case the source is dropped.
+    /// </summary>
+    private void DisarmTimeout(CancellationTokenSource cts)
+    {
+        if (!cts.TryReset())
+        {
+            cts.Dispose();
+            if (ReferenceEquals(_timeoutSource, cts))
+            {
+                _timeoutSource = null;
+            }
+        }
+    }
+
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<SmtpReply> ReadReplyAsync(SmtpStage stage, TimeSpan timeout, CancellationToken ct)
     {
-        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        cts.CancelAfter(timeout);
+        var cts = ArmTimeout(ct, timeout);
         try
         {
             while (true)
@@ -207,8 +245,13 @@ public sealed class SmtpClientConnection : IAsyncDisposable
             _broken = true;
             throw new SmtpConnectionException(stage, $"Connection to {_target.Host} lost at {stage}: {ex.Message}", ex);
         }
+        finally
+        {
+            DisarmTimeout(cts);
+        }
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask FlushAsync(SmtpStage stage, CancellationToken ct)
     {
         try
@@ -236,15 +279,86 @@ public sealed class SmtpClientConnection : IAsyncDisposable
         _writer.Advance(n);
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<SmtpReply> CommandAsync(SmtpStage stage, string command, TimeSpan timeout, CancellationToken ct)
     {
         WriteLine(command);
+        return await FlushAndReadReplyAsync(stage, timeout, ct).ConfigureAwait(false);
+    }
+
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
+    private async ValueTask<SmtpReply> FlushAndReadReplyAsync(SmtpStage stage, TimeSpan timeout, CancellationToken ct)
+    {
         await FlushAsync(stage, ct).ConfigureAwait(false);
         return await ReadReplyAsync(stage, timeout, ct).ConfigureAwait(false);
     }
 
+    /// <summary>Writes <c>MAIL FROM:&lt;path&gt;</c> with the parameters the envelope and the server's capabilities call for, straight into the pipe.</summary>
+    private void WriteMailFrom(SmtpEnvelope envelope, SmtpCapabilities caps, int messageLength)
+    {
+        var line = new DefaultInterpolatedStringHandler(0, 0, System.Globalization.CultureInfo.InvariantCulture, stackalloc char[320]);
+        line.AppendLiteral("MAIL FROM:");
+        AppendPath(ref line, envelope.From);
+        if (caps.Size is not null)
+        {
+            line.AppendLiteral(" SIZE=");
+            line.AppendFormatted(messageLength);
+        }
+
+        if (envelope.SmtpUtf8)
+        {
+            line.AppendLiteral(" SMTPUTF8");
+        }
+
+        if (envelope.EightBit)
+        {
+            line.AppendLiteral(" BODY=8BITMIME");
+        }
+
+        WriteLine(line.Text);
+        line.Clear();
+    }
+
+    private void WriteRcptTo(EmailAddress recipient)
+    {
+        var line = new DefaultInterpolatedStringHandler(0, 0, System.Globalization.CultureInfo.InvariantCulture, stackalloc char[320]);
+        line.AppendLiteral("RCPT TO:");
+        AppendPath(ref line, recipient);
+        WriteLine(line.Text);
+        line.Clear();
+    }
+
+    private static void AppendPath(ref DefaultInterpolatedStringHandler line, EmailAddress address)
+    {
+        if (address.IsNull)
+        {
+            line.AppendLiteral("<>");
+            return;
+        }
+
+        line.AppendLiteral("<");
+        line.AppendFormatted(address.LocalPart);
+        line.AppendLiteral("@");
+        line.AppendFormatted(address.Domain);
+        line.AppendLiteral(">");
+    }
+
+    private static bool AnyAccepted(List<SmtpRecipientResult> results)
+    {
+        foreach (var r in results)
+        {
+            if (r.Accepted)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     // ------------------------------------------------------------ session setup
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask EhloAsync(CancellationToken ct)
     {
         var reply = await CommandAsync(SmtpStage.Ehlo, $"EHLO {_options.HeloName}", _options.CommandTimeout, ct).ConfigureAwait(false);
@@ -267,6 +381,7 @@ public sealed class SmtpClientConnection : IAsyncDisposable
         Capabilities = SmtpCapabilities.Parse(reply.Lines.Skip(1));
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask StartTlsAsync(CancellationToken ct)
     {
         var reply = await CommandAsync(SmtpStage.StartTls, "STARTTLS", _options.CommandTimeout, ct).ConfigureAwait(false);
@@ -298,6 +413,7 @@ public sealed class SmtpClientConnection : IAsyncDisposable
         await EhloAsync(ct).ConfigureAwait(false);
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask HandshakeAsync(NetworkStream network, bool startTlsAdvertised, CancellationToken ct)
     {
         var tls = _target.Tls;
@@ -350,6 +466,7 @@ public sealed class SmtpClientConnection : IAsyncDisposable
 
     private static string? DescribeSubject(X509Certificate? c) => c?.Subject;
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask AuthenticateAsync(SmtpCredentials cred, CancellationToken ct)
     {
         if (TlsSession.Used is false && _target.Tls.Mode != SmtpTlsMode.None)
@@ -394,6 +511,7 @@ public sealed class SmtpClientConnection : IAsyncDisposable
     // ------------------------------------------------------------ transaction
 
     /// <summary>Sends one message. Network failures throw <see cref="SmtpConnectionException"/>; SMTP-level refusals are reported in the result.</summary>
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<SmtpSendResult> SendAsync(SmtpEnvelope envelope, ReadOnlyMemory<byte> message, CancellationToken cancellationToken = default)
     {
         ArgumentOutOfRangeException.ThrowIfZero(envelope.Recipients.Count);
@@ -418,31 +536,14 @@ public sealed class SmtpClientConnection : IAsyncDisposable
         bool pipelining = _options.Pipelining && caps.Pipelining;
         bool chunking = _options.PreferChunking && caps.Chunking;
 
-        // MAIL FROM
-        var mail = new StringBuilder("MAIL FROM:", 64).Append(envelope.From.ToPath());
-        if (caps.Size is not null)
-        {
-            mail.Append(" SIZE=").Append(message.Length);
-        }
-
-        if (envelope.SmtpUtf8)
-        {
-            mail.Append(" SMTPUTF8");
-        }
-
-        if (envelope.EightBit)
-        {
-            mail.Append(" BODY=8BITMIME");
-        }
-
         var results = new List<SmtpRecipientResult>(envelope.Recipients.Count);
         SmtpReply mailReply;
         if (pipelining)
         {
-            WriteLine(mail.ToString());
-            foreach (var rcpt in envelope.Recipients)
+            WriteMailFrom(envelope, caps, message.Length);
+            for (int i = 0; i < envelope.Recipients.Count; i++)   // by index: enumerating the interface allocates
             {
-                WriteLine($"RCPT TO:{rcpt.ToPath()}");
+                WriteRcptTo(envelope.Recipients[i]);
             }
 
             // DATA/BDAT cannot be pipelined blindly with BDAT; with DATA we may send it right behind the last RCPT.
@@ -466,7 +567,7 @@ public sealed class SmtpClientConnection : IAsyncDisposable
                 return new SmtpSendResult { Stage = SmtpStage.MailFrom, SenderRejection = mailReply, Recipients = results };
             }
 
-            if (!results.Any(r => r.Accepted))
+            if (!AnyAccepted(results))
             {
                 if (dataReply is { IsIntermediate: true })
                 {
@@ -495,19 +596,22 @@ public sealed class SmtpClientConnection : IAsyncDisposable
             return await SendBdatAsync(results, message, cancellationToken).ConfigureAwait(false);
         }
 
-        mailReply = await CommandAsync(SmtpStage.MailFrom, mail.ToString(), _options.CommandTimeout, cancellationToken).ConfigureAwait(false);
+        WriteMailFrom(envelope, caps, message.Length);
+        mailReply = await FlushAndReadReplyAsync(SmtpStage.MailFrom, _options.CommandTimeout, cancellationToken).ConfigureAwait(false);
         if (!mailReply.IsPositiveCompletion)
         {
             return new SmtpSendResult { Stage = SmtpStage.MailFrom, SenderRejection = mailReply };
         }
 
-        foreach (var rcpt in envelope.Recipients)
+        for (int i = 0; i < envelope.Recipients.Count; i++)
         {
-            var r = await CommandAsync(SmtpStage.RcptTo, $"RCPT TO:{rcpt.ToPath()}", _options.CommandTimeout, cancellationToken).ConfigureAwait(false);
+            var rcpt = envelope.Recipients[i];
+            WriteRcptTo(rcpt);
+            var r = await FlushAndReadReplyAsync(SmtpStage.RcptTo, _options.CommandTimeout, cancellationToken).ConfigureAwait(false);
             results.Add(new SmtpRecipientResult { Address = rcpt, Reply = r });
         }
 
-        if (!results.Any(r => r.Accepted))
+        if (!AnyAccepted(results))
         {
             await ResetAsync(cancellationToken).ConfigureAwait(false);
             return new SmtpSendResult { Stage = SmtpStage.RcptTo, Recipients = results };
@@ -527,6 +631,7 @@ public sealed class SmtpClientConnection : IAsyncDisposable
         return await SendDataAsync(results, message, cancellationToken).ConfigureAwait(false);
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<SmtpSendResult> SendDataAsync(List<SmtpRecipientResult> results, ReadOnlyMemory<byte> message, CancellationToken ct)
     {
         var stuffer = new DotStuffer();
@@ -541,8 +646,7 @@ public sealed class SmtpClientConnection : IAsyncDisposable
                 return new SmtpSendResult { LocalFailure = LocalFailure.MalformedMessage, Stage = SmtpStage.Data, Recipients = results };
             }
 
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(_options.DataBlockTimeout);
+            var cts = ArmTimeout(ct, _options.DataBlockTimeout);
             try
             {
                 await FlushAsync(SmtpStage.Data, cts.Token).ConfigureAwait(false);
@@ -551,6 +655,10 @@ public sealed class SmtpClientConnection : IAsyncDisposable
             {
                 _broken = true;
                 throw new SmtpConnectionException(SmtpStage.Data, $"Timeout sending data to {_target.Host}", timedOut: true);
+            }
+            finally
+            {
+                DisarmTimeout(cts);
             }
         }
 
@@ -581,6 +689,7 @@ public sealed class SmtpClientConnection : IAsyncDisposable
         return new SmtpSendResult { Stage = SmtpStage.EndOfData, Recipients = results, FinalReply = final, EndOfDataSent = true };
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<SmtpSendResult> SendBdatAsync(List<SmtpRecipientResult> results, ReadOnlyMemory<byte> message, CancellationToken ct)
     {
         if (!BdatSafe(message.Span))
@@ -644,6 +753,7 @@ public sealed class SmtpClientConnection : IAsyncDisposable
     }
 
     /// <summary>RSET; used between transactions on a reused connection and after aborted ones.</summary>
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     public async ValueTask ResetAsync(CancellationToken ct = default)
     {
         var r = await CommandAsync(SmtpStage.Rset, "RSET", _options.CommandTimeout, ct).ConfigureAwait(false);
@@ -654,6 +764,7 @@ public sealed class SmtpClientConnection : IAsyncDisposable
     }
 
     /// <summary>Checks the idle connection is still usable (NOOP).</summary>
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<bool> CheckAliveAsync(CancellationToken ct = default)
     {
         if (!IsReusable) { return false; }
@@ -669,6 +780,7 @@ public sealed class SmtpClientConnection : IAsyncDisposable
         }
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     public async ValueTask QuitAsync(CancellationToken ct = default)
     {
         if (_quit || _broken || _socket is null) { return; }
@@ -686,6 +798,7 @@ public sealed class SmtpClientConnection : IAsyncDisposable
         }
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     public async ValueTask DisposeAsync()
     {
         if (_socket is null)
@@ -696,6 +809,8 @@ public sealed class SmtpClientConnection : IAsyncDisposable
         try { if (_writer is not null) { await _writer.CompleteAsync().ConfigureAwait(false); } } catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException) { }
         try { if (_reader is not null) { await _reader.CompleteAsync().ConfigureAwait(false); } } catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException) { }
         try { if (_stream is not null) { await _stream.DisposeAsync().ConfigureAwait(false); } } catch (Exception ex) when (ex is IOException or ObjectDisposedException) { }
+        _timeoutSource?.Dispose();
+        _timeoutSource = null;
         _socket.Dispose();
         _socket = null;
     }

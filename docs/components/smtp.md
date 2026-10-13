@@ -15,6 +15,8 @@ Hand-written and package-free (decision 4). `Mta.Smtp.Protocol` is pure (no I/O)
 - Idle connections hold no read buffer (zero-byte reads, as Kestrel does); pipes are pooled; replies to pipelined commands are batched into one flush.
 - Message bodies are accumulated in pooled segments (`MessageBuffer`) and handed to the handler as a `ReadOnlySequence<byte>`; no contiguous allocation for large messages.
 - Constant replies are pre-rendered.
+- Allocation (2 KB message, plain text, no storage: about 1.1 KB per message, measured with `bench/Mta.Bench.Pipeline -- --sink-only true`): the session's `ValueTask` methods use pooled async builders; one `ReceivedHeaderBuilder` per session caches the parts of the `Received` field that change only with the greeting name, the TLS state or the authenticated user, so a message costs one exactly sized array; a message that fits one buffer segment reaches the handler as a single-segment sequence (the handler may use `Body.First` without copying; it is valid only during the call); MAIL/RCPT paths are decoded in stack memory; the discard writer exists only for oversized messages.
+- Client (`Mta.Smtp.Client`): one linked timeout source per connection is re-armed for every reply read and data block (it is replaced when the caller's token changes or it has fired), MAIL and RCPT lines are written into stack memory, `SmtpReplyParser` reads a line in place when it sits in one segment and shares the usual enhanced status strings. The pool still sends NOOP before and RSET after reusing a connection (two round trips per message); skipping either is a protocol-behaviour decision that has not been taken.
 
 ## Extension points
 

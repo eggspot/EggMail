@@ -240,6 +240,136 @@ public sealed class AddressList : IReadOnlyList<AddressItem>
         }
     }
 
+    /// <summary>
+    /// Looks at the valid mailboxes (group members included, invalid entries skipped) and reports whether they all share one domain,
+    /// without allocating. <paramref name="domain"/> is the lower-case domain of the first valid mailbox, also when the result is
+    /// <see cref="CommonDomainResult.MultipleDomains"/>; it is null when there is no valid mailbox.
+    /// </summary>
+    public CommonDomainResult GetCommonDomain(out string? domain)
+    {
+        domain = null;
+        bool differs = false;
+        foreach (var item in _items)
+        {
+            if (item is Mailbox m)
+            {
+                Visit(m, ref domain, ref differs);
+            }
+            else if (item is MailboxGroup g)
+            {
+                foreach (var member in g.Members)
+                {
+                    Visit(member, ref domain, ref differs);
+                }
+            }
+        }
+
+        return domain is null ? CommonDomainResult.NoValidMailbox : differs ? CommonDomainResult.MultipleDomains : CommonDomainResult.Single;
+
+        static void Visit(Mailbox mailbox, ref string? domain, ref bool differs)
+        {
+            if (!mailbox.IsValid)
+            {
+                return;
+            }
+
+            if (domain is null)
+            {
+                domain = mailbox.Address.Domain.ToLowerInvariant();
+            }
+            else if (!string.Equals(mailbox.Address.Domain, domain, StringComparison.OrdinalIgnoreCase))
+            {
+                differs = true;
+            }
+        }
+    }
+
+    /// <summary>
+    /// <see cref="GetCommonDomain(out string?)"/> for the value of an address header field. The result is the same as for
+    /// <c>Parse(header, limits).GetCommonDomain(out domain)</c>; a field of the usual simple shape (<c>user@host</c> or
+    /// <c>Display Name &lt;user@host&gt;</c> without quotes, comments, encoded words or folding) is answered straight from its bytes,
+    /// without building the value string, the address list and the display name.
+    /// </summary>
+    public static CommonDomainResult GetCommonDomain(in MimeHeader header, MimeLimits? limits, out string? domain)
+    {
+        if (TrySimpleMailboxDomain(header.RawValue.Span, out domain))
+        {
+            return CommonDomainResult.Single;
+        }
+
+        return Parse(header, limits).GetCommonDomain(out domain);
+    }
+
+    private static bool TrySimpleMailboxDomain(ReadOnlySpan<byte> raw, out string? domain)
+    {
+        domain = null;
+        raw = HeaderText.TrimWsp(raw);
+        if (raw.IsEmpty || raw.Length > 254)
+        {
+            return false;
+        }
+
+        ReadOnlySpan<byte> address = raw;
+        int open = raw.IndexOf((byte)'<');
+        if (open >= 0)
+        {
+            // Display name (letters, digits, spaces and a few marks; nothing the full parser treats specially), then <address>, then nothing.
+            if (raw[^1] != (byte)'>' || raw.IndexOf((byte)'>') != raw.Length - 1)
+            {
+                return false;
+            }
+
+            foreach (byte b in raw[..open])
+            {
+                if (!(char.IsAsciiLetterOrDigit((char)b) || b is (byte)' ' or (byte)'.' or (byte)'-' or (byte)'_' or (byte)'\''))
+                {
+                    return false;
+                }
+            }
+
+            address = raw[(open + 1)..^1];
+        }
+
+        // One '@' with atom characters around it. Quotes, comments, routes, spaces and non-ASCII bytes take the full parser.
+        int at = -1;
+        for (int i = 0; i < address.Length; i++)
+        {
+            byte b = address[i];
+            if (b == (byte)'@')
+            {
+                if (at >= 0)
+                {
+                    return false;
+                }
+
+                at = i;
+            }
+            else if (!(char.IsAsciiLetterOrDigit((char)b) || b is (byte)'.' or (byte)'-' or (byte)'_' or (byte)'+'))
+            {
+                return false;
+            }
+        }
+
+        if (at <= 0 || at == address.Length - 1)
+        {
+            return false;
+        }
+
+        Span<char> chars = stackalloc char[address.Length];
+        for (int i = 0; i < address.Length; i++)
+        {
+            chars[i] = (char)address[i];
+        }
+
+        if (!EmailAddress.TryParse(chars, allowUtf8: true, out var parsed))
+        {
+            return false;
+        }
+
+        domain = parsed.Domain.ToLowerInvariant();
+        return true;
+    }
+
     /// <summary>Parses an address header value (the unfolded text; RFC 2047 words in display names are decoded).</summary>
     public static AddressList Parse(string? value, MimeLimits? limits = null) =>
         string.IsNullOrWhiteSpace(value) ? Empty : AddressParser.Parse(value, limits ?? MimeLimits.Default);
@@ -254,6 +384,19 @@ public sealed class AddressList : IReadOnlyList<AddressItem>
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
 
     internal static AddressList Create(AddressItem[] items, MimeAnomaly anomalies) => new(items, anomalies);
+}
+
+/// <summary>Outcome of <see cref="AddressList.GetCommonDomain(out string?)"/>.</summary>
+public enum CommonDomainResult
+{
+    /// <summary>There is no valid mailbox.</summary>
+    NoValidMailbox,
+
+    /// <summary>All valid mailboxes use the same domain (compared case-insensitively).</summary>
+    Single,
+
+    /// <summary>The valid mailboxes use more than one domain.</summary>
+    MultipleDomains,
 }
 
 /// <summary>Tolerant RFC 5322 address-list parser. Every loop iteration consumes input, so it always terminates in linear time.</summary>

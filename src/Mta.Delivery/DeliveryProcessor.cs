@@ -83,7 +83,8 @@ public sealed class DeliveryProcessor
         DeliveryMetrics.GroupDuration.Record(Stopwatch.GetElapsedTime(started).TotalSeconds);
     }
 
-    private async Task ProcessTransactionAsync(ClaimedDelivery[] group, CancellationToken ct)
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
+    private async ValueTask ProcessTransactionAsync(ClaimedDelivery[] group, CancellationToken ct)
     {
         var results = new List<Result>(group.Length);
         var progress = new Progress();
@@ -145,7 +146,8 @@ public sealed class DeliveryProcessor
         }
     }
 
-    private async Task ProcessTransactionCoreAsync(ClaimedDelivery[] group, List<Result> results, Progress progress, CancellationToken ct)
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
+    private async ValueTask ProcessTransactionCoreAsync(ClaimedDelivery[] group, List<Result> results, Progress progress, CancellationToken ct)
     {
         var first = group[0];
         var now = _s.Clock.UtcNow;
@@ -180,7 +182,8 @@ public sealed class DeliveryProcessor
         Trace($"group {first.MessageId:N}/{first.RecipientDomain}: recorded");
     }
 
-    private async Task AttemptAsync(ClaimedDelivery first, List<ClaimedDelivery> pending, List<Result> results, CancellationToken ct)
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
+    private async ValueTask AttemptAsync(ClaimedDelivery first, List<ClaimedDelivery> pending, List<Result> results, CancellationToken ct)
     {
         var now = _s.Clock.UtcNow;
         byte[]? raw = await _s.Storage.Deliveries.GetRawAsync(first.MessageId, ct).ConfigureAwait(false);
@@ -232,14 +235,24 @@ public sealed class DeliveryProcessor
             var attempt = await RunRoutesAsync(first, transaction, ct).ConfigureAwait(false);
             Interpret(pending, attempt, results);
 
+            bool throttled = false;
+            int undelivered = 0;
+            foreach (var r in results)
+            {
+                throttled |= r.Class == DeliveryClass.TransientThrottle;
+                if (r.Attempt.Outcome != DeliveryOutcome.Delivered && pending.Contains(r.Delivery))
+                {
+                    undelivered++;
+                }
+            }
+
             lease.Report(attempt.Route switch
             {
                 RouteAttemptResult.Delivered => ThrottleSignal.Success,
                 RouteAttemptResult.ConnectTimeout or RouteAttemptResult.ConnectRefused => ThrottleSignal.ConnectionFailure,
-                _ => results.Any(r => r.Class == DeliveryClass.TransientThrottle) ? ThrottleSignal.Throttled : ThrottleSignal.Success,
+                _ => throttled ? ThrottleSignal.Throttled : ThrottleSignal.Success,
             });
 
-            int undelivered = results.Count(r => r.Attempt.Outcome != DeliveryOutcome.Delivered && pending.Contains(r.Delivery));
             if (undelivered > 0)
             {
                 _s.Limits.Release(first.TenantId, first.SendingDomain, undelivered, decision.At);
@@ -324,7 +337,8 @@ public sealed class DeliveryProcessor
         public bool Connected => Route is not (RouteAttemptResult.ConnectTimeout or RouteAttemptResult.ConnectRefused);
     }
 
-    private async Task<AttemptResult> RunRoutesAsync(ClaimedDelivery first, OutboundTransaction tx, CancellationToken ct)
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
+    private async ValueTask<AttemptResult> RunRoutesAsync(ClaimedDelivery first, OutboundTransaction tx, CancellationToken ct)
     {
         var plan = _s.Routes.Plan(first.RecipientDomain);
         if (plan.IsEmpty)
@@ -380,7 +394,8 @@ public sealed class DeliveryProcessor
         };
     }
 
-    private async Task<AttemptResult> TryDirectAsync(ClaimedDelivery first, OutboundTransaction tx, CancellationToken ct)
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
+    private async ValueTask<AttemptResult> TryDirectAsync(ClaimedDelivery first, OutboundTransaction tx, CancellationToken ct)
     {
         var mx = await _s.Mx.ResolveAsync(first.RecipientDomain, ct).ConfigureAwait(false);
         switch (mx.Status)
@@ -596,7 +611,8 @@ public sealed class DeliveryProcessor
         TlsReportRecorder.RecordSession(_s.TlsReports, decision, result.ReceivingIp, ReportableSendingIp(result.SendingIp), result.TlsFailure, result.Validator?.Outcome, result.Tls?.Used ?? false);
     }
 
-    private async Task<AttemptResult> TryRelayAsync(ClaimedDelivery first, RelayRouteRecord relay, OutboundTransaction tx, CancellationToken ct)
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
+    private async ValueTask<AttemptResult> TryRelayAsync(ClaimedDelivery first, RelayRouteRecord relay, OutboundTransaction tx, CancellationToken ct)
     {
         var addresses = await _s.Mx.ResolveHostAsync(relay.Host, ct).ConfigureAwait(false);
         if (addresses.Addresses.Count == 0)
@@ -657,7 +673,8 @@ public sealed class DeliveryProcessor
         };
     }
 
-    private async Task<AttemptResult> SendOnceAsync(SmtpRemoteTarget target, OutboundTransaction tx, CancellationToken ct)
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
+    private async ValueTask<AttemptResult> SendOnceAsync(SmtpRemoteTarget target, OutboundTransaction tx, CancellationToken ct)
     {
         long started = Stopwatch.GetTimestamp();
         PooledConnection? pooled = null;
@@ -690,7 +707,7 @@ public sealed class DeliveryProcessor
             try
             {
                 var send = await pooled.Connection.SendAsync(plan.Envelope, plan.Message, ct).ConfigureAwait(false);
-                Trace($"#{seq} sent via {target.Host}: delivered={send.Delivered} stage={send.Stage} endOfData={send.EndOfDataSent}" + (send.Delivered ? string.Empty : $" reply={send.SenderRejection ?? send.DataRejection ?? send.FinalReply}"));
+                Trace($"#{seq} sent via {target.Host}: delivered={send.Delivered} stage={send.Stage} endOfData={send.EndOfDataSent} reply={(send.Delivered ? null : send.SenderRejection ?? send.DataRejection ?? send.FinalReply)}");
                 return new AttemptResult
                 {
                     Route = Bucket(send),
@@ -791,6 +808,38 @@ public sealed class DeliveryProcessor
         {
             _s.Log.Write(MtaLogLevel.Debug, Source, message);
         }
+    }
+
+    /// <summary>Lets an interpolated trace line cost nothing while debug logging is off: the text is only built when it will be written.</summary>
+    private void Trace([System.Runtime.CompilerServices.InterpolatedStringHandlerArgument("")] ref TraceLine line)
+    {
+        if (line.Enabled)
+        {
+            _s.Log.Write(MtaLogLevel.Debug, Source, line.ToStringAndClear());
+        }
+    }
+
+    [System.Runtime.CompilerServices.InterpolatedStringHandler]
+    private ref struct TraceLine
+    {
+        private System.Runtime.CompilerServices.DefaultInterpolatedStringHandler _text;
+
+        public TraceLine(int literalLength, int formattedCount, DeliveryProcessor owner, out bool shouldAppend)
+        {
+            Enabled = owner._s.Log.IsEnabled(MtaLogLevel.Debug);
+            shouldAppend = Enabled;
+            _text = Enabled ? new System.Runtime.CompilerServices.DefaultInterpolatedStringHandler(literalLength, formattedCount) : default;
+        }
+
+        public bool Enabled { get; }
+
+        public void AppendLiteral(string value) => _text.AppendLiteral(value);
+
+        public void AppendFormatted<T>(T value) => _text.AppendFormatted(value);
+
+        public void AppendFormatted<T>(T value, string? format) => _text.AppendFormatted(value, format);
+
+        public string ToStringAndClear() => _text.ToStringAndClear();
     }
 
     private static AttemptResult Dropped(SmtpConnectionException ex, SmtpTlsSession? tls, long started, string? sendingIp)
@@ -912,7 +961,16 @@ public sealed class DeliveryProcessor
             }
             else
             {
-                var rcpt = send.Recipients.FirstOrDefault(r => r.Address.Equals(d.Recipient));
+                SmtpRecipientResult? rcpt = null;
+                for (int i = 0; i < send.Recipients.Count; i++)   // by index: enumerating the interface allocates
+                {
+                    if (send.Recipients[i].Address.Equals(d.Recipient))
+                    {
+                        rcpt = send.Recipients[i];
+                        break;
+                    }
+                }
+
                 if (rcpt is not null && !rcpt.Accepted)
                 {
                     reply = rcpt.Reply;
@@ -1022,7 +1080,7 @@ public sealed class DeliveryProcessor
         };
     }
 
-    private static Result Terminal(ClaimedDelivery d, DeliveryOutcome outcome, DateTimeOffset now, SmtpReply? reply, string message) => new()
+    private Result Terminal(ClaimedDelivery d, DeliveryOutcome outcome, DateTimeOffset now, SmtpReply? reply, string message) => new()
     {
         Delivery = d,
         Reply = reply,
@@ -1073,8 +1131,15 @@ public sealed class DeliveryProcessor
         }
     }
 
-    private static DeliveryAttempt Build(ClaimedDelivery d, DeliveryAttempt attempt)
+    private DeliveryAttempt Build(ClaimedDelivery d, DeliveryAttempt attempt)
     {
+        // The event payload is only built when an endpoint can receive it (the fan-out would discard it otherwise).
+        string? type = WebhookEventFactory.EventTypeFor(attempt.Outcome);
+        if (type is null || !_s.Storage.Webhooks.MayHaveSubscribers(d.TenantId, type))
+        {
+            return attempt;
+        }
+
         var draft = WebhookEventFactory.ForAttempt(d, attempt);
         return draft is null ? attempt : Clone(attempt, [draft]);
     }
@@ -1150,7 +1215,8 @@ public sealed class DeliveryProcessor
     // ---------------------------------------------------------------- recording
 
     /// <summary>Storing results is retried a few times: the message may already be sent, so losing the result would send it twice.</summary>
-    private async Task RecordWithRetryAsync(List<Result> results)
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
+    private async ValueTask RecordWithRetryAsync(List<Result> results)
     {
         TimeSpan[] waits = [TimeSpan.FromMilliseconds(250), TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(3)];
         for (int attempt = 0; ; attempt++)
@@ -1168,25 +1234,47 @@ public sealed class DeliveryProcessor
         }
     }
 
-    private async Task RecordAsync(List<Result> results, CancellationToken ct)
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
+    private async ValueTask RecordAsync(List<Result> results, CancellationToken ct)
     {
         foreach (var r in results)
         {
-            DeliveryMetrics.Attempts.Add(1, new KeyValuePair<string, object?>("outcome", r.Attempt.Outcome.ToString().ToLowerInvariant()));
+            DeliveryMetrics.Attempts.Add(1, DeliveryMetrics.OutcomeTag(r.Attempt.Outcome));
         }
 
-        await Task.WhenAll(results.Select(r => _s.Storage.Deliveries.RecordAttemptAsync(r.Attempt, ct).AsTask())).ConfigureAwait(false);
+        if (results.Count == 1)
+        {
+            await _s.Storage.Deliveries.RecordAttemptAsync(results[0].Attempt, ct).ConfigureAwait(false);
+            return;
+        }
+
+        var recording = new Task[results.Count];
+        for (int i = 0; i < recording.Length; i++)
+        {
+            recording[i] = _s.Storage.Deliveries.RecordAttemptAsync(results[i].Attempt, ct).AsTask();
+        }
+
+        await Task.WhenAll(recording).ConfigureAwait(false);
     }
 
-    private async Task ReportBouncesAsync(List<Result> results, CancellationToken ct)
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
+    private async ValueTask ReportBouncesAsync(List<Result> results, CancellationToken ct)
     {
         if (_dsn is null)
         {
             return;
         }
 
-        var failed = results.Where(r => r.Attempt.Outcome is DeliveryOutcome.Failed or DeliveryOutcome.Expired).ToList();
-        if (failed.Count == 0)
+        List<Result>? failed = null;
+        foreach (var r in results)
+        {
+            if (r.Attempt.Outcome is DeliveryOutcome.Failed or DeliveryOutcome.Expired)
+            {
+                (failed ??= []).Add(r);
+            }
+        }
+
+        if (failed is null)
         {
             return;
         }

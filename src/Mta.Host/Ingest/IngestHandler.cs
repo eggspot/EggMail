@@ -25,6 +25,7 @@ public sealed class IngestHandler : ISmtpServerHandler
     private sealed class State
     {
         public Tenant Tenant { get; init; } = null!;
+        public string RemoteAddress { get; init; } = "";   // the same for every message of the session: formatted once
         public int Recipients;
     }
 
@@ -91,7 +92,7 @@ public sealed class IngestHandler : ISmtpServerHandler
         }
 
         _throttle.RecordSuccess(ip, userKey);
-        session.HandlerState = new State { Tenant = tenant };
+        session.HandlerState = new State { Tenant = tenant, RemoteAddress = ip };
         return SmtpAuthResult.Succeeded(credential!.UserName);
     }
 
@@ -133,6 +134,7 @@ public sealed class IngestHandler : ISmtpServerHandler
         return ValueTask.FromResult(SmtpReplies.RecipientOk);
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<SmtpReply> OnMessageAsync(SmtpMessage message, CancellationToken ct)
     {
         try
@@ -152,6 +154,7 @@ public sealed class IngestHandler : ISmtpServerHandler
         }
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<SmtpReply> HandleSubmissionAsync(SmtpMessage message, CancellationToken ct)
     {
         if (message.Session.HandlerState is not State state)
@@ -165,9 +168,10 @@ public sealed class IngestHandler : ISmtpServerHandler
             Source = MessageSource.Smtp,
             EnvelopeFrom = message.Sender,
             Recipients = message.Recipients,
-            Message = message.ToArray(),
+            // The message memory is valid for the duration of this call, which is all the submission needs (it makes its own copy of the stored message).
+            Message = message.Body.IsSingleSegment ? message.Body.First : message.ToArray(),
             ReceivedHeader = message.ReceivedHeader,
-            RemoteAddress = message.Session.RemoteEndPoint.Address.ToString(),
+            RemoteAddress = state.RemoteAddress,
             Authenticated = message.Session.AuthenticatedUser,
         }, ct).ConfigureAwait(false);
 
@@ -176,7 +180,11 @@ public sealed class IngestHandler : ISmtpServerHandler
             case SubmissionStatus.Accepted:
             case SubmissionStatus.Duplicate:
                 _onAccepted?.Invoke();
-                return SmtpReply.Create(250, "2.0.0", "Queued as " + Ids.ToCompact(result.MessageId));
+                return SmtpReply.Create(250, "2.0.0", string.Create(10 + 32, result.MessageId, static (span, id) =>
+                {
+                    "Queued as ".CopyTo(span);
+                    id.TryFormat(span[10..], out _, "N");
+                }));
             case SubmissionStatus.Rejected:
                 return SmtpReply.Create(result.Rejection!.SmtpCode, result.Rejection.EnhancedCode, result.Rejection.Message);
             case SubmissionStatus.TooLarge:

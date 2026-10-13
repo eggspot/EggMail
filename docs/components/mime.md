@@ -17,9 +17,10 @@ All input is hostile. Every parser is bounded by `MimeLimits`, runs in time line
 | Tree | `MimeMessage.Parse` -> `MimePart` (headers, content type, lazy `Body`, `Children`, `DecodeBodyTo`, `GetDecodedBytes`, `GetDecodedLength`, `GetText`) |
 | Transfer coding | `Base64Decoder`, `QuotedPrintableDecoder` (streaming, lenient), `BodyDecoder`, `TransferEncoder` (base64, quoted-printable, choice) |
 | 8BITMIME downgrade | `EightBitDowngrader.Downgrade` -> `EightBitDowngradeResult` (`NotNeeded`, `Downgraded`, `Impossible` + reason) |
-| History extraction | `MessageContentExtractor.Extract` -> `ExtractedContent`, `AttachmentInfo` |
+| History extraction | `MessageContentExtractor.Extract(bytes)` or `Extract(MimeMessage)` (on an already parsed message, with the limits it was parsed with) -> `ExtractedContent`, `AttachmentInfo` |
+| Sender check | `AddressList.GetCommonDomain(header, limits, out domain)` and `AddressList.GetCommonDomain(out domain)` -> `CommonDomainResult` (`NoValidMailbox`, `Single`, `MultipleDomains`); a single plain address is answered from the header bytes, anything else by the full parser (same result, tested differentially) |
 | Building | `MessageBuilder`, `MessageBuilderOptions`, `BuilderAttachment`, `HeaderPolicy`, `BuiltMessage`, `HeaderFolder`, `HeaderValidator` |
-| Editing raw bytes | `MessageHeaderEditor` (prepend, append, remove, replace, raw fields), `LineEndings.ToCrlf`, `MessageInspector` (`Inspect`, `HasUtf8Headers`, `HasEightBitBody`, `ContainsBareLf`, `ContainsBareCr`) |
+| Editing raw bytes | `MessageHeaderEditor` (prepend, append, remove, replace, raw fields, `PrependRawWithoutCopy` to reference a field instead of copying it), `LineEndings.ToCrlf`, `MessageInspector` (`Inspect`, `HasUtf8Headers`, `HasEightBitBody`, `ContainsBareLf`, `ContainsBareCr`) |
 | Receive checks | `MessageValidator.Validate` -> `MessageValidationResult` (`MessageIssue`, `MessageIssueCode`, `IssueSeverity`) |
 
 ### How other components use it
@@ -58,7 +59,7 @@ All input is hostile. Every parser is bounded by `MimeLimits`, runs in time line
 | `MaxAddresses` | 1000 | `TooManyAddresses` |
 | `MaxBoundaryLength` | 200 | treated as a missing boundary |
 
-Worst-case materialized memory of a parse is bounded by the limits: a header record is 40 bytes, so at most `MaxParts` x `MaxHeaderCount` x 40 B = about 40 MB for the defaults, regardless of input size.
+Worst-case materialized memory of a parse is bounded by the limits: a header record is 32 bytes, so at most `MaxParts` x `MaxHeaderCount` x 32 B = about 32 MB for the defaults, regardless of input size.
 
 `MessageContentExtractor.Extract(raw, maxBodyBytes = 256 KiB)` limits each stored body to that many UTF-8 bytes (cut on a character boundary) and sets `TextTruncated` / `HtmlTruncated`; subjects are capped at 2048 chars. Decoded text has NUL removed (PostgreSQL text cannot hold it), subject and file names have control characters replaced.
 

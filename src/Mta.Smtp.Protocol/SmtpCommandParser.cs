@@ -350,8 +350,10 @@ public static class SmtpCommandParser
             inner = inner[(colon + 1)..];
         }
 
-        string text = Encoding.UTF8.GetString(inner);
-        if (!EmailAddress.TryParse(text, options.AllowSmtpUtf8, out address))
+        // Decoded into stack memory: only the address parts that the result keeps are allocated.
+        Span<char> chars = inner.Length <= 512 ? stackalloc char[inner.Length] : new char[inner.Length];
+        int length = Encoding.UTF8.GetChars(inner, chars);
+        if (!EmailAddress.TryParse(chars[..length], options.AllowSmtpUtf8, out address))
         {
             return SmtpParseError.Syntax;
         }
