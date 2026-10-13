@@ -4,6 +4,14 @@ using Mta.Storage.Portability;
 
 namespace Mta.Storage.Portability.Tests;
 
+/// <summary>Runs alone: the memory-bounds test measures the whole process's heap, which other test classes running in parallel would inflate.</summary>
+[CollectionDefinition(Name, DisableParallelization = true)]
+public sealed class ExclusiveHeapCollection
+{
+    public const string Name = "exclusive-heap";
+}
+
+[Collection(ExclusiveHeapCollection.Name)]
 public class BundleTests : IDisposable
 {
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "eggmail-bundle-" + Guid.NewGuid().ToString("N"));
@@ -143,7 +151,7 @@ public class BundleTests : IDisposable
         long n = 0;
         await foreach (var _ in reader.ReadNdjsonAsync<Row>("history/events.ndjson", default)) { n++; }
         Assert.Equal(100_000, n);
-        Assert.True(GC.GetTotalMemory(false) - before < 50_000_000);
+        Assert.True(GC.GetTotalMemory(true) - before < 50_000_000);
         Assert.True((await reader.VerifyAsync(default)).Ok);
     }
 
