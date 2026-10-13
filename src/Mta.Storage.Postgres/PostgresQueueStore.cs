@@ -71,7 +71,7 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
                 }
 
                 return await AcceptCoreAsync(message, now, day, writeHistory, content, storeContent, subject, eventId, cancellationToken).ConfigureAwait(false);
-            }).ConfigureAwait(false);
+            }, () => writeHistory ? day : null, cancellationToken).ConfigureAwait(false);
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrors.UniqueViolation)
         {
@@ -90,8 +90,12 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
         return result;
     }
 
-    /// <summary>A write that hits a missing partition (dropped by another replica, or created too late) creates it and tries once more.</summary>
-    private async Task<T> WithPartitionRetryAsync<T>(Func<Task<T>> body)
+    /// <summary>
+    /// A write that hits a missing partition (dropped by another replica, or never created for this day) creates it and tries
+    /// once more. The failed attempt has already given its connection and transaction back, so the partition is created while
+    /// this caller holds no pooled connection: nothing here ever waits for a second connection while holding the first.
+    /// </summary>
+    private async Task<T> WithPartitionRetryAsync<T>(Func<Task<T>> body, Func<int?> missingDay, CancellationToken ct)
     {
         try
         {
@@ -100,6 +104,11 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
         catch (PostgresException ex) when (ex.SqlState == PostgresErrors.CheckViolation && ex.MessageText.Contains("no partition", StringComparison.Ordinal))
         {
             rt.Partitions.ForgetAll();
+            if (missingDay() is { } day)
+            {
+                await rt.Partitions.EnsureDayAsync(day, force: true, ct).ConfigureAwait(false);
+            }
+
             return await body().ConfigureAwait(false);
         }
     }
@@ -299,7 +308,8 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
         try
         {
             WebhookTarget[] targets = attempt.WebhookEvents.Count == 0 ? [] : await rt.GetWebhookTargetsAsync(cancellationToken).ConfigureAwait(false);
-            result = await WithPartitionRetryAsync(() => RecordAttemptCoreAsync(attempt, targets, cancellationToken)).ConfigureAwait(false);
+            int? historyDay = null;
+            result = await WithPartitionRetryAsync(() => RecordAttemptCoreAsync(attempt, targets, d => historyDay = d, cancellationToken), () => historyDay, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
         {
@@ -325,7 +335,7 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
         }
     }
 
-    private async Task<AttemptResult> RecordAttemptCoreAsync(DeliveryAttempt a, WebhookTarget[] targets, CancellationToken ct)
+    private async Task<AttemptResult> RecordAttemptCoreAsync(DeliveryAttempt a, WebhookTarget[] targets, Action<int?> historyDayWritten, CancellationToken ct)
     {
         DateTimeOffset at = StorageTime.Normalize(a.At);
         await using NpgsqlConnection connection = await rt.Data.OpenConnectionAsync(ct).ConfigureAwait(false);
@@ -350,10 +360,10 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
         int day = StorageTime.DayNumber(row.MessageId);
         DateTimeOffset now = rt.Clock.UtcNow;
         bool writeHistory = rt.IsFull && plan.Events.Count > 0 && history.MetadataWritable(day, now);
-        if (writeHistory)
-        {
-            await rt.Partitions.EnsureDayAsync(day, force: false, ct).ConfigureAwait(false);
-        }
+        // The day's partitions were created when the message was accepted; if they are not there (another replica dropped them, or the
+        // message was accepted before history was on) the first write fails with "no partition", the transaction is rolled back and
+        // WithPartitionRetryAsync creates them with no connection held. Nothing is created here, inside the transaction.
+        historyDayWritten(writeHistory ? day : null);
 
         // 2. The spool counter first (RETURNING is read below), then suppression, the queue row and the webhook fan-out: one round trip.
         await using var batch = new NpgsqlBatch(connection, tx);
