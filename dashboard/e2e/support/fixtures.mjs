@@ -75,10 +75,16 @@ export const test = base.extend({
     await use(tenant);
   },
 
+  // Console messages a test expects on purpose (RegExp list): for example the browser reporting that it blocked a hostile message's
+  // remote image. Everything else still fails the test.
+  allowProblems: async ({}, use) => {
+    await use([]);
+  },
+
   // Fails a test on page errors, console errors and any Content-Security-Policy violation. Failed requests that a test provokes
   // on purpose (401, 403, 404, 409, 429 ...) show up as "Failed to load resource" console lines and are not counted.
   problems: [
-    async ({ page }, use) => {
+    async ({ page, allowProblems }, use) => {
       const problems = [];
       page.on('pageerror', (e) => problems.push(`pageerror: ${e.message}`));
       page.on('console', (m) => {
@@ -95,7 +101,8 @@ export const test = base.extend({
       });
       await use(problems);
       const violations = await page.evaluate(() => window.__cspViolations ?? []).catch(() => []);
-      expect([...problems, ...violations.map((v) => `CSP violation: ${v}`)], 'console errors, page errors and CSP violations').toEqual([]);
+      const unexpected = [...problems, ...violations.map((v) => `CSP violation: ${v}`)].filter((p) => !allowProblems.some((re) => re.test(p)));
+      expect(unexpected, 'console errors, page errors and CSP violations').toEqual([]);
     },
     { auto: true },
   ],

@@ -79,7 +79,8 @@ test.describe('webhooks', () => {
     await page.getByRole('dialog').getByRole('button', { name: 'Replay delivery' }).click();
     await expect(page.getByText('Delivery re-queued.')).toBeVisible();
     await expect.poll(() => stack.webhooks.requests.length, { timeout: 30_000 }).toBeGreaterThan(before);
-    await expect(attemptRows.filter({ hasText: '200' })).toHaveCount(2, { timeout: 30_000 });
+    // The replay is a new attempt in the log (the earlier failed delivery may also be retried meanwhile and succeed now).
+    await expect.poll(() => attemptRows.filter({ hasText: '200' }).count(), { timeout: 30_000 }).toBeGreaterThanOrEqual(2);
   });
 
   test('an endpoint is edited, disabled, re-enabled and deleted; test events to a disabled endpoint are refused', async ({ adminPage: page, admin, tenant, stack }) => {

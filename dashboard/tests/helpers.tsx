@@ -95,6 +95,7 @@ export function makeApp(over: Partial<AppContextValue> & { role?: Role; mode?: H
     me,
     capabilities: makeCapabilities({ mode }),
     offlineError: null,
+    signInNotice: null,
     tenants: [],
     tenantId: role === 'admin' ? 't_1' : null,
     setTenantId: () => {},

@@ -3,6 +3,7 @@ import type { ComponentChildren } from 'preact';
 import { useCallback, useContext, useEffect, useMemo, useState } from 'preact/hooks';
 import { api } from '../api/endpoints';
 import { ApiError, setCsrfToken, setTenantId as setClientTenant, setUnauthorizedHandler } from '../api/client';
+import { friendlyMessage } from '../api/errorMessages';
 import type { Capabilities, HistoryMode, Me, Tenant } from '../api/types';
 import { safeGet, safeSet } from '../lib/hooks';
 
@@ -14,6 +15,8 @@ export interface AppContextValue {
   capabilities: Capabilities | null;
   /** Set when the server answered 503 not_ready or could not be reached. */
   offlineError: ApiError | null;
+  /** Why a session that exists was not accepted (for example a suspended tenant); shown on the sign-in page. */
+  signInNotice: string | null;
   /** Admin only: tenants to choose from and the one currently acted on. */
   tenants: Tenant[];
   tenantId: string | null;
@@ -34,6 +37,7 @@ const defaultValue: AppContextValue = {
   me: null,
   capabilities: null,
   offlineError: null,
+  signInNotice: null,
   tenants: [],
   tenantId: null,
   setTenantId: () => {},
@@ -61,6 +65,7 @@ export function AppProvider({ children }: { children: ComponentChildren }) {
   const [me, setMe] = useState<Me | null>(null);
   const [capabilities, setCapabilities] = useState<Capabilities | null>(null);
   const [offlineError, setOfflineError] = useState<ApiError | null>(null);
+  const [signInNotice, setSignInNotice] = useState<string | null>(null);
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [tenantId, setTenantIdState] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
@@ -148,6 +153,8 @@ export function AppProvider({ children }: { children: ComponentChildren }) {
           setOfflineError(e);
           setStatus('offline');
         } else {
+          // A valid session of a suspended tenant is answered 403: say so instead of showing a bare sign-in form.
+          if (e instanceof ApiError && e.code === 'tenant_disabled') setSignInNotice(friendlyMessage(e));
           setStatus('anonymous');
         }
       }
@@ -169,6 +176,7 @@ export function AppProvider({ children }: { children: ComponentChildren }) {
     async (user: string, password: string) => {
       const who = await api.login(user, password);
       await loadTenants(who);
+      setSignInNotice(null);
       setMe(who);
       setStatus('authenticated');
       void refreshCapabilities();
@@ -193,6 +201,7 @@ export function AppProvider({ children }: { children: ComponentChildren }) {
       me,
       capabilities,
       offlineError,
+      signInNotice,
       tenants,
       tenantId,
       setTenantId: applyTenant,
@@ -204,7 +213,7 @@ export function AppProvider({ children }: { children: ComponentChildren }) {
       refreshCapabilities,
       refreshTenants,
     }),
-    [status, me, capabilities, offlineError, tenants, tenantId, applyTenant, login, logout, refreshCapabilities, refreshTenants],
+    [status, me, capabilities, offlineError, signInNotice, tenants, tenantId, applyTenant, login, logout, refreshCapabilities, refreshTenants],
   );
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
