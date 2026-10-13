@@ -27,6 +27,9 @@ public sealed class TlsReportJournal
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
 
+    /// <summary>Counters of a day older than this are dropped instead of reported: RFC 8460 reports are about the last 24 hours, and a report weeks late is of no use.</summary>
+    public const int MaxReportAgeDays = 7;
+
     private static readonly int UnixEpochDayNumber = DateOnly.FromDateTime(DateTime.UnixEpoch).DayNumber;
 
     private readonly TlsRptCollector _collector;
@@ -90,8 +93,15 @@ public sealed class TlsReportJournal
     {
         int today = DayNumber(DateOnly.FromDateTime(_clock.UtcNow.UtcDateTime));
         var rows = await _store.GetTlsRptBucketsAsync(today, maxBuckets, cancellationToken).ConfigureAwait(false);
+        var stale = rows.Where(r => r.Day < today - MaxReportAgeDays).Select(r => r.Id).ToList();
+        if (stale.Count > 0)
+        {
+            _log.Write(MtaLogLevel.Information, "tlsrpt", $"dropping {stale.Count} TLS-RPT counter row(s) older than {MaxReportAgeDays} days");
+            await _store.ReplaceTlsRptBucketsAsync(stale, null, cancellationToken).ConfigureAwait(false);
+        }
+
         var reports = new List<PendingTlsReport>();
-        foreach (var group in rows.GroupBy(r => (r.Day, r.PolicyDomain)))
+        foreach (var group in rows.Where(r => r.Day >= today - MaxReportAgeDays).GroupBy(r => (r.Day, r.PolicyDomain)))
         {
             var pieces = new List<TlsRptDomainReportData>();
             var readable = new List<Guid>();

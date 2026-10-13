@@ -252,6 +252,23 @@ public class TlsReportSenderTests
     }
 
     [Fact]
+    public async Task Counters_of_a_day_more_than_a_week_old_are_dropped_not_reported()
+    {
+        var clock = new FakeClock(new DateTimeOffset(2026, 10, 11, 12, 0, 0, TimeSpan.Zero));
+        var dns = new StaticDnsResolver().AddTxt("_smtp._tls.example.net", "v=TLSRPTv1; rua=mailto:tlsrpt@example.net");
+        await using var storage = await NewStorageAsync(clock);
+        using var https = new TlsRptHttpsSender();
+        var p = new Process(clock, storage, dns, https);
+        p.Collector.RecordSuccess("example.net", Policy, "mx.example.net");
+        await p.Journal.FlushAsync(default);
+
+        clock.Now = clock.Now.AddDays(TlsReportJournal.MaxReportAgeDays + 1);
+        Assert.Equal(0, await p.Sender.RunOnceAsync(default));
+        Assert.Empty(await storage.Config.GetTlsRptBucketsAsync(int.MaxValue, 10, default));
+        Assert.Empty(await storage.Deliveries.ClaimAsync("t", 10, clock.Now.AddSeconds(1), TimeSpan.FromMinutes(1), default));
+    }
+
+    [Fact]
     public async Task An_unreadable_counter_row_is_dropped_without_blocking_the_other_reports()
     {
         var clock = new FakeClock(new DateTimeOffset(2026, 10, 11, 12, 0, 0, TimeSpan.Zero));
