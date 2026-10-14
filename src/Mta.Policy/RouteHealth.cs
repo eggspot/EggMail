@@ -468,7 +468,8 @@ public sealed class RouteHealth
 
     private void NoteOpened(in RouteHealthKey key, Entry entry)
     {
-        if (_sharing && (_opened.Count < MaxShared || _opened.ContainsKey(key)))
+        // Only MX hosts are passed on: the others would not adopt a route anyway (ApplyPeerOpen).
+        if (_sharing && key.Kind == RouteHealthKind.MxHost && (_opened.Count < MaxShared || _opened.ContainsKey(key)))
         {
             _opened[key] = (entry.RetryAtTicks, entry.CooldownTicks);
         }
