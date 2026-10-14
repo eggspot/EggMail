@@ -291,6 +291,12 @@ public interface IConfigStore : IRuntimeStateStore
     ValueTask<IReadOnlyList<AcmeRenewalRecord>> GetAcmeRenewalsAsync(CancellationToken ct);
     ValueTask UpsertAcmeRenewalAsync(AcmeRenewalRecord renewal, CancellationToken ct);
 
+    /// <summary>
+    /// Sets only <see cref="AcmeRenewalRecord.AriJson"/> of a certificate's renewal row and touches nothing else, so a replica that stores what the CA
+    /// advised cannot overwrite the status, failure count or back-off another replica wrote meanwhile. A missing row is created with status <c>issued</c>.
+    /// </summary>
+    ValueTask SetAcmeRenewalAdviceAsync(string certificateName, string? ariJson, CancellationToken ct);
+
     // Leases (renewal lock, singleton jobs) and idempotency
     ValueTask<LeaseRecord?> TryAcquireLeaseAsync(string name, string owner, TimeSpan duration, DateTimeOffset now, CancellationToken ct);
     ValueTask<bool> RenewLeaseAsync(string name, string owner, long fencingToken, TimeSpan duration, DateTimeOffset now, CancellationToken ct);

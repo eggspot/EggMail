@@ -151,6 +151,10 @@ internal static class Cli
                 {
                     OwnerConnectionString = options.Postgres.OwnerConnectionString,
                     RuntimeConnectionString = options.Postgres.RuntimeConnectionString,
+                    ReadOnlyConnectionString = options.Postgres.ReadOnlyConnectionString,
+                    ReadOnlyStatementTimeoutSeconds = options.Postgres.ReadOnlyStatementTimeoutSeconds,
+                    ReadOnlyIdleInTransactionTimeoutSeconds = options.Postgres.ReadOnlyIdleInTransactionTimeoutSeconds,
+                    ReadOnlyMaxPoolSize = options.Postgres.ReadOnlyMaxPoolSize,
                     AutoMigrate = true,
                     MaxPoolSize = options.Postgres.MaxPoolSize,
                     PartitionsAheadDays = options.Postgres.PartitionsAheadDays,
@@ -243,6 +247,7 @@ internal static class Cli
         if (gate.Mode == StartupMode.Normal || gate.Mode == StartupMode.Draining)
         {
             builder.Services.AddHostedService<RuntimeStateService>();   // before the services that produce the state: it stops after them
+            builder.Services.AddHostedService<ReplicaCoordinationService>();
             builder.Services.AddHostedService<DeliveryService>();
             builder.Services.AddHostedService<WebhookService>();
             builder.Services.AddHostedService<CertificateService>();

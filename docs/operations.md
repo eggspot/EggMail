@@ -12,7 +12,7 @@ Tested deployment files are in `deploy/` (the release workflow tests them agains
 | Docker Compose, PostgreSQL | `deploy/compose/compose.postgres.yaml` | EggMail plus `postgres:17`; one database role for both duties (use a managed PostgreSQL with an owner and a runtime role in production) |
 | DANE: local validating resolver | `deploy/compose/compose.unbound.yaml` (add with a second `-f`), `deploy/kubernetes/components/unbound` | Unbound sidecar, sets `Dns:Servers`, `Dns:RequestDnssec` and `Dns:TrustAuthenticatedData` together |
 | Kubernetes, SQLite | `deploy/kubernetes/sqlite` | StatefulSet (one replica, ReadWriteOnce claim), `fsGroup` for the volume, startup/liveness (`/healthz`) and readiness (`/readyz`) probes |
-| Kubernetes, PostgreSQL | `deploy/kubernetes/postgres` | Deployment (raise `replicas` for availability), connection strings from a Secret |
+| Kubernetes, PostgreSQL | `deploy/kubernetes/postgres` | Deployment (raise `replicas` for availability; read [Running more than one replica](#running-more-than-one-replica) first), connection strings from a Secret |
 | Both Kubernetes variants | `deploy/kubernetes/base` | Services (SMTP as a LoadBalancer with `externalTrafficPolicy: Local` so client addresses survive), NetworkPolicy of design 7.1, ConfigMap |
 
 Things that are easy to get wrong:
@@ -48,6 +48,10 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | `Sqlite:RetentionDeletePause` | `00:00:00.020` | Pause between those batches so intake stays responsive |
 | `Storage:Postgres:OwnerConnectionString` | none | Owner role: runs migrations and partition DDL |
 | `Storage:Postgres:RuntimeConnectionString` | none | Runtime role: normal work (required for PostgreSQL). With only one of the two set it serves both roles and health warns |
+| `Storage:Postgres:ReadOnlyConnectionString` | none | Optional read-only role for the read queries of the dashboard and the API (message search, detail, events, statistics); must name a `Username` and point at the primary; the migration grants it `SELECT` on the history and statistics tables only. Without it those queries use the runtime role |
+| `Storage:Postgres:ReadOnlyStatementTimeoutSeconds` | 5 | `statement_timeout` of the read-only connections; a query that runs longer is cancelled and answered `503 query_too_slow` |
+| `Storage:Postgres:ReadOnlyIdleInTransactionTimeoutSeconds` | 10 | `idle_in_transaction_session_timeout` of the read-only connections |
+| `Storage:Postgres:ReadOnlyMaxPoolSize` | 8 | Connection pool of the read-only role |
 | `Storage:Postgres:MaxPoolSize` | 32 | Connection pool of the runtime role (the owner role has a small pool of its own) |
 | `Storage:Postgres:PartitionsAheadDays` | 7 | Day partitions of the history tables created ahead by maintenance |
 | `Storage:Postgres:StatsFlushInterval` | `00:00:10` | As `Sqlite:StatsFlushInterval` |
@@ -137,7 +141,8 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | `Acme:CloudflareApiToken` | none | API token with DNS edit rights (prefer the file form) |
 | `Acme:CloudflareApiTokenFile` | none | File holding that token |
 | `Acme:PropagationDelay` | `00:00:30` | Wait after publishing the challenge record |
-| `Acme:RenewAtRemainingFraction` | 0.3333 | Renew when this fraction of the lifetime remains (between 0 and 1) |
+| `Acme:RenewAtRemainingFraction` | 0.3333 | Renew when this fraction of the lifetime remains (between 0 and 1); used when the CA gives no renewal information |
+| `Acme:UseRenewalInfo` | true | Ask the CA when to renew (ACME Renewal Information, RFC 9773) and follow its suggested window; falls back to the lifetime rule when the CA has none or fails |
 | `Acme:CheckInterval` | `01:00:00` | How often the renewal service looks |
 | `Secrets:KeyProtection` | `None` | `Certificate` (with `Secrets:CertificatePath`) or `Kms` (see "Protecting the key ring" below) for production. `None` stores the key ring unprotected and logs a warning |
 | `Secrets:CertificatePath` | none | PFX that protects the Data Protection key ring (deployment configuration, never in the database) |
@@ -233,7 +238,7 @@ Certificates live in the database and are served by SMTP (STARTTLS and implicit 
 
 **Built-in ACME** (`Acme:Enabled=true`) orders one certificate for `Acme:Domains` (the SMTP and dashboard host names) from the CA at `Acme:DirectoryUrl`, using the **DNS-01** challenge only. DNS-01 needs no inbound port 80 or 443; the only supported DNS provider is Cloudflare, with a token that has Zone:Read and DNS:Edit for the zone (`Acme:CloudflareApiToken` or `Acme:CloudflareApiTokenFile`). Wildcard names work. The ACME account is created on the first order and kept (encrypted) in the database for that directory; it is part of a backend switch bundle. Email addresses given to the CA (`Acme:Email`) get no expiry notices from Let's Encrypt any more, so monitor expiry yourself.
 
-Renewal runs hourly and renews when a third of the lifetime is left. A failed attempt (DNS provider error, CA error, validation failed, CA unreachable) is recorded and retried after 10 minutes, then 20, 40, … up to 6 hours; the certificate in use keeps being served. Status, failure count, last error and next attempt are in the admin API (`GET /api/v1/admin/certificates/acme`). With several replicas only one orders at a time (a lease row); the others pick the new certificate up from the database within `Tls:PollInterval` without a restart.
+Renewal is checked hourly (`Acme:CheckInterval`). When the CA supports ACME Renewal Information (ARI; Let's Encrypt does) EggMail asks it when to renew and renews at a random time inside the window it suggests (when that time falls before the next hourly check), and never later than when a sixth of the lifetime is left. A window that has passed, for example after a revocation or an incident, means renew at the next check, but a certificate younger than a day (or a twentieth of its lifetime if longer; 4.5 days for 90 days) is never renewed on advice alone, so a CA that keeps saying "now" cannot make EggMail order at every check. The CA is asked about once per its `Retry-After` (between a minute and a day, 6 hours without one). After a server error or a network failure it is asked again after 5 minutes, doubling up to 6 hours; after any other error after 6 hours. A CA without ARI (asked again daily), an ARI request that fails, or `Acme:UseRenewalInfo=false` falls back to renewing when a third of the lifetime is left. The renewal order names the certificate it replaces. The last advice (window, chosen time, errors, failure count) is stored in the certificate's renewal row (`ari_json`) and logged; it is not shown in the API yet. A failed order, a DNS provider error, validation failure or an unreachable CA is recorded and retried after 10 minutes, then 20, 40, … up to 6 hours; the certificate in use keeps being served. Status, failure count, last error and next attempt are in the admin API (`GET /api/v1/admin/certificates/acme`). With several replicas only one orders at a time (a lease row); the others pick the new certificate up from the database within `Tls:PollInterval` without a restart.
 
 **Use the staging CA first.** Production Let's Encrypt rate-limits failed validations and new accounts. Set `Acme:DirectoryUrl=https://acme-staging-v02.api.letsencrypt.org/directory`, check that a certificate is issued (it is not trusted by clients), then switch to `https://acme-v02.api.letsencrypt.org/directory`. Accounts are per directory, so switching the directory registers a second account; the existing certificate is not re-ordered until it is due or you request one (`POST /api/v1/admin/certificates/acme`).
 
@@ -246,6 +251,19 @@ Checklist for the first real-CA run: a domain whose zone is in Cloudflare and a 
 Backups run while the server runs (`VACUUM INTO` per file) every `Backup:IntervalHours` into `<data>/backups/eggmail-backup-<UTC>/`; the newest `Backup:Keep` are kept. Put `Backup:Directory` on another disk when possible and copy backups off the host.
 
 To restore: stop EggMail, copy the files of one backup directory over the data directory (replace `config.db`, `queue.db`, `stats.db`, `history.db` together), start. The state returns to the moment of the backup; mail accepted since is lost. If a file is found corrupt at start (possible after power loss with `Sqlite:SyncMode=Off`) it is moved aside (quarantined), the instance starts with a fresh file, and a warning is shown. If `config.db` is quarantined the instance starts without tenants and keys: restore it from a backup. PostgreSQL: use `pg_dump` or your platform's backups.
+
+## PostgreSQL roles
+
+Three logins are supported (design section 4.3): the **owner** (migrations and partition DDL: `Storage:Postgres:OwnerConnectionString`), the **runtime** role (everything the application does: `Storage:Postgres:RuntimeConnectionString`), and an optional **read-only** role for the read queries of the dashboard and the API. To use the read-only role create it once, then restart (the start applies the grants, or run `mta migrate-db` when `Mail:Database:Migrate=Never`):
+
+```sql
+CREATE ROLE eggmail_ro LOGIN PASSWORD '...';
+ALTER ROLE eggmail_ro CONNECTION LIMIT 8;                  -- matches Storage:Postgres:ReadOnlyMaxPoolSize
+ALTER ROLE eggmail_ro SET statement_timeout = '5s';        -- optional: the application sets the same timeouts itself
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;                -- PostgreSQL before 15 lets everyone create tables in public (15 and later do not)
+```
+
+and set `Storage:Postgres:ReadOnlyConnectionString` to a connection string for it, pointing at the primary (not a replica: reads would lag the writes). The connections are also started `read-only` (`default_transaction_read_only=on`). The role can read the history and statistics tables and nothing else: no write, no secrets, no queue. If it cannot, or the password is wrong or the role does not exist, the start stops with the reason; later, an unusable or too privileged role shows as a health warning without taking the instance out of service. A query that runs past the timeout answers `503 query_too_slow`. Behind a pooler in transaction mode let the `options` startup parameter through (PgBouncer: `ignore_startup_parameters = options`).
 
 ## Monitoring
 
@@ -300,7 +318,7 @@ To restore: stop EggMail, copy the files of one backup directory over the data d
 | `mta_backup_runs_total` | counter | `outcome` (`success`, `failed`) | Scheduled backup runs |
 | `mta_backup_last_success_timestamp_seconds` | gauge | none | Unix time of the newest good backup (also after a restart, from the backups on disk); absent until there is one |
 
-PostgreSQL command latency and pool state come from the Npgsql driver's own meter, exported unchanged next to the `mta_` metrics. The pool label (`db_client_connection_pool_name`) is `eggmail-runtime` or `eggmail-owner`; saturation is `used / max` of `db_client_connection_count` and `db_client_connection_max`.
+PostgreSQL command latency and pool state come from the Npgsql driver's own meter, exported unchanged next to the `mta_` metrics. The pool label (`db_client_connection_pool_name`) is `eggmail-runtime`, `eggmail-owner` or, with several replicas, `eggmail-coordination` (two connections); saturation is `used / max` of `db_client_connection_count` and `db_client_connection_max`.
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
@@ -381,7 +399,32 @@ Take a backup, pull the new image, restart. Schema changes run at start (SQLite:
 
 ## State kept across restarts
 
-Four things the server counts or learns while running are written to the database in the background, so a restart (and, on PostgreSQL, another replica) sees them: the last DNS check result of every record of a domain, the hourly and daily sending counters behind the sending caps (`Sending:GlobalPerHour` and the others) and the warm-up, the TLS-RPT counters, and the reports that could not be delivered yet. They are flushed every 10 seconds (counters) and every minute (TLS-RPT) and when the process stops, so a graceful restart loses nothing and a crash loses at most that last interval (the caps may then be overshot by what was sent in those seconds). With several replicas on one PostgreSQL database the caps are shared with a lag of one flush interval and each daily TLS report is sent once. Global settings changed in the dashboard (`/admin/settings`) are stored at once and applied at the next start.
+Four things the server counts or learns while running are written to the database in the background, so a restart (and, on PostgreSQL, another replica) sees them: the last DNS check result of every record of a domain, the hourly and daily sending counters behind the sending caps (`Sending:GlobalPerHour` and the others) and the warm-up, the TLS-RPT counters, and the reports that could not be delivered yet. They are flushed every 10 seconds (counters) and every minute (TLS-RPT) and when the process stops, so a graceful restart loses nothing and a crash loses at most that last interval (the caps may then be overshot by what was sent in those seconds). With several replicas on one PostgreSQL database the caps are shared with a lag of one flush interval and each daily TLS report is sent once ([Running more than one replica](#running-more-than-one-replica)). Global settings changed in the dashboard (`/admin/settings`) are stored at once and applied at the next start.
+
+## Running more than one replica
+
+Only with the PostgreSQL backend (SQLite is one process on one volume, by design). Point every replica at the same database with the same `Secrets` configuration; each replica generates a unique name for itself at start. Nothing needs to be configured for the replicas to find each other: they beat in the database every 5 seconds.
+
+What is shared between replicas, and what is not (decision 82):
+
+| What | With N replicas |
+|---|---|
+| Queue, history, suppressions, configuration, certificates and ACME renewal, domain verification | One copy in the database; claims use `SKIP LOCKED`, renewals and checks take leases |
+| Failed-login lockout (`SMTP AUTH` and the API/dashboard sign-in) | One budget for all replicas (10 failures per address and per user name in 15 minutes), counted in the database as keyed digests. Costs one small read per login attempt, one write per failed attempt, and a delete after a success that follows failures. If the database cannot be reached or is slow each replica counts on its own until it is back |
+| Connections and messages per minute to one destination (`Delivery:Throttle:MaxConnections`, `Delivery:Throttle:MaxMessagesPerMinute`) | The ceiling holds for all replicas together: each takes its share (a ceiling of 20 connections is 7, 7 and 6 on three replicas). A replica that joins or leaves is noticed within about 5 s (a replica that dies within 20 s); until then the sum of the shares can be above a ceiling for a few seconds. Set `Delivery:Throttle:MaxConnections` at least as high as the number of replicas, otherwise every replica still gets one |
+| A destination that throttled one replica, a mail server found down | The other replicas slow down or skip an MX host within about 5 s, for at most the base cool-down (5 minutes) and not if they connected to it in the last 2 minutes; relay routes are never opened by another replica. Each replica still probes a down server itself once its cool-down is over |
+| Sending caps and warm-up (`Sending:GlobalPerHour` and the others) | Shared through the database with a lag of one flush interval (10 s): a cap can be overshot by what the other replicas send in those seconds. Set a hard ceiling lower by that amount |
+| TLS reports | One report per domain and day, with every replica's counts |
+| Inbound connection limits (`Smtp:MaxConnections`, `MaxConnectionsPerIp`, `MaxInFlightBytes`), the API request memory budget | Per replica (they protect that process); behind a load balancer the per-address limit is per replica |
+
+Things to get right:
+
+- **Clocks.** The replica set and what replicas tell each other about destinations are timed by the database's clock, so replica clocks do not enter. Leases (renewals, domain checks, the TLS report job) and the failed-login buckets use each replica's own clock: keep them within a minute of each other (NTP).
+- **Rolling updates.** A new replica joins the set before it delivers; the old one leaves when it stops (SIGTERM; give it the 60 s grace). A replica killed without leaving is dropped by the others after 20 seconds, and in the meantime it holds a share that nobody uses.
+- **Rolling updates across a schema version.** The first new replica migrates the schema at start (`Mail:Database:Migrate=Auto`; otherwise apply `mta migrate-db` first). Replicas of the old build that are already running keep working, because the migrations are additive; but an old build that restarts after the migration refuses to start (the schema is newer than it knows), so roll forward and do not restart old replicas in between; to go back, restore the backup and start the old image ([Upgrades](#upgrades)). Builds before schema version 6 take no part in the coordination: while they run, the new replicas share the destination ceilings and the failed-login budget among themselves only, so the old ones come on top of the ceilings, and failed logins at an old replica are not counted by the new ones.
+- **A database that cannot be reached for a while.** A replica that cannot beat for 20 seconds is dropped by the others while it keeps its old share, so for that time the shares add up to more than a ceiling; it rejoins at its next successful beat. Its claims are failing too, so it sends little in that time. The coordination uses two database connections of its own (pool `eggmail-coordination`), so a busy queue does not delay the beat.
+- **A delivery that was being sent when its replica died** is picked up by another replica when its lease (`Delivery:ClaimLease`, 15 minutes) runs out and is flagged `possible_duplicate`. Lower the lease only if remote conversations are short: a delivery that takes longer than the lease is sent by two replicas, both flagged.
+- **Connections.** Keep the sum of the pool sizes of all replicas below about half of `max_connections` of the database (design section 4.2). The coordination adds a handful of tiny statements per replica every 5 seconds, on its own two connections, and one read per login attempt.
 
 ## Graceful shutdown
 

@@ -583,6 +583,26 @@ public abstract class ConfigConformance : StorageTestBase
         Assert.Equal("{\"token\":1}", web.ChallengeStateJson);
     }
 
+    [Fact]
+    public async Task Setting_the_renewal_advice_changes_nothing_else_in_the_row()
+    {
+        var failed = new AcmeRenewalRecord("web", "failed", Clock.UtcNow, Clock.UtcNow.AddMinutes(40), 3, "dns timeout", "{\"token\":1}", "{\"old\":1}");
+        await C.UpsertAcmeRenewalAsync(failed, Ct);
+
+        await C.SetAcmeRenewalAdviceAsync("web", "{\"new\":2}", Ct);
+
+        Assert.Equal(failed with { AriJson = "{\"new\":2}" }, Assert.Single(await C.GetAcmeRenewalsAsync(Ct)));
+
+        await C.SetAcmeRenewalAdviceAsync("web", null, Ct);
+        Assert.Null(Assert.Single(await C.GetAcmeRenewalsAsync(Ct)).AriJson);
+
+        // A certificate without a renewal row gets one.
+        await C.SetAcmeRenewalAdviceAsync("smtp", "{\"a\":1}", Ct);
+        var created = (await C.GetAcmeRenewalsAsync(Ct)).Single(r => r.CertificateName == "smtp");
+        Assert.Equal(("issued", 0, "{\"a\":1}"), (created.Status, created.Failures, created.AriJson));
+        Assert.Null(created.NextAttemptAt);
+    }
+
     // Leases
 
     [Fact]

@@ -54,7 +54,9 @@ public class MigrationTests : PgTestBase
 
         Assert.Empty(missing);
         Assert.Empty(mismatched);
-        List<string> extra = [.. actual.Keys.Where(k => !modelColumns.Contains(k) && !k.StartsWith("eggmail_schema_version.", StringComparison.Ordinal))];
+        // The replica coordination tables (V006) are PostgreSQL-only, ephemeral and written with raw SQL: not part of the model or of the backend switch bundle.
+        string[] outsideTheModel = ["eggmail_schema_version.", "replica_heartbeat.", "replica_signal.", "auth_failure."];
+        List<string> extra = [.. actual.Keys.Where(k => !modelColumns.Contains(k) && !outsideTheModel.Any(p => k.StartsWith(p, StringComparison.Ordinal)))];
         Assert.Empty(extra);
     }
 
