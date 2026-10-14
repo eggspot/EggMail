@@ -168,6 +168,7 @@ public class UnicodeSelfTestTests
                 new[] { "migrate-db" },
                 new[] { "migrate-storage", "preflight", "--to", "postgres" },
                 new[] { "admin", "create", "--user", "root" },
+                new[] { "secrets", "rewrap" },
             })
             {
                 var (exit, _, error) = RunMta(Invariant, [.. command, $"--Sqlite:DataDirectory={data}"]);
