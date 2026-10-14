@@ -48,6 +48,9 @@ public sealed class ApiOptions
     /// <summary>A session unused for this long ends. Default 2 hours.</summary>
     public TimeSpan SessionIdleTimeout { get; set; } = TimeSpan.FromHours(2);
 
+    /// <summary>PBKDF2 iterations for passwords the API hashes (null: <see cref="Mta.Host.Security.PasswordHasher.DefaultIterations"/>). Tests lower it; there is no configuration key.</summary>
+    internal int? PasswordHashIterations { get; set; }
+
     /// <summary>Activity (session last-seen, API key last-used) is written at most this often per session or key.</summary>
     public TimeSpan TouchInterval { get; set; } = TimeSpan.FromMinutes(1);
 

@@ -34,17 +34,17 @@ test.describe('a tenant account', () => {
 
     const nav = page.getByRole('navigation', { name: 'Main' });
     await expect(nav.getByRole('link', { name: 'Domains' })).toBeVisible();
-    for (const admin of ['Tenants', 'Server status', 'Certificates', 'Storage switch']) await expect(nav.getByRole('link', { name: admin })).toHaveCount(0);
+    for (const admin of ['Tenants', 'Users', 'Server status', 'Certificates', 'Storage switch']) await expect(nav.getByRole('link', { name: admin })).toHaveCount(0);
 
     // Typing an administrator URL gives an explanation, not data or an error banner.
-    for (const route of ['/admin/tenants', '/admin/status', '/admin/certificates', '/admin/storage']) {
+    for (const route of ['/admin/tenants', '/admin/users', '/admin/status', '/admin/certificates', '/admin/storage']) {
       await page.goto(`${stack.baseURL}${route}`);
       await expect(page.getByText('Administrators only')).toBeVisible();
     }
 
     // The server refuses the same requests on its own.
     const me = await new ApiClient(stack.baseURL).signIn(ALICE.user, ALICE.password);
-    for (const path of ['/api/v1/admin/tenants', '/api/v1/admin/status', '/api/v1/admin/settings', '/api/v1/admin/storage/switch', '/api/v1/admin/certificates']) {
+    for (const path of ['/api/v1/admin/tenants', '/api/v1/admin/users', '/api/v1/admin/status', '/api/v1/admin/settings', '/api/v1/admin/storage/switch', '/api/v1/admin/certificates']) {
       const r = await me.request('GET', path);
       expect([r.status, r.body?.code]).toEqual([403, 'forbidden']);
     }

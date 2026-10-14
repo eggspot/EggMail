@@ -45,8 +45,8 @@ async function visit(path: string) {
   );
 }
 
-const TENANT_ROUTES = ['/', '/messages', '/send', '/domains', '/webhooks', '/suppressions', '/credentials', '/statistics', '/settings'];
-const ADMIN_ROUTES = ['/admin/tenants', '/admin/status', '/admin/certificates', '/admin/storage'];
+const TENANT_ROUTES = ['/', '/messages', '/send', '/domains', '/webhooks', '/suppressions', '/credentials', '/statistics', '/settings', '/account'];
+const ADMIN_ROUTES = ['/admin/tenants', '/admin/users', '/admin/status', '/admin/certificates', '/admin/storage'];
 
 describe('dashboard against the mock API', () => {
   beforeEach(() => {

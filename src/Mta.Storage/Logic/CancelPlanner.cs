@@ -19,7 +19,7 @@ public enum CancelHold : byte
 /// </summary>
 public readonly record struct PendingDelivery(Guid DeliveryId, string Recipient, string EnvelopeFrom, int Attempt, bool PossibleDuplicate, CancelHold Hold);
 
-/// <summary>The shared decisions of <see cref="IDeliveryStore.CancelAsync"/>, so every backend answers the same way (decision 84).</summary>
+/// <summary>The shared decisions of <see cref="IDeliveryStore.CancelAsync"/>, so every backend answers the same way (decision 85).</summary>
 public static class CancelPlanner
 {
     /// <summary>The text of the <c>cancelled</c> event when nothing suggests the message was sent.</summary>

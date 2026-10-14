@@ -347,6 +347,27 @@ export interface Tenant {
   createdAt?: string;
 }
 
+/** A dashboard user (admin API `/admin/users`). The password hash is never sent. */
+export interface DashboardUser {
+  id: string;
+  userName: string;
+  role: Role;
+  /** Absent for administrators. */
+  tenantId?: string | null;
+  enabled: boolean;
+  createdAt: string;
+  /** Present only in the create and reset responses, and only when the server generated the password. */
+  password?: string;
+}
+
+export interface CreateUserRequest {
+  userName: string;
+  role: Role;
+  tenantId?: string;
+  /** Omit it to let the server generate one (shown once). */
+  password?: string;
+}
+
 export interface CertificateInfo {
   id: string;
   subject: string;

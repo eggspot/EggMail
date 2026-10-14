@@ -230,6 +230,167 @@ public abstract class ConfigConformance : StorageTestBase
         Assert.NotNull(await C.FindDashboardUserAsync("stays", Ct));
     }
 
+    [Fact]
+    public async Task Guarded_user_update_applies_the_change_to_the_stored_row_and_ends_sessions_except_the_kept_one()
+    {
+        var user = NewUser("guarded");
+        await C.UpsertDashboardUserAsync(user, Ct);
+        var keep = NewSession(user.Id, "keep");
+        var drop = NewSession(user.Id, "drop");
+        var foreign = NewSession((await AddUserAsync("foreign")).Id, "foreign");
+        foreach (var s in new[] { keep, drop, foreign })
+        {
+            await C.AddDashboardSessionAsync(s, Ct);
+        }
+
+        // The change function receives the stored row, not a caller's older copy.
+        await C.UpsertDashboardUserAsync(user with { PasswordHash = "stored-hash" }, Ct);
+        DashboardUserUpdate u = await C.UpdateDashboardUserGuardedAsync(user.Id, x => x with { Enabled = false }, endSessions: true, keepSessionHash: keep.IdHash, Ct);
+        Assert.Equal(DashboardUserWriteResult.Applied, u.Result);
+        Assert.False(u.User!.Enabled);
+        Assert.Equal("stored-hash", u.User.PasswordHash);
+        var back = (await C.GetDashboardUserAsync(user.Id, Ct))!;
+        Assert.False(back.Enabled);
+        Assert.Equal("stored-hash", back.PasswordHash);
+        Assert.Equal("guarded", back.UserName);
+        Assert.NotNull(await C.FindDashboardSessionAsync(keep.IdHash, Ct));
+        Assert.Null(await C.FindDashboardSessionAsync(drop.IdHash, Ct));
+        Assert.NotNull(await C.FindDashboardSessionAsync(foreign.IdHash, Ct));
+
+        DashboardUserUpdate again = await C.UpdateDashboardUserGuardedAsync(user.Id, x => x with { Enabled = true }, endSessions: false, keepSessionHash: null, Ct);
+        Assert.Equal(DashboardUserWriteResult.Applied, again.Result);
+        Assert.NotNull(await C.FindDashboardSessionAsync(keep.IdHash, Ct));
+
+        DashboardUserUpdate all = await C.UpdateDashboardUserGuardedAsync(user.Id, x => x, endSessions: true, keepSessionHash: null, Ct);
+        Assert.Equal(DashboardUserWriteResult.Applied, all.Result);
+        Assert.Null(await C.FindDashboardSessionAsync(keep.IdHash, Ct));
+        Assert.NotNull(await C.FindDashboardSessionAsync(foreign.IdHash, Ct));
+    }
+
+    [Fact]
+    public async Task Guarded_user_update_and_delete_report_unknown_users_and_create_nothing()
+    {
+        DashboardUserUpdate u = await C.UpdateDashboardUserGuardedAsync(Ids.New(), x => x with { Enabled = false }, endSessions: true, keepSessionHash: null, Ct);
+        Assert.Equal(DashboardUserWriteResult.NotFound, u.Result);
+        Assert.Null(u.User);
+        Assert.Equal(DashboardUserWriteResult.NotFound, await C.DeleteDashboardUserGuardedAsync(Ids.New(), Ct));
+        Assert.Empty(await C.GetDashboardUsersAsync(Ct));
+    }
+
+    [Fact]
+    public async Task The_last_enabled_admin_cannot_be_disabled_demoted_or_deleted_but_disabled_admins_do_not_count()
+    {
+        var only = NewUser("only-admin", DashboardRole.Admin);
+        var tenantUser = NewUser("a-tenant-user");
+        await C.UpsertDashboardUserAsync(only, Ct);
+        await C.UpsertDashboardUserAsync(tenantUser, Ct);
+        var session = NewSession(only.Id, "admin-session");
+        await C.AddDashboardSessionAsync(session, Ct);
+
+        Assert.Equal(DashboardUserWriteResult.WouldRemoveLastAdmin, (await C.UpdateDashboardUserGuardedAsync(only.Id, x => x with { Enabled = false }, true, null, Ct)).Result);
+        Assert.Equal(DashboardUserWriteResult.WouldRemoveLastAdmin, (await C.UpdateDashboardUserGuardedAsync(only.Id, x => x with { Role = DashboardRole.Tenant, TenantId = TenantA }, true, null, Ct)).Result);
+        Assert.Equal(DashboardUserWriteResult.WouldRemoveLastAdmin, await C.DeleteDashboardUserGuardedAsync(only.Id, Ct));
+        var unchanged = (await C.GetDashboardUserAsync(only.Id, Ct))!;
+        Assert.True(unchanged.Enabled);
+        Assert.Equal(DashboardRole.Admin, unchanged.Role);
+        Assert.NotNull(await C.FindDashboardSessionAsync(session.IdHash, Ct)); // a refused change ends nothing
+
+        // Changes that keep an enabled admin are fine (a new password, the same flags), and the tenant user is not an admin.
+        Assert.Equal(DashboardUserWriteResult.Applied, (await C.UpdateDashboardUserGuardedAsync(only.Id, x => x with { PasswordHash = "p2" }, false, null, Ct)).Result);
+        Assert.Equal(DashboardUserWriteResult.Applied, (await C.UpdateDashboardUserGuardedAsync(tenantUser.Id, x => x with { Enabled = false }, true, null, Ct)).Result);
+
+        // A second, disabled admin does not count; an enabled one does.
+        var second = NewUser("second-admin", DashboardRole.Admin) with { Enabled = false };
+        await C.UpsertDashboardUserAsync(second, Ct);
+        Assert.Equal(DashboardUserWriteResult.WouldRemoveLastAdmin, await C.DeleteDashboardUserGuardedAsync(only.Id, Ct));
+        Assert.Equal(DashboardUserWriteResult.Applied, (await C.UpdateDashboardUserGuardedAsync(second.Id, x => x with { Enabled = true }, false, null, Ct)).Result);
+        Assert.Equal(DashboardUserWriteResult.Applied, (await C.UpdateDashboardUserGuardedAsync(only.Id, x => x with { Enabled = false }, true, null, Ct)).Result);
+        Assert.Null(await C.FindDashboardSessionAsync(session.IdHash, Ct));
+        Assert.Equal(DashboardUserWriteResult.WouldRemoveLastAdmin, await C.DeleteDashboardUserGuardedAsync(second.Id, Ct));
+        Assert.Equal(DashboardUserWriteResult.Applied, await C.DeleteDashboardUserGuardedAsync(only.Id, Ct)); // a disabled admin may go
+        Assert.Null(await C.GetDashboardUserAsync(only.Id, Ct));
+        Assert.Equal(DashboardUserWriteResult.WouldRemoveLastAdmin, await C.DeleteDashboardUserGuardedAsync(second.Id, Ct));
+    }
+
+    [Fact]
+    public async Task Guarded_user_writes_keep_one_admin_when_two_admins_remove_each_other_at_once()
+    {
+        var a = NewUser("race-a", DashboardRole.Admin);
+        var b = NewUser("race-b", DashboardRole.Admin);
+        await C.UpsertDashboardUserAsync(a, Ct);
+        await C.UpsertDashboardUserAsync(b, Ct);
+
+        for (int round = 0; round < 10; round++)
+        {
+            var results = await Task.WhenAll(
+                Task.Run(async () => (await C.UpdateDashboardUserGuardedAsync(a.Id, x => x with { Enabled = false }, true, null, Ct)).Result),
+                Task.Run(async () => (await C.UpdateDashboardUserGuardedAsync(b.Id, x => x with { Enabled = false }, true, null, Ct)).Result));
+            Assert.Equal(1, results.Count(r => r == DashboardUserWriteResult.Applied));
+            Assert.Equal(1, results.Count(r => r == DashboardUserWriteResult.WouldRemoveLastAdmin));
+            Assert.Equal(1, (await C.GetDashboardUsersAsync(Ct)).Count(u => u.Enabled));
+            foreach (var u in await C.GetDashboardUsersAsync(Ct))
+            {
+                await C.UpsertDashboardUserAsync(u with { Enabled = true }, Ct);
+            }
+        }
+
+        var deletes = await Task.WhenAll(Task.Run(async () => await C.DeleteDashboardUserGuardedAsync(a.Id, Ct)), Task.Run(async () => await C.DeleteDashboardUserGuardedAsync(b.Id, Ct)));
+        Assert.Equal(1, deletes.Count(r => r == DashboardUserWriteResult.Applied));
+        Assert.Single(await C.GetDashboardUsersAsync(Ct));
+    }
+
+    [Fact]
+    public async Task Guarded_user_update_keeps_the_user_name_unique()
+    {
+        var x = NewUser("name-one");
+        var y = NewUser("name-two");
+        await C.UpsertDashboardUserAsync(x, Ct);
+        await C.UpsertDashboardUserAsync(y, Ct);
+        await Assert.ThrowsAsync<StorageConflictException>(async () => await C.UpdateDashboardUserGuardedAsync(y.Id, u => u with { UserName = "NAME-ONE" }, false, null, Ct));
+        Assert.Equal("name-two", (await C.GetDashboardUserAsync(y.Id, Ct))!.UserName);
+    }
+
+    [Fact]
+    public async Task A_session_is_added_only_for_the_user_a_sign_in_verified()
+    {
+        var user = NewUser("signs.in");
+        await C.UpsertDashboardUserAsync(user, Ct);
+        var good = NewSession(user.Id, "good");
+        Assert.True(await C.TryAddDashboardSessionForVerifiedUserAsync(good, user, Ct));
+        Assert.NotNull(await C.FindDashboardSessionAsync(good.IdHash, Ct));
+
+        // Each change between the verification and the insert refuses the session and stores nothing.
+        (string Name, Func<DashboardUser, DashboardUser> Change)[] changes =
+        [
+            ("password", u => u with { PasswordHash = "other-hash" }),
+            ("role", u => u with { Role = DashboardRole.Admin, TenantId = null }),
+            ("tenant", u => u with { TenantId = TenantB }),
+            ("disabled", u => u with { Enabled = false }),
+        ];
+        foreach (var (name, change) in changes)
+        {
+            await C.UpsertDashboardUserAsync(user, Ct);
+            var verified = user;
+            await C.UpsertDashboardUserAsync(change(user), Ct);
+            var refused = NewSession(user.Id, "refused-" + name);
+            Assert.False(await C.TryAddDashboardSessionForVerifiedUserAsync(refused, verified, Ct), name);
+            Assert.Null(await C.FindDashboardSessionAsync(refused.IdHash, Ct));
+        }
+
+        await C.UpsertDashboardUserAsync(user, Ct);
+        Assert.True(await C.DeleteDashboardUserAsync(user.Id, Ct));
+        var afterDelete = NewSession(user.Id, "after-delete");
+        Assert.False(await C.TryAddDashboardSessionForVerifiedUserAsync(afterDelete, user, Ct));
+        Assert.Null(await C.FindDashboardSessionAsync(afterDelete.IdHash, Ct));
+    }
+
+    private async Task<DashboardUser> AddUserAsync(string name)
+    {
+        var user = NewUser(name);
+        await C.UpsertDashboardUserAsync(user, Ct);
+        return user;
+    }
+
     // Domains and DKIM
 
     private DomainRecord NewDomain(string name, Guid? tenant = null, DateTimeOffset? next = null) =>

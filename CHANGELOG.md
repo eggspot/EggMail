@@ -31,6 +31,9 @@ workflow refuses a stable tag without a non-empty section for that exact version
   Protection.
 - HTTP API (`/api/v1`) and the dashboard (Preact + Vite) with API keys, SMTP credentials, tenants, domains with DNS verification, DKIM
   rotation, suppressions, webhooks, statistics and settings. `/healthz`, `/readyz`, `/metrics`.
+- Dashboard user management while the server runs: `/api/v1/admin/users` (create, list, enable, disable, role and tenant, reset
+  password, delete) and `POST /api/v1/me/password`, with the matching Users and Account pages. Disabling, role changes, resets and
+  deletes end the user's sessions in the same write, and the last enabled administrator cannot be removed.
 - `mta` command line: `serve`, `--healthcheck`, `--version`, `migrate-db`, `migrate-storage`, `admin create`.
 - One multi-architecture container image (`ghcr.io/eggspot/eggmail`, `linux/amd64` and `linux/arm64`, chiseled .NET 10 base, non-root)
   with SBOM and provenance attestations.
@@ -40,7 +43,7 @@ workflow refuses a stable tag without a non-empty section for that exact version
 - Benchmark harness (`bench/`) and a scheduled allocation-regression gate with a checked-in baseline.
 - Cancelling queued mail: `POST /api/v1/messages/{id}/cancel` and a "Cancel delivery" action on the dashboard's message page stop delivery
   to the recipients that are still waiting (all of them, or the ones named); a recipient whose delivery attempt is running is left alone and
-  reported as in flight. Works with and without per-message history, publishes a `message.cancelled` webhook event and is implemented on every storage backend (decision 84; adds the index `delivery_queue (message_id)`, schema version 7).
+  reported as in flight. Works with and without per-message history, publishes a `message.cancelled` webhook event and is implemented on every storage backend (decision 85; adds the index `delivery_queue (message_id)`, schema version 7).
 
 ### Security
 

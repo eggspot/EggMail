@@ -227,6 +227,79 @@ internal sealed partial class InMemoryConfigStore : IConfigStore
         }
     }
 
+    public ValueTask<DashboardUserUpdate> UpdateDashboardUserGuardedAsync(Guid id, Func<DashboardUser, DashboardUser> change, bool endSessions, byte[]? keepSessionHash, CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            if (!_dashboardUsers.TryGetValue(id, out var current))
+            {
+                return R(new DashboardUserUpdate(DashboardUserWriteResult.NotFound, null));
+            }
+
+            var e = (change(current.ToRecord()) with { Id = id }).ToEntity();
+            bool isEnabledAdmin = current.Role == DashboardRole.Admin && current.Enabled;
+            bool staysEnabledAdmin = e.Role == DashboardRole.Admin && e.Enabled;
+            if (isEnabledAdmin && !staysEnabledAdmin && !_dashboardUsers.Values.Any(u => u.Id != id && u.Role == DashboardRole.Admin && u.Enabled))
+            {
+                return R(new DashboardUserUpdate(DashboardUserWriteResult.WouldRemoveLastAdmin, null));
+            }
+
+            if (_dashboardUsers.Values.Any(u => u.UserName == e.UserName && u.Id != id))
+            {
+                throw Conflict("dashboard_user.user_name");
+            }
+
+            _dashboardUsers[id] = e;
+            if (endSessions)
+            {
+                _dashboardSessions.RemoveAll(s => s.UserId == id && (keepSessionHash is null || !s.IdHash.AsSpan().SequenceEqual(keepSessionHash)));
+            }
+
+            return R(new DashboardUserUpdate(DashboardUserWriteResult.Applied, e.ToRecord()));
+        }
+    }
+
+    public ValueTask<DashboardUserWriteResult> DeleteDashboardUserGuardedAsync(Guid id, CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            if (!_dashboardUsers.TryGetValue(id, out var current))
+            {
+                return R(DashboardUserWriteResult.NotFound);
+            }
+
+            if (current.Role == DashboardRole.Admin && current.Enabled && !_dashboardUsers.Values.Any(u => u.Id != id && u.Role == DashboardRole.Admin && u.Enabled))
+            {
+                return R(DashboardUserWriteResult.WouldRemoveLastAdmin);
+            }
+
+            _dashboardSessions.RemoveAll(s => s.UserId == id);
+            _dashboardUsers.Remove(id);
+            return R(DashboardUserWriteResult.Applied);
+        }
+    }
+
+    public ValueTask<bool> TryAddDashboardSessionForVerifiedUserAsync(DashboardSession session, DashboardUser verified, CancellationToken ct)
+    {
+        var e = session.ToEntity();
+        lock (_gate)
+        {
+            if (!_dashboardUsers.TryGetValue(verified.Id, out var current) || !current.Enabled || current.PasswordHash != verified.PasswordHash
+                || current.Role != verified.Role || current.TenantId != verified.TenantId)
+            {
+                return R(false);
+            }
+
+            if (_dashboardSessions.Any(s => s.IdHash.AsSpan().SequenceEqual(e.IdHash)))
+            {
+                throw Conflict("dashboard_session");
+            }
+
+            _dashboardSessions.Add(e);
+            return R(true);
+        }
+    }
+
     public ValueTask AddDashboardSessionAsync(DashboardSession session, CancellationToken ct)
     {
         var e = session.ToEntity();
