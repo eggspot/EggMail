@@ -18,7 +18,7 @@ Tested deployment files are in `deploy/` (the release workflow tests them agains
 Things that are easy to get wrong:
 
 - **Healthcheck command.** The chiseled image has no shell and `/app` is not on `PATH`: use `["CMD", "/app/mta", "--healthcheck"]` (the `HEALTHCHECK` of the image does). `["CMD", "mta", "--healthcheck"]` fails with "executable file not found in $PATH". The release workflow checks this on every build (`deploy/smoke/image.sh` prints the image's `PATH` and tries `mta`).
-- **First administrator.** Compose: a file secret read through `Dashboard__BootstrapAdminPasswordFile` (the file must be readable by uid 1654: Compose does not apply `uid` or `mode` to file secrets outside Swarm). Kubernetes: a Secret mounted at `/run/secrets/eggmail`. Or `mta admin create` while the SQLite server is stopped.
+- **First administrator.** Compose: a file secret read through `Dashboard__BootstrapAdminPasswordFile` (the file must be readable by uid 1654: Compose does not apply `uid` or `mode` to file secrets outside Swarm). Kubernetes: a Secret mounted at `/run/secrets/eggmail`. Or `mta admin create` while the SQLite server is stopped. Further users are made in the dashboard or the API while the server runs (see "Users while the server runs").
 - **Volume ownership.** The image prepares `/data` for uid 1654; a new Kubernetes volume is owned by root, hence `fsGroup: 1654` in the StatefulSet.
 - **Inbound port 25 for bounces** needs a public MX record and a platform that offers inbound 25 (many load balancers do not).
 - **Kubernetes NetworkPolicy** is enforced only by a CNI that implements it; the smoke test applies the policy on kind but does not test enforcement.
@@ -224,7 +224,18 @@ A listener named in configuration replaces the default of the same name member b
 
 ## First administrator
 
-Set `Dashboard:BootstrapAdminPasswordFile` (a file holding the password, for example a mounted secret) and `Dashboard:BootstrapAdminUser`: when no administrator exists the server creates one at start. Or, with the server stopped (SQLite allows one process per data directory), run `mta admin create --user NAME --password-file FILE` (`--role tenant --tenant SLUG` for a tenant user; the password can also come from `MTA_ADMIN_PASSWORD`, never from the command line). Passwords need at least 10 characters.
+Set `Dashboard:BootstrapAdminPasswordFile` (a file holding the password, for example a mounted secret) and `Dashboard:BootstrapAdminUser`: when no administrator exists the server creates one at start. Or, with the server stopped (SQLite allows one process per data directory), run `mta admin create --user NAME --password-file FILE` (`--role tenant --tenant SLUG` for a tenant user; the password can also come from `MTA_ADMIN_PASSWORD`, never from the command line). Passwords need 10 to 1,024 characters.
+
+### Users while the server runs
+
+Once one administrator exists, the others are made in the dashboard (**Users**, administrators only) or with the API (`POST /api/v1/admin/users`, [api.md](api.md#dashboard-users-role-admin-addition)): no restart and no stopped server are needed, on either backend. What to know:
+
+- **Create** a user as an administrator or as a user of one active tenant. Leave the password empty and the server generates one (shown once; pass it on over a safe channel and ask the person to change it on the **Account** page). Names are not case sensitive.
+- **Disable** a user (a leaver) and they are signed out at once and cannot sign in; **enable** brings the account back (the old sessions do not return). A role or tenant change also signs the user out. **Delete** removes the account.
+- **Forgotten password:** an administrator resets it (**Reset password**, generated or chosen); all of that person's sessions end. If the only administrator forgot theirs, there is no one to reset it: stop the server and run `mta admin create` for a new administrator (SQLite), or use the bootstrap file when no administrator exists at all.
+- **You cannot lock the installation out through the dashboard:** the last enabled administrator cannot be disabled, demoted or deleted (`409`, "only enabled administrator"). Create or enable a second administrator first. A disabled administrator does not count.
+- **Own password:** the **Account** page (`POST /api/v1/me/password`) asks for the current password, signs the user's other sessions out and keeps the current one. Ten wrong attempts from one address or for one user name within 15 minutes lock that address or name out of sign-in, SMTP AUTH and this form alike (`429`, `Retry-After`).
+- **Trail:** there is no audit table. Every user change writes one log line at information level, for example `Dashboard user updated: actor root, user 0192..., enabled=False role=tenant ...`, with no password or hash; keep the server log if you need to answer "who disabled this account".
 
 ## DNS records for a sending domain
 

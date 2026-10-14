@@ -115,6 +115,9 @@ internal sealed class ApiFixtureOptions
     /// there already, so nothing is seeded, and the shared storage is left open when this fixture is disposed.
     /// </summary>
     public ApiFixture? SharedWith { get; init; }
+
+    /// <summary>A coordination store the failed-login throttle shares between fixtures (two servers over one database); null: a process-local throttle.</summary>
+    public Mta.Storage.IReplicaCoordination? ThrottleCoordination { get; init; }
 }
 
 /// <summary>
@@ -185,7 +188,7 @@ internal sealed class ApiFixture : IAsyncDisposable
             MetricsAllowedNetworks = ApiOptions.DefaultMetricsNetworks(),
         };
         o.ConfigureApi?.Invoke(Options);
-        Throttle = new AuthThrottle(Clock, maxFailures: 5, window: TimeSpan.FromMinutes(10));
+        Throttle = new AuthThrottle(Clock, maxFailures: 5, window: TimeSpan.FromMinutes(10), shared: o.ThrottleCoordination, digestKey: o.ThrottleCoordination is null ? null : new byte[32]);
 
         WebApplicationBuilder builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();

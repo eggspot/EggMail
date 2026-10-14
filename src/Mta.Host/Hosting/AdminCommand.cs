@@ -11,7 +11,7 @@ namespace Mta.Host.Hosting;
 /// <c>mta admin create --user NAME [--role admin|tenant] [--tenant SLUG] --password-file FILE</c> (or the password in the environment variable
 /// <c>MTA_ADMIN_PASSWORD</c>; never on the command line). Creates a dashboard account directly in the store, for first set-up and for locked-out
 /// installations. With a SQLite backend the server must be stopped (one process owns the data directory); a running server can create
-/// the first administrator at start from <c>Dashboard:BootstrapAdminPasswordFile</c>, or accounts can be made through the API.
+/// the first administrator at start from <c>Dashboard:BootstrapAdminPasswordFile</c>, or, once an administrator exists, accounts are made in the dashboard or with <c>POST /api/v1/admin/users</c> (docs/api.md, "Dashboard users").
 /// </summary>
 public static class AdminCommand
 {
@@ -53,7 +53,7 @@ public static class AdminCommand
         }
         catch (IOException ex)
         {
-            error.WriteLine(ex.Message + " Stop the server first, or use Dashboard:BootstrapAdminPasswordFile / the API.");
+            error.WriteLine(ex.Message + " Stop the server first, or use Dashboard:BootstrapAdminPasswordFile / the API (POST /api/v1/admin/users).");
             return 3;
         }
 
