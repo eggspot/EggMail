@@ -392,7 +392,11 @@ public sealed class SessionService
         _throttle.RecordSuccess(userKey); // only the user's count: a valid account must not reset the address limit that guards password guessing elsewhere
         if (PasswordHasher.NeedsRehash(user!.PasswordHash))
         {
-            await config.UpsertDashboardUserAsync(user with { PasswordHash = PasswordHasher.Hash(password) }, ct).ConfigureAwait(false);
+            // Written through the guarded update so that the stored row is changed, not the copy read above: a concurrent disable, role change or
+            // password reset must not be undone by an upgrade of the hash (and an upgrade of a hash that was reset in the meantime is skipped).
+            string verifiedHash = user.PasswordHash;
+            string upgraded = PasswordHasher.Hash(password);
+            await config.UpdateDashboardUserGuardedAsync(user.Id, u => u.PasswordHash == verifiedHash ? u with { PasswordHash = upgraded } : u, endSessions: false, keepSessionHash: null, ct).ConfigureAwait(false);
         }
 
         // A new sign-in replaces the session the browser presented (no fixation, no accumulation).

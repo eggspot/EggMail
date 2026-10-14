@@ -115,9 +115,9 @@ Semantic landmarks and headings, a skip link, focus moved to the page content af
 
 ## Bundle size
 
-`npm run build` then `npm run size` (gzip level 9): the initial load (entry JS + CSS) is **21.7 KiB gzip**. All routes are separate lazy chunks of 0.2 to 7 KiB gzip each. The whole `dist/` is 67.6 KiB gzip (164 KiB JS raw, 14 KiB CSS raw, no fonts or images apart from a 0.2 KiB favicon).
+`npm run build` then `npm run size` (gzip level 9): the initial load (entry JS + CSS) is **21.8 KiB gzip**. All routes are separate lazy chunks of 0.2 to 7 KiB gzip each. The whole `dist/` is 71.4 KiB gzip (189 KiB raw, no fonts or images apart from a 0.2 KiB favicon).
 
-Verification at the time of writing: `npm run lint` (tsc plus custom rules over 49 source files), `npm run typecheck`, `npm test` (29 files, 403 tests, including contrast checks for both themes, the CSP checker, the mock API contract, and a smoke test that renders every route against the real mock server for both roles and both history modes), `npm run build` and `npm run check-csp` pass, and the end-to-end tests (below) pass against the real server.
+Verification at the time of writing: `npm run lint` (tsc plus custom rules over 51 source files), `npm run typecheck`, `npm test` (31 files, 424 tests, including contrast checks for both themes, the CSP checker, the mock API contract, and a smoke test that renders every route against the real mock server for both roles and both history modes), `npm run build` and `npm run check-csp` pass, and the end-to-end tests (below) pass against the real server.
 
 ## Pages and features, audited against the plan
 
