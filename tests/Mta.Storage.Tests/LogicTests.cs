@@ -308,7 +308,7 @@ public class LogicTests
     [Fact]
     public void Attempt_planner_maps_outcomes()
     {
-        var row = new DeliveryRowInfo(Ids.New(), Ids.New(), Ids.New(), "a@x.example", "x.example", "s.example", MessageSource.Api, 0);
+        var row = new DeliveryRowInfo(Ids.New(), Ids.New(), Ids.New(), "a@x.example", "x.example", "s.example", MessageSource.Api, 0, false);
         DateTimeOffset at = new(2026, 10, 12, 12, 0, 0, TimeSpan.Zero);
         DeliveryAttempt A(DeliveryOutcome o, DateTimeOffset? next = null, SuppressionReason? s = null, bool dup = false) =>
             new() { DeliveryId = row.DeliveryId, Outcome = o, At = at, NextAttemptAt = next, Suppress = s, PossibleDuplicate = dup, SmtpCode = 550, EnhancedCode = "5.1.1", Message = "secret" };

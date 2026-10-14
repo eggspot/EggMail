@@ -206,11 +206,19 @@ public sealed record ThrottleSnapshot(
 internal sealed class ThrottleState
 {
     public readonly ThrottleKey Key;
-    public readonly ThrottleLimits Ceiling;
+
+    /// <summary>The ceilings of the options (this destination's override or the defaults), before this replica's share of them is taken.</summary>
+    public readonly ThrottleLimits FullCeiling;
+
+    /// <summary>The ceilings this replica may use: <see cref="FullCeiling"/> divided among the live replicas. Changed only under <see cref="Gate"/>.</summary>
+    public ThrottleLimits Ceiling;
     public readonly object Gate = new();
 
     public int InUse;
     public int ConcurrencyLimit;
+
+    /// <summary>The concurrency limit as a fraction of <see cref="Ceiling"/>'s connections, kept exactly so that rescaling for a changing replica count rounds from it and never drifts.</summary>
+    public double ConcurrencyFraction;
     public double Rate;
     public double Tokens;
     public long RefillTicks;
@@ -222,11 +230,13 @@ internal sealed class ThrottleState
     public long LastTouchTicks;
     public bool Evicted;
 
-    public ThrottleState(ThrottleKey key, ThrottleLimits ceiling, int concurrency, double rate, long nowTicks, double burstSeconds)
+    public ThrottleState(ThrottleKey key, ThrottleLimits fullCeiling, ThrottleLimits ceiling, int concurrency, double rate, long nowTicks, double burstSeconds)
     {
         Key = key;
+        FullCeiling = fullCeiling;
         Ceiling = ceiling;
         ConcurrencyLimit = concurrency;
+        ConcurrencyFraction = (double)concurrency / ceiling.MaxConcurrentConnections;
         Rate = rate;
         RefillTicks = nowTicks;
         LastTouchTicks = nowTicks;
@@ -297,9 +307,20 @@ public sealed class DestinationThrottle
     private readonly long _sweepTicks;
     private readonly long _cooldownTicks;
     private readonly long _failureWindowTicks;
+    private readonly ConcurrentDictionary<ThrottleKey, long> _slowdowns = new();
+    private volatile ReplicaShare _share = ReplicaShare.Alone;
+    private volatile bool _sharing;
     private int _count;
     private long _lastSweepTicks;
     private int _sweeping;
+
+    /// <summary>Slowdowns kept for the other replicas at most (a burst against more keys than this tells them nothing more).</summary>
+    private const int MaxPendingSlowdowns = 4096;
+
+    private sealed record ReplicaShare(int Index, int Count)
+    {
+        public static readonly ReplicaShare Alone = new(0, 1);
+    }
 
     /// <summary>Creates a throttle.</summary>
     public DestinationThrottle(IClock clock, DestinationThrottleOptions? options = null)
@@ -316,6 +337,97 @@ public sealed class DestinationThrottle
 
     /// <summary>The number of keys currently tracked.</summary>
     public int TrackedKeyCount => Volatile.Read(ref _count);
+
+    /// <summary>
+    /// Tells the throttle it is replica <paramref name="index"/> (0-based rank among the live replicas, the same ordering on every replica) of <paramref name="count"/>
+    /// sharing one set of remote destinations. Every ceiling is divided so the replicas together stay within it: the connection ceiling is split into whole connections
+    /// (the first <c>ceiling mod count</c> ranks get one more; at least one each, so with a ceiling below the replica count the sum can exceed it), the message rate, the initial
+    /// values and the floor are divided evenly, the per-connection message cap is unchanged. Limits the destination has already learned are scaled by the same ratio, so a
+    /// penalized destination stays penalized by the same fraction. A replica that learns of its peers a few seconds late sends at the old share for those seconds.
+    /// </summary>
+    public void SetReplicaShare(int index, int count)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(count, 1);
+        ArgumentOutOfRangeException.ThrowIfNegative(index);
+        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(index, count);
+        ReplicaShare current = _share;
+        if (current.Index == index && current.Count == count)
+        {
+            return;
+        }
+
+        var next = new ReplicaShare(index, count);
+        _share = next;
+        foreach (var kv in _states)
+        {
+            lock (kv.Value.Gate)
+            {
+                Rescale(kv.Value, next);
+            }
+        }
+    }
+
+    /// <summary>Moves a state to <paramref name="share"/>: the ceilings are recomputed and what the destination has learned is scaled by the same ratio. Call under the state's lock; a state already at the share is unchanged.</summary>
+    private void Rescale(ThrottleState state, ReplicaShare share)
+    {
+        ThrottleLimits old = state.Ceiling;
+        ThrottleLimits scaled = Scale(state.FullCeiling, share);
+        if (scaled == old)
+        {
+            return;
+        }
+
+        state.Ceiling = scaled;
+        // From the exact fraction, not from the last rounded limit: a replica count that flaps must not ratchet the limit up.
+        state.ConcurrencyLimit = Math.Clamp((int)Math.Round(state.ConcurrencyFraction * scaled.MaxConcurrentConnections, MidpointRounding.AwayFromZero), Math.Min(_options.MinConcurrentConnections, scaled.MaxConcurrentConnections), scaled.MaxConcurrentConnections);
+        state.Rate = Math.Clamp(state.Rate * scaled.MaxMessagesPerMinute / old.MaxMessagesPerMinute, Math.Min(MinRate(share), scaled.MaxMessagesPerMinute), scaled.MaxMessagesPerMinute);
+        state.Tokens = Math.Min(state.Tokens, state.Capacity(_options.BurstSeconds));
+    }
+
+    /// <summary>
+    /// Starts keeping the slowdowns this replica is told by destinations for <see cref="DrainSlowdowns"/>. Off by default: a throttle nobody drains (one process, SQLite) keeps nothing.
+    /// </summary>
+    public void ShareSlowdowns() => _sharing = true;
+
+    /// <summary>
+    /// Takes the destinations this replica slowed down since the last call (a throttling reply or a burst of refused connections, not a slowdown it adopted from another
+    /// replica), with the time of the latest one, so the host can tell the other replicas. Each key appears once.
+    /// </summary>
+    public void DrainSlowdowns(List<(ThrottleKey Key, DateTimeOffset At)> into)
+    {
+        foreach (var kv in _slowdowns)
+        {
+            if (_slowdowns.TryRemove(kv))
+            {
+                into.Add((kv.Key, new DateTimeOffset(kv.Value, TimeSpan.Zero)));
+            }
+        }
+    }
+
+    /// <summary>
+    /// Slows <paramref name="key"/> down because another replica was told to by the destination (the same multiplicative decrease, including its cooldown, which makes
+    /// a burst of replicas halve once). Not passed on again.
+    /// </summary>
+    public void ApplyPeerSlowdown(in ThrottleKey key)
+    {
+        long now = _clock.UtcNow.UtcTicks;
+        while (true)
+        {
+            ThrottleState state = GetOrCreate(key, now);
+            lock (state.Gate)
+            {
+                if (state.Evicted)
+                {
+                    continue;
+                }
+
+                state.LastTouchTicks = now;
+                state.SuccessStreak = 0;
+                Decrease(state, now, passOn: false);
+                return;
+            }
+        }
+    }
 
     /// <summary>
     /// Tries to take a connection slot (and the first message token) for <paramref name="key"/>.
@@ -465,7 +577,7 @@ public sealed class DestinationThrottle
                     break;
                 case ThrottleSignal.Throttled:
                     state.SuccessStreak = 0;
-                    Decrease(state, now);
+                    Decrease(state, now, passOn: true);
                     break;
                 case ThrottleSignal.ConnectionFailure:
                     state.SuccessStreak = 0;
@@ -478,7 +590,7 @@ public sealed class DestinationThrottle
                     if (++state.FailureCount >= _options.ConnectionFailureBurstThreshold)
                     {
                         state.FailureCount = 0;
-                        Decrease(state, now);
+                        Decrease(state, now, passOn: true);
                     }
 
                     break;
@@ -490,7 +602,7 @@ public sealed class DestinationThrottle
 
     private bool InCooldown(ThrottleState state, long now) => state.HasDecreased && now - state.LastDecreaseTicks < _cooldownTicks;
 
-    private void Decrease(ThrottleState state, long now)
+    private void Decrease(ThrottleState state, long now, bool passOn)
     {
         if (InCooldown(state, now))
         {
@@ -499,15 +611,21 @@ public sealed class DestinationThrottle
 
         Refill(state, now);
         state.ConcurrencyLimit = Math.Max(_options.MinConcurrentConnections, (int)(state.ConcurrencyLimit * _options.DecreaseFactor));
-        state.Rate = Math.Max(_options.MinMessagesPerMinute, state.Rate * _options.DecreaseFactor);
+        state.ConcurrencyFraction = (double)state.ConcurrencyLimit / state.Ceiling.MaxConcurrentConnections;
+        state.Rate = Math.Max(MinRate(_share), state.Rate * _options.DecreaseFactor);
         state.Tokens = Math.Min(state.Tokens, state.Capacity(_options.BurstSeconds));
         state.HasDecreased = true;
         state.LastDecreaseTicks = now;
+        if (passOn && _sharing && _slowdowns.Count < MaxPendingSlowdowns)
+        {
+            _slowdowns[state.Key] = now;
+        }
     }
 
     private void Increase(ThrottleState state)
     {
         state.ConcurrencyLimit = Math.Min(state.Ceiling.MaxConcurrentConnections, state.ConcurrencyLimit + 1);
+        state.ConcurrencyFraction = (double)state.ConcurrencyLimit / state.Ceiling.MaxConcurrentConnections;
         double step = Math.Max(1.0, state.Ceiling.MaxMessagesPerMinute * _options.RateIncreaseFraction);
         state.Rate = Math.Min(state.Ceiling.MaxMessagesPerMinute, state.Rate + step);
     }
@@ -540,18 +658,46 @@ public sealed class DestinationThrottle
             return existing;
         }
 
-        ThrottleLimits ceiling = _options.Overrides.TryGetValue(key.Destination, out ThrottleLimits o) ? o : _options.Defaults;
-        int concurrency = Math.Clamp(_options.InitialConcurrentConnections, _options.MinConcurrentConnections, ceiling.MaxConcurrentConnections);
-        double rate = Math.Clamp(_options.InitialMessagesPerMinute, Math.Min(_options.MinMessagesPerMinute, ceiling.MaxMessagesPerMinute), ceiling.MaxMessagesPerMinute);
-        var created = new ThrottleState(key, ceiling, concurrency, rate, now, _options.BurstSeconds);
+        ReplicaShare share = _share;
+        ThrottleLimits full = _options.Overrides.TryGetValue(key.Destination, out ThrottleLimits o) ? o : _options.Defaults;
+        ThrottleLimits ceiling = Scale(full, share);
+        int concurrency = Math.Clamp((int)Math.Ceiling((double)_options.InitialConcurrentConnections / share.Count), Math.Min(_options.MinConcurrentConnections, ceiling.MaxConcurrentConnections), ceiling.MaxConcurrentConnections);
+        double rate = Math.Clamp(_options.InitialMessagesPerMinute / share.Count, Math.Min(MinRate(share), ceiling.MaxMessagesPerMinute), ceiling.MaxMessagesPerMinute);
+        var created = new ThrottleState(key, full, ceiling, concurrency, rate, now, _options.BurstSeconds);
         ThrottleState winner = _states.GetOrAdd(key, created);
-        if (ReferenceEquals(winner, created) && Interlocked.Increment(ref _count) > _options.MaxTrackedKeys)
+        if (ReferenceEquals(winner, created))
         {
-            SweepCore(now, force: true, keep: created);
+            // The share may have changed between reading it and adding the state, in which case SetReplicaShare did not see this state.
+            ReplicaShare current = _share;
+            if (!ReferenceEquals(current, share))
+            {
+                lock (created.Gate)
+                {
+                    Rescale(created, current);
+                }
+            }
+
+            if (Interlocked.Increment(ref _count) > _options.MaxTrackedKeys)
+            {
+                SweepCore(now, force: true, keep: created);
+            }
         }
 
         return winner;
     }
+
+    private static ThrottleLimits Scale(ThrottleLimits full, ReplicaShare share)
+    {
+        if (share.Count <= 1)
+        {
+            return full;
+        }
+
+        int connections = full.MaxConcurrentConnections / share.Count + (share.Index < full.MaxConcurrentConnections % share.Count ? 1 : 0);
+        return new ThrottleLimits(Math.Max(1, connections), full.MaxMessagesPerMinute / share.Count, full.MaxMessagesPerConnection);
+    }
+
+    private double MinRate(ReplicaShare share) => _options.MinMessagesPerMinute / share.Count;
 
     private void MaybeSweep(long now)
     {

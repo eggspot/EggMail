@@ -68,6 +68,17 @@ public class InMemoryRuntimeState : RuntimeStateConformance
     protected override Task<IStorage> CreateAsync(StorageOptions options) => Task.FromResult<IStorage>(new InMemoryStorage(options, Clock, null, TimeSpan.Zero));
 }
 
+public class InMemoryReplicaCoordinationConformance : ReplicaCoordinationConformance
+{
+    protected override Task<IStorage> CreateAsync(StorageOptions options) => Task.FromResult<IStorage>(new InMemoryStorage(options, Clock, null, TimeSpan.Zero));
+
+    protected override Task PassTimeAsync(TimeSpan by)
+    {
+        Clock.Advance(by);
+        return Task.CompletedTask;
+    }
+}
+
 public class InMemoryConfig : ConfigConformance
 {
     protected override Task<IStorage> CreateAsync(StorageOptions options) => Task.FromResult<IStorage>(new InMemoryStorage(options, Clock, null, TimeSpan.Zero));

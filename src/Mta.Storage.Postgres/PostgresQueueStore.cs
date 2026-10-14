@@ -349,7 +349,7 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
         // 1. Lock the delivery row. A repeated report of the same attempt waits here and then finds the row gone.
         DeliveryRowInfo row;
         await using (var select = new NpgsqlCommand(
-            "SELECT message_id, tenant_id, recipient, recipient_domain, sending_domain, source, attempt FROM delivery_queue WHERE id = $1 FOR UPDATE", connection, tx))
+            "SELECT message_id, tenant_id, recipient, recipient_domain, sending_domain, source, attempt, possible_duplicate FROM delivery_queue WHERE id = $1 FOR UPDATE", connection, tx))
         {
             select.Parameters.Uuid(a.DeliveryId);
             await using NpgsqlDataReader r = await select.ExecuteReaderAsync(ct).ConfigureAwait(false);
@@ -358,7 +358,7 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
                 return new AttemptResult(false, default, null);
             }
 
-            row = new DeliveryRowInfo(a.DeliveryId, r.GetGuid(0), r.GetGuid(1), r.GetString(2), r.GetString(3), r.GetNullableString(4), (MessageSource)r.GetInt16(5), r.GetInt32(6));
+            row = new DeliveryRowInfo(a.DeliveryId, r.GetGuid(0), r.GetGuid(1), r.GetString(2), r.GetString(3), r.GetNullableString(4), (MessageSource)r.GetInt16(5), r.GetInt32(6), r.GetBoolean(7));
         }
 
         AttemptPlan plan = AttemptPlanner.Plan(a, row);

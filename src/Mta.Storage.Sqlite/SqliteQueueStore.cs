@@ -42,7 +42,7 @@ internal static class QueueSql
         "@owner", "@until", "@now", "@max");
 
     public static readonly Stmt DeliverySelect = new(
-        "SELECT message_id, tenant_id, recipient, recipient_domain, sending_domain, source, attempt FROM delivery_queue WHERE id = @id",
+        "SELECT message_id, tenant_id, recipient, recipient_domain, sending_domain, source, attempt, possible_duplicate FROM delivery_queue WHERE id = @id",
         "@id");
 
     public static readonly Stmt DeliveryDelete = new("DELETE FROM delivery_queue WHERE id = @id", "@id");
@@ -432,7 +432,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
                 return new AttemptOutcome(false, default, null, false);
             }
 
-            row = new DeliveryRowInfo(a.DeliveryId, r.GetGuid(0), r.GetGuid(1), r.GetString(2), r.GetString(3), r.GetNullableString(4), (MessageSource)r.GetInt32(5), r.GetInt32(6));
+            row = new DeliveryRowInfo(a.DeliveryId, r.GetGuid(0), r.GetGuid(1), r.GetString(2), r.GetString(3), r.GetNullableString(4), (MessageSource)r.GetInt32(5), r.GetInt32(6), r.GetInt32(7) != 0);
         }
 
         AttemptPlan plan = AttemptPlanner.Plan(a, row);

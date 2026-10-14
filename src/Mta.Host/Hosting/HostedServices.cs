@@ -20,6 +20,49 @@ internal sealed class SmtpListenerService(EggMailRuntime runtime) : IHostedServi
     public Task StopAsync(CancellationToken cancellationToken) => runtime.SmtpServer.StopAsync(TimeSpan.FromSeconds(20));
 }
 
+/// <summary>
+/// Coordinates with the other replicas on the same database (live set, shares of the per-destination limits, slowdowns and open circuits learned from remote servers)
+/// every few seconds and leaves the replica set when the host stops, so the others take over this replica's share at once. Nothing to do without replica coordination.
+/// It joins the set in <see cref="StartAsync"/>, before the services registered after it (the delivery engine) start, so this replica sends at its share from the first message.
+/// </summary>
+internal sealed class ReplicaCoordinationService(EggMailRuntime runtime) : BackgroundService
+{
+    public override async Task StartAsync(CancellationToken cancellationToken)
+    {
+        if (runtime.ReplicaCoordinator is { } coordinator)
+        {
+            try
+            {
+                await coordinator.RunOnceAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                runtime.Log.Write(MtaLogLevel.Warning, "replicas", "could not join the replica set at start; the periodic coordination will retry (the destination ceilings are not shared until it succeeds)", ex);
+            }
+        }
+
+        await base.StartAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        if (runtime.ReplicaCoordinator is { } coordinator)
+        {
+            await coordinator.RunAsync(stoppingToken).ConfigureAwait(false);
+        }
+    }
+
+    public override async Task StopAsync(CancellationToken cancellationToken)
+    {
+        await base.StopAsync(cancellationToken).ConfigureAwait(false);
+        if (runtime.ReplicaCoordinator is { } coordinator)
+        {
+            using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await coordinator.LeaveAsync(limit.Token).ConfigureAwait(false);
+        }
+    }
+}
+
 /// <summary>Runs the delivery engine.</summary>
 internal sealed class DeliveryService(EggMailRuntime runtime) : BackgroundService
 {
