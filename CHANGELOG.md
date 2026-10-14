@@ -30,6 +30,9 @@ workflow refuses a stable tag without a non-empty section for that exact version
   Protection.
 - HTTP API (`/api/v1`) and the dashboard (Preact + Vite) with API keys, SMTP credentials, tenants, domains with DNS verification, DKIM
   rotation, suppressions, webhooks, statistics and settings. `/healthz`, `/readyz`, `/metrics`.
+- Dashboard user management while the server runs: `/api/v1/admin/users` (create, list, enable, disable, role and tenant, reset
+  password, delete) and `POST /api/v1/me/password`, with the matching Users and Account pages. Disabling, role changes, resets and
+  deletes end the user's sessions in the same write, and the last enabled administrator cannot be removed.
 - `mta` command line: `serve`, `--healthcheck`, `--version`, `migrate-db`, `migrate-storage`, `admin create`.
 - One multi-architecture container image (`ghcr.io/eggspot/eggmail`, `linux/amd64` and `linux/arm64`, chiseled .NET 10 base, non-root)
   with SBOM and provenance attestations.
