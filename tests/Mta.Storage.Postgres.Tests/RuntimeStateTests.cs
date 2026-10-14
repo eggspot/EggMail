@@ -69,14 +69,14 @@ public class RuntimeStateTests : PgTestBase
         var old = await AcceptAsync(Msg(to: ["a@example.org"]));
         await Storage.DisposeAsync();
 
-        // Turn the database back into what version 3 created: no runtime state tables, no header or tags column, no version 4 row.
+        // Turn the database back into what version 3 created: no runtime state tables, no header or tags column, no headers_utf8 column, no version 4 or 5 row.
         await using (var c = new NpgsqlConnection(Db.ConnectionString))
         {
             await c.OpenAsync();
             await using var cmd = new NpgsqlCommand(
                 "DROP TABLE domain_record_check; DROP TABLE tls_rpt_bucket; DROP TABLE sending_counter; " +
                 "DROP INDEX \"IX_message_index_tenant_id_message_id_header\"; ALTER TABLE message_index DROP COLUMN message_id_header; ALTER TABLE message_index DROP COLUMN tags; " +
-                "DELETE FROM eggmail_schema_version WHERE version = 4", c);
+                "ALTER TABLE delivery_queue DROP COLUMN headers_utf8; DELETE FROM eggmail_schema_version WHERE version IN (4, 5)", c);
             await cmd.ExecuteNonQueryAsync();
         }
 
@@ -85,7 +85,7 @@ public class RuntimeStateTests : PgTestBase
         await upgraded.InitializeAsync(CancellationToken.None);
         try
         {
-            Assert.Equal(4, PostgresMigrator.CurrentVersion);
+            Assert.Equal(5, PostgresMigrator.CurrentVersion);
             Assert.NotNull(await upgraded.History.GetAsync(TenantA, old.MessageId, default));
             Assert.Null((await upgraded.History.GetAsync(TenantA, old.MessageId, default))!.Summary.Tags);
             var fresh = Msg(messageIdHeader: "<after@x>", tags: ["t"]);

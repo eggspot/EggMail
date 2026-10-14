@@ -442,7 +442,6 @@ public sealed class SendingApi(ApiAuthenticator auth, SubmissionService submissi
             Message = message.Raw,
             RemoteAddress = context.Connection.RemoteIpAddress?.ToString(),
             Authenticated = caller.Name,
-            SmtpUtf8 = message.SmtpUtf8,
             IdempotencyKey = idempotencyKey,
             IdempotencyFingerprint = idempotencyKey is null ? null : fingerprint,
             StoreAttachments = store,

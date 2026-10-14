@@ -1,5 +1,6 @@
 using Mta.Core;
 using Mta.Dsn;
+using Mta.Mime;
 using Mta.Storage;
 
 namespace Mta.Delivery;
@@ -70,6 +71,7 @@ public sealed class DsnService
                 Raw = dsn,
                 ReceivedAt = now,
                 ExpiresAt = now + _options.DsnLifetime,
+                HeadersUtf8 = MessageInspector.HasValidUtf8Headers(dsn),   // the sender's address is in the To field
             }, ct).ConfigureAwait(false);
             DeliveryMetrics.Bounces.Add(1);
         }
