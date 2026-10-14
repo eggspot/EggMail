@@ -210,6 +210,34 @@ public class ApiContractTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Relay_routes_and_tls_policies()
+    {
+        Assert.True(_ts.Has("RelayRoute") && _ts.Has("TlsPolicy"));
+        Reply route = await _admin.PostAsync("/api/v1/admin/relay-routes", new { name = "backup", host = "smtp.relay.example", tlsMode = "verify", userName = "u", password = "p", domains = new[] { "partner.example" } });
+        Conforms(route, "RelayRoute", HttpStatusCode.Created);
+        Conforms(await _admin.GetAsync("/api/v1/admin/relay-routes"), "RelayRoute[]");
+        Conforms(await _admin.PatchAsync("/api/v1/admin/relay-routes/" + route.Str("id"), new { enabled = false }), "RelayRoute");
+        Reply policy = await _admin.PostAsync("/api/v1/admin/tls-policies", new { domainPattern = "*.bank.example", level = "verify" });
+        Conforms(policy, "TlsPolicy", HttpStatusCode.Created);
+        Conforms(await _admin.GetAsync("/api/v1/admin/tls-policies"), "TlsPolicy[]");
+        Conforms(await _admin.PatchAsync("/api/v1/admin/tls-policies/" + policy.Str("id"), new { level = "none" }), "TlsPolicy");
+    }
+
+    [Theory]
+    [InlineData("RelayRouteCreate", typeof(CreateRelayRouteRequest))]
+    [InlineData("RelayRoutePatch", typeof(UpdateRelayRouteRequest))]
+    [InlineData("TlsPolicyCreate", typeof(CreateTlsPolicyRequest))]
+    [InlineData("TlsPolicyPatch", typeof(UpdateTlsPolicyRequest))]
+    public void Routing_request_members_the_dashboard_sends_are_accepted(string tsType, Type clr)
+    {
+        var accepted = JsonMembers(clr).ToHashSet(StringComparer.Ordinal);
+        foreach (string member in _ts.MembersOf(tsType))
+        {
+            Assert.True(accepted.Contains(member), $"The dashboard sends '{member}' in {tsType}, but {clr.Name} does not accept it.");
+        }
+    }
+
+    [Fact]
     public async Task Storage_switch()
     {
         object target = new { host = "db.internal", database = "egg" };

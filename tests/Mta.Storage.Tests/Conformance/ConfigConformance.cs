@@ -483,6 +483,42 @@ public abstract class ConfigConformance : StorageTestBase
         Assert.Equal("backup", (await C.GetRelayRoutesAsync(Ct)).Single().Name);
     }
 
+    [Fact]
+    public async Task Relay_routes_are_replaced_by_id_credentials_can_be_cleared_and_deleting_an_unknown_id_is_harmless()
+    {
+        var route = new RelayRouteRecord(Ids.New(), "primary", "smtp.example", 587, "verify", "user", [9, 9], 10, true, ["a.example"]);
+        await C.UpsertRelayRouteAsync(route, Ct);
+        await C.UpsertRelayRouteAsync(route with { Name = "renamed", Port = 465, TlsMode = "implicit", UserName = null, PasswordProtected = null, Priority = 1, Enabled = false, Domains = ["*.b.example", "c.example"] }, Ct);
+
+        var stored = Assert.Single(await C.GetRelayRoutesAsync(Ct));
+        Assert.Equal(route.Id, stored.Id);
+        Assert.Equal(("renamed", 465, "implicit", 1, false), (stored.Name, stored.Port, stored.TlsMode, stored.Priority, stored.Enabled));
+        Assert.Null(stored.UserName);
+        Assert.Null(stored.PasswordProtected);
+        Assert.Equal(["*.b.example", "c.example"], stored.Domains);
+
+        await C.DeleteRelayRouteAsync(Ids.New(), Ct);
+        await C.DeleteTlsPolicyAsync(Ids.New(), Ct);
+        Assert.Single(await C.GetRelayRoutesAsync(Ct));
+    }
+
+    [Fact]
+    public async Task A_tls_policy_can_move_to_a_free_pattern_but_not_onto_a_taken_one()
+    {
+        var a = new TlsPolicyRecord(Ids.New(), "a.example", TlsLevel.May);
+        var b = new TlsPolicyRecord(Ids.New(), "b.example", TlsLevel.Verify);
+        await C.UpsertTlsPolicyAsync(a, Ct);
+        await C.UpsertTlsPolicyAsync(b, Ct);
+
+        await Assert.ThrowsAsync<StorageConflictException>(async () => await C.UpsertTlsPolicyAsync(b with { DomainPattern = "A.EXAMPLE" }, Ct));
+        await C.UpsertTlsPolicyAsync(b with { DomainPattern = "*.c.example", Level = TlsLevel.None }, Ct);
+
+        var all = await C.GetTlsPoliciesAsync(Ct);
+        Assert.Equal(["*.c.example", "a.example"], all.Select(p => p.DomainPattern));
+        Assert.Equal(TlsLevel.None, all.Single(p => p.Id == b.Id).Level);
+        Assert.Equal(TlsLevel.May, all.Single(p => p.Id == a.Id).Level);
+    }
+
     // Certificates and ACME
 
     private CertificateRecord Cert(string name, Guid? id = null) =>

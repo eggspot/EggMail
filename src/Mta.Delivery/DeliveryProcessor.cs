@@ -629,13 +629,7 @@ public sealed class DeliveryProcessor
             System.Security.Cryptography.CryptographicOperations.ZeroMemory(plain);
         }
 
-        var tls = relay.TlsMode.ToLowerInvariant() switch
-        {
-            "none" => SmtpTlsPolicy.Disabled,
-            "implicit" => new SmtpTlsPolicy { Mode = SmtpTlsMode.Implicit, Require = true, TargetHost = relay.Host },
-            "required" or "verify" => new SmtpTlsPolicy { Mode = SmtpTlsMode.StartTls, Require = true, TargetHost = relay.Host },
-            _ => new SmtpTlsPolicy { Mode = SmtpTlsMode.StartTls, Require = false, TargetHost = relay.Host },
-        };
+        var tls = RelayTlsPolicy(relay);
 
         AttemptResult? lastFailure = null;
         foreach (var address in addresses.Addresses.Take(_options.MaxAddressesPerHost))
@@ -653,6 +647,27 @@ public sealed class DeliveryProcessor
         }
 
         return lastFailure!;
+    }
+
+    /// <summary>
+    /// The TLS behaviour of a relay route (docs/api.md, relay <c>tlsMode</c>). <c>none</c>: no TLS. <c>starttls</c>: STARTTLS when offered, any certificate, plaintext
+    /// otherwise. <c>required</c>: STARTTLS required, certificate not validated (encryption only). <c>verify</c>: STARTTLS required, and the certificate chain and the
+    /// relay's host name must validate. <c>implicit</c>: TLS from the first byte (port 465), validated like <c>verify</c>, because it is the mode for credentialed
+    /// submission relays. An unknown value behaves like <c>starttls</c> (the API only stores the five values above).
+    /// </summary>
+    public static SmtpTlsPolicy RelayTlsPolicy(RelayRouteRecord relay)
+    {
+        static bool ChainAndNameValid(object sender, System.Security.Cryptography.X509Certificates.X509Certificate? certificate, System.Security.Cryptography.X509Certificates.X509Chain? chain, System.Net.Security.SslPolicyErrors errors) =>
+            errors == System.Net.Security.SslPolicyErrors.None;
+
+        return relay.TlsMode.ToLowerInvariant() switch
+        {
+            "none" => SmtpTlsPolicy.Disabled,
+            "implicit" => new SmtpTlsPolicy { Mode = SmtpTlsMode.Implicit, Require = true, TargetHost = relay.Host, ValidationCallback = ChainAndNameValid },
+            "verify" => new SmtpTlsPolicy { Mode = SmtpTlsMode.StartTls, Require = true, TargetHost = relay.Host, ValidationCallback = ChainAndNameValid },
+            "required" => new SmtpTlsPolicy { Mode = SmtpTlsMode.StartTls, Require = true, TargetHost = relay.Host },
+            _ => new SmtpTlsPolicy { Mode = SmtpTlsMode.StartTls, Require = false, TargetHost = relay.Host },
+        };
     }
 
     private static SmtpTlsPolicy BuildTlsPolicy(TlsPolicyDecision decision, string mxHost, out RemoteCertificateValidator? validator)
