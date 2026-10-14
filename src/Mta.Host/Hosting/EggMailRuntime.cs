@@ -209,7 +209,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
                 acmeDnsOverride = new CloudflareDnsChallengeProvider(new HttpClient(), token);
             }
 
-            acme = new AcmeRenewalService(storage.Config, secrets, acmeRunnerOverride ?? new CertesOrderRunner(), acmeDnsOverride, config.Acme, clock, log);
+            acme = new AcmeRenewalService(storage.Config, secrets, acmeRunnerOverride ?? new CertesOrderRunner(log: log), acmeDnsOverride, config.Acme, clock, log);
         }
 
         var runtime = new EggMailRuntime

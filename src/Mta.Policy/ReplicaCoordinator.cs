@@ -28,7 +28,7 @@ public sealed class ReplicaCoordinatorOptions
 }
 
 /// <summary>
-/// What replicas on one database share about the remote destinations they all send to (DESIGN-DECIDED, decision 81), coordinated every few seconds so the delivery hot path
+/// What replicas on one database share about the remote destinations they all send to (DESIGN-DECIDED, decision 82), coordinated every few seconds so the delivery hot path
 /// never waits for the database:
 /// <list type="bullet">
 /// <item><b>Shares.</b> Every beat returns the live replicas; this replica's rank among them and their number set the <see cref="DestinationThrottle"/> share, so the

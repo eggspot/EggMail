@@ -25,7 +25,7 @@ public readonly record struct AuthLockoutCheck(TimeSpan? RetryAfter, IReadOnlyLi
 /// window of its oldest counted failure expires. Memory is bounded: expired entries are dropped opportunistically.
 /// <para><b>Replicas.</b> With a shared <see cref="IReplicaCoordination"/> (PostgreSQL) the failures are counted in the database, in buckets of a fifteenth of the window per key
 /// (a sliding window with that resolution: a failure counts until the end of its bucket plus the window), so the budget is for all replicas together and an attacker who
-/// spreads attempts over replicas gets the same budget as one who does not (DESIGN-DECIDED, decision 81). The cost per login attempt is one indexed read; per failed attempt one small
+/// spreads attempts over replicas gets the same budget as one who does not (DESIGN-DECIDED, decision 82). The cost per login attempt is one indexed read; per failed attempt one small
 /// write; a successful login adds one delete only if the read found failures on record for the keys it clears, so ordinary logins cost no more than the read. All next to a PBKDF2
 /// verification of 600,000 iterations; nothing on the mail path. The keys are stored as HMAC-SHA256 digests under a key that is itself protected by Data Protection, so a copy of the
 /// table alone does not say which addresses or user names failed. Writes are not cancelled with the request that caused them (a client that hangs up must not buy a free guess)

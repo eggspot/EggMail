@@ -141,7 +141,8 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | `Acme:CloudflareApiToken` | none | API token with DNS edit rights (prefer the file form) |
 | `Acme:CloudflareApiTokenFile` | none | File holding that token |
 | `Acme:PropagationDelay` | `00:00:30` | Wait after publishing the challenge record |
-| `Acme:RenewAtRemainingFraction` | 0.3333 | Renew when this fraction of the lifetime remains (between 0 and 1) |
+| `Acme:RenewAtRemainingFraction` | 0.3333 | Renew when this fraction of the lifetime remains (between 0 and 1); used when the CA gives no renewal information |
+| `Acme:UseRenewalInfo` | true | Ask the CA when to renew (ACME Renewal Information, RFC 9773) and follow its suggested window; falls back to the lifetime rule when the CA has none or fails |
 | `Acme:CheckInterval` | `01:00:00` | How often the renewal service looks |
 | `Secrets:KeyProtection` | `None` | `Certificate` (with `Secrets:CertificatePath`) or `Kms` (see "Protecting the key ring" below) for production. `None` stores the key ring unprotected and logs a warning |
 | `Secrets:CertificatePath` | none | PFX that protects the Data Protection key ring (deployment configuration, never in the database) |
@@ -237,7 +238,7 @@ Certificates live in the database and are served by SMTP (STARTTLS and implicit 
 
 **Built-in ACME** (`Acme:Enabled=true`) orders one certificate for `Acme:Domains` (the SMTP and dashboard host names) from the CA at `Acme:DirectoryUrl`, using the **DNS-01** challenge only. DNS-01 needs no inbound port 80 or 443; the only supported DNS provider is Cloudflare, with a token that has Zone:Read and DNS:Edit for the zone (`Acme:CloudflareApiToken` or `Acme:CloudflareApiTokenFile`). Wildcard names work. The ACME account is created on the first order and kept (encrypted) in the database for that directory; it is part of a backend switch bundle. Email addresses given to the CA (`Acme:Email`) get no expiry notices from Let's Encrypt any more, so monitor expiry yourself.
 
-Renewal runs hourly and renews when a third of the lifetime is left. A failed attempt (DNS provider error, CA error, validation failed, CA unreachable) is recorded and retried after 10 minutes, then 20, 40, … up to 6 hours; the certificate in use keeps being served. Status, failure count, last error and next attempt are in the admin API (`GET /api/v1/admin/certificates/acme`). With several replicas only one orders at a time (a lease row); the others pick the new certificate up from the database within `Tls:PollInterval` without a restart.
+Renewal is checked hourly (`Acme:CheckInterval`). When the CA supports ACME Renewal Information (ARI; Let's Encrypt does) EggMail asks it when to renew and renews at a random time inside the window it suggests (when that time falls before the next hourly check), and never later than when a sixth of the lifetime is left. A window that has passed, for example after a revocation or an incident, means renew at the next check, but a certificate younger than a day (or a twentieth of its lifetime if longer; 4.5 days for 90 days) is never renewed on advice alone, so a CA that keeps saying "now" cannot make EggMail order at every check. The CA is asked about once per its `Retry-After` (between a minute and a day, 6 hours without one). After a server error or a network failure it is asked again after 5 minutes, doubling up to 6 hours; after any other error after 6 hours. A CA without ARI (asked again daily), an ARI request that fails, or `Acme:UseRenewalInfo=false` falls back to renewing when a third of the lifetime is left. The renewal order names the certificate it replaces. The last advice (window, chosen time, errors, failure count) is stored in the certificate's renewal row (`ari_json`) and logged; it is not shown in the API yet. A failed order, a DNS provider error, validation failure or an unreachable CA is recorded and retried after 10 minutes, then 20, 40, … up to 6 hours; the certificate in use keeps being served. Status, failure count, last error and next attempt are in the admin API (`GET /api/v1/admin/certificates/acme`). With several replicas only one orders at a time (a lease row); the others pick the new certificate up from the database within `Tls:PollInterval` without a restart.
 
 **Use the staging CA first.** Production Let's Encrypt rate-limits failed validations and new accounts. Set `Acme:DirectoryUrl=https://acme-staging-v02.api.letsencrypt.org/directory`, check that a certificate is issued (it is not trusted by clients), then switch to `https://acme-v02.api.letsencrypt.org/directory`. Accounts are per directory, so switching the directory registers a second account; the existing certificate is not re-ordered until it is due or you request one (`POST /api/v1/admin/certificates/acme`).
 
@@ -390,7 +391,7 @@ Four things the server counts or learns while running are written to the databas
 
 Only with the PostgreSQL backend (SQLite is one process on one volume, by design). Point every replica at the same database with the same `Secrets` configuration; each replica generates a unique name for itself at start. Nothing needs to be configured for the replicas to find each other: they beat in the database every 5 seconds.
 
-What is shared between replicas, and what is not (decision 81):
+What is shared between replicas, and what is not (decision 82):
 
 | What | With N replicas |
 |---|---|
