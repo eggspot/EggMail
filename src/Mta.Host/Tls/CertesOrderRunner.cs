@@ -25,9 +25,8 @@ public sealed class CertesOrderRunner : IAcmeOrderRunner
     /// </param>
     public CertesOrderRunner(HttpMessageHandler? handler = null) => _handler = handler;
 
-    public async Task<AcmeIssuedCertificate> IssueAsync(AcmeOrderRequest request, IDnsChallengeProvider dns, CancellationToken ct)
-    {
-        try
+    public Task<AcmeIssuedCertificate> IssueAsync(AcmeOrderRequest request, IDnsChallengeProvider dns, CancellationToken ct) =>
+        TranslateAsync(async () =>
         {
             var account = new AccountState { KeyPem = request.AccountKeyPem };
             for (int attempt = 1; ; attempt++)
@@ -43,6 +42,33 @@ public sealed class CertesOrderRunner : IAcmeOrderRunner
                     // account registered by an earlier attempt is kept in <see cref="AccountState"/> and reused.
                 }
             }
+        }, ct);
+
+    /// <summary>
+    /// ARI (RFC 9773): asks the CA when it wants the certificate renewed. The request needs no account. Null when the CA does not advertise
+    /// <c>renewalInfo</c> in its directory; <see cref="AcmeException"/> when it does and the answer is an error or unusable.
+    /// </summary>
+    public Task<AcmeRenewalInfo?> GetRenewalInfoAsync(string directoryUrl, string certificateChainPem, CancellationToken ct) =>
+        TranslateAsync(async () =>
+        {
+            var directory = new Uri(directoryUrl);
+            using var http = _handler is null ? new HttpClient() : new HttpClient(_handler, disposeHandler: false);
+            var acme = new AcmeContext(directory, null, new AcmeHttpClient(directory, http));
+            if ((await acme.GetDirectory().ConfigureAwait(false)).RenewalInfo is null)
+            {
+                return (AcmeRenewalInfo?)null;
+            }
+
+            string certificateId = new CertificateChain(certificateChainPem).GetRenewalInfoCertificateId();
+            var info = await acme.GetRenewalInfo(certificateId).ConfigureAwait(false);
+            return new AcmeRenewalInfo(info.SuggestedWindow.Start, info.SuggestedWindow.End, info.RetryAfter, info.ExplanationUrl?.ToString());
+        }, ct);
+
+    private static async Task<T> TranslateAsync<T>(Func<Task<T>> body, CancellationToken ct)
+    {
+        try
+        {
+            return await body().ConfigureAwait(false);
         }
         catch (AcmeRequestException ex)
         {
@@ -125,9 +151,31 @@ public sealed class CertesOrderRunner : IAcmeOrderRunner
         return false;
     }
 
+    /// <summary>
+    /// A new order; when the certificate it renews is known and the CA advertises ARI, an order that names it (<c>replaces</c>, RFC 9773 section 5),
+    /// so the CA can tell a renewal from a new certificate (rate limits, and it marks the old one as replaced). The CA may refuse the link
+    /// (already replaced by another order, certificate unknown to it, no name in common); that must never stop the renewal, so the plain order follows.
+    /// </summary>
+    private static async Task<IOrderContext> NewOrderAsync(AcmeContext acme, AcmeOrderRequest request)
+    {
+        var names = request.Domains.ToList();
+        if (request.ReplacesCertificatePem is { } replaced && (await acme.GetDirectory().ConfigureAwait(false)).RenewalInfo is not null)
+        {
+            try
+            {
+                return await acme.NewReplacementOrder(names, new CertificateChain(replaced).GetRenewalInfoCertificateId()).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is Certes.AcmeException && !IsBadNonce(ex))
+            {
+            }
+        }
+
+        return await acme.NewOrder(names).ConfigureAwait(false);
+    }
+
     private static async Task<AcmeIssuedCertificate> OrderAsync(AcmeContext acme, AcmeOrderRequest request, IDnsChallengeProvider dns, string? accountUrl, CancellationToken ct)
     {
-        var order = await acme.NewOrder(request.Domains.ToList()).ConfigureAwait(false);
+        var order = await NewOrderAsync(acme, request).ConfigureAwait(false);
         var authorizations = await order.Authorizations().ConfigureAwait(false);
         var handles = new List<string>();
         var challenges = new List<(IAuthorizationContext Authz, IChallengeContext Challenge)>();

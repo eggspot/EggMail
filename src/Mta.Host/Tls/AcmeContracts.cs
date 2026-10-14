@@ -20,7 +20,11 @@ public sealed record AcmeOrderRequest(
     IReadOnlyList<string> Domains,
     string? AccountKeyPem,
     TimeSpan PropagationDelay,
-    Func<AcmeAccountCreated, CancellationToken, Task>? AccountCreated = null);
+    Func<AcmeAccountCreated, CancellationToken, Task>? AccountCreated = null,
+    string? ReplacesCertificatePem = null);
+
+/// <summary>What the CA answered to a renewal information (ARI, RFC 9773) request: the window in which it wants the certificate renewed, and when to ask again.</summary>
+public sealed record AcmeRenewalInfo(DateTimeOffset WindowStart, DateTimeOffset WindowEnd, TimeSpan? RetryAfter, string? ExplanationUrl);
 
 /// <summary>A freshly registered ACME account: its private key (PEM) and its URL at the CA.</summary>
 public sealed record AcmeAccountCreated(string AccountKeyPem, string? AccountUrl);
@@ -32,6 +36,12 @@ public sealed record AcmeIssuedCertificate(string ChainPem, byte[] PrivateKeyPkc
 public interface IAcmeOrderRunner
 {
     Task<AcmeIssuedCertificate> IssueAsync(AcmeOrderRequest request, IDnsChallengeProvider dns, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Asks the CA when to renew the certificate (leaf-first PEM chain) issued by the directory. Null when the CA has no ARI; throws
+    /// <see cref="AcmeException"/> when it has and the request failed. The default is "no ARI", which keeps the lifetime rule.
+    /// </summary>
+    Task<AcmeRenewalInfo?> GetRenewalInfoAsync(string directoryUrl, string certificateChainPem, CancellationToken cancellationToken) => Task.FromResult<AcmeRenewalInfo?>(null);
 }
 
 public sealed class AcmeException : Exception

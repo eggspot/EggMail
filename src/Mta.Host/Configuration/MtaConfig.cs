@@ -288,6 +288,12 @@ public sealed class AcmeSection
     public double RenewAtRemainingFraction { get; init; } = 1.0 / 3.0;
 
     public TimeSpan CheckInterval { get; init; } = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// Ask the CA when to renew (ACME Renewal Information, RFC 9773) and follow its window; when the CA has no ARI or it fails, or this is false,
+    /// <see cref="RenewAtRemainingFraction"/> decides. The CA is asked no more often than <see cref="CheckInterval"/> and its Retry-After allow.
+    /// </summary>
+    public bool UseRenewalInfo { get; init; } = true;
 }
 
 /// <summary>
