@@ -219,7 +219,6 @@ public sealed class MessagesApi(ApiAuthenticator auth, IStorage storage, Submiss
             Message = raw,
             RemoteAddress = context.Connection.RemoteIpAddress?.ToString(),
             Authenticated = caller.Name,
-            SmtpUtf8 = from.IsInternational || recipients.Any(r => r.IsInternational),
             StoreAttachments = !recomposed,
         }, ct).ConfigureAwait(false);
         if (!result.IsAccepted)

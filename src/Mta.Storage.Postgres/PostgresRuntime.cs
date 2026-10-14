@@ -103,7 +103,9 @@ internal sealed class PostgresRuntime
             builder.AutoPrepareMinUsages = 2;
         }
 
-        return new NpgsqlDataSourceBuilder(builder.ConnectionString).Build();
+        // The name becomes the "db.client.connection.pool.name" label of Npgsql's pool metrics. Unnamed, Npgsql uses the connection string
+        // (host, user, database), which is both long and an information leak in a scrape; two fixed names are bounded and say what they are.
+        return new NpgsqlDataSourceBuilder(builder.ConnectionString) { Name = runtimePool ? "eggmail-runtime" : "eggmail-owner" }.Build();
     }
 
     /// <summary>
@@ -121,6 +123,28 @@ internal sealed class PostgresRuntime
         }
 
         return PostgresErrors.Unavailable(inner);
+    }
+
+    /// <summary>
+    /// Whether an enabled endpoint of the tenant subscribes to the event type according to the loaded list; null when that list is not current
+    /// (not loaded, changed, or older than <see cref="TargetsMaxAgeMs"/>), in which case the caller must assume yes and let the fan-out refresh it.
+    /// </summary>
+    public bool? AnyWebhookSubscriber(Guid tenantId, string eventType)
+    {
+        if (!IsFresh(ConfigStore.WebhookEndpointVersion))
+        {
+            return null;
+        }
+
+        foreach (WebhookTarget target in Volatile.Read(ref _targets))
+        {
+            if (target.TenantId == tenantId && WebhookSubscriptions.Matches(target.EventTypes, eventType))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>The enabled endpoints, refreshed whenever the config store reports a webhook endpoint change.</summary>

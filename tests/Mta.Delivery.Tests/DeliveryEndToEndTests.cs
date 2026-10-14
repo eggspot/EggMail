@@ -5,6 +5,7 @@ using Mta.Storage;
 
 namespace Mta.Delivery.Tests;
 
+[Collection("delivery-pipeline")]
 public class DeliveryEndToEndTests
 {
     [Fact]
@@ -210,6 +211,7 @@ public class DeliveryEndToEndTests
     }
 }
 
+[Collection("delivery-pipeline")]
 public class DeliveryDkimAndLimitsTests
 {
     [Fact]
@@ -275,6 +277,7 @@ public class DeliveryDkimAndLimitsTests
     }
 }
 
+[Collection("delivery-pipeline")]
 public class DeliveryResumeTests
 {
     [Fact]

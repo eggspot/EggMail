@@ -93,6 +93,8 @@ public class PgWebhookFull : WebhookConformance
 {
     private readonly PgHarness _pg = new();
 
+    protected override bool SubscriberAnswerIsPrecise => false;
+
     protected override Task<IStorage> CreateAsync(StorageOptions options) => _pg.CreateAsync(options, Clock);
 
     public override async Task DisposeAsync()
@@ -105,6 +107,8 @@ public class PgWebhookFull : WebhookConformance
 public class PgWebhookStatsOnly : WebhookConformance
 {
     private readonly PgHarness _pg = new();
+
+    protected override bool SubscriberAnswerIsPrecise => false;
 
     protected override HistoryMode Mode => HistoryMode.StatsOnly;
 

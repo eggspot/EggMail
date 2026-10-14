@@ -34,6 +34,7 @@ public sealed class SqliteStorage : IStorage
     private int _disposed;
     private SqliteMaintenance? _maintenance;
     private EfStorageTransfer? _transfer;
+    private IDisposable? _meters;
 
     private SqliteStorage(StorageOptions options, IClock clock, IMtaLog log)
     {
@@ -156,6 +157,7 @@ public sealed class SqliteStorage : IStorage
         }
 
         _maintenance = new SqliteMaintenance(_rt, _queue, _stats, so.DataDirectory, _quarantine);
+        _meters = SqliteMetrics.Attach(this);
         LogWarnings();
 
         if (so.StatsFlushInterval > TimeSpan.Zero)
@@ -225,6 +227,7 @@ public sealed class SqliteStorage : IStorage
             return;
         }
 
+        _meters?.Dispose();
         if (_flushCts is not null)
         {
             await _flushCts.CancelAsync().ConfigureAwait(false);
@@ -255,6 +258,7 @@ public sealed class SqliteStorage : IStorage
 
         foreach (SqliteFile f in _rt.Files.Where(f => f is not null).ToList())
         {
+            f.ReadSessions.Close();   // the storage is gone: later reads still work but keep no connection open
             f.ClearPool();
         }
     }

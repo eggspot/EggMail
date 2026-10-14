@@ -57,14 +57,14 @@ public class RuntimeStateTests : SqliteTestBase
         // Turn the files back into what version 3 created.
         Run("config.db", "DROP TABLE domain_record_check", "DROP TABLE tls_rpt_bucket", "DROP TABLE sending_counter", "PRAGMA user_version = 3");
         Run("history.db", "DROP INDEX IX_message_index_tenant_id_message_id_header", "ALTER TABLE message_index DROP COLUMN message_id_header", "ALTER TABLE message_index DROP COLUMN tags", "PRAGMA user_version = 3");
-        Run("queue.db", "PRAGMA user_version = 3");
+        Run("queue.db", "ALTER TABLE delivery_queue DROP COLUMN headers_utf8", "PRAGMA user_version = 3");
         Run("stats.db", "PRAGMA user_version = 3");
 
         await ReopenAsync();
 
         foreach (string file in new[] { "config.db", "history.db", "queue.db", "stats.db" })
         {
-            Assert.Equal(4, ScalarLong(PathOf(file), "PRAGMA user_version"));
+            Assert.Equal(5, ScalarLong(PathOf(file), "PRAGMA user_version"));
         }
 
         Assert.Equal(0, ScalarLong(PathOf("config.db"), "SELECT count(*) FROM sending_counter"));

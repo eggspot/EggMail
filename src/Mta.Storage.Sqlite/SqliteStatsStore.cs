@@ -81,7 +81,7 @@ internal sealed class SqliteStatsStore : IStatsStore
     private IEnumerable<(Guid Tenant, string Sending, string Recipient)> LoadHourSeries(DateTimeOffset hour)
     {
         var list = new List<(Guid, string, string)>();
-        using SqliteDataReader r = _activeContext!.Command(StatsSql.HourSeries).Set(0, StorageTime.ToUnixMs(hour)).ExecuteReader();
+        using RawReader r = _activeContext!.Command(StatsSql.HourSeries).Set(0, StorageTime.ToUnixMs(hour)).ExecuteReader();
         while (r.Read())
         {
             list.Add((r.GetGuid(0), r.GetString(1), r.GetString(2)));
@@ -118,7 +118,7 @@ internal sealed class SqliteStatsStore : IStatsStore
         self._activeContext = ctx;
         try
         {
-            SqliteCommand upsert = ctx.Command(StatsSql.Upsert);
+            PreparedCommand upsert = ctx.Command(StatsSql.Upsert);
             foreach (StatDelta d in self._bucketer.Apply(s.Deltas))
             {
                 upsert.Set(0, 0).Set(1, StorageTime.ToUnixMs(d.Key.HourStart)).Set(2, d.Key.TenantId).Set(3, d.Key.SendingDomain).Set(4, d.Key.RecipientDomain);
@@ -132,7 +132,7 @@ internal sealed class SqliteStatsStore : IStatsStore
 
             if (s.RingCapacity > 0 && s.Ring.Count > 0)
             {
-                SqliteCommand ring = ctx.Command(StatsSql.RingInsert);
+                PreparedCommand ring = ctx.Command(StatsSql.RingInsert);
                 foreach (RecentEvent e in s.Ring)
                 {
                     ring.Set(0, StorageTime.ToUnixMs(e.At)).Set(1, e.TenantId).Set(2, e.EventType).Set(3, e.RecipientDomain).Set(4, e.Detail).ExecuteNonQuery();

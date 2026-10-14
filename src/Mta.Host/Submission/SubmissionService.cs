@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Mta.Core;
 using Mta.Mime;
 using Mta.Policy;
@@ -38,7 +39,6 @@ public sealed class SubmissionRequest
 
     public string? RemoteAddress { get; init; }
     public string? Authenticated { get; init; }
-    public bool SmtpUtf8 { get; init; }
     public string? IdempotencyKey { get; init; }
 
     /// <summary>Digest of the request that carries <see cref="IdempotencyKey"/>; storage returns the stored one on a duplicate so the caller can detect key reuse with another body.</summary>
@@ -91,6 +91,7 @@ public sealed class SubmissionService
         _options = options ?? new SubmissionOptions();
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<SubmissionResult> SubmitAsync(SubmissionRequest request, CancellationToken ct)
     {
         if (request.Message.Length + request.ReceivedHeader.Length > _options.MaxMessageBytes)
@@ -98,7 +99,7 @@ public sealed class SubmissionService
             return new SubmissionResult(SubmissionStatus.TooLarge, Guid.Empty, Detail: "message exceeds the size limit");
         }
 
-        var recipients = request.Recipients.Distinct().ToList();
+        var recipients = DistinctRecipients(request.Recipients);
         if (recipients.Count == 0)
         {
             return new SubmissionResult(SubmissionStatus.Invalid, Guid.Empty, Detail: "no recipients");
@@ -109,6 +110,7 @@ public sealed class SubmissionService
             return new SubmissionResult(SubmissionStatus.Invalid, Guid.Empty, _policy.CheckRecipientCount(recipients.Count), "too many recipients");
         }
 
+        // The message is parsed once here; the sender check, the header repair and the history extraction all work from this one parse.
         var parsed = MimeMessage.Parse(request.Message);
         string? fromDomain = HeaderFromDomain(parsed, out string? fromProblem);
         if (fromDomain is null)
@@ -124,10 +126,18 @@ public sealed class SubmissionService
         }
 
         var now = _clock.UtcNow;
+        var headers = parsed.Headers;
         var editor = new MessageHeaderEditor(request.Message);
-        editor.Remove(HeaderNames.Bcc);
+        // Bcc must never reach the stored copy. The parsed list is authoritative only when it is complete: past the header count or
+        // size limits it stops recording fields, while the editor (which has no such limit) still sees them, so then the rule stays.
+        bool headerListComplete = (headers.Anomalies & (MimeAnomaly.TooManyHeaders | MimeAnomaly.HeaderBlockTooLarge)) == 0;
+        if (!headerListComplete || headers.IndexOf(HeaderId.Bcc) >= 0)
+        {
+            editor.Remove(HeaderNames.Bcc);
+        }
+
         string messageIdHeader;
-        if (parsed.Headers.TryGetFirst(HeaderId.MessageId, out var existingMessageId))
+        if (headers.TryGetFirst(HeaderId.MessageId, out var existingMessageId))
         {
             messageIdHeader = existingMessageId.Value;
         }
@@ -137,18 +147,20 @@ public sealed class SubmissionService
             editor.Prepend(HeaderNames.MessageId, messageIdHeader);
         }
 
-        if (!parsed.Headers.TryGetFirst(HeaderId.Date, out _))
+        if (!headers.TryGetFirst(HeaderId.Date, out _))
         {
             editor.Prepend(HeaderNames.Date, MimeDate.Format(now));
         }
 
         if (!request.ReceivedHeader.IsEmpty)
         {
-            editor.PrependRaw(request.ReceivedHeader.Span);   // last: each prepended field goes above the earlier ones, and Received belongs at the very top
+            editor.PrependRawWithoutCopy(request.ReceivedHeader);   // last: each prepended field goes above the earlier ones, and Received belongs at the very top
         }
 
         byte[] raw = editor.ToArray();
-        var content = ExtractContent(raw);
+
+        // Only headers are added or removed, so subject, bodies and attachments of the original parse are those of the stored message.
+        var content = ExtractContent(parsed);
         var messageId = Ids.New(now);
         var accepted = new AcceptedMessage
         {
@@ -156,7 +168,7 @@ public sealed class SubmissionService
             TenantId = request.Tenant.Id,
             Source = request.Source,
             EnvelopeFrom = request.EnvelopeFrom,
-            Recipients = recipients.Select(r => new AcceptedRecipient(Ids.New(now), r)).ToList(),
+            Recipients = ToAcceptedRecipients(recipients, now),
             Raw = raw,
             ReceivedAt = now,
             ExpiresAt = now + _storageOptions.Queue.MaxLifetime,
@@ -164,7 +176,10 @@ public sealed class SubmissionService
             IdempotencyFingerprint = request.IdempotencyFingerprint,
             RemoteAddress = request.RemoteAddress,
             Authenticated = request.Authenticated,
-            SmtpUtf8 = request.SmtpUtf8,
+            // What the message itself needs (UTF-8 in its header fields), decided from its bytes rather than from the submitter's MAIL FROM
+            // parameter: a client that declares SMTPUTF8 only for an internationalized address must not make every transaction of this
+            // message demand SMTPUTF8, and one that sends UTF-8 headers without declaring it still gets them delivered as such.
+            HeadersUtf8 = MessageInspector.HasValidUtf8Headers(raw),
             Content = content,
             RetainRaw = request.StoreAttachments && _storageOptions.Content.AllowAttachmentStorage && content is { Attachments.Count: > 0 },
             SendingDomain = decision.SendingDomain?.Name ?? fromDomain,
@@ -172,8 +187,81 @@ public sealed class SubmissionService
             Tags = request.Tags is { Count: > 0 } tags ? tags.Distinct(StringComparer.Ordinal).ToList() : null,
         };
 
+        using Activity? span = MessageTrace.Start(MessageTrace.SubmitSpan, messageId);
+        if (span is not null)
+        {
+            span.SetTag("mta.tenant.id", Ids.ToCompact(request.Tenant.Id));
+            span.SetTag("mta.message.source", request.Source.ToString());
+            span.SetTag("mta.message.recipients", recipients.Count);
+            span.SetTag("mta.message.size", raw.Length);
+        }
+
         var result = await _storage.Intake.AcceptAsync(accepted, ct).ConfigureAwait(false);
+        if (span is not null)
+        {
+            span.SetTag("mta.submit.outcome", result.Status == IntakeStatus.Accepted ? "accepted" : "duplicate");
+            if (result.Status != IntakeStatus.Accepted)
+            {
+                span.SetTag("mta.submit.original_message_id", Ids.ToCompact(result.MessageId));   // an idempotent repeat: the message that counts is the first one
+            }
+        }
+
         return new SubmissionResult(result.Status == IntakeStatus.Accepted ? SubmissionStatus.Accepted : SubmissionStatus.Duplicate, result.MessageId, IdempotencyFingerprint: result.IdempotencyFingerprint);
+    }
+
+    /// <summary>The recipients without duplicates, in first-seen order. Returns the caller's list itself when it has none (the usual case).</summary>
+    private static IReadOnlyList<EmailAddress> DistinctRecipients(IReadOnlyList<EmailAddress> recipients)
+    {
+        int count = recipients.Count;
+        if (count < 2)
+        {
+            return recipients;
+        }
+
+        if (count <= 16)
+        {
+            // Quadratic but allocation free; the common message has one to three recipients.
+            for (int i = 1; i < count; i++)
+            {
+                for (int j = 0; j < i; j++)
+                {
+                    if (recipients[i].Equals(recipients[j]))
+                    {
+                        return FirstOccurrences(recipients);
+                    }
+                }
+            }
+
+            return recipients;
+        }
+
+        return FirstOccurrences(recipients);
+    }
+
+    private static List<EmailAddress> FirstOccurrences(IReadOnlyList<EmailAddress> recipients)
+    {
+        var seen = new HashSet<EmailAddress>(recipients.Count);
+        var distinct = new List<EmailAddress>(recipients.Count);
+        for (int i = 0; i < recipients.Count; i++)
+        {
+            if (seen.Add(recipients[i]))
+            {
+                distinct.Add(recipients[i]);
+            }
+        }
+
+        return distinct;
+    }
+
+    private static AcceptedRecipient[] ToAcceptedRecipients(IReadOnlyList<EmailAddress> recipients, DateTimeOffset now)
+    {
+        var accepted = new AcceptedRecipient[recipients.Count];
+        for (int i = 0; i < accepted.Length; i++)
+        {
+            accepted[i] = new AcceptedRecipient(Ids.New(now), recipients[i]);
+        }
+
+        return accepted;
     }
 
     /// <summary>
@@ -194,20 +282,37 @@ public sealed class SubmissionService
         return domains;
     }
 
-    private MessageContent? ExtractContent(byte[] raw)
+    private MessageContent? ExtractContent(MimeMessage parsed)
     {
         if (_storage.HistoryMode != HistoryMode.Full || !_storageOptions.Content.Retain)
         {
             return null;
         }
 
-        var extracted = MessageContentExtractor.Extract(raw, _storageOptions.Content.MaxStoredBodyBytes);
+        var extracted = MessageContentExtractor.Extract(parsed, _storageOptions.Content.MaxStoredBodyBytes);
         return new MessageContent(
             _storageOptions.Content.StoreSubject ? extracted.Subject : null,
             extracted.TextBody,
             extracted.HtmlBody,
-            extracted.Attachments.Select(a => new StoredAttachment(a.FileName, a.ContentType, a.Size, a.ContentId)).ToList(),
+            ToStoredAttachments(extracted.Attachments),
             extracted.IsTruncated);
+    }
+
+    private static IReadOnlyList<StoredAttachment> ToStoredAttachments(IReadOnlyList<Mta.Mime.AttachmentInfo> attachments)
+    {
+        if (attachments.Count == 0)
+        {
+            return [];
+        }
+
+        var stored = new StoredAttachment[attachments.Count];
+        for (int i = 0; i < stored.Length; i++)
+        {
+            var a = attachments[i];
+            stored[i] = new StoredAttachment(a.FileName, a.ContentType, a.Size, a.ContentId);
+        }
+
+        return stored;
     }
 
     private static string? HeaderFromDomain(MimeMessage message, out string? problem)
@@ -219,21 +324,17 @@ public sealed class SubmissionService
             return null;
         }
 
-        var mailboxes = AddressList.Parse(from).Mailboxes.Where(m => m.IsValid).ToList();
-        if (mailboxes.Count == 0)
+        switch (AddressList.GetCommonDomain(from, null, out string? domain))
         {
-            problem = "the From header has no valid address";
-            return null;
+            case CommonDomainResult.Single:
+                return domain;
+            case CommonDomainResult.MultipleDomains:
+                problem = "the From header must use a single domain";
+                return null;
+            default:
+                problem = "the From header has no valid address";
+                return null;
         }
-
-        string domain = mailboxes[0].Address.Domain.ToLowerInvariant();
-        if (mailboxes.Any(m => !string.Equals(m.Address.Domain, domain, StringComparison.OrdinalIgnoreCase)))
-        {
-            problem = "the From header must use a single domain";
-            return null;
-        }
-
-        return domain;
     }
 }
 
