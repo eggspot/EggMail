@@ -66,6 +66,9 @@ test.describe('sign-in, sign-out and CSRF', () => {
     await context.addCookies([{ name: 'eggmail_session', value: mine.sessionCookieValue, url: stack.baseURL, httpOnly: true, sameSite: 'Strict' }]);
     await page.goto('/admin/tenants');
     await expect(page.getByRole('heading', { name: 'Tenants', exact: true })).toBeVisible();
+    // The heading is drawn before the page's own requests (tenant list, capabilities) have answered. A request still in flight when the
+    // session ends gets the 401 and sends the page to the form on its own, so the "next action" below would find no form to fill.
+    await page.waitForLoadState('networkidle');
     // The session is ended on the server (as if it had expired or been signed out elsewhere).
     await mine.ok('DELETE', '/api/v1/session');
     await page.getByLabel('Name', { exact: true }).fill('after-expiry');
