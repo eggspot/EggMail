@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Mta.Core;
+using Mta.Host.Submission;
 using Mta.Storage;
 using Mta.Webhooks;
 
@@ -52,12 +53,12 @@ public sealed class SettingsUpdateRequest
 /// </summary>
 public sealed class SettingsService
 {
-    public const string StoreAttachmentsKey = "Content:StoreAttachments";
+    public const string StoreAttachmentsKey = AttachmentStoragePolicy.StoreAttachmentsKey;
     public const string WebhookAllowlistKey = "Webhooks:AllowedNetworks";
 
     private static readonly IReadOnlyList<SettingDefinition> TenantCatalog =
     [
-        new(StoreAttachmentsKey, SettingKind.Boolean, "Keep the raw message with its attachments after delivery so the message can be resent. Off by default; stored attachments use disk space. Needs the operator's Content:AllowAttachmentStorage switch."),
+        new(StoreAttachmentsKey, SettingKind.Boolean, "Keep the raw message with its attachments after delivery so the message can be resent. Until you set it, the operator's default applies; stored attachments use disk space. Needs the operator's Content:AllowAttachmentStorage switch."),
         new(WebhookAllowlistKey, SettingKind.String, "Comma separated networks (CIDR) your webhooks may call although they are internal addresses (SSRF allowlist). Only an administrator can change this.", AdminOnly: true),
         new("Smtp:MaxRecipients", SettingKind.Number, "Maximum recipients per message (fixed by the operator).", DeploymentOnly: true),
         new("Sending:PerHour", SettingKind.Number, "Most messages this tenant may send per UTC hour (0 or unset: the operator's default). Only an administrator can change this.", AdminOnly: true, Max: long.MaxValue),
@@ -119,7 +120,7 @@ public sealed class SettingsService
         {
             JsonElement value = d.Key switch
             {
-                StoreAttachmentsKey => Element(tenant.StoreAttachments),
+                StoreAttachmentsKey => Element(AttachmentStoragePolicy.TenantSetting(tenant, stored.Values) ?? _storageOptions.Content.StoreAttachments),   // not chosen yet: the operator default applies
                 "Smtp:MaxRecipients" => Element((long)_options.MaxRecipients),
                 _ => stored.TryGetValue(d.Key, out SettingRecord? s) ? Parse(s.ValueJson) : Element(""),
             };
@@ -161,11 +162,14 @@ public sealed class SettingsService
         {
             if (d.Key == StoreAttachmentsKey)
             {
+                // The tenant-scoped row is the tenant's choice (false must be able to override a global true); the tenant column mirrors it for readers of the tenant record.
                 updated = updated with { StoreAttachments = value.GetBoolean() };
             }
-            else
+
+            await Config.SetSettingAsync(new SettingRecord(d.Key, tenant.Id, value.GetRawText(), _clock.UtcNow), ct).ConfigureAwait(false);
+            if (d.Key == StoreAttachmentsKey)
             {
-                await Config.SetSettingAsync(new SettingRecord(d.Key, tenant.Id, value.GetRawText(), _clock.UtcNow), ct).ConfigureAwait(false);
+                AttachmentStoragePolicy.Bump();
             }
         }
 

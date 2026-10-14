@@ -44,8 +44,11 @@ public sealed class SubmissionRequest
     /// <summary>Digest of the request that carries <see cref="IdempotencyKey"/>; storage returns the stored one on a duplicate so the caller can detect key reuse with another body.</summary>
     public string? IdempotencyFingerprint { get; init; }
 
-    /// <summary>The caller asks to keep the raw message with its attachments after delivery (needs the global switch too).</summary>
-    public bool StoreAttachments { get; init; }
+    /// <summary>
+    /// The per-send request to keep (true) or not keep (false) the raw message with its attachments after delivery; null when the submitter has no such flag (SMTP, or an API
+    /// request that did not set one), in which case the tenant's setting and then the global default decide (<see cref="AttachmentStoragePolicy"/>). Needs the master switch either way.
+    /// </summary>
+    public bool? StoreAttachments { get; init; }
 
     /// <summary>Tags the API caller gave the message; stored with the message's history (<c>History:Mode=Full</c>) and returned by the messages API.</summary>
     public IReadOnlyList<string>? Tags { get; init; }
@@ -80,6 +83,7 @@ public sealed class SubmissionService
     private readonly SenderPolicy _policy;
     private readonly StorageOptions _storageOptions;
     private readonly SubmissionOptions _options;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, (bool? Row, long ExpiresAt, long Version)> _attachmentRowCache = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, (IReadOnlyList<DomainRecord> Domains, long ExpiresAt, long Version)> _domainCache = new();
 
     public SubmissionService(IStorage storage, IClock clock, SenderPolicy policy, StorageOptions storageOptions, SubmissionOptions? options = null)
@@ -158,9 +162,12 @@ public sealed class SubmissionService
         }
 
         byte[] raw = editor.ToArray();
-
         // Only headers are added or removed, so subject, bodies and attachments of the original parse are those of the stored message.
         var content = ExtractContent(parsed);
+
+        // The tenant's setting is only looked up when it can matter: the operator allows attachment storage and the message has attachments to keep.
+        bool retainRaw = _storageOptions.Content.AllowAttachmentStorage && content is { Attachments.Count: > 0 }
+            && (request.StoreAttachments ?? AttachmentStoragePolicy.Combine(request.Tenant, await GetAttachmentRowAsync(request.Tenant.Id, ct).ConfigureAwait(false)) ?? _storageOptions.Content.StoreAttachments);
         var messageId = Ids.New(now);
         var accepted = new AcceptedMessage
         {
@@ -181,7 +188,7 @@ public sealed class SubmissionService
             // message demand SMTPUTF8, and one that sends UTF-8 headers without declaring it still gets them delivered as such.
             HeadersUtf8 = MessageInspector.HasValidUtf8Headers(raw),
             Content = content,
-            RetainRaw = request.StoreAttachments && _storageOptions.Content.AllowAttachmentStorage && content is { Attachments.Count: > 0 },
+            RetainRaw = retainRaw,
             SendingDomain = decision.SendingDomain?.Name ?? fromDomain,
             MessageIdHeader = messageIdHeader,
             Tags = request.Tags is { Count: > 0 } tags ? tags.Distinct(StringComparer.Ordinal).ToList() : null,
@@ -280,6 +287,21 @@ public sealed class SubmissionService
         var domains = await _storage.Config.GetDomainsAsync(tenantId, ct).ConfigureAwait(false);
         _domainCache[tenantId] = (domains, now + (long)(_options.DomainCacheTtl.TotalSeconds * System.Diagnostics.Stopwatch.Frequency), version);
         return domains;
+    }
+
+    /// <summary>The tenant's attachment-storage row, cached briefly like the domain list (a change made through this process shows at once: <see cref="AttachmentStoragePolicy.Bump"/>).</summary>
+    private async ValueTask<bool?> GetAttachmentRowAsync(Guid tenantId, CancellationToken ct)
+    {
+        long now = _clock.Timestamp;
+        long version = AttachmentStoragePolicy.Version;
+        if (_attachmentRowCache.TryGetValue(tenantId, out var cached) && now < cached.ExpiresAt && cached.Version == version)
+        {
+            return cached.Row;
+        }
+
+        bool? row = AttachmentStoragePolicy.RowSetting(tenantId, await _storage.Config.GetSettingsAsync(tenantId, ct).ConfigureAwait(false));
+        _attachmentRowCache[tenantId] = (row, now + (long)(_options.DomainCacheTtl.TotalSeconds * System.Diagnostics.Stopwatch.Frequency), version);
+        return row;
     }
 
     private MessageContent? ExtractContent(MimeMessage parsed)

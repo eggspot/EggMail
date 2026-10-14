@@ -322,6 +322,8 @@ Internationalized domain names and Unicode normalization depend on ICU. In invar
 
 ## Upgrades
 
+**Attachment storage on SMTP.** SMTP submissions now follow the tenant's `Content:StoreAttachments` setting, and the operator default when the tenant never chose (they used to ignore both), so where `Content:AllowAttachmentStorage` is on and the default or a tenant says yes, SMTP mail with attachments is kept after delivery and uses disk for `Content:RetentionDays`. Check the tenants' settings and `Content:StoreAttachments` before upgrading if that is not wanted.
+
 Take a backup, pull the new image, restart. Schema changes run at start (SQLite: automatic; PostgreSQL: `Mail:Database:Migrate`, owner role). Schema version 4 builds an index on the history index (`message_index`) of every partition on PostgreSQL, which blocks intake writes for the duration; on a large history run `mta migrate-db` in a quiet moment before the rollout. Roll back by restoring the backup and starting the old image. Backend switching (SQLite ⇄ PostgreSQL) is a separate, manual procedure (`docs/design.md` section 4.6; the engine is being built).
 
 ## State kept across restarts
