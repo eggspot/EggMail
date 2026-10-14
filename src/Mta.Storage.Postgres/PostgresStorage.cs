@@ -261,5 +261,6 @@ public sealed class PostgresStorage : IStorage
         }
 
         await _rt.Owner.DisposeAsync().ConfigureAwait(false);
+        await _rt.Coordination.DisposeAsync().ConfigureAwait(false);
     }
 }

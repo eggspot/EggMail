@@ -12,7 +12,7 @@ public readonly record struct DeliveryRowInfo(
     string? SendingDomain,
     MessageSource Source,
     int Attempt,
-    bool PossibleDuplicate = false);
+    bool PossibleDuplicate);
 
 /// <summary>What an attempt does to the queue row.</summary>
 public enum QueueRowAction : byte

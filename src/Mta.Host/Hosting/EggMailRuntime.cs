@@ -49,14 +49,14 @@ public sealed class EggMailRuntime : IAsyncDisposable
 
     public AcmeRenewalService? Acme { get; init; }
 
-    /// <summary>The circuit breakers per route and MX host (shared among replicas through <see cref="ReplicaExchange"/>).</summary>
+    /// <summary>The circuit breakers per route and MX host (shared among replicas through <see cref="ReplicaCoordinator"/>).</summary>
     public required RouteHealth Health { get; init; }
 
-    /// <summary>The per-destination connection and rate limits of the delivery engine (shared among replicas through <see cref="ReplicaExchange"/>).</summary>
+    /// <summary>The per-destination connection and rate limits of the delivery engine (shared among replicas through <see cref="ReplicaCoordinator"/>).</summary>
     public required DestinationThrottle DestinationThrottle { get; init; }
 
-    /// <summary>Shares the destination ceilings and the learned back-off and circuit state with the other replicas; null when the storage has no replica coordination (SQLite).</summary>
-    public ReplicaStateExchange? ReplicaExchange { get; init; }
+    /// <summary>Coordinates with the other replicas on the same database (live set, shares of the destination ceilings, learned back-off and open circuits); null when the storage has no replica coordination (SQLite).</summary>
+    public ReplicaCoordinator? ReplicaCoordinator { get; init; }
     public TlsReportSender? TlsReports { get; init; }
 
     /// <summary>Persists the sending counters (write-behind); loaded before the first delivery, flushed by <see cref="FlushRuntimeStateAsync"/>.</summary>
@@ -95,7 +95,27 @@ public sealed class EggMailRuntime : IAsyncDisposable
             storage, clock, new SenderPolicy(), storageOptions,
             new SubmissionOptions { MessageIdDomain = config.Hostname, MaxMessageBytes = config.Smtp.MaxMessageSize, MaxRecipients = config.Smtp.MaxRecipients });
         // Several replicas on one database count failed logins together; SQLite (one process) and a store without coordination count in memory, which is exact there.
-        var throttle = new AuthThrottle(clock, shared: storage.Replicas, log: log);
+        IReplicaCoordination? sharedFailures = storage.Replicas;
+        byte[]? digestKey = null;
+        if (sharedFailures is not null)
+        {
+            try
+            {
+                digestKey = await AuthThrottleKeyStore.LoadOrCreateAsync(storage.Config, secrets, clock, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                log.Write(MtaLogLevel.Warning, "auth", "could not read or create the failed-login digest key", ex);
+            }
+
+            if (digestKey is null)
+            {
+                log.Write(MtaLogLevel.Warning, "auth", "failed logins are counted per process until the failed-login digest key can be stored");
+                sharedFailures = null;
+            }
+        }
+
+        var throttle = new AuthThrottle(clock, shared: sharedFailures, digestKey: digestKey, log: log);
 
         var bounces = new BounceProcessor(verp, storage.Config, storage.Stats, new StorageWebhookPublisher(storage), clock, log, history: storage.History);
         DeliveryEngine? engine = null;
@@ -147,9 +167,9 @@ public sealed class EggMailRuntime : IAsyncDisposable
             InitialConcurrentConnections = config.Delivery.Throttle.InitialConnections,
             InitialMessagesPerMinute = config.Delivery.Throttle.InitialMessagesPerMinute,
         });
-        // Replicas on one database share the per-destination ceilings and tell each other what remote destinations did (ReplicaExchangeService runs it).
-        ReplicaStateExchange? replicaExchange = storage.Replicas is { } coordination
-            ? new ReplicaStateExchange(coordination, deliveryOptions.Owner, clock, destinationThrottle, routeHealth, log: log)
+        // Replicas on one database share the per-destination ceilings and tell each other what remote destinations did (ReplicaCoordinationService runs it).
+        ReplicaCoordinator? replicaCoordinator = storage.Replicas is { } coordination
+            ? new ReplicaCoordinator(coordination, deliveryOptions.Owner, clock, destinationThrottle, routeHealth, log: log)
             : null;
 
         var services = new DeliveryServices
@@ -197,10 +217,15 @@ public sealed class EggMailRuntime : IAsyncDisposable
             KeysProtectedAtRest = Mta.Host.Secrets.SecretsFactory.KeysProtectedAtRest(config.Secrets, storage.Config),
             Config = config, Storage = storage, Clock = clock, Log = log, Secrets = secrets, Certificates = certificates, Verp = verp,
             Submission = submission, AuthThrottle = throttle, SmtpServer = smtp, Delivery = delivery, Webhooks = webhooks, Dns = dns,
-            Pool = pool, Routes = routes, Limits = limits, Acme = acme, TlsReports = reports, Health = routeHealth, DestinationThrottle = destinationThrottle, ReplicaExchange = replicaExchange,
+            Pool = pool, Routes = routes, Limits = limits, Acme = acme, TlsReports = reports, Health = routeHealth, DestinationThrottle = destinationThrottle, ReplicaCoordinator = replicaCoordinator,
             CounterPersistence = counterPersistence, TlsJournal = tlsJournal, TlsCollector = collector,
         };
         runtime._owned.Add(certificateMeters);
+        if (replicaCoordinator is not null)
+        {
+            runtime._owned.Add(replicaCoordinator);
+        }
+
         runtime._owned.Add(pool);
         runtime._owned.Add(smtp);
         return runtime;

@@ -188,11 +188,14 @@ public class PgRuntimeState : RuntimeStateConformance
     }
 }
 
-public class PgReplicaCoordination : ReplicaCoordinationConformance
+public class PgReplicaCoordinationConformance : ReplicaCoordinationConformance
 {
     private readonly PgHarness _pg = new();
 
     protected override Task<IStorage> CreateAsync(StorageOptions options) => _pg.CreateAsync(options, Clock);
+
+    /// <summary>The coordination runs on the database server's clock, which only real time moves.</summary>
+    protected override Task PassTimeAsync(TimeSpan by) => Task.Delay(by);
 
     public override async Task DisposeAsync()
     {

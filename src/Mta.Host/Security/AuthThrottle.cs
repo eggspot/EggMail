@@ -7,35 +7,62 @@ using Mta.Storage;
 namespace Mta.Host.Security;
 
 /// <summary>
+/// What <see cref="AuthThrottle.CheckAsync"/> found: how long the caller is locked out for (null: not locked out), and which of the checked keys have failures on record, so that a
+/// later successful login clears only those.
+/// </summary>
+public readonly record struct AuthLockoutCheck(TimeSpan? RetryAfter, IReadOnlyList<string> DigestsWithFailures)
+{
+    /// <summary>Nothing locked, nothing on record.</summary>
+    public static AuthLockoutCheck Clear => new(null, []);
+
+    /// <summary>True if any checked key is locked out.</summary>
+    public bool IsLockedOut => RetryAfter is not null;
+}
+
+/// <summary>
 /// Failed-login tracking shared by SMTP AUTH and the dashboard/API login so an attacker does not get a fresh budget per port
 /// (design §7.1). Keys are IP addresses and user names; a key that reaches the limit within the window is locked out until the
 /// window of its oldest counted failure expires. Memory is bounded: expired entries are dropped opportunistically.
-/// <para><b>Replicas.</b> With a shared <see cref="IReplicaCoordination"/> (PostgreSQL) the failures are counted in the database, in buckets of a fifteenth of the window per hashed
-/// key (a sliding window with that resolution: a failure counts until the end of its bucket plus the window), so the budget is for all replicas together and an attacker who
-/// spreads attempts over replicas gets the same budget as one who does not (DESIGN-DECIDED, decision 81). The cost is one indexed read per login attempt and one small write per
-/// failed attempt, next to a PBKDF2 verification of 600,000 iterations; nothing on the mail path. If the database cannot be reached the throttle falls back to this process's own
-/// counts (a failed-login lockout must not take sign-in down with the database, and the credential lookup would fail anyway). Without a shared store (SQLite, one process) the
-/// in-memory counts are exact. Use <see cref="CheckAsync"/>, <see cref="RecordFailureAsync"/> and <see cref="RecordSuccessAsync"/>; the synchronous methods see this process only.</para>
+/// <para><b>Replicas.</b> With a shared <see cref="IReplicaCoordination"/> (PostgreSQL) the failures are counted in the database, in buckets of a fifteenth of the window per key
+/// (a sliding window with that resolution: a failure counts until the end of its bucket plus the window), so the budget is for all replicas together and an attacker who
+/// spreads attempts over replicas gets the same budget as one who does not (DESIGN-DECIDED, decision 81). The cost per login attempt is one indexed read; per failed attempt one small
+/// write; a successful login adds one delete only if the read found failures on record for the keys it clears, so ordinary logins cost no more than the read. All next to a PBKDF2
+/// verification of 600,000 iterations; nothing on the mail path. The keys are stored as HMAC-SHA256 digests under a key that is itself protected by Data Protection, so a copy of the
+/// table alone does not say which addresses or user names failed. Writes are not cancelled with the request that caused them (a client that hangs up must not buy a free guess)
+/// but are bounded to two seconds; if the database cannot be reached the throttle falls back to this process's own counts (a failed-login lockout must not take sign-in down with
+/// the database, and the credential lookup would fail anyway). Without a shared store (SQLite, one process) the in-memory counts are exact. Use <see cref="CheckAsync"/>,
+/// <see cref="RecordFailureAsync"/> and <see cref="RecordSuccessAsync"/>; the synchronous methods see this process only.</para>
 /// </summary>
 public sealed class AuthThrottle
 {
+    private static readonly TimeSpan SharedCallTimeout = TimeSpan.FromSeconds(2);
+
     private readonly IClock _clock;
     private readonly int _maxFailures;
     private readonly TimeSpan _window;
     private readonly int _maxKeys;
     private readonly ConcurrentDictionary<string, Queue<DateTimeOffset>> _failures = new(StringComparer.OrdinalIgnoreCase);
     private readonly IReplicaCoordination? _shared;
+    private readonly byte[]? _digestKey;
     private readonly IMtaLog _log;
     private readonly long _bucketSeconds;
     private long _lastFallbackWarning;
 
-    public AuthThrottle(IClock? clock = null, int maxFailures = 10, TimeSpan? window = null, int maxKeys = 100_000, IReplicaCoordination? shared = null, IMtaLog? log = null)
+    /// <param name="shared">Where all replicas count failures together, or null (one process).</param>
+    /// <param name="digestKey">The secret the keys are digested with before they reach <paramref name="shared"/>; required with it, the same on every replica.</param>
+    public AuthThrottle(IClock? clock = null, int maxFailures = 10, TimeSpan? window = null, int maxKeys = 100_000, IReplicaCoordination? shared = null, byte[]? digestKey = null, IMtaLog? log = null)
     {
+        if (shared is not null && (digestKey is null || digestKey.Length < 16))
+        {
+            throw new ArgumentException("A shared failed-login store needs a digest key of at least 16 bytes.", nameof(digestKey));
+        }
+
         _clock = clock ?? SystemClock.Instance;
         _maxFailures = maxFailures;
         _window = window ?? TimeSpan.FromMinutes(15);
         _maxKeys = maxKeys;
         _shared = shared;
+        _digestKey = digestKey;
         _log = log ?? NullMtaLog.Instance;
         _bucketSeconds = Math.Max(1, (long)_window.TotalSeconds / 15);
     }
@@ -44,68 +71,80 @@ public sealed class AuthThrottle
     public bool IsShared => _shared is not null;
 
     /// <summary>
-    /// How long the caller is locked out for if any of the keys is (after counting the failures of every replica), or null if none is. A shared store that cannot be
-    /// reached is answered from this process's own counts.
+    /// Whether any of the keys is locked out, and for how long, after counting the failures of every replica. A shared store that cannot be reached (or does not answer within
+    /// two seconds) is answered from this process's own counts.
     /// </summary>
-    public async ValueTask<TimeSpan?> CheckAsync(CancellationToken cancellationToken, params string[] keys)
+    public async ValueTask<AuthLockoutCheck> CheckAsync(CancellationToken cancellationToken, params string[] keys)
     {
         if (_shared is not null)
         {
             try
             {
-                return await CheckSharedAsync(_shared, keys, cancellationToken).ConfigureAwait(false);
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeout.CancelAfter(SharedCallTimeout);
+                return await CheckSharedAsync(_shared, keys, timeout.Token).ConfigureAwait(false);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
             {
                 WarnFallback(ex);
             }
         }
 
-        return IsLockedOut(out TimeSpan retryAfter, keys) ? retryAfter : null;
+        return IsLockedOut(out TimeSpan retryAfter, keys) ? new AuthLockoutCheck(retryAfter, []) : AuthLockoutCheck.Clear;
     }
 
     /// <summary>Counts a failed login against every key, in this process and (if shared) for all replicas.</summary>
-    public async ValueTask RecordFailureAsync(CancellationToken cancellationToken, params string[] keys)
+    public async ValueTask RecordFailureAsync(params string[] keys)
     {
         RecordFailure(keys);
         if (_shared is not null)
         {
             try
             {
-                long minBucket = MinBucket(_clock.UtcNow);
-                await _shared.AddAuthFailuresAsync(Hash(keys), BucketOf(_clock.UtcNow), minBucket, cancellationToken).ConfigureAwait(false);
+                using var timeout = new CancellationTokenSource(SharedCallTimeout);
+                DateTimeOffset now = _clock.UtcNow;
+                await _shared.AddAuthFailuresAsync(Digest(keys), BucketOf(now), MinBucket(now), timeout.Token).ConfigureAwait(false);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex)
             {
                 WarnFallback(ex);
             }
         }
     }
 
-    /// <summary>Forgets the failures of the keys (a successful login), in this process and (if shared) for all replicas.</summary>
-    public async ValueTask RecordSuccessAsync(CancellationToken cancellationToken, params string[] keys)
+    /// <summary>
+    /// Forgets the failures of the keys (a successful login), in this process and (if shared) for all replicas. <paramref name="check"/> is what the login attempt's
+    /// <see cref="CheckAsync"/> returned: the shared failures are deleted only for keys it found on record, so a login that follows no failure costs no round trip.
+    /// </summary>
+    public async ValueTask RecordSuccessAsync(AuthLockoutCheck check, params string[] keys)
     {
         RecordSuccess(keys);
-        if (_shared is not null)
+        if (_shared is not null && check.DigestsWithFailures.Count > 0)
         {
+            string[] toClear = [.. Digest(keys).Where(d => check.DigestsWithFailures.Contains(d, StringComparer.Ordinal))];
+            if (toClear.Length == 0)
+            {
+                return;
+            }
+
             try
             {
-                await _shared.ClearAuthFailuresAsync(Hash(keys), cancellationToken).ConfigureAwait(false);
+                using var timeout = new CancellationTokenSource(SharedCallTimeout);
+                await _shared.ClearAuthFailuresAsync(toClear, timeout.Token).ConfigureAwait(false);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex)
             {
                 WarnFallback(ex);
             }
         }
     }
 
-    private async ValueTask<TimeSpan?> CheckSharedAsync(IReplicaCoordination shared, string[] keys, CancellationToken ct)
+    private async ValueTask<AuthLockoutCheck> CheckSharedAsync(IReplicaCoordination shared, string[] keys, CancellationToken ct)
     {
         DateTimeOffset now = _clock.UtcNow;
-        string[] hashes = Hash(keys);
-        IReadOnlyList<AuthFailureCount> counts = await shared.GetAuthFailuresAsync(hashes, MinBucket(now), ct).ConfigureAwait(false);
+        IReadOnlyList<AuthFailureCount> counts = await shared.GetAuthFailuresAsync(Digest(keys), MinBucket(now), ct).ConfigureAwait(false);
         TimeSpan? retryAfter = null;
-        foreach (var perKey in counts.GroupBy(c => c.KeyHash, StringComparer.Ordinal))
+        foreach (var perKey in counts.GroupBy(c => c.KeyDigest, StringComparer.Ordinal))
         {
             long total = perKey.Sum(c => c.Count);
             if (total < _maxFailures)
@@ -137,7 +176,7 @@ public sealed class AuthThrottle
             }
         }
 
-        return retryAfter;
+        return new AuthLockoutCheck(retryAfter, [.. counts.Select(c => c.KeyDigest).Distinct(StringComparer.Ordinal)]);
     }
 
     private long BucketOf(DateTimeOffset at) => at.ToUnixTimeSeconds() / _bucketSeconds;
@@ -146,16 +185,19 @@ public sealed class AuthThrottle
 
     private DateTimeOffset BucketEnd(long bucket) => DateTimeOffset.FromUnixTimeSeconds((bucket + 1) * _bucketSeconds);
 
-    /// <summary>The database holds a digest of each key, not the address or user name: fixed length whatever a client sends, and nothing personal in an ephemeral table.</summary>
-    private static string[] Hash(string[] keys)
+    /// <summary>
+    /// What is stored for a key: HMAC-SHA256 under the deployment's digest key of the key in one case, in hexadecimal. Fixed length whatever a client sends, one budget however the
+    /// name is cased, and meaningless without the key (which only the replicas, through Data Protection, can read).
+    /// </summary>
+    public string[] Digest(string[] keys)
     {
-        var hashes = new string[keys.Length];
+        var digests = new string[keys.Length];
         for (int i = 0; i < keys.Length; i++)
         {
-            hashes[i] = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(keys[i].ToLowerInvariant())));
+            digests[i] = Convert.ToHexString(HMACSHA256.HashData(_digestKey!, Encoding.UTF8.GetBytes(keys[i].ToLowerInvariant())));
         }
 
-        return hashes;
+        return digests;
     }
 
     private void WarnFallback(Exception ex)

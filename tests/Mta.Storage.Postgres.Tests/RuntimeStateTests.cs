@@ -86,7 +86,7 @@ public class RuntimeStateTests : PgTestBase
         try
         {
             Assert.Equal(6, PostgresMigrator.CurrentVersion);
-            Assert.Equal(["a"], await upgraded.Replicas!.HeartbeatAsync("a", Clock.UtcNow, TimeSpan.FromSeconds(20), default));   // the version 6 tables exist
+            Assert.Equal(["a"], await upgraded.Replicas!.HeartbeatAsync("a", TimeSpan.FromSeconds(20), default));   // the version 6 tables exist
             Assert.NotNull(await upgraded.History.GetAsync(TenantA, old.MessageId, default));
             Assert.Null((await upgraded.History.GetAsync(TenantA, old.MessageId, default))!.Summary.Tags);
             var fresh = Msg(messageIdHeader: "<after@x>", tags: ["t"]);

@@ -317,7 +317,7 @@ and set `Storage:Postgres:ReadOnlyConnectionString` to a connection string for i
 | `mta_backup_runs_total` | counter | `outcome` (`success`, `failed`) | Scheduled backup runs |
 | `mta_backup_last_success_timestamp_seconds` | gauge | none | Unix time of the newest good backup (also after a restart, from the backups on disk); absent until there is one |
 
-PostgreSQL command latency and pool state come from the Npgsql driver's own meter, exported unchanged next to the `mta_` metrics. The pool label (`db_client_connection_pool_name`) is `eggmail-runtime` or `eggmail-owner`; saturation is `used / max` of `db_client_connection_count` and `db_client_connection_max`.
+PostgreSQL command latency and pool state come from the Npgsql driver's own meter, exported unchanged next to the `mta_` metrics. The pool label (`db_client_connection_pool_name`) is `eggmail-runtime`, `eggmail-owner` or, with several replicas, `eggmail-coordination` (two connections); saturation is `used / max` of `db_client_connection_count` and `db_client_connection_max`.
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
@@ -395,19 +395,21 @@ What is shared between replicas, and what is not (decision 81):
 | What | With N replicas |
 |---|---|
 | Queue, history, suppressions, configuration, certificates and ACME renewal, domain verification | One copy in the database; claims use `SKIP LOCKED`, renewals and checks take leases |
-| Failed-login lockout (`SMTP AUTH` and the API/dashboard sign-in) | One budget for all replicas (10 failures per address and per user name in 15 minutes), counted in the database as digests. If the database cannot be reached each replica counts on its own until it is back |
+| Failed-login lockout (`SMTP AUTH` and the API/dashboard sign-in) | One budget for all replicas (10 failures per address and per user name in 15 minutes), counted in the database as keyed digests. Costs one small read per login attempt, one write per failed attempt, and a delete after a success that follows failures. If the database cannot be reached or is slow each replica counts on its own until it is back |
 | Connections and messages per minute to one destination (`Delivery:Throttle:MaxConnections`, `Delivery:Throttle:MaxMessagesPerMinute`) | The ceiling holds for all replicas together: each takes its share (a ceiling of 20 connections is 7, 7 and 6 on three replicas). A replica that joins or leaves is noticed within about 5 s (a replica that dies within 20 s); until then the sum of the shares can be above a ceiling for a few seconds. Set `Delivery:Throttle:MaxConnections` at least as high as the number of replicas, otherwise every replica still gets one |
-| A destination that throttled one replica, a mail server found down | The other replicas slow down or skip it within about 5 s. Each replica still probes a down server itself once the cool-down is over |
+| A destination that throttled one replica, a mail server found down | The other replicas slow down or skip an MX host within about 5 s, for at most the base cool-down (5 minutes) and not if they connected to it in the last 2 minutes; relay routes are never opened by another replica. Each replica still probes a down server itself once its cool-down is over |
 | Sending caps and warm-up (`Sending:GlobalPerHour` and the others) | Shared through the database with a lag of one flush interval (10 s): a cap can be overshot by what the other replicas send in those seconds. Set a hard ceiling lower by that amount |
 | TLS reports | One report per domain and day, with every replica's counts |
 | Inbound connection limits (`Smtp:MaxConnections`, `MaxConnectionsPerIp`, `MaxInFlightBytes`), the API request memory budget | Per replica (they protect that process); behind a load balancer the per-address limit is per replica |
 
 Things to get right:
 
-- **Clocks.** Replicas must agree on the time to within about 20 seconds (NTP). The replica set, the leases and the failed-login buckets are timed by each replica's own clock.
+- **Clocks.** The replica set and what replicas tell each other about destinations are timed by the database's clock, so replica clocks do not enter. Leases (renewals, domain checks, the TLS report job) and the failed-login buckets use each replica's own clock: keep them within a minute of each other (NTP).
 - **Rolling updates.** A new replica joins the set before it delivers; the old one leaves when it stops (SIGTERM; give it the 60 s grace). A replica killed without leaving is dropped by the others after 20 seconds, and in the meantime it holds a share that nobody uses.
+- **Rolling updates across a schema version.** The first new replica migrates the schema at start (`Mail:Database:Migrate=Auto`; otherwise apply `mta migrate-db` first). Replicas of the old build that are already running keep working, because the migrations are additive; but an old build that restarts after the migration refuses to start (the schema is newer than it knows), so roll forward and do not restart old replicas in between; to go back, restore the backup and start the old image ([Upgrades](#upgrades)). Builds before schema version 6 take no part in the coordination: while they run, the new replicas share the destination ceilings and the failed-login budget among themselves only, so the old ones come on top of the ceilings, and failed logins at an old replica are not counted by the new ones.
+- **A database that cannot be reached for a while.** A replica that cannot beat for 20 seconds is dropped by the others while it keeps its old share, so for that time the shares add up to more than a ceiling; it rejoins at its next successful beat. Its claims are failing too, so it sends little in that time. The coordination uses two database connections of its own (pool `eggmail-coordination`), so a busy queue does not delay the beat.
 - **A delivery that was being sent when its replica died** is picked up by another replica when its lease (`Delivery:ClaimLease`, 15 minutes) runs out and is flagged `possible_duplicate`. Lower the lease only if remote conversations are short: a delivery that takes longer than the lease is sent by two replicas, both flagged.
-- **Connections.** Keep the sum of the pool sizes of all replicas below about half of `max_connections` of the database (design section 4.2). The exchange adds a handful of tiny statements per replica every 5 seconds and one read per login attempt.
+- **Connections.** Keep the sum of the pool sizes of all replicas below about half of `max_connections` of the database (design section 4.2). The coordination adds a handful of tiny statements per replica every 5 seconds, on its own two connections, and one read per login attempt.
 
 ## Graceful shutdown
 

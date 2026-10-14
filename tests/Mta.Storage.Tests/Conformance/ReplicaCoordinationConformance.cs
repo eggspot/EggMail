@@ -2,76 +2,100 @@ namespace Mta.Storage.Tests;
 
 /// <summary>
 /// What replicas on one database exchange (<see cref="IReplicaCoordination"/>): liveness, signals about remote destinations and the failed-login counts.
-/// The in-memory and PostgreSQL backends run it; SQLite is one process by design and offers no coordination.
+/// The in-memory and PostgreSQL backends run it; SQLite is one process by design and offers no coordination. Time is the storage's own (the test clock for the in-memory
+/// backend, the database server's for PostgreSQL), so a test that needs time to pass says so with <see cref="PassTimeAsync"/> and asserts only in the direction that
+/// passing time can never reverse.
 /// </summary>
 public abstract class ReplicaCoordinationConformance : StorageTestBase
 {
     private IReplicaCoordination Replicas => Storage.Replicas ?? throw new InvalidOperationException("this backend has no replica coordination");
 
-    private static readonly TimeSpan LiveFor = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan Forever = TimeSpan.FromHours(1);
+
+    /// <summary>Lets <paramref name="by"/> pass on the clock the backend under test uses.</summary>
+    protected abstract Task PassTimeAsync(TimeSpan by);
 
     [Fact]
-    public async Task Heartbeats_list_the_live_replicas_in_ordinal_order_and_a_silent_one_drops_out()
+    public async Task Heartbeats_list_the_live_replicas_in_ordinal_order()
     {
-        Assert.Equal(["b"], await Replicas.HeartbeatAsync("b", Clock.UtcNow, LiveFor, default));
-        Assert.Equal(["a", "b"], await Replicas.HeartbeatAsync("a", Clock.UtcNow, LiveFor, default));
-        Assert.Equal(["a", "b", "c"], await Replicas.HeartbeatAsync("c", Clock.UtcNow, LiveFor, default));
+        Assert.Equal(["b"], await Replicas.HeartbeatAsync("b", Forever, default));
+        Assert.Equal(["a", "b"], await Replicas.HeartbeatAsync("a", Forever, default));
+        Assert.Equal(["a", "b", "c"], await Replicas.HeartbeatAsync("c", Forever, default));
+        Assert.Equal(["a", "b", "c"], await Replicas.HeartbeatAsync("b", Forever, default));
+    }
 
-        // "b" stops beating: after the liveness window the others no longer count it, and it is forgotten altogether only after minutes.
-        Clock.Advance(TimeSpan.FromSeconds(15));
-        await Replicas.HeartbeatAsync("a", Clock.UtcNow, LiveFor, default);
-        Clock.Advance(TimeSpan.FromSeconds(10));
-        Assert.Equal(["a", "c"], await Replicas.HeartbeatAsync("c", Clock.UtcNow, LiveFor, default));
-        Assert.Equal(["a", "c"], await Replicas.HeartbeatAsync("a", Clock.UtcNow, LiveFor, default));
+    [Fact]
+    public async Task A_replica_that_stopped_beating_drops_out_of_the_live_set_after_the_liveness_window()
+    {
+        await Replicas.HeartbeatAsync("a", Forever, default);
+        await Replicas.HeartbeatAsync("b", Forever, default);
+
+        await PassTimeAsync(TimeSpan.FromMilliseconds(300));
+        Assert.Equal(["b"], await Replicas.HeartbeatAsync("b", TimeSpan.FromMilliseconds(100), default));   // "a" beat more than 100 ms ago, "b" just now
+        Assert.Equal(["a", "b"], await Replicas.HeartbeatAsync("b", Forever, default));                      // still known, just not live
     }
 
     [Fact]
     public async Task A_replica_that_leaves_is_gone_at_once_together_with_its_signals()
     {
-        await Replicas.HeartbeatAsync("a", Clock.UtcNow, LiveFor, default);
-        await Replicas.HeartbeatAsync("b", Clock.UtcNow, LiveFor, default);
-        await Replicas.PublishSignalsAsync([Signal(PeerSignalKind.CircuitOpened, "mx:mail.example", "b", 300)], Clock.UtcNow, default);
-        Assert.Single(await Replicas.GetSignalsAsync("a", Clock.UtcNow, default));
+        await Replicas.HeartbeatAsync("a", Forever, default);
+        await Replicas.HeartbeatAsync("b", Forever, default);
+        await Replicas.PublishSignalsAsync("b", [Signal(PeerSignalKind.CircuitOpened, "mx:mail.example", 300)], default);
+        Assert.Single(await Replicas.GetSignalsAsync("a", default));
 
         await Replicas.LeaveAsync("b", default);
 
-        Assert.Equal(["a"], await Replicas.HeartbeatAsync("a", Clock.UtcNow, LiveFor, default));
-        Assert.Empty(await Replicas.GetSignalsAsync("a", Clock.UtcNow, default));
+        Assert.Equal(["a"], await Replicas.HeartbeatAsync("a", Forever, default));
+        Assert.Empty(await Replicas.GetSignalsAsync("a", default));
     }
 
     [Fact]
-    public async Task Signals_reach_the_other_replicas_only_while_valid_and_a_newer_one_replaces_the_older()
+    public async Task Signals_reach_the_other_replicas_with_what_is_left_of_their_validity()
     {
-        await Replicas.HeartbeatAsync("a", Clock.UtcNow, LiveFor, default);
-        await Replicas.HeartbeatAsync("b", Clock.UtcNow, LiveFor, default);
-        await Replicas.PublishSignalsAsync([Signal(PeerSignalKind.CircuitOpened, "mx:mail.example", "a", 300), Signal(PeerSignalKind.DestinationSlowedDown, "big.example", "a", 60)], Clock.UtcNow, default);
+        await Replicas.PublishSignalsAsync("a", [Signal(PeerSignalKind.CircuitOpened, "mx:mail.example", 300), Signal(PeerSignalKind.DestinationSlowedDown, "big.example", 60)], default);
 
-        Assert.Empty(await Replicas.GetSignalsAsync("a", Clock.UtcNow, default));   // never one's own
-        var seen = await Replicas.GetSignalsAsync("b", Clock.UtcNow, default);
-        Assert.Equal([(PeerSignalKind.CircuitOpened, "mx:mail.example"), (PeerSignalKind.DestinationSlowedDown, "big.example")], seen.OrderBy(s => s.Kind).Select(s => (s.Kind, s.Key)));
-        Assert.All(seen, s => Assert.Equal("a", s.ReplicaId));
+        Assert.Empty(await Replicas.GetSignalsAsync("a", default));   // never one's own
+        var seen = await Replicas.GetSignalsAsync("b", default);
+        Assert.Equal([(PeerSignalKind.CircuitOpened, "mx:mail.example"), (PeerSignalKind.DestinationSlowedDown, "big.example")], seen.OrderBy(s => s.Signal.Kind).Select(s => (s.Signal.Kind, s.Signal.Key)));
+        Assert.All(seen, s => Assert.Equal("a", s.ReplicaName));
+        var opened = seen.Single(s => s.Signal.Kind == PeerSignalKind.CircuitOpened).Signal;
+        Assert.InRange(opened.ValidFor, TimeSpan.FromSeconds(290), TimeSpan.FromSeconds(300));
+        Assert.Equal(TimeSpan.FromSeconds(300), opened.Cooldown);
+        Assert.Equal(TimeSpan.Zero, seen.Single(s => s.Signal.Kind == PeerSignalKind.DestinationSlowedDown).Signal.Cooldown);
+    }
 
-        // The same kind and key again replaces the earlier one (longer cooldown after a failed probe).
-        Clock.Advance(TimeSpan.FromSeconds(10));
-        await Replicas.PublishSignalsAsync([Signal(PeerSignalKind.CircuitOpened, "mx:mail.example", "a", 600)], Clock.UtcNow, default);
-        var replaced = (await Replicas.GetSignalsAsync("b", Clock.UtcNow, default)).Single(s => s.Kind == PeerSignalKind.CircuitOpened);
-        Assert.Equal(Clock.UtcNow.AddSeconds(600), replaced.Until);
-        Assert.Equal(600L * TimeSpan.TicksPerSecond, replaced.Value);
+    [Fact]
+    public async Task A_newer_publication_replaces_the_older_one_and_is_told_apart_by_its_raised_time()
+    {
+        await Replicas.PublishSignalsAsync("a", [Signal(PeerSignalKind.CircuitOpened, "mx:mail.example", 300)], default);
+        var first = Assert.Single(await Replicas.GetSignalsAsync("b", default));
 
-        // After its end a signal is not delivered any more.
-        Clock.Advance(TimeSpan.FromSeconds(61));
-        Assert.Equal([PeerSignalKind.CircuitOpened], (await Replicas.GetSignalsAsync("b", Clock.UtcNow, default)).Select(s => s.Kind));
-        Clock.Advance(TimeSpan.FromSeconds(600));
-        Assert.Empty(await Replicas.GetSignalsAsync("b", Clock.UtcNow, default));
+        await PassTimeAsync(TimeSpan.FromMilliseconds(20));
+        await Replicas.PublishSignalsAsync("a", [new PeerSignal(PeerSignalKind.CircuitOpened, "mx:mail.example", TimeSpan.FromSeconds(900), TimeSpan.FromSeconds(600))], default);
+
+        var second = Assert.Single(await Replicas.GetSignalsAsync("b", default));
+        Assert.True(second.RaisedAt > first.RaisedAt);
+        Assert.Equal(TimeSpan.FromSeconds(600), second.Signal.Cooldown);
+        Assert.True(second.Signal.ValidFor > TimeSpan.FromSeconds(600));
+    }
+
+    [Fact]
+    public async Task A_signal_is_not_delivered_after_it_ended()
+    {
+        await Replicas.PublishSignalsAsync("a", [new PeerSignal(PeerSignalKind.DestinationSlowedDown, "short.example", TimeSpan.FromMilliseconds(100), TimeSpan.Zero), Signal(PeerSignalKind.DestinationSlowedDown, "long.example", 3600)], default);
+
+        await PassTimeAsync(TimeSpan.FromMilliseconds(300));
+
+        Assert.Equal(["long.example"], (await Replicas.GetSignalsAsync("b", default)).Select(s => s.Signal.Key));
     }
 
     [Fact]
     public async Task Signals_published_by_two_replicas_for_one_key_are_kept_apart()
     {
-        await Replicas.PublishSignalsAsync([Signal(PeerSignalKind.CircuitOpened, "mx:mail.example", "a", 300), Signal(PeerSignalKind.CircuitOpened, "mx:mail.example", "b", 120)], Clock.UtcNow, default);
-        var seenByC = await Replicas.GetSignalsAsync("c", Clock.UtcNow, default);
-        Assert.Equal(["a", "b"], seenByC.Select(s => s.ReplicaId));
-        Assert.Equal(["b"], (await Replicas.GetSignalsAsync("a", Clock.UtcNow, default)).Select(s => s.ReplicaId));
+        await Replicas.PublishSignalsAsync("a", [Signal(PeerSignalKind.CircuitOpened, "mx:mail.example", 300)], default);
+        await Replicas.PublishSignalsAsync("b", [Signal(PeerSignalKind.CircuitOpened, "mx:mail.example", 120)], default);
+        Assert.Equal(["a", "b"], (await Replicas.GetSignalsAsync("c", default)).Select(s => s.ReplicaName));
+        Assert.Equal(["b"], (await Replicas.GetSignalsAsync("a", default)).Select(s => s.ReplicaName));
     }
 
     [Fact]
@@ -83,8 +107,8 @@ public abstract class ReplicaCoordinationConformance : StorageTestBase
         await Replicas.AddAuthFailuresAsync(["ip-2"], 95, 90, default);
 
         var counts = await Replicas.GetAuthFailuresAsync(["ip-1", "user-1"], 0, default);
-        Assert.Equal([("ip-1", 100L, 2L), ("ip-1", 101L, 1L), ("user-1", 100L, 1L)], counts.Select(c => (c.KeyHash, c.Bucket, c.Count)));
-        Assert.Equal([("ip-1", 101L, 1L)], (await Replicas.GetAuthFailuresAsync(["ip-1"], 101, default)).Select(c => (c.KeyHash, c.Bucket, c.Count)));
+        Assert.Equal([("ip-1", 100L, 2L), ("ip-1", 101L, 1L), ("user-1", 100L, 1L)], counts.Select(c => (c.KeyDigest, c.Bucket, c.Count)));
+        Assert.Equal([("ip-1", 101L, 1L)], (await Replicas.GetAuthFailuresAsync(["ip-1"], 101, default)).Select(c => (c.KeyDigest, c.Bucket, c.Count)));
         Assert.Empty(await Replicas.GetAuthFailuresAsync([], 0, default));
 
         // Adding with a later prune point deletes what is older, for every key.
@@ -106,13 +130,21 @@ public abstract class ReplicaCoordinationConformance : StorageTestBase
     }
 
     [Fact]
-    public async Task Concurrent_failures_from_many_callers_are_all_counted()
+    public async Task Concurrent_failures_and_clears_from_many_callers_are_all_counted_and_never_deadlock()
     {
         await Task.WhenAll(Enumerable.Range(0, 40).Select(i => Task.Run(() => Replicas.AddAuthFailuresAsync(["shared", i % 2 == 0 ? "even" : "odd"], 100, 90, default).AsTask())));
-        var counts = (await Replicas.GetAuthFailuresAsync(["shared", "even", "odd"], 0, default)).ToDictionary(c => c.KeyHash, c => c.Count);
+        var counts = (await Replicas.GetAuthFailuresAsync(["shared", "even", "odd"], 0, default)).ToDictionary(c => c.KeyDigest, c => c.Count);
         Assert.Equal((40L, 20L, 20L), (counts["shared"], counts["even"], counts["odd"]));
+
+        // Clears of overlapping key sets in opposite orders, together with failures and pruning.
+        await Task.WhenAll(Enumerable.Range(0, 40).Select(i => Task.Run(async () =>
+        {
+            await Replicas.ClearAuthFailuresAsync(i % 2 == 0 ? ["even", "odd"] : ["odd", "even"], default);
+            await Replicas.AddAuthFailuresAsync(["shared"], 100 + i, 95, default);
+        })));
+        Assert.Empty(await Replicas.GetAuthFailuresAsync(["even", "odd"], 0, default));
     }
 
-    private PeerSignal Signal(PeerSignalKind kind, string key, string replica, int validSeconds) =>
-        new(kind, key, replica, Clock.UtcNow, Clock.UtcNow.AddSeconds(validSeconds), validSeconds * TimeSpan.TicksPerSecond);
+    private static PeerSignal Signal(PeerSignalKind kind, string key, int validSeconds) =>
+        new(kind, key, TimeSpan.FromSeconds(validSeconds), kind == PeerSignalKind.CircuitOpened ? TimeSpan.FromSeconds(validSeconds) : TimeSpan.Zero);
 }

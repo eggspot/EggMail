@@ -122,10 +122,13 @@ public sealed class RouteHealthOptions
     /// <summary>Failures older than this no longer count toward consecutive failures. Default 10 minutes.</summary>
     public TimeSpan FailureStaleAfter { get; init; } = TimeSpan.FromMinutes(10);
 
+    /// <summary>A circuit another replica opened is not adopted for a target this replica connected to within this long (it knows better). Default 2 minutes.</summary>
+    public TimeSpan PeerOpenIgnoredAfterSuccess { get; init; } = TimeSpan.FromMinutes(2);
+
     internal void Validate()
     {
         if (FailureThreshold < 1 || Cooldown <= TimeSpan.Zero || CooldownMultiplier < 1 || MaxCooldown < Cooldown
-            || ProbeTimeout <= TimeSpan.Zero || IdleEviction <= TimeSpan.Zero || FailureStaleAfter <= TimeSpan.Zero)
+            || ProbeTimeout <= TimeSpan.Zero || IdleEviction <= TimeSpan.Zero || FailureStaleAfter <= TimeSpan.Zero || PeerOpenIgnoredAfterSuccess < TimeSpan.Zero)
         {
             throw new ArgumentException("Invalid route health option.");
         }
@@ -173,6 +176,11 @@ public sealed class RouteHealth
 
     private readonly ConcurrentDictionary<RouteHealthKey, Entry> _entries = new();
     private readonly ConcurrentDictionary<RouteHealthKey, (long RetryAtTicks, long CooldownTicks)> _opened = new();
+    private readonly ConcurrentDictionary<RouteHealthKey, long> _recentSuccesses = new();
+    private volatile bool _sharing;
+
+    /// <summary>Circuits kept for the other replicas, and targets whose last success is remembered, at most (beyond it nothing more is learned that the cooldowns do not cover).</summary>
+    private const int MaxShared = 4096;
     private readonly RouteHealthOptions _options;
     private readonly IClock _clock;
     private int _reports;
@@ -277,6 +285,11 @@ public sealed class RouteHealth
     public void ReportSuccess(in RouteHealthKey key)
     {
         long now = _clock.UtcNow.UtcTicks;
+        if (_sharing && _recentSuccesses.Count < MaxShared)
+        {
+            _recentSuccesses[key] = now;   // for ApplyPeerOpen: this replica just connected, so another replica's failures are not news
+        }
+
         if (!_entries.TryGetValue(key, out Entry? entry))
         {
             return; // healthy and untracked: nothing to remember
@@ -350,6 +363,12 @@ public sealed class RouteHealth
     }
 
     /// <summary>
+    /// Starts keeping the circuits this replica opens for <see cref="DrainOpened"/> and the targets it connects to for <see cref="ApplyPeerOpen"/>. Off by default: a tracker nobody
+    /// drains (one process, SQLite) keeps nothing.
+    /// </summary>
+    public void ShareOpenCircuits() => _sharing = true;
+
+    /// <summary>
     /// Takes the circuits this replica opened (or re-opened after a failed probe) since the last call, not those it adopted from another replica, so the host can tell the others.
     /// Each key appears once with its latest retry time and cooldown.
     /// </summary>
@@ -365,18 +384,27 @@ public sealed class RouteHealth
     }
 
     /// <summary>
-    /// Opens the circuit of <paramref name="key"/> until <paramref name="retryAt"/> because another replica found the target down, so this replica does not spend its
-    /// own failed connection attempts to learn the same. A target that is closed here opens; one that is already open is only extended; one being probed here is left
-    /// alone (this replica's probe will tell). Not passed on again. Whatever replica probes first after the retry time decides, as for a circuit opened here.
+    /// Opens the circuit of an MX host because another replica found it down, so this replica does not spend its own failed connection attempts to learn the same. One sick
+    /// replica (its own network, its own egress address) must not open circuits fleet-wide, so the adoption is bounded: only MX hosts (never a route, which would take a relay out of
+    /// every plan), at most for the base <see cref="RouteHealthOptions.Cooldown"/> from now whatever the other replica's cooldown has grown to, and not at all for a host this replica
+    /// connected to within <see cref="RouteHealthOptions.PeerOpenIgnoredAfterSuccess"/>. A host closed here opens; one already open is only extended (within the same bound); one being
+    /// probed here is left alone. Not passed on again. Returns whether the circuit was opened or extended.
     /// </summary>
-    public void ApplyPeerOpen(in RouteHealthKey key, DateTimeOffset retryAt, TimeSpan cooldown)
+    public bool ApplyPeerOpen(in RouteHealthKey key, DateTimeOffset retryAt, TimeSpan cooldown)
     {
-        long now = _clock.UtcNow.UtcTicks;
-        if (retryAt.UtcTicks <= now)
+        if (key.Kind != RouteHealthKind.MxHost)
         {
-            return;
+            return false;
         }
 
+        long now = _clock.UtcNow.UtcTicks;
+        long until = Math.Min(retryAt.UtcTicks, now + _options.Cooldown.Ticks);
+        if (until <= now || (_recentSuccesses.TryGetValue(key, out long lastSuccess) && now - lastSuccess < _options.PeerOpenIgnoredAfterSuccess.Ticks))
+        {
+            return false;
+        }
+
+        long adoptedCooldown = Math.Min(cooldown.Ticks, _options.Cooldown.Ticks);
         while (true)
         {
             Entry entry = _entries.GetOrAdd(key, static _ => new Entry());
@@ -392,17 +420,20 @@ public sealed class RouteHealth
                 {
                     entry.ConsecutiveFailures = Math.Max(entry.ConsecutiveFailures, _options.FailureThreshold);
                     entry.LastError ??= "opened because another replica could not connect";
-                    Open(entry, now, cooldown.Ticks);
-                    entry.RetryAtTicks = retryAt.UtcTicks;
+                    Open(entry, now, adoptedCooldown);
+                    entry.RetryAtTicks = until;
+                    return true;
                 }
-                else if (entry.State == CircuitState.Open && retryAt.UtcTicks > entry.RetryAtTicks)
-                {
-                    entry.RetryAtTicks = retryAt.UtcTicks;
-                    entry.CooldownTicks = Math.Max(entry.CooldownTicks, cooldown.Ticks);
-                }
-            }
 
-            return;
+                if (entry.State == CircuitState.Open && until > entry.RetryAtTicks)
+                {
+                    entry.RetryAtTicks = until;
+                    entry.CooldownTicks = Math.Max(entry.CooldownTicks, adoptedCooldown);
+                    return true;
+                }
+
+                return false;
+            }
         }
     }
 
@@ -435,7 +466,13 @@ public sealed class RouteHealth
     /// <summary>Drops closed, idle entries. Returns the number removed.</summary>
     public int Sweep() => SweepCore(_clock.UtcNow.UtcTicks);
 
-    private void NoteOpened(in RouteHealthKey key, Entry entry) => _opened[key] = (entry.RetryAtTicks, entry.CooldownTicks);
+    private void NoteOpened(in RouteHealthKey key, Entry entry)
+    {
+        if (_sharing && (_opened.Count < MaxShared || _opened.ContainsKey(key)))
+        {
+            _opened[key] = (entry.RetryAtTicks, entry.CooldownTicks);
+        }
+    }
 
     private static void Open(Entry entry, long now, long cooldownTicks)
     {
@@ -477,6 +514,14 @@ public sealed class RouteHealth
 
     private int SweepCore(long now)
     {
+        foreach (var kv in _recentSuccesses)
+        {
+            if (now - kv.Value >= _options.PeerOpenIgnoredAfterSuccess.Ticks)
+            {
+                _recentSuccesses.TryRemove(kv);
+            }
+        }
+
         int removed = 0;
         foreach (var kv in _entries)
         {

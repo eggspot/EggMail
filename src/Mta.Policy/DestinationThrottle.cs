@@ -216,6 +216,9 @@ internal sealed class ThrottleState
 
     public int InUse;
     public int ConcurrencyLimit;
+
+    /// <summary>The concurrency limit as a fraction of <see cref="Ceiling"/>'s connections, kept exactly so that rescaling for a changing replica count rounds from it and never drifts.</summary>
+    public double ConcurrencyFraction;
     public double Rate;
     public double Tokens;
     public long RefillTicks;
@@ -233,6 +236,7 @@ internal sealed class ThrottleState
         FullCeiling = fullCeiling;
         Ceiling = ceiling;
         ConcurrencyLimit = concurrency;
+        ConcurrencyFraction = (double)concurrency / ceiling.MaxConcurrentConnections;
         Rate = rate;
         RefillTicks = nowTicks;
         LastTouchTicks = nowTicks;
@@ -305,6 +309,7 @@ public sealed class DestinationThrottle
     private readonly long _failureWindowTicks;
     private readonly ConcurrentDictionary<ThrottleKey, long> _slowdowns = new();
     private volatile ReplicaShare _share = ReplicaShare.Alone;
+    private volatile bool _sharing;
     private int _count;
     private long _lastSweepTicks;
     private int _sweeping;
@@ -373,10 +378,16 @@ public sealed class DestinationThrottle
         }
 
         state.Ceiling = scaled;
-        state.ConcurrencyLimit = Math.Clamp((int)Math.Ceiling(state.ConcurrencyLimit * (double)scaled.MaxConcurrentConnections / old.MaxConcurrentConnections), Math.Min(_options.MinConcurrentConnections, scaled.MaxConcurrentConnections), scaled.MaxConcurrentConnections);
+        // From the exact fraction, not from the last rounded limit: a replica count that flaps must not ratchet the limit up.
+        state.ConcurrencyLimit = Math.Clamp((int)Math.Round(state.ConcurrencyFraction * scaled.MaxConcurrentConnections, MidpointRounding.AwayFromZero), Math.Min(_options.MinConcurrentConnections, scaled.MaxConcurrentConnections), scaled.MaxConcurrentConnections);
         state.Rate = Math.Clamp(state.Rate * scaled.MaxMessagesPerMinute / old.MaxMessagesPerMinute, Math.Min(MinRate(share), scaled.MaxMessagesPerMinute), scaled.MaxMessagesPerMinute);
         state.Tokens = Math.Min(state.Tokens, state.Capacity(_options.BurstSeconds));
     }
+
+    /// <summary>
+    /// Starts keeping the slowdowns this replica is told by destinations for <see cref="DrainSlowdowns"/>. Off by default: a throttle nobody drains (one process, SQLite) keeps nothing.
+    /// </summary>
+    public void ShareSlowdowns() => _sharing = true;
 
     /// <summary>
     /// Takes the destinations this replica slowed down since the last call (a throttling reply or a burst of refused connections, not a slowdown it adopted from another
@@ -600,11 +611,12 @@ public sealed class DestinationThrottle
 
         Refill(state, now);
         state.ConcurrencyLimit = Math.Max(_options.MinConcurrentConnections, (int)(state.ConcurrencyLimit * _options.DecreaseFactor));
+        state.ConcurrencyFraction = (double)state.ConcurrencyLimit / state.Ceiling.MaxConcurrentConnections;
         state.Rate = Math.Max(MinRate(_share), state.Rate * _options.DecreaseFactor);
         state.Tokens = Math.Min(state.Tokens, state.Capacity(_options.BurstSeconds));
         state.HasDecreased = true;
         state.LastDecreaseTicks = now;
-        if (passOn && _slowdowns.Count < MaxPendingSlowdowns)
+        if (passOn && _sharing && _slowdowns.Count < MaxPendingSlowdowns)
         {
             _slowdowns[state.Key] = now;
         }
@@ -613,6 +625,7 @@ public sealed class DestinationThrottle
     private void Increase(ThrottleState state)
     {
         state.ConcurrencyLimit = Math.Min(state.Ceiling.MaxConcurrentConnections, state.ConcurrencyLimit + 1);
+        state.ConcurrencyFraction = (double)state.ConcurrencyLimit / state.Ceiling.MaxConcurrentConnections;
         double step = Math.Max(1.0, state.Ceiling.MaxMessagesPerMinute * _options.RateIncreaseFraction);
         state.Rate = Math.Min(state.Ceiling.MaxMessagesPerMinute, state.Rate + step);
     }

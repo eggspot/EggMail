@@ -25,7 +25,7 @@ workflow refuses a stable tag without a non-empty section for that exact version
   bounce and complaint processing, signed webhooks (Standard Webhooks), sending caps and domain warm-up.
 - Storage backends with the same feature set: SQLite (default, `Sqlite:SyncMode=Off` with a loud warning) and PostgreSQL (EF Core +
   Npgsql, day partitions, `SKIP LOCKED` claims, owner and runtime roles). Shared conformance suites run against both.
-- Replicas on one PostgreSQL database share the failed-login budget, the per-destination connection and rate ceilings, and what remote destinations told a replica (throttling, open circuits); every replica takes its share of the ceilings from the live replica set. A delivery whose lease another replica took over is flagged `possible_duplicate` when its first holder reports (schema version 6).
+- Replica coordination on PostgreSQL: replicas share the failed-login budget, the per-destination connection and rate ceilings (each takes its share from the live replica set) and, bounded, what remote destinations told a replica (throttling, an unreachable MX host). A delivery whose lease another replica took over is flagged `possible_duplicate` when its first holder reports (schema version 6).
 - Backend switch in both directions (`mta migrate-storage`, `/api/v1/admin/storage/switch/*` and the dashboard wizard): drain or
   quiesce, fence, symmetric bundle, verification, activation, rollback, resumable history migration, secrets re-protected with Data
   Protection.

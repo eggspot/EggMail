@@ -19,4 +19,5 @@ public static class SecretPurposes
     public const string TlsPrivateKey = "EggMail.Secrets.TlsPrivateKey.v1";
     public const string AcmeAccountKey = "EggMail.Secrets.AcmeAccountKey.v1";
     public const string RelayPassword = "EggMail.Secrets.RelayPassword.v1";
+    public const string AuthThrottleKey = "EggMail.Secrets.AuthThrottleKey.v1";
 }

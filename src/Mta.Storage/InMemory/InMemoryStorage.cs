@@ -30,6 +30,7 @@ public sealed class InMemoryStorage : IStorage
         Webhooks = new MemoryWebhooks(_state);
         Maintenance = new MemoryMaintenance(_state);
         Transfer = new MemoryTransfer(_state);
+        Replicas = new InMemoryReplicaCoordination(_state.Clock);
         TimeSpan interval = statsFlushInterval ?? TimeSpan.FromSeconds(10);
         if (interval > TimeSpan.Zero)
         {
@@ -57,7 +58,7 @@ public sealed class InMemoryStorage : IStorage
 
     public IStorageTransfer Transfer { get; }
 
-    public IReplicaCoordination? Replicas { get; } = new InMemoryReplicaCoordination();
+    public IReplicaCoordination? Replicas { get; }
 
     public Task InitializeAsync(CancellationToken cancellationToken)
     {

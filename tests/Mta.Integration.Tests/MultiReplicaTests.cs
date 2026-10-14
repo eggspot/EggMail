@@ -22,14 +22,29 @@ using Npgsql;
 namespace Mta.Integration.Tests;
 
 /// <summary>
+/// A <c>[Fact]</c> that needs a PostgreSQL server: reported as skipped when there is none (locally, without installed binaries or <c>EGGMAIL_TEST_POSTGRES</c>), but never when the
+/// environment promises one: under CI (<c>CI</c> is set) or with <c>EGGMAIL_TEST_POSTGRES</c> set the test runs and fails if the server is not there, so a broken CI service cannot
+/// turn the proof into a pass.
+/// </summary>
+public sealed class PostgresFactAttribute : FactAttribute
+{
+    private static bool ServerPromised =>
+        !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CI")) || !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("EGGMAIL_TEST_POSTGRES"));
+
+    public override string Skip
+    {
+        get => base.Skip ?? (ServerPromised ? null : PostgresTestServer.UnavailableReason)!;
+        set => base.Skip = value;
+    }
+}
+
+/// <summary>
 /// Several replicas of EggMail (separate <see cref="EggMailRuntime"/> instances, each with its own storage object and connection pool) on one PostgreSQL database. The tests need a
 /// server (<c>EGGMAIL_TEST_POSTGRES</c> in CI, or locally installed binaries) and return at once without one, like the other PostgreSQL pipeline tests.
 /// </summary>
 internal static class ReplicaHarness
 {
     public static readonly Guid TenantId = Guid.Parse("a0000000-0000-7000-8000-000000000001");
-
-    public static bool Available => PostgresTestServer.UnavailableReason is null;
 
     public static StorageOptions StorageFor(TestDatabase database) => new()
     {
@@ -57,7 +72,7 @@ internal static class ReplicaHarness
         var storage = PostgresStorage.Create(config.Storage, clock, log);
         await storage.InitializeAsync(default);
         var runtime = await EggMailRuntime.CreateAsync(config, storage, clock, log, default, dns);
-        await runtime.ReplicaExchange!.ExchangeAsync(default);
+        await runtime.ReplicaCoordinator!.RunOnceAsync(default);
         return runtime;
     }
 
@@ -86,7 +101,7 @@ internal static class ReplicaHarness
     public static async Task StopAsync(EggMailRuntime runtime)
     {
         await runtime.SmtpServer.StopAsync(TimeSpan.FromSeconds(2));
-        if (runtime.ReplicaExchange is { } exchange)
+        if (runtime.ReplicaCoordinator is { } exchange)
         {
             await exchange.LeaveAsync(default);
         }
@@ -105,11 +120,6 @@ public sealed class MultiReplicaStateTests : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
-        if (!ReplicaHarness.Available)
-        {
-            return;
-        }
-
         _database = await PostgresTestServer.Instance.CreateDatabaseAsync();
         var config = ReplicaHarness.ConfigFor(ReplicaHarness.StorageFor(_database));
         // One after the other: each generates (the first) or loads (the next) the shared TLS certificate for its submission listener.
@@ -140,27 +150,22 @@ public sealed class MultiReplicaStateTests : IAsyncLifetime
 
     private EggMailRuntime B => _replicas[1];
 
-    private async Task ExchangeAllAsync()
+    private async Task CoordinateAllAsync()
     {
         foreach (var replica in _replicas)
         {
-            await replica.ReplicaExchange!.ExchangeAsync(default);
+            await replica.ReplicaCoordinator!.RunOnceAsync(default);
         }
     }
 
-    [Fact]
+    [PostgresFact]
     public async Task Replicas_find_each_other_and_share_the_destination_ceilings_until_one_leaves()
     {
-        if (!ReplicaHarness.Available)
-        {
-            return;
-        }
-
-        await ExchangeAllAsync();
-        await ExchangeAllAsync();
-        Assert.Equal(2, A.ReplicaExchange!.ReplicaCount);
-        Assert.Equal(2, B.ReplicaExchange!.ReplicaCount);
-        Assert.NotEqual(A.ReplicaExchange.ReplicaIndex, B.ReplicaExchange.ReplicaIndex);
+        await CoordinateAllAsync();
+        await CoordinateAllAsync();
+        Assert.Equal(2, A.ReplicaCoordinator!.ReplicaCount);
+        Assert.Equal(2, B.ReplicaCoordinator!.ReplicaCount);
+        Assert.NotEqual(A.ReplicaCoordinator.ReplicaIndex, B.ReplicaCoordinator.ReplicaIndex);
         Assert.Equal(2, await ReplicaHarness.CountAsync(_database!, "SELECT count(*) FROM replica_heartbeat"));
 
         var key = new ThrottleKey("big.example");
@@ -185,22 +190,17 @@ public sealed class MultiReplicaStateTests : IAsyncLifetime
             lease.Dispose();
         }
 
-        await B.ReplicaExchange.LeaveAsync(default);
-        await A.ReplicaExchange.ExchangeAsync(default);
-        Assert.Equal(1, A.ReplicaExchange.ReplicaCount);
+        await B.ReplicaCoordinator.LeaveAsync(default);
+        await A.ReplicaCoordinator.RunOnceAsync(default);
+        Assert.Equal(1, A.ReplicaCoordinator.ReplicaCount);
         Assert.Equal(16, A.DestinationThrottle.GetSnapshot(key)!.ConcurrencyCeiling);
         Assert.Equal(1, await ReplicaHarness.CountAsync(_database!, "SELECT count(*) FROM replica_heartbeat"));
     }
 
-    [Fact]
-    public async Task A_destination_that_slows_one_replica_down_and_an_unreachable_server_are_known_to_the_other_replica_within_one_exchange()
+    [PostgresFact]
+    public async Task A_destination_that_slows_one_replica_down_and_an_unreachable_server_are_known_to_the_other_replica_within_one_round()
     {
-        if (!ReplicaHarness.Available)
-        {
-            return;
-        }
-
-        await ExchangeAllAsync();
+        await CoordinateAllAsync();
         var destination = new ThrottleKey("gmail.example");
         var mx = RouteHealthKey.ForMxHost("mx.down.example");
         B.DestinationThrottle.TryAcquire(destination).Lease!.Dispose();
@@ -213,13 +213,13 @@ public sealed class MultiReplicaStateTests : IAsyncLifetime
         }
 
         Assert.Equal(CircuitState.Closed, B.Health.GetSnapshot(mx).State);
-        await A.ReplicaExchange!.ExchangeAsync(default);
-        await B.ReplicaExchange!.ExchangeAsync(default);
+        await A.ReplicaCoordinator!.RunOnceAsync(default);
+        await B.ReplicaCoordinator!.RunOnceAsync(default);
 
         Assert.Equal(rateBefore / 2, B.DestinationThrottle.GetSnapshot(destination)!.MessagesPerMinute);
         Assert.Equal(CircuitState.Open, B.Health.GetSnapshot(mx).State);
-        // The database keeps microseconds, the circuit breaker ticks of 100 ns.
-        Assert.InRange((A.Health.GetSnapshot(mx).RetryAt!.Value - B.Health.GetSnapshot(mx).RetryAt!.Value).Duration(), TimeSpan.Zero, TimeSpan.FromMilliseconds(1));
+        // The signal is a duration, aged by the database: the retry times agree up to the time the round trips took.
+        Assert.InRange((A.Health.GetSnapshot(mx).RetryAt!.Value - B.Health.GetSnapshot(mx).RetryAt!.Value).Duration(), TimeSpan.Zero, TimeSpan.FromSeconds(2));
         Assert.Equal(RouteAdmission.Rejected, B.Health.TryAdmit(mx));
     }
 
@@ -247,14 +247,9 @@ public sealed class MultiReplicaStateTests : IAsyncLifetime
         Assert.DoesNotContain(true, results);
     }
 
-    [Fact]
+    [PostgresFact]
     public async Task Failed_logins_count_against_one_budget_for_all_replicas()
     {
-        if (!ReplicaHarness.Available)
-        {
-            return;
-        }
-
         Assert.True(A.AuthThrottle.IsShared);
 
         // Nine failures spread over both replicas (budget: 10 per address and per user in 15 minutes): neither replica has seen more than five, and sign-in still works.
@@ -268,10 +263,12 @@ public sealed class MultiReplicaStateTests : IAsyncLifetime
         Assert.False(await LoginSucceedsAsync(A, "s3cret"));   // locked out, even with the right password, on both replicas
         Assert.False(await LoginSucceedsAsync(B, "s3cret"));
 
-        // The database holds digests only: no address, no user name.
+        // The database holds keyed digests only: no address, no user name, and not even their plain hashes.
         long rows = await ReplicaHarness.CountAsync(_database!, "SELECT count(*) FROM auth_failure");
         Assert.True(rows >= 2);
-        Assert.Equal(0, await ReplicaHarness.CountAsync(_database!, "SELECT count(*) FROM auth_failure WHERE key_hash !~ '^[0-9A-F]{64}$'"));
+        Assert.Equal(0, await ReplicaHarness.CountAsync(_database!, "SELECT count(*) FROM auth_failure WHERE key_digest !~ '^[0-9A-F]{64}$'"));
+        string plain = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData("127.0.0.1"u8));
+        Assert.Equal(0, await ReplicaHarness.CountAsync(_database!, $"SELECT count(*) FROM auth_failure WHERE key_digest = '{plain}'"));
     }
 }
 
@@ -299,11 +296,6 @@ public sealed class MultiReplicaTlsReportTests : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
-        if (!ReplicaHarness.Available)
-        {
-            return;
-        }
-
         _database = await PostgresTestServer.Instance.CreateDatabaseAsync();
         var dns = new StaticDnsResolver();
         foreach (string domain in Domains)
@@ -332,14 +324,9 @@ public sealed class MultiReplicaTlsReportTests : IAsyncLifetime
         }
     }
 
-    [Fact]
+    [PostgresFact]
     public async Task Three_replicas_that_all_saw_sessions_send_one_report_per_domain_with_everyones_counts()
     {
-        if (!ReplicaHarness.Available)
-        {
-            return;
-        }
-
         // Every replica delivered to every domain during the day: 1 + 2 + 3 successful sessions, and replica 0 and 2 also one failure each.
         for (int r = 0; r < _replicas.Count; r++)
         {
@@ -387,8 +374,9 @@ public sealed class MultiReplicaTlsReportTests : IAsyncLifetime
 }
 
 /// <summary>
-/// The delivery promise with two replicas working one queue: every recipient reaches exactly one final state, nothing is lost, and nothing reaches the remote twice unless it is
-/// flagged <c>possible_duplicate</c>, including when a replica's claim runs out while it is still waiting for the remote's answer and the other replica takes the delivery over.
+/// The delivery promise with two replicas working one queue under a randomized, unreliable remote: every recipient reaches exactly one final state, nothing is lost, and nothing
+/// reaches the remote twice unless it is flagged <c>possible_duplicate</c>. Some answers are slow enough for a claim to run out (a one-second claim), so takeovers happen too; that they
+/// do is proven deterministically by <see cref="MultiReplicaTakeoverTests"/>, here they are one more thing the invariants must survive.
 /// </summary>
 [Collection("Runtime")]
 public sealed class MultiReplicaChaosTests : IAsyncLifetime
@@ -405,11 +393,6 @@ public sealed class MultiReplicaChaosTests : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
-        if (!ReplicaHarness.Available)
-        {
-            return;
-        }
-
         _seed = int.TryParse(Environment.GetEnvironmentVariable("EGGMAIL_CHAOS_SEED"), out int s) ? s : Environment.TickCount;
         _internet = new ChaosInternet(_seed, _log)
         {
@@ -444,17 +427,12 @@ public sealed class MultiReplicaChaosTests : IAsyncLifetime
         foreach (var runtime in _replicas)
         {
             _engines.Add(Task.Run(() => runtime.Delivery.RunAsync(_stop.Token)));
-            _engines.Add(Task.Run(() => runtime.ReplicaExchange!.RunAsync(_stop.Token)));   // the replicas beat and share their limits while they work
+            _engines.Add(Task.Run(() => runtime.ReplicaCoordinator!.RunAsync(_stop.Token)));   // the replicas beat and share their limits while they work
         }
     }
 
     public async Task DisposeAsync()
     {
-        if (!ReplicaHarness.Available)
-        {
-            return;
-        }
-
         await _stop.CancelAsync();
         foreach (var engine in _engines)
         {
@@ -474,14 +452,9 @@ public sealed class MultiReplicaChaosTests : IAsyncLifetime
         }
     }
 
-    [Fact]
+    [PostgresFact]
     public async Task Two_replicas_on_one_queue_deliver_every_recipient_once_and_flag_what_may_have_been_sent_twice()
     {
-        if (!ReplicaHarness.Available)
-        {
-            return;
-        }
-
         int messages = int.TryParse(Environment.GetEnvironmentVariable("EGGMAIL_CHAOS_MESSAGES"), out int m) ? Math.Min(m, 90) : 90;
         var rng = new Random(_seed + 1);
         var plan = new List<(string Subject, string[] Recipients)>();
@@ -546,11 +519,142 @@ public sealed class MultiReplicaChaosTests : IAsyncLifetime
 
         string context = $" (seed {_seed})";
         await ChaosInvariants.AssertAsync(_replicas[0].Storage, ReplicaHarness.TenantId, plan, _internet, context);
+    }
+}
 
-        // Both replicas really worked the queue, and the takeovers the slow answers cause were exercised: something reached the remote twice, and all of it was flagged
-        // (ChaosInvariants fails an unflagged duplicate).
-        Assert.All(_replicas, r => Assert.True(r.DestinationThrottle.TrackedKeyCount > 0, "a replica never delivered anything" + context));
-        var twice = _internet.Accepted.Where(a => a.Subject.StartsWith("chaos-", StringComparison.Ordinal)).GroupBy(a => a).Count(g => g.Count() > 1);
-        Assert.True(twice > 0 || _proxy.Drops > 0, "neither a takeover nor a cut connection produced a repeated delivery, so the flag was not exercised" + context);
+/// <summary>
+/// A replica whose claim runs out while it is still waiting for the remote's answer: the other replica takes the delivery over, both send, and whichever reports first, the
+/// delivery is reported as a possible duplicate. Deterministic: the remote holds both conversations open until both have arrived.
+/// </summary>
+[Collection("Runtime")]
+public sealed class MultiReplicaTakeoverTests : IAsyncLifetime
+{
+    /// <summary>A remote that answers only when told to, and counts the messages that reached it.</summary>
+    private sealed class HoldingRemote : ISmtpServerHandler
+    {
+        private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _arrived;
+
+        public int Arrived => Volatile.Read(ref _arrived);
+
+        public void Release() => _release.TrySetResult();
+
+        public ValueTask<SmtpReply?> OnConnectedAsync(SmtpSessionContext session, CancellationToken ct) => ValueTask.FromResult<SmtpReply?>(null);
+
+        public ValueTask<SmtpAuthResult> AuthenticateAsync(SmtpSessionContext session, string authorizationId, string userName, string password, CancellationToken ct) => ValueTask.FromResult(SmtpAuthResult.Failed);
+
+        public ValueTask<SmtpReply> OnMailFromAsync(SmtpSessionContext session, MailFromInfo mail, CancellationToken ct) => ValueTask.FromResult(SmtpReplies.SenderOk);
+
+        public ValueTask<SmtpReply> OnRcptToAsync(SmtpSessionContext session, MailFromInfo mail, EmailAddress recipient, RcptParameters p, CancellationToken ct) => ValueTask.FromResult(SmtpReplies.RecipientOk);
+
+        public async ValueTask<SmtpReply> OnMessageAsync(SmtpMessage message, CancellationToken ct)
+        {
+            Interlocked.Increment(ref _arrived);
+            await _release.Task.WaitAsync(ct);
+            return SmtpReply.Create(250, "2.0.0", "Accepted");
+        }
+
+        public void OnDisconnected(SmtpSessionContext session)
+        {
+        }
+    }
+
+    private readonly CancellationTokenSource _stop = new();
+    private readonly HoldingRemote _remote = new();
+    private readonly List<EggMailRuntime> _replicas = [];
+    private readonly List<Task> _running = [];
+    private SmtpServer _server = null!;
+    private TestDatabase? _database;
+
+    public async Task InitializeAsync()
+    {
+        _server = new SmtpServer(new SmtpServerOptions
+        {
+            Hostname = "mx.hold.example",
+            Listeners = [new SmtpListenerOptions { Name = "mx", BindAddress = IPAddress.Loopback, Port = 0, Mode = ListenerMode.Plain, AuthRequired = false, Role = ListenerRole.Bounce }],
+        }, _remote);
+        _server.Start();
+        var dns = new StaticDnsResolver();
+        foreach (string domain in new[] { "dest.example", "example.org" })
+        {
+            dns.AddMx(domain, 10, "mx." + domain).AddA("mx." + domain, "127.0.0.1");
+        }
+
+        _database = await PostgresTestServer.Instance.CreateDatabaseAsync();
+        var config = ReplicaHarness.ConfigFor(ReplicaHarness.StorageFor(_database), _server.LocalEndPoints["mx"].Port, claimLease: TimeSpan.FromSeconds(1));
+        for (int i = 0; i < 2; i++)
+        {
+            var runtime = await ReplicaHarness.StartAsync(config, SystemClock.Instance, NullMtaLog.Instance, dns);
+            runtime.SmtpServer.Start();
+            _replicas.Add(runtime);
+        }
+
+        await ReplicaHarness.SeedAsync(_replicas[0].Storage, "example.org");
+    }
+
+    public async Task DisposeAsync()
+    {
+        _remote.Release();
+        await _stop.CancelAsync();
+        foreach (var task in _running)
+        {
+            try { await task; } catch (OperationCanceledException) { }
+        }
+
+        foreach (var runtime in _replicas)
+        {
+            await ReplicaHarness.StopAsync(runtime);
+        }
+
+        await _server.DisposeAsync();
+        if (_database is not null)
+        {
+            await _database.DisposeAsync();
+        }
+    }
+
+    [PostgresFact]
+    public async Task A_claim_that_runs_out_during_the_send_makes_the_other_replica_send_too_and_the_delivery_is_flagged()
+    {
+        using (var client = new SmtpClient { CheckCertificateRevocation = false, ServerCertificateValidationCallback = (_, _, _, _) => true })
+        {
+            await client.ConnectAsync("127.0.0.1", ReplicaHarness.SubmissionPort(_replicas[0]), SecureSocketOptions.StartTls);
+            await client.AuthenticateAsync("acme-user", "s3cret");
+            var msg = new MimeKit.MimeMessage();
+            msg.From.Add(MailboxAddress.Parse("news@example.org"));
+            msg.To.Add(MailboxAddress.Parse("user@dest.example"));
+            msg.Subject = "takeover";
+            msg.Body = new TextPart("plain") { Text = "body\r\n" };
+            await client.SendAsync(msg);
+        }
+
+        foreach (var runtime in _replicas)
+        {
+            _running.Add(Task.Run(() => runtime.Delivery.RunAsync(_stop.Token)));
+        }
+
+        // One replica claims the delivery and waits for the remote; its one-second claim runs out; a replica claims it again and sends too. Wait for the event, not for time.
+        var deadline = DateTime.UtcNow.AddSeconds(60);
+        while (_remote.Arrived < 2)
+        {
+            Assert.True(DateTime.UtcNow < deadline, "the delivery was never taken over");
+            await Task.Delay(50);
+        }
+
+        _remote.Release();
+        QueueStats stats;
+        do
+        {
+            Assert.True(DateTime.UtcNow < deadline, "the queue did not drain");
+            await Task.Delay(50);
+            stats = await _replicas[0].Storage.Deliveries.GetQueueStatsAsync(default);
+        }
+        while (stats is not { Queued: 0, Leased: 0, Deferred: 0 });
+
+        Assert.Equal(2, _remote.Arrived);
+        var summary = Assert.Single((await _replicas[0].Storage.History.SearchAsync(new MessageQuery(ReplicaHarness.TenantId, Limit: 10), default)).Items, s => s.Subject == "takeover");
+        var events = await _replicas[0].Storage.History.GetEventsAsync(ReplicaHarness.TenantId, summary.MessageId, default);
+        Assert.Single(events, e => e.Type == MessageEventType.Delivered);
+        Assert.Contains(events, e => e.Type == MessageEventType.PossibleDuplicate);
     }
 }
