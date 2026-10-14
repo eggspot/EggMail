@@ -73,10 +73,14 @@ The consequences of an outcome are computed by one shared function, so SQLite an
 | Deferred (counted) | attempt+1, new due time, lease released, `last_error` | deferred | Deferred |
 | Deferred, `CountAttempt=false` | due time and lease only; no attempt, no event, no statistic, no webhooks | none | none |
 | Failed | deleted | bounced | HardBounce |
-| Expired / Suppressed / Cancelled | deleted | expired / suppressed / cancelled | Expired / Suppressed / none |
+| Expired / Suppressed / Cancelled | deleted | expired / suppressed / cancelled | Expired / Suppressed / none (`Cancelled` is produced by `CancelAsync`; the delivery processor never records it) |
 | AbortedBySwitch | requeued unchanged (lease released) | aborted_by_switch | none |
 
 `Suppress=Complaint` adds a `complained` event and counter; `PossibleDuplicate` adds a `possible_duplicate` event and sets the sticky flag on a surviving row. Webhook events fan out to the tenant's **enabled** endpoints whose list contains the event type or `*` (an empty list receives nothing), in the same transaction as the row completion. The spool counter is decremented in that transaction; the last recipient frees the spool row. Recording an attempt for a delivery that is already gone is a no-op, so reports are safe to repeat.
+
+### Cancelling (`IDeliveryStore.CancelAsync`, decision 80)
+
+One shared decision function (`CancelPlanner`) splits the message's pending rows into "cancel" (not leased, not marked for a switch), "in flight" (leased) and "not pending" (a *named* recipient without a row), so the backends cannot disagree; each cancelled row then goes through `AttemptPlanner.Plan` with a `Cancelled` attempt, exactly as a recorded attempt. Per backend: SQLite runs the selection, the deletes and the spool decrement in one queue-writer command (`CancelCommand`), then retained raw, history events and status, and the recent-events ring as after a recorded attempt; PostgreSQL does everything in one transaction (`SELECT … WHERE message_id AND tenant_id ORDER BY id FOR UPDATE`, then the same code as a recorded attempt for each row); in-memory under the state lock. The statement scans `delivery_queue` by `message_id` and `tenant_id` (there is no index on `message_id`, as for a recorded attempt, which reads by id), which is fine for an operator action; an index would be a schema change (see Known gaps). Cancelled rows write the `cancelled` event and the message status (the shared `MessageStatus.Next`), and no statistics counter: `StatCounter` has no cancelled bucket, and adding one would change the statistics API contract for an event that is not a delivery outcome.
 
 ## Crash windows (design §4.4)
 
@@ -244,6 +248,7 @@ Reading the table: with one caller the cost is one round trip plus the commit; w
 
 - Power-loss and OS-crash behaviour is documented from the SQLite docs, not tested.
 - The write-time recipient-domain top-N is approximate within an hour (above).
+- `CancelAsync` selects the rows of a message with a scan of `delivery_queue` (no index on `message_id`): milliseconds for a queue of hundreds of thousands of rows on SQLite, where it runs inside the queue writer and so delays claims for that long; add an index (schema version 6) if cancelling becomes frequent on a very large queue.
 - `GetQueueStatsAsync` computes `SpoolBytes` with a scan of `message_spool`; fine for dashboards, not for a tight loop.
 - `ReleaseOwnedLeasesAsync` scans `delivery_queue` (no index on the lease owner), acceptable at shutdown.
 - Config reads other than the suppression check use a pooled EF context per call; config is otherwise a cold path.

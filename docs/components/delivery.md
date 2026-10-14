@@ -17,6 +17,19 @@ Per group, in order:
 
 A connection lost after the end of data was sent is deferred with the `possible_duplicate` flag. `QuiesceAsync` stops claiming, waits up to the timeout, cancels what is left (recorded as `AbortedBySwitch`, requeued unchanged, flagged possible duplicate only when the end of the message data had begun to be written, see `SmtpClientConnection.EndOfDataStarted`) and releases the leases (decision R).
 
+### Cancelling a queued message
+
+`IDeliveryStore.CancelAsync` (`POST /messages/{id}/cancel`, [../api.md](../api.md)) finishes the *waiting* recipients of one message as `DeliveryOutcome.Cancelled`, with the same consequences as a recorded attempt (`AttemptPlanner`): queue row deleted, a `cancelled` event, the message status recomputed, the spool freed with the last recipient (a retained raw message moves to history like for any final outcome). It adds no statistic counter, no webhook event and no bounce message.
+
+**In-flight rule (decision 80).** A delivery is *in flight* while it is leased (`lease_until` after the time the cancel runs, or marked for a backend switch). A cancel only ever takes deliveries that are not leased, and it takes them in the same serialized step that `ClaimAsync` uses (SQLite: the single queue writer; PostgreSQL: one transaction with `FOR UPDATE` on the message's rows, while claim uses `FOR UPDATE SKIP LOCKED`; in-memory: the state lock). So for every delivery exactly one of two things is true: it was claimed first (the cancel reports it in `inFlight` and leaves it; the processor records its result as usual and the cancel did not happen for that recipient), or it was cancelled first (the row is gone; no claim can ever return it). Consequences:
+
+- Cancel never interrupts or races an SMTP transaction, and a result for a cancelled delivery is impossible except from a worker whose lease had already expired (it could be claimed by another worker at that point anyway); that late `RecordAttemptAsync` finds no row and is a no-op, so it cannot resurrect the delivery, double count anything or send a second event.
+- A recipient that is *deferred, waiting for its next attempt* has no lease and is cancellable: the common case of "stop retrying this".
+- Cancel does not abort a running attempt. The alternative (a `cancel_requested` flag consulted when the result is recorded) would still send the message and only hide the fact, and aborting the connection would risk a partial transmission; refusing the in-flight recipient is the only provably safe choice, and the caller can simply retry once the attempt ends (a transmission lasts seconds, the lease is minutes).
+- A cancelled recipient is not suppressed and does not count against the destination; sending the message again is a resend.
+
+The processor needs no change: it never sees a cancelled delivery, because the row is deleted before it can be claimed. `CancelThroughEngineTests` runs the three cases through the real engine (before the first attempt, deferred and waiting, mid-transaction with the remote holding the reply).
+
 ### Metrics and traces
 
 `DeliveryMetrics` (`Mta.Delivery`): attempts by outcome, group duration, holds, claims and their duration, the duration of storing results, bounces generated, and the queue gauges. The gauges (`mta_delivery_queue_depth` by state, the age of the oldest due delivery, spooled bytes) read the last `QueueSample` of `QueueGauges`, a background loop that calls `GetQueueStatsAsync` every `Observability:QueueSampleSeconds`; a scrape never queries the queue. A failed sample keeps the previous numbers and is counted. The metric table is in [../operations.md](../operations.md#monitoring).

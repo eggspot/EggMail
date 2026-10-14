@@ -333,6 +333,15 @@ PostgreSQL command latency and pool state come from the Npgsql driver's own mete
 
 Alert also on the readiness warnings of `/readyz` (`sqlite_sync_off`, `sqlite_quarantined:<file>`, `queue_persistence_memory`), which carry the same facts as the gauges.
 
+## Cancelling queued mail
+
+A message that has not been delivered yet can be stopped from the message page of the dashboard (**Cancel delivery**) or with `POST /api/v1/messages/{id}/cancel` ([api.md](api.md)); the caller needs the `send` scope. What an operator should know:
+
+- It works on recipients that are *waiting*: queued, or deferred until their next retry. A recipient whose delivery attempt is running at that moment (it holds a lease) is left alone and reported as `inFlight`; try again after the attempt, which lasts seconds. A stuck lease (a worker that died) is released when it expires (the lease length is `Delivery:ClaimLease`, 15 minutes by default) or at the next start, and the recipient is cancellable from then on.
+- A cancelled recipient is final: `cancelled` event, no retry, no bounce message to the sender, no suppression, no webhook event and no statistics counter (the "recent events" list shows it). The accepted count of the statistics stays, so accepted minus the other counters includes cancelled mail.
+- It needs `History:Mode=Full` (`410 history_not_recorded` under `StatsOnly`, where mail cannot be found by id). Under `StatsOnly` there is no handle to stop a single queued message (there is no queue editor); it is delivered or expires.
+- There is no audit log of who cancelled: the `cancelled` events in the message history are the record. Cancelling during a backend switch is refused with `503` like every queue write.
+
 ## Bounces caused by the receiving server's capabilities
 
 EggMail sends 8-bit bodies with `BODY=8BITMIME` and internationalized mail with `SMTPUTF8` when the receiving server offers them, and converts or refuses when it does not. Three permanent failures name this in the bounce text (none of them suppresses the recipient): `5.6.1` the server has no 8BITMIME and the message could not be converted to 7-bit (the text says why, for example 8-bit header fields in an attached message); `5.6.9` the message has UTF-8 header fields and the server has no SMTPUTF8 (a change from earlier versions, which sent such mail as is; headers are not downgraded, RFC 6857); `5.6.7` the sender or recipient address has non-ASCII characters before the `@` and the server has no SMTPUTF8 (when only some recipients are affected the others are delivered, and the affected ones are offered to the domain's other mail hosts first). A configured `Delivery:BounceDomain` makes the envelope sender an ASCII bounce address, which avoids `5.6.7` for the sender. Bounce reports about internationalized recipients are RFC 6533 reports (`message/global-delivery-status`).
