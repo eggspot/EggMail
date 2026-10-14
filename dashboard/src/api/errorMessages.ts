@@ -4,6 +4,7 @@ import { ApiError } from './client';
 const MESSAGES: Record<string, string> = {
   unauthorized: 'You are not signed in, or your session has expired. Please sign in again.',
   forbidden: 'You do not have permission to do that.',
+  tenant_disabled: 'This tenant is suspended, so it cannot be used right now. An administrator can activate it again.',
   not_found: 'That item was not found. It may have been deleted.',
   validation_failed: 'Some of the values are not valid. Check the highlighted fields.',
   rate_limited: 'Too many requests. Please wait a moment and try again.',
@@ -13,6 +14,7 @@ const MESSAGES: Record<string, string> = {
   idempotency_conflict: 'This request was already sent with different content. Reload and try again.',
   history_not_recorded: 'Per-message history is not recorded on this server (History mode is statistics only).',
   body_expired: 'The message content has expired and was removed. Metadata and events are still available.',
+  content_not_recorded: 'The content of this message was never recorded because the server does not keep message content (Content mode is none). Metadata and events are available.',
   message_not_found: 'That message was not found. It may be older than the event retention period.',
   attachments_not_stored: 'This message had attachments that were not stored, so it cannot be resent.',
   not_ready: 'The server is not ready yet (storage unavailable). Try again in a few seconds.',
@@ -40,7 +42,8 @@ export function friendlyMessage(err: unknown): string {
 export function errorFootnote(err: unknown): string {
   if (!(err instanceof ApiError)) return '';
   const parts: string[] = [];
-  if (err.detail && !MESSAGES[err.code]) parts.push(err.detail);
+  // not_ready is also how the server refuses a step it cannot do on this instance, with the reason in the detail.
+  if (err.detail && (!MESSAGES[err.code] || err.code === 'not_ready')) parts.push(err.detail);
   if (err.requestId) parts.push(`request id ${err.requestId}`);
   return parts.join(' - ');
 }

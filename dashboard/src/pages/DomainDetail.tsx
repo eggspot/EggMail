@@ -4,6 +4,7 @@ import { ApiError } from '../api/client';
 import { friendlyMessage, isCode } from '../api/errorMessages';
 import { DnsHints, DnsRecordsTable, DomainStatusChip } from '../components/DnsRecordsTable';
 import { DomainStateBanner } from '../components/DomainStateBanner';
+import type { DkimKeyInfo } from '../api/types';
 import { Button, Card, Chip, ConfirmDialog, CopyButton, EmptyState, ErrorNotice, KeyValue, Loading, Notice, PageHeader } from '../components/ui';
 import { formatDateTime, formatRelative } from '../lib/format';
 import { useAction, useApi, useCooldown, useDocumentTitle, usePolling } from '../lib/hooks';
@@ -19,6 +20,7 @@ export default function DomainDetail({ id }: { id?: string }) {
   const [announce, setAnnounce] = useState('');
   const [verifyNote, setVerifyNote] = useState<string | null>(null);
   const [rotating, setRotating] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const wasCoolingDown = useRef(false);
 
   // Announce only the start and the end of the cooldown for screen readers.
@@ -55,6 +57,12 @@ export default function DomainDetail({ id }: { id?: string }) {
     return d;
   });
 
+  const cancelRotation = useAction(async () => {
+    const d = await api.cancelDkimRotation(domainId);
+    setData(d);
+    return d;
+  });
+
   usePolling(
     async () => {
       try {
@@ -79,6 +87,10 @@ export default function DomainDetail({ id }: { id?: string }) {
   if (!domain) return null;
 
   const coolingDown = cooldown.remaining > 0;
+  const keys: DkimKeyInfo[] = domain.dkimKeys?.length ? domain.dkimKeys : [domain.dkim];
+  // The signing key is the active one; a key that is neither active nor retired is a pending rotation.
+  const signing = keys.find((k) => k.active) ?? domain.dkim;
+  const pending = domain.dkimKeys ? keys.filter((k) => !k.active && !k.retiredAt) : [];
 
   return (
     <>
@@ -128,27 +140,85 @@ export default function DomainDetail({ id }: { id?: string }) {
       <Card
         title="DKIM key"
         actions={
-          <Button onClick={() => setRotating(true)}>Rotate DKIM key</Button>
+          <>
+            {pending.length > 0 && <Button onClick={() => setCancelling(true)}>Cancel pending rotation</Button>}
+            <Button onClick={() => setRotating(true)}>Rotate DKIM key</Button>
+          </>
         }
       >
         <KeyValue
           items={[
-            ['Selector', <code>{domain.dkim.selector}</code>],
-            ['Active', domain.dkim.active ? 'Yes' : 'No'],
-            ['Created', formatDateTime(domain.dkim.createdAt)],
+            ['Selector', <code>{signing.selector}</code>],
+            ['Active', signing.active ? 'Yes' : 'No'],
+            ['Created', formatDateTime(signing.createdAt)],
           ]}
         />
+        {pending.length > 0 && (
+          <Notice tone="info" title="Key rotation pending">
+            <p>
+              The new selector {pending.map((k) => k.selector).join(', ')} is published as advice but does not sign yet: the current key keeps signing until the new record is found in DNS. You can cancel the
+              rotation while it is pending; the unused key is deleted.
+            </p>
+          </Notice>
+        )}
         <div class="stack">
           <span class="label">Public key (RSA-2048)</span>
           <div class="value-cell">
             <code class="dns-value" data-testid="dkim-public-key">
-              {domain.dkim.publicKey}
+              {signing.publicKey}
             </code>
-            <CopyButton text={domain.dkim.publicKey} what="DKIM public key" />
+            <CopyButton text={signing.publicKey} what="DKIM public key" />
           </div>
         </div>
+        {keys.length > 1 && (
+          <div class="table-wrap">
+            <table>
+              <caption class="sr-only">All DKIM keys of this domain</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Selector</th>
+                  <th scope="col">State</th>
+                  <th scope="col">Created</th>
+                  <th scope="col">Retired</th>
+                </tr>
+              </thead>
+              <tbody>
+                {keys.map((k) => (
+                  <tr key={k.selector}>
+                    <th scope="row">
+                      <code>{k.selector}</code>
+                    </th>
+                    <td>{k.active ? <Chip tone="ok">Signing</Chip> : k.retiredAt ? <Chip tone="neutral">Retired</Chip> : <Chip tone="info">Waiting for DNS</Chip>}</td>
+                    <td>{formatDateTime(k.createdAt)}</td>
+                    <td>{k.retiredAt ? formatDateTime(k.retiredAt) : '-'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
         {rotate.error !== undefined && !rotating && <ErrorNotice error={rotate.error} />}
+        {cancelRotation.error !== undefined && !cancelling && <ErrorNotice error={cancelRotation.error} />}
       </Card>
+
+      {cancelling && (
+        <ConfirmDialog
+          title="Cancel the pending key rotation?"
+          confirmLabel="Cancel rotation"
+          busy={cancelRotation.busy}
+          error={cancelRotation.error}
+          onCancel={() => {
+            cancelRotation.clearError();
+            setCancelling(false);
+          }}
+          onConfirm={async () => {
+            const d = await cancelRotation.run();
+            if (d) setCancelling(false);
+          }}
+        >
+          <p>The new key is deleted and its DNS record is no longer needed. The current key keeps signing. Selector names are never reused, so a later rotation uses a new name.</p>
+        </ConfirmDialog>
+      )}
 
       {rotating && (
         <ConfirmDialog

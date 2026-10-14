@@ -11,7 +11,7 @@ import { Stepper } from '../../components/switch/Stepper';
 import { PressureIndicators } from '../../components/PressureIndicators';
 import { Card, Chip, ErrorNotice, Loading, Notice, PageHeader } from '../../components/ui';
 import { useAction, useApi, useDocumentTitle, usePolling } from '../../lib/hooks';
-import { allowedActions, buildRequest, flowReducer, initialForm, initialLocal, isRunning, STATE_LABEL, stateText, stepFor } from '../../lib/switchFlow';
+import { allowedActions, buildRequest, flowReducer, initialForm, initialLocal, isRunning, stateLabel, stateText, stepFor } from '../../lib/switchFlow';
 import type { SwitchForm } from '../../lib/switchFlow';
 import { useApp } from '../../state/app';
 
@@ -112,7 +112,7 @@ export default function StorageSwitch(_props: Record<string, unknown>) {
         subtitle="Move between SQLite and PostgreSQL. Manual, guided and reversible until you activate. EggMail never switches by itself."
         actions={
           <Chip tone={state === 'failed' ? 'bad' : state === 'none' ? 'neutral' : 'info'} title={stateText(state)}>
-            {STATE_LABEL[state]}
+            {stateLabel(state)}
           </Chip>
         }
       />

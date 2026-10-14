@@ -20,8 +20,7 @@ internal static class Cli
 {
     public static async Task<int> RunAsync(string[] args)
     {
-        string command = args.FirstOrDefault(a => !a.StartsWith("--", StringComparison.Ordinal) || a is "--healthcheck" or "--version") ?? "serve";
-        string[] rest = args.Where(a => a != command).ToArray();
+        (string command, string[] rest) = SplitCommand(args);
         // Every command that handles mail, addresses or accounts needs working Unicode; --version, --healthcheck and self-test (which reports it) do not.
         if (command is "serve" or "migrate-db" or "migrate-storage" or "admin" && !UnicodeSelfTest.Enforce(RequiresUnicodeSupport(rest), UnicodeLog(command), Console.Error))
         {
@@ -68,6 +67,16 @@ internal static class Cli
     /// <summary>The server logs as JSON; the one-off commands print their own output, so the check stays quiet there unless it fails.</summary>
     private static IMtaLog UnicodeLog(string command) =>
         command == "serve" ? new MtaLogAdapter(LoggerFactory.Create(b => b.AddJsonConsole())) : NullMtaLog.Instance;
+
+    /// <summary>
+    /// The command is the first argument that is not an option; only that one argument is taken out. (Removing every argument equal to the
+    /// command name also removed option values: <c>admin create --role admin</c> lost its <c>admin</c>.)
+    /// </summary>
+    internal static (string Command, string[] Arguments) SplitCommand(string[] args)
+    {
+        int index = Array.FindIndex(args, a => !a.StartsWith("--", StringComparison.Ordinal) || a is "--healthcheck" or "--version");
+        return index < 0 ? ("serve", args) : (args[index], args.Where((_, i) => i != index).ToArray());
+    }
 
     private static LoadedConfig? Load(string[] args)
     {

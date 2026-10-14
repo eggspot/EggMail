@@ -33,16 +33,18 @@ function toQuery(f: SearchForm): MessageQuery {
   };
 }
 
-function RecipientsCell({ recipients }: { recipients: string[] }) {
-  if (!recipients.length) return <>-</>;
+function RecipientsCell({ recipients, count }: { recipients: string[]; count?: number }) {
+  if (!recipients.length) return <>{count ? `${count} recipient${count === 1 ? '' : 's'}` : '-'}</>;
   const [first, ...rest] = recipients;
+  // The list only carries the first few recipients; recipientCount is the real number.
+  const more = Math.max(rest.length, (count ?? recipients.length) - 1);
   return (
     <>
       {first}
-      {rest.length > 0 && (
-        <span class="muted" title={rest.join(', ')}>
+      {more > 0 && (
+        <span class="muted" title={rest.join(', ') || undefined}>
           {' '}
-          +{rest.length} more
+          +{more} more
         </span>
       )}
     </>
@@ -177,7 +179,7 @@ function MessageSearch() {
                       </td>
                       <td class="wrap">{m.from}</td>
                       <td class="wrap">
-                        <RecipientsCell recipients={m.recipients} />
+                        <RecipientsCell recipients={m.recipients} count={m.recipientCount} />
                       </td>
                       <td>
                         <StatusChip status={m.status} />
