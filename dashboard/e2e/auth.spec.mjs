@@ -66,6 +66,10 @@ test.describe('sign-in, sign-out and CSRF', () => {
     await context.addCookies([{ name: 'eggmail_session', value: mine.sessionCookieValue, url: stack.baseURL, httpOnly: true, sameSite: 'Strict' }]);
     await page.goto('/admin/tenants');
     await expect(page.getByRole('heading', { name: 'Tenants', exact: true })).toBeVisible();
+    // Let the page finish loading first: a request still in flight when the session is deleted would send the page to the form on its
+    // own (the heading appears before the tenant list and the capabilities have arrived, so on a slow runner the race was lost).
+    await expect(page.getByRole('heading', { name: 'All tenants' })).toBeVisible();
+    await page.waitForLoadState('networkidle');
     // The session is ended on the server (as if it had expired or been signed out elsewhere).
     await mine.ok('DELETE', '/api/v1/session');
     await page.getByLabel('Name', { exact: true }).fill('after-expiry');
