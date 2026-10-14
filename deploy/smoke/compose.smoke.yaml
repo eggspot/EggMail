@@ -1,0 +1,8 @@
+# Test-only override used by deploy/smoke/compose.sh: points the instance at the DNS stub and the SMTP sink of deploy/smoke/smoke.py.
+# It is never part of a real deployment.
+services:
+  eggmail:
+    environment:
+      Dns__Servers__0: ${SMOKE_HOST_IP:?}:5300
+      Delivery__RemotePort: "2500"
+      Delivery__AllowPrivateMxAddresses: "true"

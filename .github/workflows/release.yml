@@ -1,10 +1,17 @@
 name: release
 
 # Publishes the single image to ghcr.io/eggspot/eggmail (docs/release.md).
-#   - tag push vMAJOR.MINOR.PATCH[-pre]  -> v1.4.2, 1.4, latest (stable only) + GitHub Release
+#   - tag push vMAJOR.MINOR.PATCH[-pre]  -> v1.4.2, 1.4, latest (stable only) + GitHub Release; the tag commit must be on main
 #   - daily schedule                      -> nightly (only when main changed since the last nightly)
-#   - workflow_dispatch                   -> manual run of the current ref (published as nightly-<sha> unless a tag)
-# Cost rules: one job on ubuntu-latest, cheapest checks first, tight timeout, never cancel a release mid-flight.
+#   - workflow_dispatch                   -> manual run of a branch or commit: publishes nightly-<sha> ONLY. A dispatch on a tag ref is refused;
+#                                            a manual run can never create a version tag, `latest` or a GitHub Release.
+# Order: build and push BY DIGEST (no tag yet) -> attest -> smoke-test that digest -> collect release assets -> only then give the
+# digest its tags (docker buildx imagetools create), so a tag never points at an image that failed its tests. A version tag is never moved:
+# the run fails when vX.Y.Z already exists. Then, for a tag push, the GitHub Release is created.
+# Cost rules: one job on ubuntu-latest, cheapest checks first, tight timeouts, never cancel a release mid-flight. One job means every step,
+# including the build and test of the solution when `ci` has not already passed, runs with this job's write permissions; splitting it into
+# a read-only test job and a write job would cost a second job's set-up and rounding in billed minutes. That is accepted because the
+# triggers are tags on main, the schedule and manual dispatch (people with write access), never pull requests, and actions are pinned by SHA.
 
 on:
   push:
@@ -19,43 +26,72 @@ concurrency:
 
 permissions:
   contents: read
-  actions: read
 
 env:
   IMAGE: ghcr.io/eggspot/eggmail
+  # Dockerfile build argument: precompile the application assemblies (ReadyToRun). See docs/decisions.md ("ReadyToRun").
+  READYTORUN: 'true'
   DOTNET_NOLOGO: 1
   DOTNET_CLI_TELEMETRY_OPTOUT: 1
 
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 45
+    # Job-level permissions REPLACE the workflow-level ones, so everything the job needs is listed here (actions: read is for the ci runs API call).
     permissions:
+      actions: read          # "was ci green for this commit?"
       contents: write        # create the GitHub Release
       packages: write        # push to GHCR with GITHUB_TOKEN (no PAT)
       id-token: write        # attestations
       attestations: write
+      artifact-metadata: write   # the attest action stores a storage record of the image (without it: "Failed to create storage record")
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 1
 
       - name: Nightly gate (skip when this commit already has a nightly)
         id: gate
         if: github.event_name == 'schedule'
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .nightly-marker
           key: nightly-built-${{ github.sha }}
           lookup-only: true
 
-      - name: Validate tag and version
-        if: steps.gate.outputs.cache-hit != 'true' && (startsWith(github.ref, 'refs/tags/v'))
+      - name: Refuse a manual run on a tag, and a tag that is not on main
+        if: steps.gate.outputs.cache-hit != 'true' && startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" != "push" ]; then
+            echo "::error::a ${GITHUB_EVENT_NAME} run on the tag ${GITHUB_REF_NAME} is refused: release tags are published only by pushing the tag"
+            exit 1
+          fi
+          # Only a commit that is on main (identical to main, or behind it, that is an ancestor) may be released.
+          status=$(gh api "repos/${GITHUB_REPOSITORY}/compare/main...${GITHUB_SHA}" --jq .status)
+          case "$status" in
+            identical|behind) echo "tag commit is on main (${status})" ;;
+            *) echo "::error::the commit of ${GITHUB_REF_NAME} is not on main (compare status: ${status}); merge it first"; exit 1 ;;
+          esac
+
+      - name: Validate tag, version and changelog
+        if: steps.gate.outputs.cache-hit != 'true' && startsWith(github.ref, 'refs/tags/v')
         run: |
           tag="${GITHUB_REF_NAME}"
           [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::tag $tag is not vMAJOR.MINOR.PATCH[-pre]"; exit 1; }
           props=$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' Directory.Build.props)
           [ "v$props" = "$tag" ] || { echo "::error::Directory.Build.props Version ($props) does not match tag $tag"; exit 1; }
+          # The curated release notes come from CHANGELOG.md: every release needs its own section for exactly this version.
+          if ! bash .github/scripts/changelog-section.sh "${tag#v}" >/dev/null; then
+            if [[ "$tag" == *-* ]] && bash .github/scripts/changelog-section.sh Unreleased >/dev/null; then
+              echo "::warning::no CHANGELOG section for ${tag#v}; the pre-release notes use [Unreleased]"
+            else
+              echo "::error::CHANGELOG.md has no non-empty '## [${tag#v}]' section (move the Unreleased entries into it in the release pull request)"
+              exit 1
+            fi
+          fi
 
       - name: Was the ci workflow green for this exact commit?
         if: steps.gate.outputs.cache-hit != 'true'
@@ -67,11 +103,11 @@ jobs:
           echo "green=$([ "${n:-0}" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
           echo "ci green for ${GITHUB_SHA}: ${n:-0} successful run(s)"
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         if: steps.gate.outputs.cache-hit != 'true' && steps.ci.outputs.green != 'true'
         with:
           dotnet-version: 10.0.x
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         if: steps.gate.outputs.cache-hit != 'true' && steps.ci.outputs.green != 'true'
         with:
           path: ~/.nuget/packages
@@ -84,14 +120,22 @@ jobs:
           dotnet build EggMail.slnx -c Release --no-restore
           dotnet test EggMail.slnx -c Release --no-build
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         if: steps.gate.outputs.cache-hit != 'true'
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         if: steps.gate.outputs.cache-hit != 'true'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image tags never move (fail when this version tag already exists)
+        if: steps.gate.outputs.cache-hit != 'true' && startsWith(github.ref, 'refs/tags/v')
+        run: |
+          if docker buildx imagetools inspect "${IMAGE}:${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "::error::${IMAGE}:${GITHUB_REF_NAME} already exists; published version tags are never moved. Fix forward with a new version."
+            exit 1
+          fi
 
       - name: Assembly and image version (a valid SemVer, the tag or the props version with a nightly pre-release)
         if: steps.gate.outputs.cache-hit != 'true'
@@ -101,34 +145,35 @@ jobs:
           else v="$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' Directory.Build.props)-nightly.g${GITHUB_SHA::7}"; fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
 
+      # The tags computed here are applied only AFTER the smoke tests (the "Give the tested digest its tags" step).
       - name: Image tags and labels
         if: steps.gate.outputs.cache-hit != 'true'
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
           images: ${{ env.IMAGE }}
           tags: |
-            type=semver,pattern=v{{version}}
-            type=semver,pattern={{major}}.{{minor}},enable=${{ !contains(github.ref_name, '-') }}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
+            type=semver,pattern=v{{version}},enable=${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
+            type=raw,value=latest,enable=${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
             type=raw,value=nightly,enable=${{ github.event_name == 'schedule' }}
-            type=raw,value=nightly-{{sha}},enable=${{ github.event_name == 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=nightly-{{sha}},enable=${{ github.event_name == 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/') }}
           labels: |
             org.opencontainers.image.source=https://github.com/eggspot/EggMail
 
-      - name: Build and push (linux/amd64, linux/arm64) with SBOM and provenance
+      - name: Build and push by digest (linux/amd64, linux/arm64) with SBOM and provenance, no tag yet
         if: steps.gate.outputs.cache-hit != 'true'
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             VERSION=${{ steps.ver.outputs.version }}
             REVISION=${{ github.sha }}
+            READYTORUN=${{ env.READYTORUN }}
           sbom: true
           provenance: mode=max
           cache-from: type=gha
@@ -136,38 +181,99 @@ jobs:
 
       - name: Attest build provenance
         if: steps.gate.outputs.cache-hit != 'true'
-        uses: actions/attest@v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-name: ${{ env.IMAGE }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
 
-      - name: Smoke test the pushed image
+      # ---- smoke tests of the pushed digest (single job: billing rules). Scripts live in deploy/smoke/ and run by hand too (Linux, Docker).
+      - name: Smoke test the pushed image (docker run, health status, SMTP submission, API, delivery to a sink)
         if: steps.gate.outputs.cache-hit != 'true'
+        timeout-minutes: 8
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: bash deploy/smoke/image.sh "${IMAGE}@${DIGEST}" "${VERSION%%-*}"
+
+      - name: Release assets (per-platform digests, SBOM files, checksums)
+        if: steps.gate.outputs.cache-hit != 'true'
+        timeout-minutes: 5
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: bash .github/scripts/release-assets.sh "${IMAGE}@${DIGEST}" release-assets
+
+      - name: Keep the release assets of a manual run for inspection
+        if: steps.gate.outputs.cache-hit != 'true' && github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-assets-${{ github.sha }}
+          path: release-assets
+          retention-days: 3
+
+      - name: Smoke test the PostgreSQL compose file (healthy, API reports postgres, SMTP submission, delivery)
+        if: steps.gate.outputs.cache-hit != 'true'
+        timeout-minutes: 8
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: bash deploy/smoke/compose.sh postgres "${IMAGE}@${DIGEST}"
+
+      # The rest runs for tags and manual runs, NOT for the daily nightly (about two extra minutes): the nightly gets the image smoke test
+      # and the PostgreSQL compose test above, nothing else.
+      - name: Smoke test the SQLite compose file and the Unbound sidecar (DNSSEC validation)
+        if: steps.gate.outputs.cache-hit != 'true' && github.event_name != 'schedule'
+        timeout-minutes: 8
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          docker run -d --name smoke -p 8080:8080 "${IMAGE}@${{ steps.build.outputs.digest }}"
-          for i in $(seq 1 30); do curl -fsS http://localhost:8080/healthz && break || sleep 2; done
-          curl -fsS http://localhost:8080/api/v1/capabilities | tee capabilities.json
-          docker logs smoke 2>&1 | grep -i "synchronous=OFF" || { echo "::error::startup warning for synchronous=OFF missing"; docker logs smoke; exit 1; }
-          docker rm -f smoke
+          bash deploy/smoke/compose.sh sqlite "${IMAGE}@${DIGEST}"
+          bash deploy/smoke/compose.sh unbound "${IMAGE}@${DIGEST}"
+
+      - name: Smoke test the Kubernetes manifests (kind cluster, StatefulSet with PVC, Deployment with PostgreSQL, Unbound sidecar)
+        if: steps.gate.outputs.cache-hit != 'true' && github.event_name != 'schedule'
+        timeout-minutes: 12
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: bash deploy/smoke/kubernetes.sh "${IMAGE}@${DIGEST}"
+
+      - name: Give the tested digest its tags (docker buildx imagetools create)
+        if: steps.gate.outputs.cache-hit != 'true'
+        timeout-minutes: 5
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          args=()
+          while IFS= read -r t; do
+            [ -n "$t" ] && args+=(-t "$t")
+          done <<< "$TAGS"
+          [ "${#args[@]}" -gt 0 ] || { echo "::error::no image tags were computed for this event"; exit 1; }
+          docker buildx imagetools create "${args[@]}" "${IMAGE}@${DIGEST}"
+          while IFS= read -r t; do
+            [ -n "$t" ] || continue
+            got=$(docker buildx imagetools inspect "$t" --format '{{json .Manifest}}' | jq -r .digest)
+            [ "$got" = "$DIGEST" ] || { echo "::error::$t points at $got, expected $DIGEST"; exit 1; }
+            echo "$t -> $DIGEST"
+          done <<< "$TAGS"
 
       - name: Remember nightly build
         if: github.event_name == 'schedule' && steps.gate.outputs.cache-hit != 'true'
         run: echo "${{ github.sha }}" > .nightly-marker
       - name: Save nightly marker
         if: github.event_name == 'schedule' && steps.gate.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .nightly-marker
           key: nightly-built-${{ github.sha }}
 
-      - name: GitHub Release (stable and pre-release tags)
-        if: steps.gate.outputs.cache-hit != 'true' && (startsWith(github.ref, 'refs/tags/v'))
+      - name: GitHub Release (curated notes from CHANGELOG.md, SBOMs, per-platform digests, checksums)
+        if: steps.gate.outputs.cache-hit != 'true' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          printf '%s\n' "${IMAGE}@${{ steps.build.outputs.digest }}" > image-digest.txt
-          sha256sum image-digest.txt > checksums.txt
+          tag="${GITHUB_REF_NAME}"
+          bash .github/scripts/release-notes.sh "$tag" "${IMAGE}" "${DIGEST}" "${GITHUB_REPOSITORY}" release-assets > release-notes.md
           flags=""
-          [[ "${GITHUB_REF_NAME}" == *-* ]] && flags="--prerelease"
-          gh release create "${GITHUB_REF_NAME}" --verify-tag --generate-notes $flags image-digest.txt checksums.txt
+          [[ "$tag" == *-* ]] && flags="--prerelease"
+          gh release create "$tag" --verify-tag --title "$tag" --notes-file release-notes.md $flags release-assets/*

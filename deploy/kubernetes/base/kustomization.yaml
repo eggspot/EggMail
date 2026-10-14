@@ -1,0 +1,29 @@
+# Shared by both variants (../sqlite and ../postgres): the Services, the NetworkPolicy and the configuration.
+# Do not apply this directory on its own; apply one of the variants.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - pairs:
+      app.kubernetes.io/name: eggmail
+      app.kubernetes.io/part-of: eggmail
+    includeSelectors: false
+
+resources:
+  - serviceaccount.yaml
+  - service.yaml
+  - networkpolicy.yaml
+
+generatorOptions:
+  disableNameSuffixHash: true       # the workload refers to the ConfigMap by its fixed name
+
+configMapGenerator:
+  - name: eggmail-config
+    literals:
+      # Name announced in SMTP greetings; must match the PTR record of the sending IP (the LoadBalancer address).
+      - Hostname=mail.example.com
+      - Dashboard__BootstrapAdminUser=admin
+      - Dashboard__BootstrapAdminPasswordFile=/run/secrets/eggmail/admin-password
+      # Any other setting of docs/operations.md goes here as an environment variable (double underscore for nesting), for example:
+      # - Sqlite__SyncMode=Normal
+      # - Delivery__BounceDomain=bounces.example.com

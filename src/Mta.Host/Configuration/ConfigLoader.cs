@@ -156,6 +156,7 @@ public static class ConfigLoader
         return new MtaConfig
         {
             Hostname = configuration["Hostname"] ?? config.Hostname,
+            Startup = Bind<StartupSection>(configuration, "Startup"),
             Smtp = new SmtpSection
             {
                 MaxMessageSize = smtp.MaxMessageSize, MaxRecipients = smtp.MaxRecipients, MaxConnections = smtp.MaxConnections,
@@ -416,6 +417,8 @@ public static class ConfigLoader
         {
             errors.Add("Delivery:PublicSendingIp is not an IP address.");
         }
+
+        Secrets.SecretsConfigurationCheck.Validate(c.Secrets, errors);
 
         if (c.Delivery.Workers < 1)
         {

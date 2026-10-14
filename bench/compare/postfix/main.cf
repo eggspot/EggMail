@@ -1,0 +1,26 @@
+# Baseline Postfix for the comparison. Private bench network only; never expose this configuration.
+myhostname = postfix.bench.test
+mydomain = bench.test
+myorigin = bench.test
+inet_interfaces = all
+inet_protocols = ipv4
+mydestination =
+mynetworks = 172.31.7.0/24
+smtpd_relay_restrictions = permit_mynetworks, reject
+smtpd_recipient_restrictions = permit_mynetworks, reject
+# Everything goes to the sink (static address, so no DNS and no MX lookup is part of the measurement).
+relayhost = [172.31.7.20]:2525
+default_transport = smtp
+smtp_tls_security_level = none
+smtpd_tls_security_level = none
+# Same limits as the load: no rate limiting of the sender (the harness is the only client).
+smtpd_client_connection_count_limit = 4096
+smtpd_client_connection_rate_limit = 0
+smtpd_client_message_rate_limit = 0
+default_process_limit = 200
+smtpd_hard_error_limit = 1000
+default_destination_concurrency_limit = 64
+initial_destination_concurrency = 64
+message_size_limit = 26214400
+maillog_file = /dev/stdout
+compatibility_level = 3.6

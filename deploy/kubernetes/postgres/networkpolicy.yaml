@@ -1,0 +1,19 @@
+# Added to the base policy (NetworkPolicies are additive): the application may reach PostgreSQL on 5432.
+# Default: a PostgreSQL pod labelled app.kubernetes.io/name=postgres in this namespace. For a managed database outside the cluster
+# replace the `to` entry by its address range (ipBlock) and keep the private-range exceptions of the base policy in mind.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: eggmail-postgres-egress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: eggmail
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgres
+      ports:
+        - { protocol: TCP, port: 5432 }

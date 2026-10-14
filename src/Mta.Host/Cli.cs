@@ -15,12 +15,18 @@ using Mta.Storage;
 
 namespace Mta.Host;
 
-/// <summary>The <c>mta</c> command line: <c>serve</c> (default), <c>--healthcheck</c>, <c>migrate-db</c>, <c>migrate-storage</c>, <c>--version</c>.</summary>
+/// <summary>The <c>mta</c> command line: <c>serve</c> (default), <c>--healthcheck</c>, <c>migrate-db</c>, <c>migrate-storage</c>, <c>admin</c>, <c>self-test</c>, <c>--version</c>.</summary>
 internal static class Cli
 {
     public static async Task<int> RunAsync(string[] args)
     {
         (string command, string[] rest) = SplitCommand(args);
+        // Every command that handles mail, addresses or accounts needs working Unicode; --version, --healthcheck and self-test (which reports it) do not.
+        if (command is "serve" or "migrate-db" or "migrate-storage" or "admin" or "secrets" && !UnicodeSelfTest.Enforce(RequiresUnicodeSupport(rest), UnicodeLog(command), Console.Error))
+        {
+            return UnicodeSelfTest.FailedExitCode;
+        }
+
         switch (command)
         {
             case "--version":
@@ -34,13 +40,33 @@ internal static class Cli
                 return await MigrateStorageCommand.RunAsync(rest, Console.Out, Console.Error).ConfigureAwait(false);
             case "admin":
                 return await AdminCommand.RunAsync(rest, Console.Out, Console.Error).ConfigureAwait(false);
+            case "self-test":
+                return SelfTest(rest);
             case "serve":
                 return await ServeAsync(rest).ConfigureAwait(false);
             default:
-                Console.Error.WriteLine($"Unknown command '{command}'. Commands: serve (default), migrate-db, migrate-storage, admin, --healthcheck, --version.");
+                Console.Error.WriteLine($"Unknown command '{command}'. Commands: serve (default), migrate-db, migrate-storage, admin, self-test, --healthcheck, --version.");
                 return 64;
         }
     }
+
+    /// <summary><c>Startup:RequireUnicodeSupport</c> from the configuration these arguments select (true when the configuration cannot be loaded: that error is reported by the command itself).</summary>
+    private static bool RequiresUnicodeSupport(string[] args)
+    {
+        try
+        {
+            LoadedConfig loaded = ConfigLoader.Load(ConfigLoader.Build(args));
+            return !loaded.IsValid || loaded.Config.Startup.RequireUnicodeSupport;
+        }
+        catch (FormatException)
+        {
+            return true;   // command-line arguments the configuration cannot parse (the command reports them)
+        }
+    }
+
+    /// <summary>The server logs as JSON; the one-off commands print their own output, so the check stays quiet there unless it fails.</summary>
+    private static IMtaLog UnicodeLog(string command) =>
+        command == "serve" ? new MtaLogAdapter(LoggerFactory.Create(b => b.AddJsonConsole())) : NullMtaLog.Instance;
 
     /// <summary>
     /// The command is the first argument that is not an option; only that one argument is taken out. (Removing every argument equal to the
@@ -66,6 +92,21 @@ internal static class Cli
         }
 
         return null;
+    }
+
+    /// <summary>Runs the startup Unicode self-test and reports the result (exit code 71 when it fails). Lets an operator check an image or host before deploying.</summary>
+    private static int SelfTest(string[] args)
+    {
+        _ = args;
+        UnicodeSelfTestResult result = UnicodeSelfTest.Run();
+        if (result.Passed)
+        {
+            Console.WriteLine(result.Describe());
+            return 0;
+        }
+
+        Console.Error.WriteLine(result.Describe());
+        return UnicodeSelfTest.FailedExitCode;
     }
 
     /// <summary>Liveness probe for container health checks: succeeds when the local HTTP endpoint answers /healthz.</summary>
@@ -156,6 +197,7 @@ internal static class Cli
         using var startupLogs = OtlpLoggerFactory.Create(observability, b => b.AddJsonConsole());
         var startupLog = new MtaLogAdapter(startupLogs.Factory);
         var clock = SystemClock.Instance;
+
         // One process owns a SQLite data directory (the offline migrate-storage commands take the same lock).
         using DataDirectoryLock? directoryLock = loaded.Config.Storage.Backend == StorageBackend.Sqlite ? DataDirectoryLock.Acquire(loaded.Config.Storage.Sqlite.DataDirectory) : null;
         var storage = StorageFactory.Create(loaded.Config.Storage, clock, startupLog);
@@ -165,7 +207,19 @@ internal static class Cli
 
         // Backend switch startup gate (design 4.6): a confirmed target becomes Active, a fenced source or an unactivated target stays quiet.
         var gate = await StartupGate.EvaluateAsync(storage, clock, startupLog, CancellationToken.None).ConfigureAwait(false);
-        await using var runtime = await EggMailRuntime.CreateAsync(config, storage, clock, startupLog, CancellationToken.None).ConfigureAwait(false);
+        EggMailRuntime createdRuntime;
+        try
+        {
+            createdRuntime = await EggMailRuntime.CreateAsync(config, storage, clock, startupLog, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Mta.Host.Secrets.SecretsConfigurationException ex)
+        {
+            // The stored key ring does not fit Secrets:* (a wrong key, a switched protection): say what to do instead of a stack trace.
+            Console.Error.WriteLine("configuration error: " + ex.Message);
+            return 2;
+        }
+
+        await using var runtime = createdRuntime;
         await ApiHosting.EnsureBootstrapAdminAsync(config, storage, clock, startupLog, CancellationToken.None).ConfigureAwait(false);
 
         builder.Services.AddSingleton(loaded);

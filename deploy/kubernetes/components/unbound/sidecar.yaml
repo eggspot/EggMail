@@ -1,0 +1,38 @@
+# JSON 6902 patch for the pod template of the StatefulSet and the Deployment alike (one file for both; the eggmail container is the
+# first container of each). Adds the resolver settings to it and appends the Unbound sidecar.
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value: { name: Dns__Servers__0, value: "127.0.0.1" }
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value: { name: Dns__RequestDnssec, value: "true" }
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value: { name: Dns__TrustAuthenticatedData, value: "true" }
+- op: add
+  path: /spec/template/spec/containers/-
+  value:
+    name: unbound
+    # Tag and digest (multi-architecture index): a moved tag cannot change what runs. Update both together; Unbound has security releases.
+    image: klutchell/unbound:1.26.1@sha256:9a3939ca33d6d3b42b81a70391bb8e43f0a08d2bd7a3fdffb43d427493345c36
+    imagePullPolicy: IfNotPresent
+    ports:
+      - { name: dns-udp, containerPort: 53, protocol: UDP }
+    # Readiness asks for a local-zone name that Unbound answers itself, so the pod does not become unready when a third-party domain or the
+    # Internet is unavailable. DNSSEC validation against the real Internet is checked by deploy/smoke/kubernetes.sh, with retries.
+    readinessProbe:
+      exec:
+        command: ["drill-hc", "@127.0.0.1", "localhost"]
+      initialDelaySeconds: 3
+      periodSeconds: 10
+      timeoutSeconds: 10
+    # Unbound binds port 53 as root and then drops to its own user, so this container (only) runs as root with exactly three capabilities
+    # (bind a low port, change uid and gid), no privilege escalation, and the pod's default seccomp profile. The alternative is a custom
+    # configuration with an unprivileged port, which would mean maintaining a copy of the image's unbound.conf.
+    securityContext:
+      runAsNonRoot: false
+      runAsUser: 0
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: [ALL]
+        add: [NET_BIND_SERVICE, SETUID, SETGID]

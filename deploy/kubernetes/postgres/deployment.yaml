@@ -1,0 +1,93 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eggmail
+spec:
+  replicas: 1                                # raise to 2 or more for availability; every replica uses the same database
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: eggmail
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: eggmail
+        app.kubernetes.io/part-of: eggmail
+    spec:
+      serviceAccountName: eggmail
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 90
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1654
+        runAsGroup: 1654
+        fsGroup: 1654
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: eggmail
+          image: ghcr.io/eggspot/eggmail
+          imagePullPolicy: Always      # the overlay uses the moving tag "nightly"; once it is pinned to a version tag or a digest, IfNotPresent is the better choice
+          envFrom:
+            - configMapRef:
+                name: eggmail-config
+          env:
+            - { name: Storage__Backend, value: Postgres }
+            - { name: Mail__Database__Migrate, value: Auto }       # Never = migrate with `mta migrate-db` in a Job instead
+            - name: Storage__Postgres__OwnerConnectionString
+              valueFrom:
+                secretKeyRef: { name: eggmail-postgres, key: owner-connection-string }
+            - name: Storage__Postgres__RuntimeConnectionString
+              valueFrom:
+                secretKeyRef: { name: eggmail-postgres, key: runtime-connection-string }
+          ports:
+            - { name: submission, containerPort: 5587 }
+            - { name: submissions, containerPort: 4465 }
+            - { name: alternate, containerPort: 2525 }
+            - { name: bounce, containerPort: 2526 }
+            - { name: http, containerPort: 8080 }
+            - { name: https, containerPort: 8443 }
+          # While PostgreSQL is down SMTP answers 451, /readyz fails (the pod leaves the Service) and /healthz stays alive (no restart).
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 2
+            failureThreshold: 60
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits: { memory: 1Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: tmp, mountPath: /tmp }
+            - { name: admin-password, mountPath: /run/secrets/eggmail, readOnly: true }
+      volumes:
+        # With PostgreSQL the queue, history and configuration are in the database. /data holds only the bootstrap file written by a
+        # backend switch and quarantined files, so an emptyDir is enough; a switch to SQLite on Kubernetes ends with a cutover patch of
+        # these manifests (design 4.6, "orchestrator-managed"), never with a file that is lost on restart.
+        - name: data
+          emptyDir: { sizeLimit: 256Mi }
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 64Mi }
+        - name: admin-password
+          secret:
+            secretName: eggmail-admin
+            defaultMode: 0440

@@ -2,7 +2,7 @@
 
 An open-source, self-hosted **outbound email server** from [eggspot](https://github.com/eggspot): SMTP ingress, an HTTP API, delivery tracking and a dashboard, built on .NET 10 with performance as the primary goal.
 
-> **Status: implemented, not yet production-ready.** The SMTP stack, delivery engine, both storage backends, the HTTP API, the dashboard and the backend switch are written and tested locally (see [docs/progress.md](docs/progress.md) for exactly what is verified and what is not). Nothing is released, no benchmark results are published, GitHub Actions has never run for this repository, and no independent security audit has been done.
+> **Status: implemented, not yet production-ready.** The SMTP stack, delivery engine, both storage backends, the HTTP API, the dashboard and the backend switch are written and tested locally (see [docs/progress.md](docs/progress.md) for exactly what is verified and what is not). No stable release has been tagged (so there is no `latest` image and no GitHub Release yet), no publishable benchmark results exist, and no independent security audit has been done. GitHub Actions runs CI and the release workflow, which pushes the image by digest, smoke-tests that digest and only then tags it (`nightly`, `nightly-<sha>` for manual runs). Every build gets the image test (SMTP submission with AUTH, API, delivery to a sink) and the PostgreSQL compose test; tags and manual runs also test the SQLite compose file, the Unbound sidecar and the Kubernetes manifests; see [docs/release.md](docs/release.md).
 
 > **Name:** the name EggMail is kept. No formal trademark search or registration is planned (owner decision); the MIT license covers the code, not the name. A free check of the USPTO, EUIPO and WIPO databases before wide promotion is recommended but optional (see [docs/decisions.md](docs/decisions.md)).
 
@@ -37,14 +37,28 @@ Backend **characteristics** (not missing features): SQLite is single node and on
 
 **Switching is manual, symmetric and easy; it never happens automatically.** Dashboard indicators are advisory only. A guided dashboard action and a CLI (`mta migrate-storage --to postgres|sqlite`) move you in either direction with one portable, versioned bundle: preflight, drain or quiesce (no need to wait for an empty queue), export, import, verify, confirm, activate, with rollback. The bundle carries config, certificates and ACME state, stats, queued mail and, optionally, per-message history; secrets travel protected by Data Protection and are never written in clear. Only the storage changes; features and settings stay as they were. See [docs/design.md §4.6](docs/design.md#46-switching-backends-manual-and-symmetric).
 
-## Quick start (planned: no image is published yet)
+## Quick start
 
-A single Docker image will run out of the box on the SQLite backend with one volume at `/data`. This is a plan: nothing is published yet. See [docs/release.md](docs/release.md) for the snippets, including a compose file with PostgreSQL.
+One Docker image runs out of the box on the SQLite backend with one volume at `/data`; PostgreSQL is selected by configuration in the same image. There is no stable release yet, so there is no `latest` or version tag: use `nightly` (the daily build of `main`; the first scheduled build has not completed yet, manual runs publish `nightly-<short sha>`) and pin a digest, or a version tag once releases exist.
 
 ```sh
+docker volume create eggmail-data
+# The first administrator (with SQLite the server must not be running while you do this; see docs/operations.md for the alternatives):
+docker run --rm -v eggmail-data:/data -e MTA_ADMIN_PASSWORD='a-long-password' ghcr.io/eggspot/eggmail:nightly admin create --user admin
 docker run -d --name eggmail -p 587:5587 -p 465:4465 -p 2525:2525 -p 8443:8443 \
-  -v eggmail-data:/data ghcr.io/eggspot/eggmail:latest
+  -v eggmail-data:/data ghcr.io/eggspot/eggmail:nightly
 ```
+
+Ready-made, tested deployment files live in [`deploy/`](deploy/):
+
+| What | Where |
+|---|---|
+| Compose, SQLite (default) | [`deploy/compose/compose.yaml`](deploy/compose/compose.yaml) |
+| Compose, PostgreSQL | [`deploy/compose/compose.postgres.yaml`](deploy/compose/compose.postgres.yaml) |
+| Optional Unbound sidecar (DNSSEC validation, so DANE works) | [`deploy/compose/compose.unbound.yaml`](deploy/compose/compose.unbound.yaml) |
+| Kubernetes (StatefulSet for SQLite, Deployment for PostgreSQL, NetworkPolicy, probes) | [`deploy/kubernetes/`](deploy/kubernetes/) |
+
+The container healthcheck is `["CMD", "/app/mta", "--healthcheck"]`: the chiseled image has no shell and `mta` is not on `PATH`, so the absolute path is required. Details, ports and the release process: [docs/release.md](docs/release.md) and [docs/operations.md](docs/operations.md).
 
 ## Documentation
 
@@ -55,8 +69,9 @@ docker run -d --name eggmail -p 587:5587 -p 465:4465 -p 2525:2525 -p 8443:8443 \
 | [docs/design.md](docs/design.md) | Architecture, components, interfaces, storage backends and history level, switching, content retention, webhooks, TLS and ports, security, deployment |
 | [docs/decisions.md](docs/decisions.md) | The decisions record (owner and design decisions A–T and items 1–52) |
 | [docs/plan.md](docs/plan.md) | Components with engineer-week estimates, phases, cut order, risks, calendar |
-| [docs/benchmarks.md](docs/benchmarks.md) | How performance will be measured and compared, per mode |
-| [docs/release.md](docs/release.md) | Release and packaging plan: the single Docker image, `ghcr.io/eggspot/eggmail`, GitHub Actions release, quick-start snippets (a plan; nothing is published yet) |
+| [docs/benchmarks.md](docs/benchmarks.md) | How performance is measured and compared, per mode; the allocation regression gate; the Postfix/KumoMTA comparison setup; trend numbers from CI |
+| [docs/release.md](docs/release.md) | Release and packaging: the single Docker image, `ghcr.io/eggspot/eggmail`, the GitHub Actions release workflow and its smoke tests, release assets, compose and Kubernetes files |
+| [CHANGELOG.md](CHANGELOG.md) | What changed in each release (Keep a Changelog, Semantic Versioning); the source of the GitHub Release notes |
 | [docs/funding.md](docs/funding.md) | Sponsorship and funding policy draft, platform options, the owner's setup steps |
 | [docs/open-questions.md](docs/open-questions.md) | Questions awaiting the owner, items to settle with spikes, unverified items |
 

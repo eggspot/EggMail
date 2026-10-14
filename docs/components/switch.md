@@ -16,7 +16,7 @@ The implementation of [design §4.6](../design.md#46-switching-backends-manual-a
 | Process control | `HostSwitchControl`, `SwitchStateWatcher`, `SwitchRuntimeState` | Stops the listeners, the API flag and the scheduler; follows state written by another process |
 | CLI | `mta migrate-storage` (`MigrateStorageCommand`) | `preflight`, `export`, `import`, `verify`, `confirm`, `activate`, `rollback`, `finalize`, `status` |
 
-`IStorageSwitchEngine` is the interface the admin API layer calls through `StorageSwitchService` (see Admin API) (`/admin/storage/switch/*`, [api.md](../api.md)). The API layer defines its own `IStorageSwitchService` stub; adapting it is a thin mapping (`preflight` to `PreflightAsync`, `start` to `StartAsync`, `GET` to `GetStatusAsync`, `confirm`/`activate`/`rollback`/`finalize` one to one; `export` and `import` run as part of the guided flow; progress comes from the `IProgress<SwitchProgress>` argument and `SwitchStatus.Progress`). The engine is stateless between calls: everything durable lives in the stores, so a new instance in another process continues a switch.
+`IStorageSwitchEngine` is the interface the admin API layer calls through `StorageSwitchService` (see Admin API) (`/admin/storage/switch/*`, [api.md](../api.md)). The API layer defines its own `IStorageSwitchService` interface (answering 503 `not_ready` when no engine is registered); `StorageSwitchService` adapts it with a thin mapping (`preflight` to `PreflightAsync`, `start` to `StartAsync`, `GET` to `GetStatusAsync`, `confirm`/`activate`/`rollback`/`finalize` one to one; `export` and `import` run as part of the guided flow; progress comes from the `IProgress<SwitchProgress>` argument and `SwitchStatus.Progress`). The engine is stateless between calls: everything durable lives in the stores, so a new instance in another process continues a switch.
 
 ## Admin API
 
@@ -130,7 +130,7 @@ The import dominates, and it is the EF change tracker plus one transaction per 5
 
 ## Known gaps
 
-- Not verified against a real orchestrator (the patch text is generated and tested, not applied to a cluster) and not run with a real KMS (`Secrets:KeyProtection=Kms` is not implemented in the host yet).
+- Not verified against a real orchestrator (the patch text is generated and tested, not applied to a cluster) and not run with a real cloud KMS (`Secrets:KeyProtection=Kms` is implemented with the built-in `LocalKey` wrapping key and an `IKeyWrapProvider` extension point; no cloud service is included).
 - The dashboard flow exists ([dashboard.md](dashboard.md); driven end to end in a browser against a real server and PostgreSQL by the Playwright tests). It switches between backends only (the API refuses `to` equal to the running backend) and has no bundle download. `finalize` through the API after the restart needs the old store described as `SwitchSource:*`; otherwise use `mta migrate-storage finalize`. A switch started by the CLI and still pending after a restart is rolled back or finalized with the CLI.
 - A switch started by the CLI against a running SQLite server is not supported (the lock refuses it); online switching of a SQLite source goes through the admin API of the running process, which owns the files.
 - Webhook deliveries in flight on a replica of a shared PostgreSQL store at the moment of the fence can complete and record on the source after the export; receivers de-duplicate by event id, and the attempt record on the source is not moved.
