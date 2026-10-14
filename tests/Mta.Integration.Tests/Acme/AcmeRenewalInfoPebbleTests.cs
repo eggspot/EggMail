@@ -59,7 +59,7 @@ public abstract class AcmeRenewalInfoPebbleTests : IAsyncLifetime
         Assert.NotNull(advice);
         Assert.True(advice.HasWindow, advice.Error);
         Assert.Null(advice.Error);
-        Assert.False(advice.Unsupported);
+        Assert.False(advice.DirectoryHasNoRenewalInfo);
         Assert.InRange(advice.WindowStart!.Value, cert.NotBefore.AddSeconds(-1), cert.NotAfter);
         Assert.InRange(advice.WindowEnd!.Value, advice.WindowStart.Value, cert.NotAfter.AddSeconds(1));
         Assert.Equal(advice.WindowStart, advice.RenewAt); // random number 0: the start of the window
@@ -85,18 +85,23 @@ public abstract class AcmeRenewalInfoPebbleTests : IAsyncLifetime
     {
         var (service, _, cert) = await IssueAsync();
         var now = _h.Clock.UtcNow;
-        await Pebble.SetRenewalInfoAsync(cert.ChainPem, Pebble.Window(now.AddDays(2), now.AddDays(3)));
+        await Pebble.SetRenewalInfoAsync(cert.ChainPem, Pebble.Window(now.AddDays(5), now.AddDays(6)));
 
         Assert.False(await service.CheckOnceAsync(default));
         var advice = await AdviceAsync(cert);
-        Assert.Equal(now.AddDays(2).ToUnixTimeSeconds(), advice!.RenewAt!.Value.ToUnixTimeSeconds());
+        Assert.Equal(now.AddDays(5).ToUnixTimeSeconds(), advice!.RenewAt!.Value.ToUnixTimeSeconds());
 
         _h.Clock.Advance(TimeSpan.FromDays(1));
         Assert.False(await service.CheckOnceAsync(default));
+
+        // Four and a half days: Pebble issues 6 or 90 day certificates at random, and the lifetime rule (a third left) would renew the 6 day ones by now,
+        // the 90 day ones in two months. The CA's window has not opened, so nothing is ordered.
+        _h.Clock.Advance(TimeSpan.FromDays(3.5));
+        Assert.False(await service.CheckOnceAsync(default));
         Assert.Equal(1, _h.Http.CountPosts(_h.Endpoints.NewOrder));
 
-        // Two days and an hour: the CA's window has opened. The lifetime rule would not renew a 90 day certificate for another 58 days.
-        _h.Clock.Advance(TimeSpan.FromDays(1) + TimeSpan.FromHours(1));
+        // Five days and an hour: the window has opened.
+        _h.Clock.Advance(TimeSpan.FromDays(0.5) + TimeSpan.FromHours(1));
         Assert.True(await WithTimeout(service.CheckOnceAsync(default)), Diagnostics);
         Assert.Equal(1, OrdersNamingAReplacedCertificate());
         Assert.NotEqual(cert.Thumbprint, Assert.Single(await _h.Storage.Config.GetCertificatesAsync(default)).Thumbprint);
@@ -108,7 +113,13 @@ public abstract class AcmeRenewalInfoPebbleTests : IAsyncLifetime
         var now = _h.Clock.UtcNow;
         await Pebble.SetRenewalInfoAsync(cert.ChainPem, Pebble.Window(now.AddHours(-2), now.AddHours(-1))); // what Pebble answers for a revoked certificate
 
-        Assert.True(await WithTimeout(service.CheckOnceAsync(default)), Diagnostics); // no time has passed
+        // A certificate minutes old is not renewed on advice alone (a CA that always says "now" must not cause an order at every check) ...
+        Assert.False(await service.CheckOnceAsync(default));
+        Assert.Equal(1, _h.Http.CountPosts(_h.Endpoints.NewOrder));
+
+        // ... an old enough one is, at the next check.
+        _h.Clock.Advance(AcmeRenewalSchedule.MinimumAge(cert.NotAfter - cert.NotBefore) + TimeSpan.FromHours(1));
+        Assert.True(await WithTimeout(service.CheckOnceAsync(default)), Diagnostics);
 
         Assert.Equal(1, OrdersNamingAReplacedCertificate());
         var renewed = Assert.Single(await _h.Storage.Config.GetCertificatesAsync(default));

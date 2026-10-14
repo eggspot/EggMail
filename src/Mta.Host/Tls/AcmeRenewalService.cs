@@ -147,29 +147,37 @@ public sealed class AcmeRenewalService
 
     /// <summary>
     /// Is the certificate due? Without a certificate, or with other names than wanted: yes. Otherwise the CA's advice (ARI) decides when it is enabled and the
-    /// CA gives some, else the lifetime rule (<see cref="AcmeRenewalSchedule"/>). Asking the CA is persisted in the renewal row, which is returned.
+    /// CA gives some, else the lifetime rule (<see cref="AcmeRenewalSchedule"/>). What the CA answers is saved in the renewal row, in that column only.
     /// </summary>
-    private async Task<(bool Due, AcmeRenewalRecord? Renewal)> IsDueAsync(string name, CertificateRecord? current, IReadOnlyList<string> domains, AcmeRenewalRecord? renewal, DateTimeOffset now, CancellationToken ct)
+    private async Task<bool> IsDueAsync(string name, CertificateRecord? current, IReadOnlyList<string> domains, AcmeRenewalRecord? renewal, DateTimeOffset now, CancellationToken ct)
     {
         if (current is null || NamesDiffer(current, domains))
         {
-            return (true, renewal);
+            return true;
         }
 
         if (!_options.UseRenewalInfo)
         {
-            return (NeedsRenewal(current, domains, now, _options.RenewAtRemainingFraction), renewal);
+            return NeedsRenewal(current, domains, now, _options.RenewAtRemainingFraction);
         }
 
         var advice = AcmeRenewalAdvice.Parse(renewal?.AriJson, current.Thumbprint);
         if (AcmeRenewalSchedule.ShouldCheck(advice, now))
         {
             advice = await FetchAdviceAsync(current, advice, now, ct).ConfigureAwait(false);
-            renewal = (renewal ?? new AcmeRenewalRecord(name, "issued", null, null, 0, null, null, null)) with { AriJson = advice.ToJson() };
-            await _config.UpsertAcmeRenewalAsync(renewal, ct).ConfigureAwait(false);
+            try
+            {
+                // Only the advice column: the row is shared with the other replicas, whose status and back-off must not be overwritten with what was read before the question.
+                await _config.SetAcmeRenewalAdviceAsync(name, advice.ToJson(), ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                // The advice in hand is still used for this decision; a database problem must not hold up a renewal or the other certificates.
+                _log.Write(MtaLogLevel.Warning, "acme", $"the renewal advice for certificate '{name}' could not be saved ({ex.Message}); using it for this check only", ex);
+            }
         }
 
-        return (AcmeRenewalSchedule.IsDue(advice, current.NotBefore, current.NotAfter, now, _options.RenewAtRemainingFraction), renewal);
+        return AcmeRenewalSchedule.IsDue(advice, current.NotBefore, current.NotAfter, now, _options.RenewAtRemainingFraction, _options.CheckInterval);
     }
 
     /// <summary>Asks the CA for its renewal advice; a CA that cannot answer never throws here (the lifetime rule applies until it can).</summary>
@@ -181,7 +189,7 @@ public sealed class AcmeRenewalService
             if (info is null)
             {
                 _log.Write(MtaLogLevel.Debug, "acme", $"the CA offers no renewal information; certificate '{current.Name}' renews by its lifetime");
-                return AcmeRenewalSchedule.FromFailure(current.Thumbprint, previous, now, "", unsupported: true);
+                return AcmeRenewalSchedule.FromDirectoryWithoutRenewalInfo(current.Thumbprint, now);
             }
 
             var advice = AcmeRenewalSchedule.FromInfo(current.Thumbprint, info, previous, now, _random);
@@ -195,8 +203,9 @@ public sealed class AcmeRenewalService
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            _log.Write(MtaLogLevel.Warning, "acme", $"renewal information for certificate '{current.Name}' is unavailable ({ex.Message}); using the lifetime rule", ex);
-            return AcmeRenewalSchedule.FromFailure(current.Thumbprint, previous, now, ex.Message);
+            var failed = AcmeRenewalSchedule.FromFailure(current.Thumbprint, previous, now, ex.Message, transient: ex is AcmeException { Transient: true } or HttpRequestException or TimeoutException);
+            _log.Write(MtaLogLevel.Warning, "acme", $"renewal information for certificate '{current.Name}' is unavailable ({ex.Message}); using the {(previous is { HasWindow: true } ? "earlier window" : "lifetime rule")}, asking again at {failed.NextCheckAt:u}", ex);
+            return failed;
         }
     }
 
@@ -209,9 +218,7 @@ public sealed class AcmeRenewalService
         var renewal = (await _config.GetAcmeRenewalsAsync(ct).ConfigureAwait(false)).FirstOrDefault(r => r.CertificateName == name);
         if (!force)
         {
-            bool due;
-            (due, renewal) = await IsDueAsync(name, current, domains, renewal, now, ct).ConfigureAwait(false);
-            if (!due)
+            if (!await IsDueAsync(name, current, domains, renewal, now, ct).ConfigureAwait(false))
             {
                 return false;
             }
@@ -231,6 +238,13 @@ public sealed class AcmeRenewalService
 
         try
         {
+            // The row read before the CA was asked may be stale by now (another replica may have failed an order and set a back-off in the meantime): read it again under the lease.
+            renewal = (await _config.GetAcmeRenewalsAsync(ct).ConfigureAwait(false)).FirstOrDefault(r => r.CertificateName == name);
+            if (!force && renewal?.NextAttemptAt is { } backoff && backoff > now)
+            {
+                return false;
+            }
+
             _log.Write(MtaLogLevel.Information, "acme", $"ordering certificate '{name}' for {string.Join(", ", domains)}");
             await _config.UpsertAcmeRenewalAsync(new AcmeRenewalRecord(name, "ordering", now, null, renewal?.Failures ?? 0, renewal?.LastError, null, renewal?.AriJson), ct).ConfigureAwait(false);
 

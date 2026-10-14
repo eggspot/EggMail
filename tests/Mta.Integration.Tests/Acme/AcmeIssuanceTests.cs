@@ -281,7 +281,9 @@ public abstract class AcmeIssuanceTests : IAsyncLifetime
 
         // The lease is released: the second replica now finds a fresh certificate and still does nothing.
         Assert.False(await second.CheckOnceAsync(default));
-        Assert.DoesNotContain(otherReplica.Requests, r => r.Method == "POST"); // it may ask the CA about renewal timing (GET), but orders nothing
+        // It may ask the CA about renewal timing (GET), but orders nothing and registers nothing.
+        Assert.Equal(0, otherReplica.CountPosts(_h.Endpoints.NewOrder));
+        Assert.Equal(0, otherReplica.CountPosts(_h.Endpoints.NewAccount));
         gated.Dispose();
     }
 

@@ -46,5 +46,11 @@ public interface IAcmeOrderRunner
 
 public sealed class AcmeException : Exception
 {
-    public AcmeException(string message, Exception? inner = null) : base(message, inner) { }
+    public AcmeException(string message, Exception? inner = null, bool transient = false) : base(message, inner) => Transient = transient;
+
+    /// <summary>
+    /// A server error or a network failure (the CA may recover on its own), as opposed to the CA answering with a refusal. Asking for renewal advice backs
+    /// off exponentially after the first kind and waits six hours after the second (RFC 9773 section 4.3.3).
+    /// </summary>
+    public bool Transient { get; }
 }
