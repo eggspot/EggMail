@@ -38,6 +38,8 @@ internal sealed class CountingQueueStore(IDeliveryStore inner) : IDeliveryStore
     public ValueTask<int> ReleaseOwnedLeasesAsync(string owner, CancellationToken cancellationToken) => inner.ReleaseOwnedLeasesAsync(owner, cancellationToken);
 
     public ValueTask<IReadOnlyList<ClaimedDelivery>> ClaimExpiredAsync(string owner, int max, DateTimeOffset now, CancellationToken cancellationToken) => inner.ClaimExpiredAsync(owner, max, now, cancellationToken);
+
+    public ValueTask<CancelResult> CancelAsync(Guid tenantId, Guid messageId, IReadOnlyList<string>? recipients, DateTimeOffset now, Func<CancelledDeliveryInfo, WebhookEventDraft?>? webhookEvent, CancellationToken cancellationToken) => inner.CancelAsync(tenantId, messageId, recipients, now, webhookEvent, cancellationToken);
 }
 
 internal sealed class ShiftedClock(TimeSpan shift) : IClock

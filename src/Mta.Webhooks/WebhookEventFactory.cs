@@ -13,9 +13,10 @@ public static class WebhookEventFactory
     public const string Expired = "message.expired";
     public const string Suppressed = "message.suppressed";
     public const string Complained = "message.complained";
+    public const string Cancelled = "message.cancelled";
     public const string EndpointDisabled = "webhook.endpoint.disabled";
 
-    public static IReadOnlyList<string> AllEventTypes { get; } = [Delivered, Deferred, Bounced, Expired, Suppressed, Complained];
+    public static IReadOnlyList<string> AllEventTypes { get; } = [Delivered, Deferred, Bounced, Expired, Suppressed, Complained, Cancelled];
 
     public static string? EventTypeFor(DeliveryOutcome outcome) => outcome switch
     {
@@ -27,7 +28,7 @@ public static class WebhookEventFactory
         _ => null,
     };
 
-    /// <summary>Creates the draft for a delivery attempt, or null when the outcome has no public event (cancellations, switch aborts).</summary>
+    /// <summary>Creates the draft for a delivery attempt, or null when the outcome has no public event (switch aborts; a cancellation is published through <see cref="ForCancelled"/>, by the cancel itself, not by an attempt).</summary>
     public static WebhookEventDraft? ForAttempt(ClaimedDelivery delivery, DeliveryAttempt attempt)
     {
         string? type = EventTypeFor(attempt.Outcome);
@@ -71,6 +72,36 @@ public static class WebhookEventFactory
         }
 
         return new WebhookEventDraft(id, type, System.Text.Encoding.UTF8.GetString(ms.GetBuffer(), 0, (int)ms.Length));
+    }
+
+    /// <summary>
+    /// The <c>message.cancelled</c> event for one recipient that was cancelled before delivery (<c>POST /messages/{id}/cancel</c>). Same envelope and member names as the
+    /// other <c>message.*</c> events; <c>attempt</c> is the number of attempts that were made (0 when none), and <c>possible_duplicate</c> is present when an earlier
+    /// attempt's outcome was unknown, so the message may nevertheless have reached the recipient's server.
+    /// </summary>
+    public static WebhookEventDraft ForCancelled(CancelledDeliveryInfo cancelled)
+    {
+        ArgumentNullException.ThrowIfNull(cancelled);
+        var id = Ids.New(cancelled.At);
+        using var ms = new MemoryStream();
+        using (var w = new Utf8JsonWriter(ms))
+        {
+            w.WriteStartObject();
+            w.WriteString("id", $"evt_{Ids.ToCompact(id)}");
+            w.WriteString("type", Cancelled);
+            w.WriteString("timestamp", cancelled.At.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", System.Globalization.CultureInfo.InvariantCulture));
+            w.WriteStartObject("data");
+            w.WriteString("message_id", Ids.ToCompact(cancelled.MessageId));
+            w.WriteString("delivery_id", Ids.ToCompact(cancelled.DeliveryId));
+            w.WriteString("from", cancelled.EnvelopeFrom);
+            w.WriteString("recipient", cancelled.Recipient);
+            w.WriteNumber("attempt", cancelled.Attempt);
+            if (cancelled.PossibleDuplicate) { w.WriteBoolean("possible_duplicate", true); }
+            w.WriteEndObject();
+            w.WriteEndObject();
+        }
+
+        return new WebhookEventDraft(id, Cancelled, System.Text.Encoding.UTF8.GetString(ms.GetBuffer(), 0, (int)ms.Length));
     }
 
     public static WebhookEventDraft EndpointDisabledEvent(Guid endpointId, string url, string reason, DateTimeOffset at)

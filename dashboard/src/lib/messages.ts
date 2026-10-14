@@ -1,6 +1,24 @@
-import type { SendMessageRequest, StatsRow } from '../api/types';
+import type { DeliveryEvent, SendMessageRequest, StatsRow } from '../api/types';
 
 export const MESSAGE_STATUSES = ['queued', 'delivered', 'deferred', 'bounced', 'expired', 'suppressed', 'cancelled', 'complained'] as const;
+
+// ---- cancelling ----
+
+const FINAL_EVENT_TYPES = new Set(['delivered', 'bounced', 'expired', 'suppressed', 'cancelled']);
+
+/**
+ * Recipients that have no final event on the timeline yet, i.e. the ones a cancel can still stop. The server decides in the end (a
+ * delivery may be in flight, or may have finished since the page loaded); this only decides what the dialog offers.
+ */
+export function waitingRecipients(recipients: string[], events: DeliveryEvent[]): string[] {
+  const done = new Set(events.filter((e) => FINAL_EVENT_TYPES.has(e.type) && e.recipient).map((e) => (e.recipient as string).toLowerCase()));
+  return recipients.filter((r) => !done.has(r.toLowerCase()));
+}
+
+/** The statuses a message can still be cancelled in: it has been accepted and is not final. */
+export function isCancellableStatus(status: string): boolean {
+  return status === 'queued' || status === 'deferred';
+}
 
 // ---- addresses and send form ----
 

@@ -41,7 +41,7 @@ Under `Sqlite:DataDirectory`: `queue.db`, `stats.db`, `config.db`, and `history.
 | `busy_timeout` | `Sqlite:BusyTimeout` (5 s) | wait for a lock before `SQLITE_BUSY` |
 | `journal_size_limit` | `Sqlite:JournalSizeLimitBytes` (64 MiB) | the WAL is truncated to at most this after a checkpoint |
 | `cache_size` | 16 MiB (writer only) | page cache of the writer connection |
-| `user_version` | 5 | schema version; versions 1 to 4 are upgraded in place, one step per version, each idempotent (2: dashboard tables and fingerprint; 3: backend switch column and tables; 4: persisted runtime state tables in `config.db`, `message_id_header` and `tags` on `message_index` in `history.db`; 5: `delivery_queue.headers_utf8`), a newer version is refused, an unversioned database with tables is refused |
+| `user_version` | 7 | schema version; versions 1 to 6 are upgraded in place, one step per version, each idempotent (2: dashboard tables and fingerprint; 3: backend switch column and tables; 4: persisted runtime state tables in `config.db`, `message_id_header` and `tags` on `message_index` in `history.db`; 5: `delivery_queue.headers_utf8`; 7: the index on `delivery_queue (message_id)`, which cancelling uses; there is no SQLite version 6: PostgreSQL's `V006` replica tables are PostgreSQL-only and the numbers are kept equal), a newer version is refused, an unversioned database with tables is refused |
 
 `Cache=Shared` is never used. Reads use separate short pooled connections (the only exception is the in-memory queue, whose reads run on its writer). Every connection of a file is private; WAL means readers see a committed snapshot.
 
@@ -73,10 +73,20 @@ The consequences of an outcome are computed by one shared function, so SQLite an
 | Deferred (counted) | attempt+1, new due time, lease released, `last_error` | deferred | Deferred |
 | Deferred, `CountAttempt=false` | due time and lease only; no attempt, no event, no statistic, no webhooks | none | none |
 | Failed | deleted | bounced | HardBounce |
-| Expired / Suppressed / Cancelled | deleted | expired / suppressed / cancelled | Expired / Suppressed / none |
+| Expired / Suppressed / Cancelled | deleted | expired / suppressed / cancelled | Expired / Suppressed / none (`Cancelled` is produced by `CancelAsync`; the delivery processor never records it) |
 | AbortedBySwitch | requeued unchanged (lease released) | aborted_by_switch | none |
 
 `Suppress=Complaint` adds a `complained` event and counter; `PossibleDuplicate` adds a `possible_duplicate` event and sets the sticky flag on a surviving row. Webhook events fan out to the tenant's **enabled** endpoints whose list contains the event type or `*` (an empty list receives nothing), in the same transaction as the row completion. The spool counter is decremented in that transaction; the last recipient frees the spool row. Recording an attempt for a delivery that is already gone is a no-op, so reports are safe to repeat.
+
+### Cancelling (`IDeliveryStore.CancelAsync`, decision 86)
+
+One shared decision function (`CancelPlanner`) splits the message's waiting rows into "cancel" (not leased, not marked for a switch), "in flight" (leased), "transfer-held" and "not waiting" (a *named* recipient without a row), so the backends cannot disagree; the result also carries how many rows were waiting (`Waiting`, whatever was requested), which the API uses to tell an unknown or finished message from one whose named recipients are not waiting. Each cancelled row then goes through `AttemptPlanner.Plan` with a `Cancelled` attempt, exactly as a recorded attempt; a row whose lease ran out without a report (`lease_owner` set) or that is flagged `possible_duplicate` is planned with the doubt, so its events say so (`possible_duplicate`). The webhook event of each cancelled row comes from a callback of the caller (storage cannot reference `Mta.Webhooks`) and its outbox rows are written in the same transaction as the deletion.
+
+- **SQLite:** the selection, the deletes, the spool decrement and the outbox rows are one queue-writer command (`CancelCommand`); the fence is checked again inside it. Then, **as for a recorded attempt, the queue (`queue.db`) and the history (`history.db`) are different files and not atomic together**: retained raw, history events and status, and the recent-events ring follow the queue commit, so a crash between the two leaves the queue right and the history without the `cancelled` event (the same window as in the crash table below).
+- **PostgreSQL:** everything in one transaction (`SELECT … WHERE message_id AND tenant_id ORDER BY id FOR UPDATE`, the fence re-checked with the rows locked, then the same code as a recorded attempt for each row, including the history), so there is no such window.
+- **In-memory:** under the state lock.
+
+The rows are found through an index on `delivery_queue (message_id)` (schema version 7: SQLite `user_version` 7 created for new files and added by the upgrade step from 5; PostgreSQL `V007`, `CREATE INDEX IF NOT EXISTS`, which blocks writes to `delivery_queue` while it builds). Cancelled rows write the `cancelled` event and the message status (the shared `MessageStatus.Next`) only under `History:Mode=Full`, and no statistics counter: `StatCounter` has no cancelled bucket, and adding one would change the statistics API contract for an event that is not a delivery outcome.
 
 ## Crash windows (design §4.4)
 

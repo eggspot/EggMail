@@ -64,7 +64,7 @@ public class RuntimeStateTests : SqliteTestBase
 
         foreach (string file in new[] { "config.db", "history.db", "queue.db", "stats.db" })
         {
-            Assert.Equal(5, ScalarLong(PathOf(file), "PRAGMA user_version"));
+            Assert.Equal(SqliteFile.SchemaVersion, ScalarLong(PathOf(file), "PRAGMA user_version"));
         }
 
         Assert.Equal(0, ScalarLong(PathOf("config.db"), "SELECT count(*) FROM sending_counter"));

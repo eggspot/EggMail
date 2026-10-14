@@ -8,6 +8,9 @@
 //   RAW_ID       raw retained                          -> resend answers {recomposed:false}
 //   HTML_ID      hostile HTML (script, remote image, inline style, meta refresh) for the sandbox
 //   BOUNCE_ID    bounced with 550 5.1.1 and TLS details
+//   WAITING_ID   deferred, two recipients waiting         -> POST /cancel cancels them (all, or the named ones)
+//   INFLIGHT_ID  queued, one recipient is "being delivered" (local part inflight...) -> cancel leaves it and reports it in flight;
+//                with only that recipient waiting, cancel answers 409 conflict
 // With History:Mode=statsonly every per-message endpoint answers 410 history_not_recorded.
 import { createHash } from 'node:crypto';
 import { HttpError, EMAIL_RE, daysAgo, hoursAgo, iso, minutesAgo, newId, paginate, rng } from '../lib.mjs';
@@ -20,6 +23,8 @@ export const RECOMPOSE_ID = fixedId(4);
 export const RAW_ID = fixedId(5);
 export const HTML_ID = fixedId(6);
 export const BOUNCE_ID = fixedId(7);
+export const WAITING_ID = fixedId(8);
+export const INFLIGHT_ID = fixedId(9);
 
 const RETENTION_DAYS = 7;
 const MAX_MESSAGE_BYTES = 26214400;
@@ -267,6 +272,8 @@ function specialMessages(r) {
         '</body></html>',
     }),
     bounce,
+    mk(WAITING_ID, { subject: 'Your weekly digest (waiting)', receivedAt: minutesAgo(25), status: 'deferred', recipients: ['noor2@gmail.com', 'ayo7@outlook.com'] }),
+    mk(INFLIGHT_ID, { subject: 'Invoice INV-2026-7777 is ready (sending)', receivedAt: minutesAgo(3), status: 'queued', recipients: ['inflight1@gmail.com', 'ivan8@gmail.com'] }),
   ];
 }
 
@@ -304,6 +311,80 @@ function detail(m) {
     content: expired ? { state: 'body_expired', attachments: [] } : { state: 'available', text: m.text, html: m.html, attachments: m.attachments },
     rawRetained: m.rawRetained,
   };
+}
+
+// ---- cancelling ----
+
+const FINAL_EVENT_TYPES = new Set(['delivered', 'bounced', 'expired', 'suppressed', 'cancelled']);
+
+/** Recipients that have no final event yet (the real server asks the queue; the mock reads the timeline). */
+function waitingOf(m) {
+  const done = new Set(m.events.filter((e) => FINAL_EVENT_TYPES.has(e.type) && e.recipient).map((e) => e.recipient.toLowerCase()));
+  return m.recipients.filter((a) => !done.has(a.toLowerCase()));
+}
+
+const isInFlight = (address) => address.toLowerCase().startsWith('inflight');
+
+function statusAfter(m) {
+  const final = (type) => m.events.filter((e) => e.type === type && e.recipient).length;
+  const waiting = waitingOf(m).length;
+  if (waiting > 0) return m.status;
+  if (final('delivered') >= m.recipients.length) return 'delivered';
+  if (final('delivered') > 0) return 'partial';
+  return final('bounced') > 0 ? 'bounced' : 'cancelled';
+}
+
+function cancelMessage(ctx) {
+  // Cancelling acts on the queue and needs no history: with History:Mode=statsonly it works too (and answers without a status).
+  const statsOnly = ctx.options.history === 'statsonly';
+  const m = store(ctx).find((x) => x.id === ctx.params.id);
+  const b = ctx.body ?? {};
+  const errors = [];
+  for (const k of Object.keys(b)) if (k !== 'recipients') errors.push({ field: k, message: 'Unknown member.' });
+  let requested = null;
+  if (b.recipients !== undefined) {
+    if (!Array.isArray(b.recipients) || b.recipients.length === 0 || b.recipients.length > 200) {
+      errors.push({ field: 'recipients', message: 'Name 1 to 200 recipients, or leave the member out to cancel every recipient that is still waiting.' });
+    } else {
+      b.recipients.forEach((a, i) => {
+        if (typeof a !== 'string' || !EMAIL_RE.test(a.trim())) errors.push({ field: `recipients[${i}]`, message: 'Enter a valid email address.' });
+      });
+      requested = b.recipients.map((a) => String(a).trim());
+    }
+  }
+  if (errors.length) throw new HttpError(400, 'validation_failed', 'One or more fields are invalid.', { errors });
+
+  const notFound = () => new HttpError(404, 'message_not_found', 'No message with that id (unknown, or older than the event retention).');
+  const waiting = m ? waitingOf(m) : [];
+  if (!m || (statsOnly && waiting.length === 0)) throw notFound(); // without history a finished message cannot be told from an unknown one
+  const want = requested ? new Set(requested.map((a) => a.toLowerCase())) : null;
+  const selected = waiting.filter((a) => !want || want.has(a.toLowerCase())).sort((x, y) => x.localeCompare(y));
+  const inFlight = selected.filter(isInFlight);
+  const cancelled = selected.filter((a) => !isInFlight(a));
+  const notWaiting = requested ? requested.filter((a) => !waiting.some((w) => w.toLowerCase() === a.toLowerCase())) : [];
+  if (cancelled.length === 0) {
+    if (inFlight.length === 0 && !statsOnly) {
+      // A repeated request whose work is done: every named recipient has a cancelled event (or, without names, the message is cancelled).
+      const done = new Set(m.events.filter((e) => e.type === 'cancelled' && e.recipient).map((e) => e.recipient.toLowerCase()));
+      const again = requested ? requested.every((a) => done.has(a.toLowerCase())) : waiting.length === 0 && m.status === 'cancelled';
+      if (again) return { id: m.id, status: m.status, cancelled: [], inFlight: [], transferHeld: [], notWaiting: [] };
+    }
+    throw new HttpError(
+      409,
+      'conflict',
+      inFlight.length > 0
+        ? 'Every recipient that is still waiting is being delivered right now. Try again when the attempt has ended (a recipient that is deferred can be cancelled between attempts).'
+        : waiting.length === 0
+          ? 'No recipient of this message is waiting for delivery: each is delivered, failed, expired, suppressed or already cancelled.'
+          : 'None of the named recipients is waiting for delivery.',
+      { inFlight, transferHeld: [], notWaiting },
+    );
+  }
+  const at = iso();
+  for (const a of cancelled) m.events.push(ev('cancelled', at, { recipient: a, message: 'Cancelled before delivery.' }));
+  m.status = statusAfter(m);
+  const body = { id: m.id, cancelled, inFlight, transferHeld: [], notWaiting };
+  return statsOnly ? body : { ...body, status: m.status };
 }
 
 // ---- sending ----
@@ -536,6 +617,8 @@ export function register(r) {
     },
     opts,
   );
+
+  r.post('/api/v1/messages/:id/cancel', cancelMessage, opts);
 
   r.post('/api/v1/messages', sendMessage, opts);
   r.post('/api/v1/messages/raw', sendRaw, opts);

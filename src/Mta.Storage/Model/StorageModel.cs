@@ -43,9 +43,11 @@ public static class StorageModel
     /// users, sessions and the idempotency fingerprint (HTTP API); version 3 the backend switch hold column and the
     /// <c>transfer_chunk_*</c> progress tables; version 4 the persisted runtime state (<c>domain_record_check</c>, <c>tls_rpt_bucket</c>,
     /// <c>sending_counter</c>) and the Message-ID header and tags of <c>message_index</c>; version 5 the
-    /// <c>headers_utf8</c> column on queued deliveries (internationalized headers).
+    /// <c>headers_utf8</c> column on queued deliveries (internationalized headers); version 7 the index on <c>delivery_queue (message_id)</c> that cancelling
+    /// a message uses. SQLite files go from 5 straight to 7 so that the number matches PostgreSQL's <c>V007</c>: PostgreSQL's <c>V006</c> (replica
+    /// coordination tables) is PostgreSQL-only and has no SQLite counterpart.
     /// </summary>
-    public const int SchemaVersion = 5;
+    public const int SchemaVersion = 7;
 
     /// <summary>
     /// Entity annotation requesting a <c>WITHOUT ROWID</c> table on SQLite (small rows whose primary key is the
@@ -177,6 +179,7 @@ public static class StorageModel
             e.ToTable("delivery_queue").HasKey(x => x.Id);
             e.HasIndex(x => new { x.DueAt, x.Id });
             e.HasIndex(x => new { x.ExpiresAt, x.Id });
+            e.HasIndex(x => x.MessageId);
         });
         mb.Entity<SpoolMessageEntity>(e =>
         {

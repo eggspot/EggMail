@@ -45,6 +45,10 @@ internal static class QueueSql
         "SELECT message_id, tenant_id, recipient, recipient_domain, sending_domain, source, attempt, possible_duplicate FROM delivery_queue WHERE id = @id",
         "@id");
 
+    public static readonly Stmt CancelRows = new(
+        "SELECT id, recipient, recipient_domain, sending_domain, source, attempt, lease_until, transfer_switch_id, lease_owner, possible_duplicate, envelope_from FROM delivery_queue WHERE message_id = @m AND tenant_id = @t",
+        "@m", "@t");
+
     public static readonly Stmt DeliveryDelete = new("DELETE FROM delivery_queue WHERE id = @id", "@id");
 
     public static readonly Stmt DeliveryReschedule = new(
@@ -457,52 +461,144 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
         // Webhook fan-out in the same transaction as the completion: a crash cannot lose an event whose outcome is durable.
         if (plan.CountAttempt && a.WebhookEvents.Count > 0 && s.Targets.Length > 0)
         {
-            long atMs = StorageTime.ToUnixMs(a.At);
-            PreparedCommand insert = ctx.Command(QueueSql.OutboxInsert);
-            foreach (WebhookEventDraft draft in a.WebhookEvents)
-            {
-                foreach (WebhookTarget target in s.Targets)
-                {
-                    if (target.TenantId != row.TenantId || !WebhookSubscriptions.Matches(target.EventTypes, draft.EventType))
-                    {
-                        continue;
-                    }
-
-                    insert.Set(0, Ids.New(a.At)).Set(1, target.EndpointId).Set(2, row.TenantId).Set(3, draft.EventType).Set(4, draft.EventId).Set(5, draft.PayloadJson).Set(6, atMs)
-                        .ExecuteNonQuery();
-                }
-            }
+            FanOut(ctx, a.WebhookEvents, s.Targets, row.TenantId, a.At);
         }
 
-        bool needsRetention = false;
-        if (plan.IsFinal)
-        {
-            int pending = 1;
-            bool retain = false;
-            using (RawReader r = ctx.Command(QueueSql.SpoolDecrement).Set(0, row.MessageId).ExecuteReader())
-            {
-                if (r.Read())
-                {
-                    pending = r.GetInt32(0);
-                    retain = r.GetFlag(1);
-                }
-            }
-
-            if (pending <= 0)
-            {
-                if (retain && s.Full)
-                {
-                    ctx.Command(QueueSql.SpoolAwaitRetention).Set(0, row.MessageId).ExecuteNonQuery();
-                    needsRetention = true;
-                }
-                else
-                {
-                    ctx.Command(QueueSql.SpoolDelete).Set(0, row.MessageId).ExecuteNonQuery();
-                }
-            }
-        }
+        bool needsRetention = plan.IsFinal && FreeSpoolIfLast(ctx, row.MessageId, s.Full);
 
         return new AttemptOutcome(true, row, plan, needsRetention);
+    };
+
+    /// <summary>Writes one outbox row per (draft, enabled endpoint of the tenant that subscribes to its type), inside the caller's queue transaction.</summary>
+    private static void FanOut(WriterContext ctx, IReadOnlyList<WebhookEventDraft> drafts, WebhookTarget[] targets, Guid tenantId, DateTimeOffset at)
+    {
+        long atMs = StorageTime.ToUnixMs(at);
+        PreparedCommand insert = ctx.Command(QueueSql.OutboxInsert);
+        foreach (WebhookEventDraft draft in drafts)
+        {
+            foreach (WebhookTarget target in targets)
+            {
+                if (target.TenantId != tenantId || !WebhookSubscriptions.Matches(target.EventTypes, draft.EventType))
+                {
+                    continue;
+                }
+
+                insert.Set(0, Ids.New(at)).Set(1, target.EndpointId).Set(2, tenantId).Set(3, draft.EventType).Set(4, draft.EventId).Set(5, draft.PayloadJson).Set(6, atMs)
+                    .ExecuteNonQuery();
+            }
+        }
+    }
+
+    /// <summary>Counts one recipient of the message as final; with the last one, deletes the spool row (or marks it for the move of the raw message to history). True when the raw message must be retained.</summary>
+    private static bool FreeSpoolIfLast(WriterContext ctx, Guid messageId, bool full)
+    {
+        int pending = 1;
+        bool retain = false;
+        using (RawReader r = ctx.Command(QueueSql.SpoolDecrement).Set(0, messageId).ExecuteReader())
+        {
+            if (r.Read())
+            {
+                pending = r.GetInt32(0);
+                retain = r.GetFlag(1);
+            }
+        }
+
+        if (pending > 0)
+        {
+            return false;
+        }
+
+        if (retain && full)
+        {
+            ctx.Command(QueueSql.SpoolAwaitRetention).Set(0, messageId).ExecuteNonQuery();
+            return true;
+        }
+
+        ctx.Command(QueueSql.SpoolDelete).Set(0, messageId).ExecuteNonQuery();
+        return false;
+    }
+
+    // Cancelling (decision 86)
+
+    private readonly record struct CancelState(Guid Tenant, Guid Message, IReadOnlyList<string>? Recipients, long NowMs, DateTimeOffset Now, bool Full, Mta.Storage.Transfer.SwitchGate Fence, Func<CancelledDeliveryInfo, WebhookEventDraft?>? WebhookEvent, WebhookTarget[] Targets);
+
+    private readonly record struct CancelledDelivery(DeliveryRowInfo Row, AttemptPlan Plan, bool NeedsRetention);
+
+    private sealed record CancelOutcome(CancelResult Result, List<CancelledDelivery> Done);
+
+    public async ValueTask<CancelResult> CancelAsync(Guid tenantId, Guid messageId, IReadOnlyList<string>? recipients, DateTimeOffset now, Func<CancelledDeliveryInfo, WebhookEventDraft?>? webhookEvent, CancellationToken cancellationToken)
+    {
+        rt.Fence.ThrowIfClosed();
+        now = StorageTime.Normalize(now);
+        WebhookTarget[] targets = webhookEvent is null ? [] : await rt.GetWebhookTargetsAsync(cancellationToken).ConfigureAwait(false);
+        CancelOutcome outcome = await rt.QueueWriter.SubmitAsync(
+            new CancelState(tenantId, messageId, recipients, StorageTime.ToUnixMs(now), now, rt.IsFull, rt.Fence, webhookEvent, targets), CancelCommand, cancellationToken).ConfigureAwait(false);
+
+        // The queue rows are final and committed; the rest is what follows a recorded attempt (steps 3 to 5 of RecordAttemptAsync). History lives in another
+        // file, so, exactly as for RecordAttemptAsync, a crash between the two leaves the queue right and the history without the event.
+        foreach (CancelledDelivery done in outcome.Done)
+        {
+            bool rawRetained = false;
+            if (done.NeedsRetention)
+            {
+                rawRetained = await RetainAndFreeSpoolAsync(done.Row.MessageId, done.Row.TenantId, now, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (rt.IsFull)
+            {
+                try
+                {
+                    await history.ApplyAttemptAsync(done.Plan, done.Row.MessageId, done.Row.TenantId, rawRetained, cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    rt.Log.Write(MtaLogLevel.Error, "storage.sqlite", $"History events for cancelled delivery {done.Row.DeliveryId} could not be written.", ex);
+                }
+            }
+
+            foreach (RecentEvent e in done.Plan.Ring)
+            {
+                rt.Aggregator.AddRecent(e);
+            }
+        }
+
+        return outcome.Result;
+    }
+
+    private static readonly Func<WriterContext, CancelState, CancelOutcome> CancelCommand = static (ctx, s) =>
+    {
+        s.Fence.ThrowIfClosed();   // again inside the writer, the one place that orders this against claims and recorded attempts
+        var waiting = new List<PendingDelivery>();
+        var rows = new Dictionary<Guid, (string Domain, string? SendingDomain, MessageSource Source)>();
+        using (RawReader r = ctx.Command(QueueSql.CancelRows).Set(0, s.Message).Set(1, s.Tenant).ExecuteReader())
+        {
+            while (r.Read())
+            {
+                Guid id = r.GetGuid(0);
+                CancelHold hold = !r.IsDBNull(7) ? CancelHold.TransferHeld : r.GetInt64(6) > s.NowMs ? CancelHold.Leased : CancelHold.None;
+                waiting.Add(new PendingDelivery(id, r.GetString(1), r.GetString(10), r.GetInt32(5), CancelPlanner.OutcomeMayBeUnknown(r.GetFlag(9), !r.IsDBNull(8)), hold));
+                rows[id] = (r.GetString(2), r.GetNullableString(3), (MessageSource)r.GetInt32(4));
+            }
+        }
+
+        CancelSelection selection = CancelPlanner.Select(waiting, s.Recipients);
+        var done = new List<CancelledDelivery>(selection.Cancel.Count);
+        foreach (PendingDelivery d in selection.Cancel)
+        {
+            var (domain, sendingDomain, source) = rows[d.DeliveryId];
+            var row = new DeliveryRowInfo(d.DeliveryId, s.Message, s.Tenant, d.Recipient, domain, sendingDomain, source, d.Attempt, d.PossibleDuplicate);
+            DeliveryAttempt attempt = CancelPlanner.AttemptFor(d, s.Message, s.Tenant, s.Now, s.WebhookEvent);
+            AttemptPlan plan = AttemptPlanner.Plan(attempt, row);
+            ctx.Command(QueueSql.DeliveryDelete).Set(0, d.DeliveryId).ExecuteNonQuery();
+            if (attempt.WebhookEvents.Count > 0 && s.Targets.Length > 0)
+            {
+                FanOut(ctx, attempt.WebhookEvents, s.Targets, s.Tenant, s.Now);
+            }
+
+            done.Add(new CancelledDelivery(row, plan, FreeSpoolIfLast(ctx, s.Message, s.Full)));
+        }
+
+        return new CancelOutcome(CancelPlanner.ResultOf(selection), done);
     };
 
     /// <summary>Copies the spool's raw message to retained storage, then deletes the spool row. Returns whether the copy exists.</summary>

@@ -20,7 +20,8 @@ internal sealed class SqliteFile
     /// Bumped when a schema change needs a migration step (stored in <c>PRAGMA user_version</c>). Version 2 added the dashboard user and
     /// session tables (config.db) and <c>api_idempotency_key.fingerprint</c> (queue.db); version 3 added the backend switch hold column
     /// and progress tables; version 4 the persisted runtime state tables (config.db) and the Message-ID header and tags of <c>message_index</c>
-    /// (history.db). <see cref="UpgradeFromV1"/>, <see cref="UpgradeFromV2"/> and <see cref="UpgradeFromV3"/> apply them in turn.
+    /// (history.db); version 5 <c>delivery_queue.headers_utf8</c>; version 7 the <c>delivery_queue (message_id)</c> index (6 is PostgreSQL-only).
+    /// The <c>UpgradeFromV#</c> methods apply them in turn.
     /// </summary>
     public const int SchemaVersion = Model.StorageModel.SchemaVersion;
 
@@ -186,7 +187,12 @@ internal sealed class SqliteFile
                 UpgradeFromV3(connection);
             }
 
-            UpgradeFromV4(connection);
+            if (version <= 4)
+            {
+                UpgradeFromV4(connection);
+            }
+
+            UpgradeFromV5(connection);
             return;
         }
 
@@ -375,6 +381,38 @@ internal sealed class SqliteFile
         using var cmd = connection.CreateCommand();
         cmd.Transaction = tx;
         cmd.CommandText = "PRAGMA user_version=5";
+        cmd.ExecuteNonQuery();
+        tx.Commit();
+    }
+
+    /// <summary>
+    /// Version 5 to 7 (6 is PostgreSQL-only): the index on <c>delivery_queue (message_id)</c>, taken from the generated schema script. Only the queue file has the table;
+    /// the other files just move to the new version.
+    /// </summary>
+    private void UpgradeFromV5(SqliteConnection connection)
+    {
+        string? index = null;
+        if (Kind == SqliteFileKind.Queue)
+        {
+            index = IfNotExists(Regex.Match(_createScript(), "CREATE INDEX \"[^\"]*delivery_queue_message_id\" ON \"delivery_queue\" [^;]*;").Value);
+            if (string.IsNullOrEmpty(index))
+            {
+                throw new InvalidOperationException($"Could not derive the version 7 upgrade of {FileName} from the generated schema script.");
+            }
+        }
+
+        using var tx = connection.BeginTransaction();
+        if (index is not null)
+        {
+            using var create = connection.CreateCommand();
+            create.Transaction = tx;
+            create.CommandText = index;
+            create.ExecuteNonQuery();
+        }
+
+        using var cmd = connection.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = "PRAGMA user_version=" + SchemaVersion.ToString(CultureInfo.InvariantCulture);
         cmd.ExecuteNonQuery();
         tx.Commit();
     }

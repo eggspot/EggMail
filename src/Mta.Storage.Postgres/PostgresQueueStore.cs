@@ -342,7 +342,6 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
 
     private async Task<AttemptResult> RecordAttemptCoreAsync(DeliveryAttempt a, WebhookTarget[] targets, Action<int?> historyDayWritten, CancellationToken ct)
     {
-        DateTimeOffset at = StorageTime.Normalize(a.At);
         await using NpgsqlConnection connection = await rt.Data.OpenConnectionAsync(ct).ConfigureAwait(false);
         await using NpgsqlTransaction tx = await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
 
@@ -361,6 +360,15 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
             row = new DeliveryRowInfo(a.DeliveryId, r.GetGuid(0), r.GetGuid(1), r.GetString(2), r.GetString(3), r.GetNullableString(4), (MessageSource)r.GetInt16(5), r.GetInt32(6), r.GetBoolean(7));
         }
 
+        AttemptResult result = await ApplyAttemptLockedAsync(connection, tx, row, a, targets, historyDayWritten, ct).ConfigureAwait(false);
+        await tx.CommitAsync(ct).ConfigureAwait(false);
+        return result;
+    }
+
+    /// <summary>Everything a recorded attempt does once its delivery row is locked in the open transaction; the caller commits.</summary>
+    private async Task<AttemptResult> ApplyAttemptLockedAsync(NpgsqlConnection connection, NpgsqlTransaction tx, DeliveryRowInfo row, DeliveryAttempt a, WebhookTarget[] targets, Action<int?> historyDayWritten, CancellationToken ct)
+    {
+        DateTimeOffset at = StorageTime.Normalize(a.At);
         AttemptPlan plan = AttemptPlanner.Plan(a, row);
         int day = StorageTime.DayNumber(row.MessageId);
         DateTimeOffset now = rt.Clock.UtcNow;
@@ -458,8 +466,85 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
             await history.ApplyAttemptAsync(connection, tx, plan, row.MessageId, rawRetained, ct).ConfigureAwait(false);
         }
 
-        await tx.CommitAsync(ct).ConfigureAwait(false);
         return new AttemptResult(true, row, plan);
+    }
+
+    // Cancelling (decision 86)
+
+    public async ValueTask<CancelResult> CancelAsync(Guid tenantId, Guid messageId, IReadOnlyList<string>? recipients, DateTimeOffset now, Func<CancelledDeliveryInfo, WebhookEventDraft?>? webhookEvent, CancellationToken cancellationToken)
+    {
+        rt.Fence.ThrowIfClosed();
+        now = StorageTime.Normalize(now);
+        List<AttemptResult> done;
+        CancelResult result;
+        try
+        {
+            WebhookTarget[] targets = webhookEvent is null ? [] : await rt.GetWebhookTargetsAsync(cancellationToken).ConfigureAwait(false);
+            int? historyDay = null;
+            (result, done) = await WithPartitionRetryAsync(
+                () => CancelCoreAsync(tenantId, messageId, recipients, now, webhookEvent, targets, d => historyDay = d, cancellationToken), () => historyDay, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
+        {
+            throw rt.Unavailable(ex);
+        }
+
+        // Statistics and the ring are in memory and flushed about every 10 s, as after a recorded attempt.
+        foreach (AttemptResult r in done)
+        {
+            foreach (PlannedCounter c in r.Plan!.Counters)
+            {
+                rt.Aggregator.Add(new StatKey(StorageTime.HourStart(now), r.Row.TenantId, r.Row.SendingDomain ?? "", r.Row.RecipientDomain), c.Counter, c.Count);
+            }
+
+            foreach (RecentEvent e in r.Plan.Ring)
+            {
+                rt.Aggregator.AddRecent(e);
+            }
+        }
+
+        return result;
+    }
+
+    private async Task<(CancelResult Result, List<AttemptResult> Done)> CancelCoreAsync(
+        Guid tenantId, Guid messageId, IReadOnlyList<string>? recipients, DateTimeOffset now, Func<CancelledDeliveryInfo, WebhookEventDraft?>? webhookEvent, WebhookTarget[] targets, Action<int?> historyDayWritten, CancellationToken ct)
+    {
+        await using NpgsqlConnection connection = await rt.Data.OpenConnectionAsync(ct).ConfigureAwait(false);
+        await using NpgsqlTransaction tx = await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
+
+        // Lock every waiting row of the message in id order (an index on message_id finds them). A claim skips locked rows and never waits (no deadlock); a
+        // recorded attempt or another cancel holding a row makes this wait, and the columns read afterwards are the committed ones. A row that a claim committed
+        // first has a lease in the future and is reported as in flight, so cancel and claim cannot both win a row.
+        var waiting = new List<PendingDelivery>();
+        var rows = new Dictionary<Guid, (string Domain, string? SendingDomain, MessageSource Source)>();
+        await using (var select = new NpgsqlCommand(
+            "SELECT id, recipient, recipient_domain, sending_domain, source, attempt, lease_until, transfer_switch_id, lease_owner, possible_duplicate, envelope_from " +
+            "FROM delivery_queue WHERE message_id = $1 AND tenant_id = $2 ORDER BY id FOR UPDATE", connection, tx))
+        {
+            select.Parameters.Uuid(messageId).Uuid(tenantId);
+            await using NpgsqlDataReader r = await select.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            while (await r.ReadAsync(ct).ConfigureAwait(false))
+            {
+                Guid id = r.GetGuid(0);
+                CancelHold hold = !r.IsDBNull(7) ? CancelHold.TransferHeld : r.GetInstant(6) > now ? CancelHold.Leased : CancelHold.None;
+                waiting.Add(new PendingDelivery(id, r.GetString(1), r.GetString(10), r.GetInt32(5), CancelPlanner.OutcomeMayBeUnknown(r.GetBoolean(9), !r.IsDBNull(8)), hold));
+                rows[id] = (r.GetString(2), r.GetNullableString(3), (MessageSource)r.GetInt16(4));
+            }
+        }
+
+        rt.Fence.ThrowIfClosed();   // again, with the rows locked: a switch that fenced the queue meanwhile has the last word
+        CancelSelection selection = CancelPlanner.Select(waiting, recipients);
+        var done = new List<AttemptResult>(selection.Cancel.Count);
+        foreach (PendingDelivery d in selection.Cancel)
+        {
+            var (domain, sendingDomain, source) = rows[d.DeliveryId];
+            var row = new DeliveryRowInfo(d.DeliveryId, messageId, tenantId, d.Recipient, domain, sendingDomain, source, d.Attempt, d.PossibleDuplicate);
+            DeliveryAttempt attempt = CancelPlanner.AttemptFor(d, messageId, tenantId, now, webhookEvent);
+            done.Add(await ApplyAttemptLockedAsync(connection, tx, row, attempt, targets, historyDayWritten, ct).ConfigureAwait(false));
+        }
+
+        await tx.CommitAsync(ct).ConfigureAwait(false);
+        return (CancelPlanner.ResultOf(selection), done);
     }
 
     private static void AppendOutboxFanOut(NpgsqlBatch batch, IReadOnlyList<WebhookEventDraft> drafts, WebhookTarget[] targets, Guid tenantId, DateTimeOffset at)

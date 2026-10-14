@@ -2,7 +2,7 @@
 import { randomBytes } from 'node:crypto';
 import { HttpError, minutesAgo, hoursAgo, newId, validate, iso } from '../lib.mjs';
 
-export const EVENT_TYPES = ['message.delivered', 'message.deferred', 'message.bounced', 'message.complained', 'message.expired', 'message.suppressed', 'webhook.endpoint.disabled', 'webhook.test'];
+export const EVENT_TYPES = ['message.delivered', 'message.deferred', 'message.bounced', 'message.complained', 'message.expired', 'message.suppressed', 'message.cancelled', 'webhook.endpoint.disabled', 'webhook.test'];
 
 const secret = () => 'whsec_' + randomBytes(24).toString('base64');
 

@@ -225,7 +225,7 @@ public class FilesAndPragmaTests : SqliteTestBase
         await ReopenAsync();
         Assert.Equal(SqliteFile.SchemaVersion, ScalarLong(PathOf("config.db"), "PRAGMA user_version"));
         Assert.Equal(SqliteFile.SchemaVersion, ScalarLong(PathOf("queue.db"), "PRAGMA user_version"));
-        Assert.Equal(5, SqliteFile.SchemaVersion);
+        Assert.Equal(7, SqliteFile.SchemaVersion);
         Assert.Equal(0, ScalarLong(PathOf("queue.db"), "SELECT count(*) FROM transfer_chunk_queue")); // the 1 to 2 to 3 path reached the switch tables too
         Assert.Equal(1, ScalarLong(PathOf("queue.db"), "SELECT count(*) FROM pragma_table_info('delivery_queue') WHERE name = 'headers_utf8'")); // and the version 5 column
 
@@ -308,11 +308,38 @@ public class FilesAndPragmaTests : SqliteTestBase
         }
 
         await ReopenAsync();
-        Assert.Equal(5, SqliteFile.SchemaVersion);
-        Assert.Equal(5, ScalarLong(PathOf("queue.db"), "PRAGMA user_version"));
+        Assert.Equal(7, SqliteFile.SchemaVersion);
+        Assert.Equal(7, ScalarLong(PathOf("queue.db"), "PRAGMA user_version"));
         Assert.Equal(1, ScalarLong(PathOf("queue.db"), "SELECT count(*) FROM delivery_queue WHERE headers_utf8 = 0"));
         var claimed = Assert.Single(await ClaimAsync());
         Assert.False(claimed.HeadersUtf8);
+    }
+
+    [Fact]
+    public async Task A_new_queue_file_has_the_message_id_index_and_a_version_5_file_gets_it_on_upgrade()
+    {
+        const string indexCount = "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'IX_delivery_queue_message_id'";
+        var m = await AcceptAsync(Msg(to: ["a@example.org"]));
+        Assert.Equal(1, ScalarLong(PathOf("queue.db"), indexCount));   // a fresh file is created from the model
+        await Storage.DisposeAsync();
+
+        foreach (string kind in new[] { "queue", "stats", "config", "history" })
+        {
+            using var c = new SqliteConnection($"Data Source={PathOf(kind + ".db")};Pooling=False");
+            c.Open();
+            using SqliteCommand cmd = c.CreateCommand();
+            cmd.CommandText = (kind == "queue" ? "DROP INDEX IX_delivery_queue_message_id;" : "") + "PRAGMA user_version = 5";
+            cmd.ExecuteNonQuery();
+        }
+
+        await ReopenAsync();
+        foreach (string kind in new[] { "queue", "stats", "config", "history" })
+        {
+            Assert.Equal(7, ScalarLong(PathOf(kind + ".db"), "PRAGMA user_version"));
+        }
+
+        Assert.Equal(1, ScalarLong(PathOf("queue.db"), indexCount));
+        Assert.Equal(["a@example.org"], (await Storage.Deliveries.CancelAsync(m.TenantId, m.MessageId, null, Clock.UtcNow, null, default)).Cancelled);   // and cancelling works on the upgraded file
     }
 
     [Fact]

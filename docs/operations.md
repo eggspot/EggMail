@@ -382,6 +382,15 @@ Manage both in the dashboard (administrators: **Relay routes**, **TLS policies**
 * **Upgrade note.** Earlier builds accepted any certificate for relay TLS modes `verify` and `implicit` (and nothing could create a route through the API, so only routes inserted straight into the database were affected). They now validate the chain and the host name: a route whose relay presents a self-signed or mismatching certificate stops carrying mail (retried, then expired) until the certificate is fixed or the mode is set to `required` (encryption without validation).
 
 Not verified: delivery through a real relay provider (the engine tests use loopback servers, including STARTTLS with a self-signed certificate that `required` accepts and `verify` refuses).
+## Cancelling queued mail
+
+A message that has not been delivered yet can be stopped from the message page of the dashboard (**Cancel delivery**) or with `POST /api/v1/messages/{id}/cancel` ([api.md](api.md)); the caller needs the `send` scope. What an operator should know:
+
+- It works on recipients that are *waiting*: queued, or deferred until their next retry. A recipient whose delivery attempt is running at that moment (it holds a lease) is left alone and reported as `inFlight`; try again after the attempt, which lasts seconds. A recipient held by a backend switch is reported as `transferHeld` until the switch is finished or rolled back. A stuck lease (a worker that died) runs out after `Delivery:ClaimLease` (15 minutes by default), and the recipient is cancellable from then on; because the outcome of that attempt is unknown, the cancel is recorded with a `possible_duplicate` event.
+- A cancelled recipient is final: `cancelled` event, no retry, no bounce message to the sender, no suppression and no statistics counter (the "recent events" list shows it). The accepted count of the statistics stays, so accepted minus the other counters includes cancelled mail. A `message.cancelled` webhook event is published to the tenant's subscribed endpoints.
+- It does not need per-message history: with `History:Mode=StatsOnly` it still works (no events or status are recorded, and the answer carries no status).
+- There is no audit log of who cancelled: the `cancelled` events in the message history are the record. Cancelling during a backend switch is refused with `503` like every queue write.
+- **Upgrade note:** schema version 7 adds an index on `delivery_queue (message_id)` so that cancelling does not scan the queue. SQLite builds it at the first start (the queue file is locked meanwhile); on PostgreSQL the migration's `CREATE INDEX` blocks writes to `delivery_queue` while it builds. Both are quick for a queue of some hundred thousand rows; on a much larger queue run the migration (`mta migrate-db`) in a quiet moment. The build time on very large queues was not measured.
 
 ## Bounces caused by the receiving server's capabilities
 
@@ -410,7 +419,7 @@ Internationalized domain names and Unicode normalization depend on ICU. In invar
 
 **Attachment storage on SMTP.** SMTP submissions now follow the tenant's `Content:StoreAttachments` setting, and the operator default when the tenant never chose (they used to ignore both), so where `Content:AllowAttachmentStorage` is on and the default or a tenant says yes, SMTP mail with attachments is kept after delivery and uses disk for `Content:RetentionDays`. Check the tenants' settings and `Content:StoreAttachments` before upgrading if that is not wanted.
 
-Take a backup, pull the new image, restart. Schema changes run at start (SQLite: automatic; PostgreSQL: `Mail:Database:Migrate`, owner role). Schema version 4 builds an index on the history index (`message_index`) of every partition on PostgreSQL, which blocks intake writes for the duration; on a large history run `mta migrate-db` in a quiet moment before the rollout. Roll back by restoring the backup and starting the old image. Backend switching (SQLite ⇄ PostgreSQL) is a separate, manual procedure (`docs/design.md` section 4.6; engine, CLI, admin API and dashboard wizard are built, see [components/switch.md](components/switch.md)).
+Take a backup, pull the new image, restart. Schema changes run at start (SQLite: automatic; PostgreSQL: `Mail:Database:Migrate`, owner role). Schema version 4 builds an index on the history index (`message_index`) of every partition on PostgreSQL, which blocks intake writes for the duration; on a large history run `mta migrate-db` in a quiet moment before the rollout. Schema version 7 does the same for the index on `delivery_queue (message_id)` (see Cancelling queued mail above). Roll back by restoring the backup and starting the old image. Backend switching (SQLite ⇄ PostgreSQL) is a separate, manual procedure (`docs/design.md` section 4.6; engine, CLI, admin API and dashboard wizard are built, see [components/switch.md](components/switch.md)).
 
 ## State kept across restarts
 
