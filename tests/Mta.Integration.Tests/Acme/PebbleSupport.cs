@@ -80,6 +80,18 @@ internal static class Pebble
         return http;
     }
 
+    /// <summary>Overrides the renewal information Pebble answers for a certificate it issued (its management API). <paramref name="ariResponse"/> may be any text, even invalid JSON.</summary>
+    public static async Task SetRenewalInfoAsync(string certificatePem, string ariResponse)
+    {
+        using var http = NewClient(CreateTransport());
+        using var response = await http.PostAsJsonAsync(new Uri(Management, "/set-renewal-info/"), new { Certificate = certificatePem, ARIResponse = ariResponse });
+        response.EnsureSuccessStatusCode();
+    }
+
+    /// <summary>A renewal information body for Pebble: the suggested window in RFC 3339.</summary>
+    public static string Window(DateTimeOffset start, DateTimeOffset end) =>
+        $"{{\"suggestedWindow\":{{\"start\":\"{start.UtcDateTime:yyyy-MM-dd'T'HH:mm:ss'Z'}\",\"end\":\"{end.UtcDateTime:yyyy-MM-dd'T'HH:mm:ss'Z'}\"}}}}";
+
     /// <summary>The certificate Pebble issues from (its current root; Pebble generates new ones at every start).</summary>
     public static async Task<X509Certificate2Collection> FetchRootsAsync()
     {
