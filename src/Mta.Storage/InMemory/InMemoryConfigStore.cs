@@ -227,6 +227,58 @@ internal sealed partial class InMemoryConfigStore : IConfigStore
         }
     }
 
+    public ValueTask<DashboardUserWriteResult> ReplaceDashboardUserGuardedAsync(DashboardUser replacement, bool endSessions, byte[]? keepSessionHash, CancellationToken ct)
+    {
+        var e = replacement.ToEntity();
+        lock (_gate)
+        {
+            if (!_dashboardUsers.TryGetValue(e.Id, out var current))
+            {
+                return R(DashboardUserWriteResult.NotFound);
+            }
+
+            bool isEnabledAdmin = current.Role == DashboardRole.Admin && current.Enabled;
+            bool staysEnabledAdmin = e.Role == DashboardRole.Admin && e.Enabled;
+            if (isEnabledAdmin && !staysEnabledAdmin && !_dashboardUsers.Values.Any(u => u.Id != e.Id && u.Role == DashboardRole.Admin && u.Enabled))
+            {
+                return R(DashboardUserWriteResult.WouldRemoveLastAdmin);
+            }
+
+            if (_dashboardUsers.Values.Any(u => u.UserName == e.UserName && u.Id != e.Id))
+            {
+                throw Conflict("dashboard_user.user_name");
+            }
+
+            _dashboardUsers[e.Id] = e;
+            if (endSessions)
+            {
+                _dashboardSessions.RemoveAll(s => s.UserId == e.Id && (keepSessionHash is null || !s.IdHash.AsSpan().SequenceEqual(keepSessionHash)));
+            }
+
+            return R(DashboardUserWriteResult.Applied);
+        }
+    }
+
+    public ValueTask<DashboardUserWriteResult> DeleteDashboardUserGuardedAsync(Guid id, CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            if (!_dashboardUsers.TryGetValue(id, out var current))
+            {
+                return R(DashboardUserWriteResult.NotFound);
+            }
+
+            if (current.Role == DashboardRole.Admin && current.Enabled && !_dashboardUsers.Values.Any(u => u.Id != id && u.Role == DashboardRole.Admin && u.Enabled))
+            {
+                return R(DashboardUserWriteResult.WouldRemoveLastAdmin);
+            }
+
+            _dashboardSessions.RemoveAll(s => s.UserId == id);
+            _dashboardUsers.Remove(id);
+            return R(DashboardUserWriteResult.Applied);
+        }
+    }
+
     public ValueTask AddDashboardSessionAsync(DashboardSession session, CancellationToken ct)
     {
         var e = session.ToEntity();
