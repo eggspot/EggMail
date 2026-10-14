@@ -342,7 +342,6 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
 
     private async Task<AttemptResult> RecordAttemptCoreAsync(DeliveryAttempt a, WebhookTarget[] targets, Action<int?> historyDayWritten, CancellationToken ct)
     {
-        DateTimeOffset at = StorageTime.Normalize(a.At);
         await using NpgsqlConnection connection = await rt.Data.OpenConnectionAsync(ct).ConfigureAwait(false);
         await using NpgsqlTransaction tx = await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
 
