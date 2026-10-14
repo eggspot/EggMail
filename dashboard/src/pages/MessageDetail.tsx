@@ -59,6 +59,11 @@ function ContentTabs({ detail, text, html }: { detail: MessageDetailData; text?:
   ];
   return (
     <>
+      {detail.content.truncated && (
+        <Notice tone="warn" title="The stored content is cut short">
+          The server keeps a limited amount of each body, and this message was larger, so the text or HTML below ends early. The delivered message itself was not changed.
+        </Notice>
+      )}
       <Tabs tabs={tabs} active={tab} onChange={(t) => setTab(t as TabId)} label="Message content" />
       <div role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`} tabIndex={0}>
         {tab === 'text' &&
@@ -86,6 +91,7 @@ function Content({ id, detail }: { id: string; detail: MessageDetailData }) {
   const needsFetch = c.state === 'available' && c.text === undefined && c.html === undefined;
   const [fetched, setFetched] = useState<{ text?: string; html?: string } | null>(null);
   const [expired, setExpired] = useState(false);
+  const [notRecorded, setNotRecorded] = useState(false);
   const [error, setError] = useState<unknown>(undefined);
 
   useEffect(() => {
@@ -97,6 +103,7 @@ function Content({ id, detail }: { id: string; detail: MessageDetailData }) {
       .catch((e) => {
         if (!live) return;
         if (isCode(e, 'body_expired')) setExpired(true);
+        else if (isCode(e, 'content_not_recorded')) setNotRecorded(true);
         else setError(e);
       });
     return () => {
@@ -104,6 +111,13 @@ function Content({ id, detail }: { id: string; detail: MessageDetailData }) {
     };
   }, [id, needsFetch]);
 
+  if (c.state === 'not_recorded' || notRecorded) {
+    return (
+      <Notice tone="info" title="The content of this message was not recorded">
+        This server does not keep message content (<code>Content:Mode=None</code>), so there is no text, HTML or attachment index to show and the message cannot be resent. The delivery events above are available.
+      </Notice>
+    );
+  }
   if (c.state === 'body_expired' || expired) {
     return (
       <Notice tone="warn" title="The message content has expired">
@@ -130,7 +144,7 @@ function ResendControl({ id, disabled }: { id: string; disabled: boolean }) {
   };
   return (
     <>
-      <Button onClick={() => { setResult(null); action.clearError(); setOpen(true); }} disabled={disabled} title={disabled ? 'The content has expired, so the message cannot be resent' : undefined}>
+      <Button onClick={() => { setResult(null); action.clearError(); setOpen(true); }} disabled={disabled} title={disabled ? 'There is no stored content (expired or never recorded), so the message cannot be resent' : undefined}>
         Resend
       </Button>
       {open && (
@@ -187,7 +201,7 @@ function Detail({ id }: { id: string }) {
       <PageHeader
         title={d.subject || '(no subject)'}
         subtitle={<a href="/messages">Back to messages</a>}
-        actions={<ResendControl id={d.id} disabled={d.content.state === 'body_expired'} />}
+        actions={<ResendControl id={d.id} disabled={d.content.state !== 'available'} />}
       />
       <Card title="Details">
         <KeyValue
@@ -195,7 +209,7 @@ function Detail({ id }: { id: string }) {
             ['Status', <StatusChip status={d.status} />],
             ['Received', <time dateTime={d.receivedAt}>{formatDateTime(d.receivedAt)}</time>],
             ['From', d.from],
-            ['Recipients', d.recipients.join(', ')],
+            ['Recipients', d.recipients.join(', ') + (d.recipientCount && d.recipientCount > d.recipients.length ? ` and ${d.recipientCount - d.recipients.length} more` : '')],
             ['Size', formatBytes(d.size)],
             ['Raw message retained', d.rawRetained ? <Chip tone="ok">yes</Chip> : <Chip tone="neutral">no</Chip>],
             ['Message id', <code>{d.id}</code>],

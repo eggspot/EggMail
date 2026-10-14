@@ -9,6 +9,9 @@ internal static class DashboardHosting
     private const string ContentSecurityPolicy =
         "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'";
 
+    private const string AssetCacheControl = "public, max-age=31536000, immutable";
+    private const string ShellCacheControl = "no-cache";
+
     public static void Map(WebApplication app)
     {
         app.Use(async (context, next) =>
@@ -37,7 +40,12 @@ internal static class DashboardHosting
         if (Directory.Exists(Path.Combine(app.Environment.ContentRootPath, "wwwroot")))
         {
             app.UseDefaultFiles();
-            app.UseStaticFiles();
+            app.UseStaticFiles(new StaticFileOptions
+            {
+                // Content-hashed assets never change under the same name; everything else (index.html, the favicon) must be revalidated.
+                OnPrepareResponse = context => context.Context.Response.Headers.CacheControl =
+                    context.Context.Request.Path.StartsWithSegments("/assets", StringComparison.Ordinal) ? AssetCacheControl : ShellCacheControl,
+            });
             app.MapFallback(async context =>
             {
                 string path = context.Request.Path.Value ?? string.Empty;
@@ -47,6 +55,7 @@ internal static class DashboardHosting
                     return;
                 }
 
+                context.Response.Headers.CacheControl = ShellCacheControl;
                 context.Response.ContentType = "text/html; charset=utf-8";
                 await context.Response.SendFileAsync(Path.Combine(app.Environment.WebRootPath, "index.html")).ConfigureAwait(false);
             });

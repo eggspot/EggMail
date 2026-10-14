@@ -232,22 +232,29 @@ describe('storage switch machine', () => {
     expect((await mock.post('/api/v1/admin/storage/switch/rollback')).data.state).toBe('rolled_back');
   });
 
-  it('shows the cutover patch only for orchestrator-managed deployments', async () => {
+  it('produces the cutover patch at activation for orchestrator-managed deployments, and the bootstrap note otherwise', async () => {
     await admin();
     await startSwitch({ target: { ...pgTarget, orchestrated: true } });
     await waitForState('verified');
     await mock.post('/api/v1/admin/storage/switch/confirm');
+    expect((await mock.get('/api/v1/admin/storage/switch')).data.cutoverPatch).toBeNull(); // not before the activation
+    await mock.post('/api/v1/admin/storage/switch/activate');
     const s = (await mock.get('/api/v1/admin/storage/switch')).data;
     expect(s.orchestratorManaged).toBe(true);
+    expect(s.cutoverPatch.kind).toBe('patch');
     expect(s.cutoverPatch.text).toContain('Storage__Backend=Postgres');
     expect(s.cutoverPatch.text).not.toMatch(/password=/i);
 
-    await mock.post('/__mock/reset');
-    await mock.login('admin');
+    await mock.close(); // an activated switch moves the mock to the other backend; start again from a fresh server
+    await admin();
     await startSwitch();
     await waitForState('verified');
     await mock.post('/api/v1/admin/storage/switch/confirm');
-    expect((await mock.get('/api/v1/admin/storage/switch')).data.cutoverPatch).toBeNull();
+    await mock.post('/api/v1/admin/storage/switch/activate');
+    const plain = (await mock.get('/api/v1/admin/storage/switch')).data;
+    expect(plain.orchestratorManaged).toBe(false);
+    expect(plain.cutoverPatch.kind).toBe('bootstrap');
+    expect(plain.cutoverPatch.text).toContain('bootstrap file');
   });
 
   it('is SQLite to PostgreSQL and back (symmetric)', async () => {
@@ -259,3 +266,23 @@ describe('storage switch machine', () => {
     expect(pre.data.checks.some((c) => c.severity === 'warning' && /synchronous=OFF/.test(c.message))).toBe(true);
   });
 });
+
+describe('mock maintenance and ACME state', () => {
+  it('reports no maintenance run until one was started, then its jobs', async () => {
+    await admin();
+    const before = (await mock.get('/api/v1/admin/maintenance')).data;
+    expect(before).toMatchObject({ running: false, finishedAt: null, reports: [] });
+    expect((await mock.post('/api/v1/admin/maintenance/run')).status).toBe(202);
+    const after = (await mock.get('/api/v1/admin/maintenance')).data;
+    expect(after.finishedAt).not.toBeNull();
+    expect(after.reports.length).toBeGreaterThan(0);
+  });
+
+  it('lists the ACME renewal state and marks it pending after a request', async () => {
+    await admin();
+    expect((await mock.get('/api/v1/admin/certificates/acme')).data[0]).toMatchObject({ certificateName: 'default', status: 'renewed' });
+    expect((await mock.post('/api/v1/admin/certificates/acme', { domains: ['mail.example.com'] })).status).toBe(202);
+    expect((await mock.get('/api/v1/admin/certificates/acme')).data[0].status).toBe('pending');
+  });
+});
+

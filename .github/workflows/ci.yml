@@ -101,6 +101,23 @@ jobs:
           npm test
           npm run build
           npm run check-csp
+      # Real-browser end-to-end tests (Chromium) against the real server: they run after the unit tests and reuse the Release build and the
+      # dashboard build above. The PostgreSQL service of this job is the target of the storage-switch tests.
+      - name: Playwright version
+        id: playwright
+        working-directory: dashboard
+        run: echo "version=$(node -p "require('./node_modules/@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-chromium-${{ steps.playwright.outputs.version }}
+      - name: Install Chromium for Playwright
+        working-directory: dashboard
+        run: npx playwright install --with-deps chromium
+      - name: Dashboard end-to-end tests (real server, real browser)
+        working-directory: dashboard
+        run: npx playwright test
       - name: Pebble logs on failure
         if: failure()
         run: docker logs pebble 2>&1 | tail -200 || true
@@ -109,5 +126,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: test-results
-          path: TestResults
+          path: |
+            TestResults
+            dashboard/e2e-results
           retention-days: 3

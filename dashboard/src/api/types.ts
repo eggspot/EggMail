@@ -68,6 +68,8 @@ export interface MessageSummary {
   subject: string;
   from: string;
   recipients: string[];
+  /** All recipients; `recipients` holds only the first few in a list. */
+  recipientCount?: number;
   status: MessageStatus;
   size: number;
   tags?: string[];
@@ -84,10 +86,12 @@ export interface AttachmentInfo {
 export interface MessageDetail extends MessageSummary {
   tenantId: string;
   content: {
-    state: 'available' | 'body_expired';
+    state: 'available' | 'body_expired' | 'not_recorded';
     text?: string;
     html?: string;
     attachments: AttachmentInfo[];
+    /** The stored text or HTML was cut at the size limit. */
+    truncated?: boolean;
   };
   rawRetained: boolean;
 }
@@ -184,6 +188,15 @@ export interface DnsRecord {
   expected?: string;
 }
 
+/** One DKIM key of a domain: `active` keys sign; a key that is neither active nor retired is a pending rotation (published as advice, not signing yet). */
+export interface DkimKeyInfo {
+  selector: string;
+  publicKey: string;
+  active: boolean;
+  createdAt: string;
+  retiredAt?: string | null;
+}
+
 export interface Domain {
   id: string;
   name: string;
@@ -193,7 +206,10 @@ export interface Domain {
   nextCheckAt?: string | null;
   lastError?: string | null;
   records: DnsRecord[];
-  dkim: { selector: string; publicKey: string; active: boolean; createdAt: string };
+  /** The newest key (which may be a pending rotation). */
+  dkim: DkimKeyInfo;
+  /** Every key, oldest first. Absent in older servers and fixtures. */
+  dkimKeys?: DkimKeyInfo[];
 }
 
 // ---- suppressions ----
@@ -212,7 +228,10 @@ export interface Webhook {
   event_types: string[];
   enabled: boolean;
   disabledReason?: string | null;
+  disabledAt?: string | null;
   createdAt?: string;
+  /** True after a secret rotation until the previous secret is removed (deliveries are signed with both). */
+  secretRotationPending?: boolean;
   /** Present only in the create and rotate-secret responses. */
   secret?: string;
 }
@@ -299,6 +318,8 @@ export interface SettingItem {
   description?: string;
   /** Set from deployment configuration; shown read-only. */
   locked?: boolean;
+  /** The stored value is read at the next start of the server. */
+  requiresRestart?: boolean;
 }
 
 export interface SettingsResponse {
@@ -332,6 +353,25 @@ export interface PressureIndicators {
   advisory: boolean;
 }
 
+/** Renewal state of a certificate requested through ACME (GET /admin/certificates/acme). */
+export interface AcmeRenewal {
+  certificateName: string;
+  status: string;
+  lastAttemptAt?: string | null;
+  nextAttemptAt?: string | null;
+  failures?: number;
+  lastError?: string | null;
+}
+
+/** GET /admin/maintenance: the background storage maintenance. */
+export interface MaintenanceState {
+  running: boolean;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  error?: string | null;
+  reports: { job: string; durationMs: number; rowsAffected: number; detail?: string | null }[];
+}
+
 export interface AdminStatus {
   version: string;
   backend: string;
@@ -353,6 +393,7 @@ export type SwitchState =
   | 'fenced'
   | 'exporting'
   | 'importing'
+  | 'verifying'
   | 'verified'
   | 'confirmed'
   | 'active'

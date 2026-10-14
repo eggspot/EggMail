@@ -62,6 +62,10 @@ Defaults: SQLite backend in `Sqlite:DataDirectory` (default `/data`), SMTP on 55
 - Warnings are errors; nullable is on; file-scoped namespaces; no allocations on hot paths without a benchmark.
 - Every user-visible behavior that a decision names is covered by a test; update [decisions.md](decisions.md), [design.md](design.md) and [progress.md](progress.md) in the same pull request when implementation forces a change, marking it DESIGN-DECIDED with the reason.
 
+## Dashboard end-to-end tests
+
+`dashboard/e2e` drives Chromium against the real server with fake DNS, recipient SMTP and webhook receiver (`npm run e2e` in `dashboard/`, after `npx playwright install chromium`; needs the .NET SDK, `openssl`, and `psql` with `EGGMAIL_TEST_POSTGRES` or local PostgreSQL binaries for the storage switch specs). See [components/dashboard.md](components/dashboard.md#end-to-end-tests).
+
 ## Continuous integration
 
 `.github/workflows/ci.yml` builds and tests on Linux in one job with PostgreSQL 17 and Pebble (with its challenge test server) started by `docker run` before the tests, then checks the dashboard. Run `dotnet test EggMail.slnx` locally before pushing; without the environment variables above the PostgreSQL and ACME tests start a local cluster or are skipped. `release.yml` publishes the image and smoke-tests it ([release.md](release.md)); `bench-gate.yml` (weekly allocation gate) and `bench-throughput.yml` (manual) are described in [benchmarks.md](benchmarks.md). The deployment smoke tests in `deploy/smoke/` need Docker and are meant for Actions, but `deploy/smoke/smoke.py` runs against a locally started `mta serve` too (see its docstring).
