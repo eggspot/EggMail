@@ -52,6 +52,24 @@ public class EmailAddressTests
         Assert.Equal("xn--bcher-kva.example", a.Domain);
     }
 
+    [Theory]
+    [InlineData("user@example.org", false, false)]
+    [InlineData("user@bücher.example", true, false)]     // the domain is held as an A-label: plain ASCII on the wire
+    [InlineData("üser@example.org", true, true)]
+    [InlineData("üser@bücher.example", true, true)]
+    public void Only_a_non_ascii_local_part_requires_smtputf8(string mailbox, bool international, bool requiresSmtpUtf8)
+    {
+        var a = EmailAddress.Parse(mailbox);
+        Assert.Equal(international, a.IsInternational);
+        Assert.Equal(requiresSmtpUtf8, a.RequiresSmtpUtf8);
+        if (!requiresSmtpUtf8)
+        {
+            Assert.True(System.Text.Ascii.IsValid(a.ToString()));
+        }
+
+        Assert.False(EmailAddress.Null.RequiresSmtpUtf8);
+    }
+
     [Fact]
     public void Uuid7_ids_are_ordered_and_carry_time()
     {

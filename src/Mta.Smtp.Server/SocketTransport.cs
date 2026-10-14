@@ -139,6 +139,7 @@ internal sealed class SocketTransport : IAsyncDisposable
     /// still running would swallow the ClientHello (and the injection guard would then refuse the connection). Bytes present at this point
     /// were sent before the reply existed, so they are pipelined plaintext (CVE-2011-0411 family). Returns false in that case.
     /// </summary>
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<bool> StopPlaintextReadingAsync()
     {
         if (_input is null || _plaintextStopped)
@@ -188,6 +189,7 @@ internal sealed class SocketTransport : IAsyncDisposable
         return true;
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     public async ValueTask DisposeAsync()
     {
         if (_disposed)

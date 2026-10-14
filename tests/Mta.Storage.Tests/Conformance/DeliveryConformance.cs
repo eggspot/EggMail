@@ -22,6 +22,23 @@ public abstract class DeliveryConformance : StorageTestBase
     }
 
     [Fact]
+    public async Task Deliveries_due_at_the_same_instant_are_claimed_in_id_order_and_max_takes_the_first_ones()
+    {
+        // One recipient per message, all received at the same millisecond: the order is the order of the ids' text.
+        for (int i = 0; i < 25; i++)
+        {
+            await AcceptAsync(Msg(received: Start, to: [$"r{i}@example.org"]));
+        }
+
+        var first = await ClaimAsync(max: 7, now: Start.AddMinutes(1));
+        var rest = await ClaimAsync(max: 100, now: Start.AddMinutes(1));
+        Assert.Equal(7, first.Count);
+        Assert.Equal(18, rest.Count);
+        string[] ids = first.Concat(rest).Select(c => c.DeliveryId.ToString("D").ToUpperInvariant()).ToArray();
+        Assert.Equal(ids.OrderBy(x => x, StringComparer.Ordinal), ids);
+    }
+
+    [Fact]
     public async Task Claim_honours_max_and_returns_nothing_when_empty()
     {
         Assert.Empty(await ClaimAsync());

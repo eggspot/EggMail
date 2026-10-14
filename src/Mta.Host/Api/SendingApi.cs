@@ -441,7 +441,6 @@ public sealed class SendingApi(ApiAuthenticator auth, SubmissionService submissi
             Message = message.Raw,
             RemoteAddress = context.Connection.RemoteIpAddress?.ToString(),
             Authenticated = caller.Name,
-            SmtpUtf8 = message.SmtpUtf8,
             IdempotencyKey = idempotencyKey,
             IdempotencyFingerprint = idempotencyKey is null ? null : fingerprint,
             StoreAttachments = storeAttachmentsFlag,   // null: the submission service applies the tenant's setting, then the global default (design section 5)

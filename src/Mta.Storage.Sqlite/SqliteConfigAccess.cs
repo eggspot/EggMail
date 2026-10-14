@@ -25,6 +25,16 @@ internal sealed class SqliteConfigAccess(SqliteFile file, IStorageModelHooks hoo
 
     public ConfigDbContext CreateReadContext() => _readPool.CreateDbContext();
 
+    private static readonly Stmt SuppressedSql = new("SELECT 1 FROM suppression WHERE tenant_id = @t AND address = @a LIMIT 1", "@t", "@a");
+
+    /// <summary>The suppression check per recipient, on an open read connection with a prepared statement (about 15 KB less than the EF query).</summary>
+    public bool? TryIsSuppressed(Guid tenantId, string normalizedAddress)
+    {
+        using ReadLease lease = file.ReadSessions.Rent();
+        using RawReader row = lease.Session.Command(SuppressedSql).Set(0, tenantId).Set(1, normalizedAddress).ExecuteReader();
+        return row.Read();
+    }
+
     public ValueTask<T> WriteAsync<T>(Func<ConfigDbContext, T> work, CancellationToken cancellationToken) =>
         Writer.SubmitAsync((work, this), static (ctx, s) =>
         {

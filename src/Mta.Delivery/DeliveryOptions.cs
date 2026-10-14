@@ -66,8 +66,22 @@ public sealed class DeliveryOptions
     /// <summary>How long a signing key lookup is cached.</summary>
     public TimeSpan DkimCacheTtl { get; init; } = TimeSpan.FromMinutes(1);
 
+    /// <summary>
+    /// The address that receiving servers see for our connections, reported as <c>sending-mta-ip</c> in TLS-RPT reports (<c>Delivery:PublicSendingIp</c>).
+    /// Set it when the host is behind NAT or a proxy; when unset the connection's local address is reported only if it is a public address.
+    /// </summary>
+    public string? PublicSendingIp { get; init; }
+
+    /// <summary>Report private, loopback and link-local local addresses too. For tests and lab setups only; production reports must not carry them.</summary>
+    public bool ReportNonPublicSendingIp { get; init; }
+
     internal void Validate()
     {
+        if (!string.IsNullOrWhiteSpace(PublicSendingIp) && !System.Net.IPAddress.TryParse(PublicSendingIp, out _))
+        {
+            throw new ArgumentException("Delivery:PublicSendingIp is not an IP address.");
+        }
+
         ArgumentException.ThrowIfNullOrWhiteSpace(Owner);
         ArgumentOutOfRangeException.ThrowIfLessThan(MaxConcurrentGroups, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(ClaimBatchSize, 1);

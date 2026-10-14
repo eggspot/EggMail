@@ -219,7 +219,6 @@ public sealed class MessagesApi(ApiAuthenticator auth, IStorage storage, Submiss
             Message = raw,
             RemoteAddress = context.Connection.RemoteIpAddress?.ToString(),
             Authenticated = caller.Name,
-            SmtpUtf8 = from.IsInternational || recipients.Any(r => r.IsInternational),
             StoreAttachments = null,   // the tenant's choice (then the operator default) decides, as for any send: a resend must not override an opt-out
         }, ct).ConfigureAwait(false);
         if (!result.IsAccepted)
