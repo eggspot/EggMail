@@ -359,7 +359,7 @@ public sealed class SessionService
         CancellationToken ct = context.RequestAborted;
         string ip = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
         string userKey = "user:" + Mta.Storage.Model.ConfigMapping.NormalizeUserName(userName); // the lookup's normalization: padding cannot buy a fresh budget
-        if (_throttle.IsLockedOut(out TimeSpan retryAfter, ip, userKey))
+        if (await _throttle.CheckAsync(ct, ip, userKey).ConfigureAwait(false) is { } retryAfter)
         {
             throw ApiException.RateLimited("Too many failed sign-in attempts. Try again later.", retryAfter);
         }
@@ -385,11 +385,11 @@ public sealed class SessionService
 
         if (!ok)
         {
-            _throttle.RecordFailure(ip, userKey);
+            await _throttle.RecordFailureAsync(ct, ip, userKey).ConfigureAwait(false);
             throw ApiException.Unauthorized("Invalid user or password.");
         }
 
-        _throttle.RecordSuccess(userKey); // only the user's count: a valid account must not reset the address limit that guards password guessing elsewhere
+        await _throttle.RecordSuccessAsync(ct, userKey).ConfigureAwait(false); // only the user's count: a valid account must not reset the address limit that guards password guessing elsewhere
         if (PasswordHasher.NeedsRehash(user!.PasswordHash))
         {
             await config.UpsertDashboardUserAsync(user with { PasswordHash = PasswordHasher.Hash(password) }, ct).ConfigureAwait(false);

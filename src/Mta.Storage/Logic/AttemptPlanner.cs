@@ -11,7 +11,8 @@ public readonly record struct DeliveryRowInfo(
     string RecipientDomain,
     string? SendingDomain,
     MessageSource Source,
-    int Attempt);
+    int Attempt,
+    bool PossibleDuplicate = false);
 
 /// <summary>What an attempt does to the queue row.</summary>
 public enum QueueRowAction : byte
@@ -158,7 +159,10 @@ public static class AttemptPlanner
             counters.Add(new PlannedCounter(StatCounter.Complained, 1));
         }
 
-        if (attempt.PossibleDuplicate)
+        // The row's flag counts too: another replica may have claimed this delivery after this attempt's lease ran out (the claim sets the flag), so the message may
+        // have been sent twice although this attempt did not know.
+        bool possibleDuplicate = attempt.PossibleDuplicate || row.PossibleDuplicate;
+        if (possibleDuplicate)
         {
             events.Add(NewEvent(MessageEventType.PossibleDuplicate));
             ring.Add(NewRing(MessageEventType.PossibleDuplicate));
@@ -170,7 +174,7 @@ public static class AttemptPlanner
             IsFinal = isFinal,
             Delivered = delivered,
             Failed = failed,
-            SetPossibleDuplicate = attempt.PossibleDuplicate && !isFinal,
+            SetPossibleDuplicate = possibleDuplicate && !isFinal,
             Events = events,
             Counters = counters,
             Ring = ring,

@@ -472,7 +472,7 @@ internal sealed class MemoryDeliveries(MemoryState s) : IDeliveryStore
                 return default; // already final (duplicate report): nothing to do
             }
 
-            var info = new DeliveryRowInfo(row.Id, row.MessageId, row.TenantId, row.Recipient, row.RecipientDomain, row.SendingDomain, row.Source, row.Attempt);
+            var info = new DeliveryRowInfo(row.Id, row.MessageId, row.TenantId, row.Recipient, row.RecipientDomain, row.SendingDomain, row.Source, row.Attempt, row.PossibleDuplicate);
             AttemptPlan plan = AttemptPlanner.Plan(attempt, info);
             DateTimeOffset at = StorageTime.Normalize(attempt.At);
 

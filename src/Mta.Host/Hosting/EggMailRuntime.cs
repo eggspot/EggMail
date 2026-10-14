@@ -45,6 +45,12 @@ public sealed class EggMailRuntime : IAsyncDisposable
     public required RoutePlanner Routes { get; init; }
     public required SendingLimits Limits { get; init; }
     public AcmeRenewalService? Acme { get; init; }
+
+    /// <summary>The per-destination connection and rate limits of the delivery engine (shared among replicas through <see cref="ReplicaExchange"/>).</summary>
+    public required DestinationThrottle DestinationThrottle { get; init; }
+
+    /// <summary>Shares the destination ceilings and the learned back-off and circuit state with the other replicas; null when the storage has no replica coordination (SQLite).</summary>
+    public ReplicaStateExchange? ReplicaExchange { get; init; }
     public TlsReportSender? TlsReports { get; init; }
 
     /// <summary>Persists the sending counters (write-behind); loaded before the first delivery, flushed by <see cref="FlushRuntimeStateAsync"/>.</summary>
@@ -77,7 +83,8 @@ public sealed class EggMailRuntime : IAsyncDisposable
         var submission = new SubmissionService(
             storage, clock, new SenderPolicy(), storageOptions,
             new SubmissionOptions { MessageIdDomain = config.Hostname, MaxMessageBytes = config.Smtp.MaxMessageSize, MaxRecipients = config.Smtp.MaxRecipients });
-        var throttle = new AuthThrottle(clock);
+        // Several replicas on one database count failed logins together; SQLite (one process) and a store without coordination count in memory, which is exact there.
+        var throttle = new AuthThrottle(clock, shared: storage.Replicas, log: log);
 
         var bounces = new BounceProcessor(verp, storage.Config, storage.Stats, new StorageWebhookPublisher(storage), clock, log, history: storage.History);
         DeliveryEngine? engine = null;
@@ -116,12 +123,35 @@ public sealed class EggMailRuntime : IAsyncDisposable
         var mtaSts = new MtaStsPolicyStore(dns, new MtaStsPolicyFetcher(), clock: clock);
         var tls = new OutboundTlsPolicyResolver(mtaSts, new DaneTlsaLookup(dns));
         var pool = new SmtpConnectionPool(new SmtpClientOptions { HeloName = config.Delivery.HeloName ?? config.Hostname, PreferChunking = config.Delivery.PreferChunking }, clock);
-        var routes = new RoutePlanner(new RouteHealth(clock));
+        var routeHealth = new RouteHealth(clock);
+        var routes = new RoutePlanner(routeHealth);
         var sendingCounters = new InMemorySendingCounterStore();
         var limits = new SendingLimits(clock, sendingCounters, SendingConfigurator.OptionsFrom(config.Sending));
         // The current hour and day windows as they were before a restart: the caps and the warm-up must not start from zero again.
         var counterPersistence = new SendingCounterPersistence(sendingCounters, storage.Config, clock);
         await counterPersistence.LoadAsync(ct).ConfigureAwait(false);
+        var destinationThrottle = new DestinationThrottle(clock, new DestinationThrottleOptions
+        {
+            Defaults = new ThrottleLimits(config.Delivery.Throttle.MaxConnections, config.Delivery.Throttle.MaxMessagesPerMinute, config.Delivery.Throttle.MaxMessagesPerConnection),
+            InitialConcurrentConnections = config.Delivery.Throttle.InitialConnections,
+            InitialMessagesPerMinute = config.Delivery.Throttle.InitialMessagesPerMinute,
+        });
+        // Replicas on one database share the per-destination ceilings and tell each other what remote destinations did; takes part before this replica delivers anything.
+        ReplicaStateExchange? replicaExchange = storage.Replicas is { } coordination
+            ? new ReplicaStateExchange(coordination, deliveryOptions.Owner, clock, destinationThrottle, routeHealth, log: log)
+            : null;
+        if (replicaExchange is not null)
+        {
+            try
+            {
+                await replicaExchange.ExchangeAsync(ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                log.Write(MtaLogLevel.Warning, "replicas", "could not join the replica set at start; the periodic exchange will retry (the destination ceilings are not shared until it succeeds)", ex);
+            }
+        }
+
         var services = new DeliveryServices
         {
             Storage = storage,
@@ -131,12 +161,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
             TlsPolicies = new TlsPolicyTable(deliveryOptions.DefaultTls),
             Pool = pool,
             Routes = routes,
-            Throttle = new DestinationThrottle(clock, new DestinationThrottleOptions
-            {
-                Defaults = new ThrottleLimits(config.Delivery.Throttle.MaxConnections, config.Delivery.Throttle.MaxMessagesPerMinute, config.Delivery.Throttle.MaxMessagesPerConnection),
-                InitialConcurrentConnections = config.Delivery.Throttle.InitialConnections,
-                InitialMessagesPerMinute = config.Delivery.Throttle.InitialMessagesPerMinute,
-            }),
+            Throttle = destinationThrottle,
             Limits = limits,
             Retry = new RetrySchedule(BuildRetryOptions(config.Delivery)),
             Dkim = new ConfigDkimSignerProvider(storage.Config, secrets, clock, deliveryOptions.DkimCacheTtl),
@@ -171,7 +196,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
         {
             Config = config, Storage = storage, Clock = clock, Log = log, Secrets = secrets, Certificates = certificates, Verp = verp,
             Submission = submission, AuthThrottle = throttle, SmtpServer = smtp, Delivery = delivery, Webhooks = webhooks, Dns = dns,
-            Pool = pool, Routes = routes, Limits = limits, Acme = acme, TlsReports = reports,
+            Pool = pool, Routes = routes, Limits = limits, Acme = acme, TlsReports = reports, DestinationThrottle = destinationThrottle, ReplicaExchange = replicaExchange,
             CounterPersistence = counterPersistence, TlsJournal = tlsJournal, TlsCollector = collector,
         };
         runtime._owned.Add(certificateMeters);

@@ -57,7 +57,7 @@ public sealed class IngestHandler : ISmtpServerHandler
     {
         string ip = session.RemoteEndPoint.Address.ToString();
         string userKey = "user:" + userName.ToLowerInvariant();
-        if (_throttle.IsLockedOut(out _, ip, userKey))
+        if (await _throttle.CheckAsync(ct, ip, userKey).ConfigureAwait(false) is not null)
         {
             return SmtpAuthResult.Rejected(AuthUnavailable);
         }
@@ -87,11 +87,11 @@ public sealed class IngestHandler : ISmtpServerHandler
         var tenant = ok ? await _storage.Config.GetTenantAsync(credential!.TenantId, ct).ConfigureAwait(false) : null;
         if (tenant is not { Enabled: true })
         {
-            _throttle.RecordFailure(ip, userKey);
+            await _throttle.RecordFailureAsync(ct, ip, userKey).ConfigureAwait(false);
             return SmtpAuthResult.Failed;
         }
 
-        _throttle.RecordSuccess(ip, userKey);
+        await _throttle.RecordSuccessAsync(ct, ip, userKey).ConfigureAwait(false);
         session.HandlerState = new State { Tenant = tenant, RemoteAddress = ip };
         return SmtpAuthResult.Succeeded(credential!.UserName);
     }

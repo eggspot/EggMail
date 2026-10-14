@@ -20,6 +20,31 @@ internal sealed class SmtpListenerService(EggMailRuntime runtime) : IHostedServi
     public Task StopAsync(CancellationToken cancellationToken) => runtime.SmtpServer.StopAsync(TimeSpan.FromSeconds(20));
 }
 
+/// <summary>
+/// Exchanges state with the other replicas on the same database (live set, shares of the per-destination limits, slowdowns and open circuits learned from remote servers)
+/// every few seconds and leaves the replica set when the host stops, so the others take over this replica's share at once. Nothing to do without replica coordination.
+/// </summary>
+internal sealed class ReplicaExchangeService(EggMailRuntime runtime) : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        if (runtime.ReplicaExchange is { } exchange)
+        {
+            await exchange.RunAsync(stoppingToken).ConfigureAwait(false);
+        }
+    }
+
+    public override async Task StopAsync(CancellationToken cancellationToken)
+    {
+        await base.StopAsync(cancellationToken).ConfigureAwait(false);
+        if (runtime.ReplicaExchange is { } exchange)
+        {
+            using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await exchange.LeaveAsync(limit.Token).ConfigureAwait(false);
+        }
+    }
+}
+
 /// <summary>Runs the delivery engine.</summary>
 internal sealed class DeliveryService(EggMailRuntime runtime) : BackgroundService
 {
