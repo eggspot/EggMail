@@ -36,6 +36,13 @@ public interface IConfigDbAccess<TContext> where TContext : DbContext, IConfigDb
     /// it to every read and write). Return null to leave the exception alone; the default changes nothing.
     /// </summary>
     Exception? TranslateException(Exception exception) => null;
+
+    /// <summary>
+    /// Answers "is this (already normalized) address on the tenant's suppression list" without building an EF query, or returns null to let the
+    /// store run its normal query. The check runs once per recipient before every delivery, so a provider with a cheaper way (a prepared statement
+    /// on an open connection) supplies it here. The answer must be the same as the query's.
+    /// </summary>
+    bool? TryIsSuppressed(Guid tenantId, string normalizedAddress) => null;
 }
 
 /// <summary>
@@ -294,11 +301,27 @@ public sealed partial class EfConfigStore<TContext>(IConfigDbAccess<TContext> db
 
     // Suppressions
 
-    public async ValueTask<bool> IsSuppressedAsync(Guid tenantId, string address, CancellationToken ct)
+    public ValueTask<bool> IsSuppressedAsync(Guid tenantId, string address, CancellationToken ct)
     {
         string a = ConfigMapping.NormalizeAddress(address);
-        return await Read(c => c.Suppressions.AsNoTracking().Any(s => s.TenantId == tenantId && s.Address == a)).ConfigureAwait(false);
+        try
+        {
+            if (db.TryIsSuppressed(tenantId, a) is { } known)
+            {
+                return ValueTask.FromResult(known);
+            }
+        }
+        catch (Exception ex)
+        {
+            // Like the async version this replaced, a failure surfaces when the result is awaited, not when the method is called.
+            return ValueTask.FromException<bool>(db.TranslateException(ex) ?? ex);
+        }
+
+        return IsSuppressedByQueryAsync(tenantId, a);
     }
+
+    private async ValueTask<bool> IsSuppressedByQueryAsync(Guid tenantId, string normalizedAddress) =>
+        await Read(c => c.Suppressions.AsNoTracking().Any(s => s.TenantId == tenantId && s.Address == normalizedAddress)).ConfigureAwait(false);
 
     public async ValueTask AddSuppressionAsync(SuppressionRecord suppression, CancellationToken ct)
     {

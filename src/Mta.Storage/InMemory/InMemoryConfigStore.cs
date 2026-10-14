@@ -536,6 +536,23 @@ internal sealed partial class InMemoryConfigStore : IConfigStore
         }
     }
 
+    /// <summary>Whether <see cref="EndpointsFor"/> would find an endpoint, without building the list.</summary>
+    internal bool HasEndpointFor(Guid tenantId, string eventType)
+    {
+        lock (_gate)
+        {
+            foreach (var w in _endpoints.Values)
+            {
+                if (w.TenantId == tenantId && w.Enabled && WebhookSubscriptions.Matches(StorageJson.DeserializeStrings(w.EventTypesJson), eventType))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
     internal bool IsEnabledEndpointOf(Guid tenantId, Guid endpointId)
     {
         lock (_gate)

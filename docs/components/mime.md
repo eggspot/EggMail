@@ -16,9 +16,11 @@ All input is hostile. Every parser is bounded by `MimeLimits`, runs in time line
 | Dates | `MimeDate.Format` / `TryFormat` / `TryParse` |
 | Tree | `MimeMessage.Parse` -> `MimePart` (headers, content type, lazy `Body`, `Children`, `DecodeBodyTo`, `GetDecodedBytes`, `GetDecodedLength`, `GetText`) |
 | Transfer coding | `Base64Decoder`, `QuotedPrintableDecoder` (streaming, lenient), `BodyDecoder`, `TransferEncoder` (base64, quoted-printable, choice) |
-| History extraction | `MessageContentExtractor.Extract` -> `ExtractedContent`, `AttachmentInfo` |
+| 8BITMIME downgrade | `EightBitDowngrader.Downgrade` -> `EightBitDowngradeResult` (`NotNeeded`, `Downgraded`, `Impossible` + reason) |
+| History extraction | `MessageContentExtractor.Extract(bytes)` or `Extract(MimeMessage)` (on an already parsed message, with the limits it was parsed with) -> `ExtractedContent`, `AttachmentInfo` |
+| Sender check | `AddressList.GetCommonDomain(header, limits, out domain)` and `AddressList.GetCommonDomain(out domain)` -> `CommonDomainResult` (`NoValidMailbox`, `Single`, `MultipleDomains`); a single plain address is answered from the header bytes, anything else by the full parser (same result, tested differentially) |
 | Building | `MessageBuilder`, `MessageBuilderOptions`, `BuilderAttachment`, `HeaderPolicy`, `BuiltMessage`, `HeaderFolder`, `HeaderValidator` |
-| Editing raw bytes | `MessageHeaderEditor` (prepend, append, remove, replace, raw fields), `LineEndings.ToCrlf`, `MessageInspector` (`Inspect`, `HasUtf8Headers`, `HasEightBitBody`, `ContainsBareLf`, `ContainsBareCr`) |
+| Editing raw bytes | `MessageHeaderEditor` (prepend, append, remove, replace, raw fields, `PrependRawWithoutCopy` to reference a field instead of copying it), `LineEndings.ToCrlf`, `MessageInspector` (`Inspect`, `HasUtf8Headers`, `HasEightBitBody`, `ContainsBareLf`, `ContainsBareCr`) |
 | Receive checks | `MessageValidator.Validate` -> `MessageValidationResult` (`MessageIssue`, `MessageIssueCode`, `IssueSeverity`) |
 
 ### How other components use it
@@ -26,7 +28,21 @@ All input is hostile. Every parser is bounded by `MimeLimits`, runs in time line
 * **SMTP server**: `HeaderList.FindBodyOffset` for a cheap split, `MessageInspector.Inspect` (bare CR/LF, NUL, 8-bit, line lengths) to decide reject/normalize and 8BITMIME/SMTPUTF8 handling, `MessageValidator.Validate` for policy, `MessageHeaderEditor` to prepend `Return-Path`/`Received` without touching the body.
 * **DKIM**: `MimeHeader.Raw` (exact bytes, no final CRLF), `GetUnfoldedValueBytes()`, order preserved; duplicates are all present for bottom-up selection. `MessageHeaderEditor.PrependRaw` inserts the pre-folded `DKIM-Signature`.
 * **DMARC**: `AddressList.Parse(headers[From])` -> `Mailbox.Domain` (lower-case A-label), `MultipleFromWithoutSender` and `InvalidFrom` issues.
+* **Delivery**: `MessageInspector.HasValidUtf8Headers` / `HasEightBitBody` decide SMTPUTF8 and BODY=8BITMIME per transaction; `EightBitDowngrader` produces the 7-bit form for servers without 8BITMIME (the result is then DKIM-signed).
 * **HTTP API / history**: `MessageBuilder` (compose), `MessageContentExtractor` (subject, text, html, attachment index, truncation flags).
+
+## 8BITMIME downgrade
+
+`EightBitDowngrader.Downgrade(message, writer)` produces the 7-bit form of a message with an 8-bit body for a server that does not offer 8BITMIME (RFC 6152). It parses the MIME tree, re-encodes only the leaves that need it and copies every other byte unchanged (headers, boundaries, 7-bit parts), so the result differs from the input exactly where it has to.
+
+* **Leaf entities** with 8-bit bytes (labelled `8bit`, `binary`, or `7bit` while holding 8-bit bytes): `text/*` becomes quoted-printable when mostly ASCII and base64 otherwise (`TransferEncoder.ChooseForText`), anything else and `binary` become base64. The `Content-Transfer-Encoding` field is replaced (added if missing, duplicates dropped). At the message root, `MIME-Version: 1.0` is added when missing and, for a message with no `Content-Type` and a valid UTF-8 body, `Content-Type: text/plain; charset=utf-8`.
+* A `-` that a quoted-printable soft line break would put at the start of a line is written `=2D`: an encoder must not create a line that looks like a MIME delimiter (`--boundary`) out of text that was mid-line in the original (boundary forgery).
+* An embedded `message/rfc822` is a message of its own: when its headers lack `MIME-Version` it gets one (and, with no `Content-Type` and a valid UTF-8 body, `text/plain; charset=utf-8`), like the top-level message.
+* **Composite entities** are never encoded as a whole (RFC 2045 section 6.4): `multipart/*` and embedded `message/rfc822` keep their structure and are processed recursively; an `8bit`/`binary` label on them becomes `7bit`.
+* `message/global` and `message/global-*` (RFC 6532 section 3.7, RFC 6533: internationalized messages and delivery status reports) are encoded as a whole, as those RFCs allow. `MimePart` decodes such a part when it is quoted-printable or base64.
+* **Refused (`Impossible`, with a reason fit for a bounce message):** 8-bit bytes in the header fields of a nested part or of an embedded message (header downgrading, RFC 6857, is experimental and not implemented), in a preamble, epilogue or delimiter line; a part declaring quoted-printable, base64 or an unknown encoding that nevertheless holds 8-bit bytes; `message/*` types other than `rfc822` and `global*`; structure the parser had to keep opaque (no boundary, duplicate boundary, `MaxDepth`/`MaxParts` exceeded) while holding 8-bit bytes; header blocks beyond `MaxHeaderCount`/`MaxHeaderBytes`. A truncated multipart (no closing delimiter) is converted normally.
+* The headers of the message itself may hold UTF-8 (SMTPUTF8) and are left alone; only the transfer-encoding fields change.
+* Tests: structure and decoded content are compared with MimeKit (fixed corpus and random trees), plus the refusal cases.
 
 ## Limits (`MimeLimits`, all configurable; defaults)
 
@@ -43,7 +59,7 @@ All input is hostile. Every parser is bounded by `MimeLimits`, runs in time line
 | `MaxAddresses` | 1000 | `TooManyAddresses` |
 | `MaxBoundaryLength` | 200 | treated as a missing boundary |
 
-Worst-case materialized memory of a parse is bounded by the limits: a header record is 40 bytes, so at most `MaxParts` x `MaxHeaderCount` x 40 B = about 40 MB for the defaults, regardless of input size.
+Worst-case materialized memory of a parse is bounded by the limits: a header record is 32 bytes, so at most `MaxParts` x `MaxHeaderCount` x 32 B = about 32 MB for the defaults, regardless of input size.
 
 `MessageContentExtractor.Extract(raw, maxBodyBytes = 256 KiB)` limits each stored body to that many UTF-8 bytes (cut on a character boundary) and sets `TextTruncated` / `HtmlTruncated`; subjects are capped at 2048 chars. Decoded text has NUL removed (PostgreSQL text cannot hold it), subject and file names have control characters replaced.
 

@@ -131,13 +131,26 @@ public sealed class ContentType
         return Parse(value.AsSpan(), limits ?? MimeLimits.Default);
     }
 
+    /// <summary>Parses the value of a Content-Type header field; the same result as <c>Parse(header.GetValue(...))</c> without building the value string for the usual short ASCII value.</summary>
+    internal static ContentType ParseHeader(in MimeHeader header, MimeLimits limits)
+    {
+        Span<char> value = stackalloc char[256];
+        if (HeaderText.TryGetAsciiValue(header.RawValue.Span, value, out int length) && header.RawValue.Length <= limits.MaxHeaderValueBytes)
+        {
+            value = value[..length];
+            return value.IsWhiteSpace() ? Default : Parse(value, limits);
+        }
+
+        return Parse(header.GetValue(limits.MaxHeaderValueBytes), limits);
+    }
+
     /// <summary>Parses a Content-Type value.</summary>
     public static ContentType Parse(ReadOnlySpan<char> value, MimeLimits limits)
     {
         int pos = 0;
         var an = MimeAnomaly.None;
         FieldScanner.SkipCfws(value, ref pos);
-        string type = FieldScanner.ReadToken(value, ref pos);
+        string type = FieldScanner.ReadLowerToken(value, ref pos);
         FieldScanner.SkipCfws(value, ref pos);
         if (type.Length == 0 || pos >= value.Length || value[pos] != '/')
         {
@@ -146,14 +159,14 @@ public sealed class ContentType
 
         pos++;
         FieldScanner.SkipCfws(value, ref pos);
-        string subtype = FieldScanner.ReadToken(value, ref pos);
+        string subtype = FieldScanner.ReadLowerToken(value, ref pos);
         if (subtype.Length == 0 || type.Length > 127 || subtype.Length > 127)
         {
             return OctetStream;
         }
 
         var parameters = ParameterParser.Parse(value, pos, limits, ref an);
-        return new ContentType(type.ToLowerInvariant(), subtype.ToLowerInvariant(), parameters, an);
+        return new ContentType(type, subtype, parameters, an);
     }
 
     /// <summary>Returns "type/subtype" followed by the parameters, quoted and RFC 2231-encoded as needed (unfolded).</summary>
@@ -307,6 +320,40 @@ internal static class FieldScanner
         }
     }
 
+    private static readonly string[] CommonLowerTokens =
+    [
+        "text", "plain", "html", "multipart", "mixed", "alternative", "related", "report", "signed", "encrypted", "digest", "parallel",
+        "application", "octet-stream", "pdf", "json", "xml", "zip", "image", "png", "jpeg", "gif", "audio", "video", "message", "rfc822",
+        "delivery-status", "calendar", "csv", "pgp-signature", "pkcs7-signature", "pkcs7-mime", "disposition-notification", "mime",
+        "charset", "boundary", "name", "filename", "format", "delsp", "micalg", "protocol", "report-type", "type", "size", "method", "start",
+    ];
+
+    /// <summary>The lower-case form of the token at <paramref name="pos"/>, as a shared string for the names every message uses (no allocation) or a new string otherwise.</summary>
+    public static string ReadLowerToken(ReadOnlySpan<char> s, ref int pos)
+    {
+        int start = pos;
+        while (pos < s.Length && IsTokenChar(s[pos]))
+        {
+            pos++;
+        }
+
+        return LowerToken(s[start..pos]);
+    }
+
+    /// <summary>The lower-case form of <paramref name="token"/>: a shared string for the names every message uses, else a new string.</summary>
+    public static string LowerToken(ReadOnlySpan<char> token)
+    {
+        foreach (string known in CommonLowerTokens)
+        {
+            if (known.Length == token.Length && token.Equals(known, StringComparison.OrdinalIgnoreCase))
+            {
+                return known;
+            }
+        }
+
+        return token.ToString().ToLowerInvariant();
+    }
+
     public static string ReadToken(ReadOnlySpan<char> s, ref int pos)
     {
         int start = pos;
@@ -374,6 +421,10 @@ internal static class ParameterParser
         public string Value;
     }
 
+    // Parsing is synchronous and never re-enters itself, so one list per thread is reused instead of allocating one for every header.
+    [ThreadStatic]
+    private static List<Fragment>? t_fragments;
+
     public static ParameterList Parse(ReadOnlySpan<char> s, int pos, MimeLimits limits, ref MimeAnomaly an)
     {
         List<Fragment>? fragments = null;
@@ -422,7 +473,12 @@ internal static class ParameterParser
                         break;
                     }
 
-                    fragments ??= new List<Fragment>(4);
+                    if (fragments is null)
+                    {
+                        fragments = t_fragments ??= new List<Fragment>(8);
+                        fragments.Clear();
+                    }
+
                     fragments.Add(MakeFragment(rawName, value));
                 }
             }
@@ -432,7 +488,19 @@ internal static class ParameterParser
             }
         }
 
-        return fragments is null ? ParameterList.Empty : new ParameterList(Resolve(fragments, ref an));
+        if (fragments is null)
+        {
+            return ParameterList.Empty;
+        }
+
+        var list = new ParameterList(Resolve(fragments, ref an));
+        fragments.Clear();
+        if (fragments.Capacity > 64)
+        {
+            t_fragments = null;   // do not keep a large list alive after a hostile header
+        }
+
+        return list;
     }
 
     /// <summary>Reads up to the next semicolon; a parenthesis preceded by white space starts a comment, which is dropped.</summary>
@@ -458,11 +526,30 @@ internal static class ParameterParser
 
         if (sb is null)
         {
-            return s[start..pos].Trim().ToString();
+            return InternValue(s[start..pos].Trim());
         }
 
         sb.Append(s[copyFrom..pos]);
         return sb.ToString().Trim();
+    }
+
+    private static readonly string[] CommonValues = ["utf-8", "UTF-8", "us-ascii", "US-ASCII", "iso-8859-1", "ISO-8859-1", "windows-1252", "iso-8859-15", "flowed", "yes", "no"];
+
+    /// <summary>A shared string for the values nearly every message repeats (the same characters, so nothing changes for the caller), else a new string.</summary>
+    private static string InternValue(ReadOnlySpan<char> value)
+    {
+        if (value.Length is >= 2 and <= 12)
+        {
+            foreach (string known in CommonValues)
+            {
+                if (value.SequenceEqual(known))
+                {
+                    return known;
+                }
+            }
+        }
+
+        return value.ToString();
     }
 
     private static Fragment MakeFragment(ReadOnlySpan<char> rawName, string value)
@@ -471,7 +558,7 @@ internal static class ParameterParser
         int star = rawName.IndexOf('*');
         if (star <= 0)
         {
-            frag.Name = rawName.ToString().ToLowerInvariant();
+            frag.Name = FieldScanner.LowerToken(rawName);
             return frag;
         }
 
@@ -490,7 +577,7 @@ internal static class ParameterParser
             if (rest.Length > 3 || !int.TryParse(rest, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out index) || index > MaxContinuationIndex)
             {
                 // Not a valid section marker: keep the literal name.
-                frag.Name = rawName.ToString().ToLowerInvariant();
+                frag.Name = FieldScanner.LowerToken(rawName);
                 return frag;
             }
         }
@@ -500,7 +587,7 @@ internal static class ParameterParser
             extended = true;
         }
 
-        frag.Name = baseName.ToString().ToLowerInvariant();
+        frag.Name = FieldScanner.LowerToken(baseName);
         frag.Index = index;
         frag.Extended = extended;
         return frag;
@@ -508,8 +595,9 @@ internal static class ParameterParser
 
     private static MimeParameter[] Resolve(List<Fragment> fragments, ref MimeAnomaly an)
     {
-        var result = new List<MimeParameter>(fragments.Count);
-        var done = new bool[fragments.Count];
+        var result = new MimeParameter[fragments.Count];
+        int resultCount = 0;
+        Span<bool> done = fragments.Count <= 128 ? stackalloc bool[fragments.Count] : new bool[fragments.Count];
         for (int i = 0; i < fragments.Count; i++)
         {
             if (done[i])
@@ -547,14 +635,19 @@ internal static class ParameterParser
             {
                 string raw = fragments[simpleIndex].Value;
                 string v = raw.Contains("=?", StringComparison.Ordinal) ? Rfc2047.DecodeCore(raw, ref an) : raw;
-                result.Add(new MimeParameter(name, v));
+                result[resultCount++] = new MimeParameter(name, v);
                 continue;
             }
 
-            result.Add(ResolveSections(name, sections, ref an));
+            result[resultCount++] = ResolveSections(name, sections, ref an);
         }
 
-        return result.ToArray();
+        if (resultCount != result.Length)
+        {
+            Array.Resize(ref result, resultCount);
+        }
+
+        return result;
     }
 
     private static MimeParameter ResolveSections(string name, List<Fragment> sections, ref MimeAnomaly an)
