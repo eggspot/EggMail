@@ -1,0 +1,22 @@
+# EggMail with the PostgreSQL backend (the same image): a Deployment, no local state to protect. More than one replica is safe
+# (queue claims use SKIP LOCKED, maintenance is advisory-locked); sending caps and throttles are per process (docs/components/policy.md).
+#
+#   kubectl create namespace eggmail
+#   kubectl -n eggmail create secret generic eggmail-admin --from-literal=admin-password='a-long-admin-password'
+#   kubectl -n eggmail create secret generic eggmail-postgres \
+#     --from-literal=owner-connection-string='Host=pg.example;Database=eggmail;Username=eggmail_owner;Password=...;SSL Mode=Require' \
+#     --from-literal=runtime-connection-string='Host=pg.example;Database=eggmail;Username=eggmail_app;Password=...;SSL Mode=Require'
+#   kubectl apply -n eggmail -k deploy/kubernetes/postgres
+#
+# The database itself is not part of this overlay: use a managed PostgreSQL with HA (or your operator of choice).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../base
+  - deployment.yaml
+  - networkpolicy.yaml
+
+images:
+  - name: ghcr.io/eggspot/eggmail
+    newTag: nightly          # pin a minor line (for example 1.4) or use `digest:` once releases exist

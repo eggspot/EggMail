@@ -1,0 +1,63 @@
+# NetworkPolicy of docs/design.md section 7.1: only the enabled listener ports in, only the traffic a sender needs out.
+#
+# Notes
+#  - Kubelet probes (8080) come from the node and are not blocked by most CNIs; if yours blocks them, allow the node CIDR.
+#  - 8080 is plain HTTP for probes and in-cluster use: it is allowed from this namespace only. The ingress controller usually lives in
+#    another namespace: add a rule for it (or terminate TLS at 8443).
+#  - Egress: direct MX delivery (25), relay routes (465, 587, 2525), webhooks, MTA-STS policy fetch and ACME (443), DNS. Private, link-local
+#    (cloud metadata) and carrier-grade NAT ranges are excluded, which also backs up the application's SSRF guard. A relay in a private
+#    network, an OTLP collector or a database needs its own egress rule (see ../postgres/networkpolicy.yaml).
+#  - IPv4 only: add the equivalent ::/0 rules for an IPv6 cluster.
+#  - Enforced only by a CNI that implements NetworkPolicy (Calico, Cilium, ...).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: eggmail
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: eggmail
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # SMTP: submission, submissions, alternate submission, bounce listener. From anywhere (senders are on the Internet).
+    - ports:
+        - { protocol: TCP, port: 5587 }
+        - { protocol: TCP, port: 4465 }
+        - { protocol: TCP, port: 2525 }
+        - { protocol: TCP, port: 2526 }
+    # Dashboard and API over HTTPS.
+    - ports:
+        - { protocol: TCP, port: 8443 }
+    # Plain HTTP (probes, internal): this namespace only.
+    - from:
+        - podSelector: {}
+      ports:
+        - { protocol: TCP, port: 8080 }
+  egress:
+    # Cluster DNS.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    # Outbound mail and HTTPS to the Internet, but not to private or link-local ranges.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+              - 100.64.0.0/10
+      ports:
+        - { protocol: TCP, port: 25 }
+        - { protocol: TCP, port: 465 }
+        - { protocol: TCP, port: 587 }
+        - { protocol: TCP, port: 2525 }
+        - { protocol: TCP, port: 443 }

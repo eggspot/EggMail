@@ -1,0 +1,58 @@
+# EggMail with the default SQLite backend: one container, one volume at /data, one replica.
+#
+#   cp .env.example .env            # then edit EGGMAIL_HOSTNAME (and EGGMAIL_IMAGE to pin a version)
+#   mkdir -p secrets && printf '%s' 'a-long-admin-password' > secrets/admin_password.txt && chmod 644 secrets/admin_password.txt
+#   (644: the application runs as uid 1654 and Compose does not apply uid or mode to file secrets outside Swarm; the file is a bind mount of
+#   this one, so keep the secrets/ directory itself private to your user, mode 700, and out of version control)
+#   docker compose up -d
+#
+# The first start creates the administrator named in Dashboard__BootstrapAdminUser from the password file (only when no administrator
+# exists yet) and a self-signed certificate (replace it from the dashboard or with ACME). Docs: docs/release.md, docs/operations.md.
+#
+# The HEALTHCHECK uses the absolute path /app/mta: the chiseled image has no shell and /app is not on PATH, so ["CMD", "mta", ...]
+# would fail with "executable file not found in $PATH".
+name: eggmail
+
+services:
+  eggmail:
+    image: ${EGGMAIL_IMAGE:?set EGGMAIL_IMAGE, see .env.example}    # no default on purpose: there is no :latest before the first release; pin a minor line (:1.4) or a digest
+    hostname: ${EGGMAIL_HOSTNAME:?set EGGMAIL_HOSTNAME to the name in the PTR record of your sending IP}
+    restart: unless-stopped
+    stop_grace_period: 60s                  # running deliveries are given time to finish (docs/operations.md, graceful shutdown)
+    environment:
+      Hostname: ${EGGMAIL_HOSTNAME}
+      Dashboard__BootstrapAdminUser: ${EGGMAIL_ADMIN_USER:-admin}
+      Dashboard__BootstrapAdminPasswordFile: /run/secrets/eggmail_admin_password
+      # Sqlite__SyncMode: Normal              # Off (the default) survives a process kill, not power loss: see docs/operations.md
+      # Delivery__BounceDomain: bounces.example.com
+    ports:
+      - "587:5587"                          # submission (STARTTLS)
+      - "465:4465"                          # submissions (implicit TLS)
+      - "2525:2525"                         # alternate submission (STARTTLS)
+      - "8443:8443"                         # dashboard and API (HTTPS)
+      - "127.0.0.1:8080:8080"               # HTTP probes and first setup, loopback of the Docker host only
+      # - "25:2526"                         # bounce listener: needs an MX record for Delivery__BounceDomain pointing here
+    volumes:
+      - eggmail-data:/data                  # SQLite files, backups, bootstrap file: a local volume only, never network storage
+    secrets:
+      - eggmail_admin_password
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "/app/mta", "--healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+      start_interval: 2s                    # check often while starting so `docker compose up --wait` returns quickly
+
+secrets:
+  eggmail_admin_password:
+    file: ./secrets/admin_password.txt      # must be readable by uid 1654 (chmod 644): Compose does not apply uid/mode to file secrets
+
+volumes:
+  eggmail-data:

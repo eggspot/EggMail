@@ -20,7 +20,7 @@ using Mta.Storage.Sqlite;
 //   dotnet run -c Release --project bench/Mta.Bench.Pipeline -- --sync off --messages 50000 --connections 32 --size 2048
 //   options: --backend sqlite|postgres (postgres needs EGGMAIL_BENCH_POSTGRES=<connection string of an empty database>)
 //            --sync off|normal|full   --history full|statsonly   --messages N   --connections N   --size BYTES   --rcpt N
-//            --micro true [--only TEXT] [--alloc-profile true]: per-step allocation of the ingest path;  --micro-delivery true: per-step allocation of the delivery path;  --sink-only true: the SMTP server alone
+//            --micro true [--only TEXT] [--alloc-profile true] [--json FILE (byte counts, read by the CI allocation gate)]: per-step allocation of the ingest path;  --micro-delivery true: per-step allocation of the delivery path;  --sink-only true: the SMTP server alone
 //            --tls true|false (default true: STARTTLS; false measures the server without TLS)   --deliver true|false (default true: also drain the queue to the sink)   --split true (start delivery after ingest so each phase is measured alone)   --label TEXT   --json out.json
 var opt = Args.Parse(args);
 if (opt.Get("micro-delivery", "false") == "true")
@@ -31,7 +31,7 @@ if (opt.Get("micro-delivery", "false") == "true")
 
 if (opt.Get("micro", "false") == "true")
 {
-    await Micro.RunAsync(opt.Get("alloc-profile", "false") == "true", opt.Get("only", ""));
+    await Micro.RunAsync(opt.Get("alloc-profile", "false") == "true", opt.Get("only", ""), opt.Get("json", ""));
     return 0;
 }
 
@@ -131,7 +131,7 @@ if (deliver && !split)
     engine = Task.Run(() => runtime.Delivery.RunAsync(stop.Token));
 }
 
-string tools = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "src", "Mta.Tools", "bin", "Release", "net10.0", "mta-tools.dll"));
+string tools = Environment.GetEnvironmentVariable("EGGMAIL_BENCH_TOOLS") ?? Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "src", "Mta.Tools", "bin", "Release", "net10.0", "mta-tools.dll"));
 if (!File.Exists(tools))
 {
     Console.Error.WriteLine("Build the load generator first: dotnet build -c Release src/Mta.Tools   (expected " + tools + ")");
@@ -353,7 +353,9 @@ internal static class Micro
 
     private static bool Wanted(string name) => _only.Length == 0 || name.Contains(_only, StringComparison.OrdinalIgnoreCase);
 
-    public static async Task RunAsync(bool profile, string only = "")
+    private static readonly Dictionary<string, long> Results = new(StringComparer.Ordinal);
+
+    public static async Task RunAsync(bool profile, string only = "", string jsonPath = "")
     {
         _only = only;
         using var allocProfile = profile ? new AllocationSampler() : null;
@@ -418,6 +420,11 @@ internal static class Micro
             try { Directory.Delete(dir, recursive: true); } catch (IOException) { }
         }
 
+        if (jsonPath.Length > 0)
+        {
+            // Read by bench/compare-allocations.py (the allocation gate).
+            File.WriteAllText(jsonPath, JsonSerializer.Serialize(new { Kind = "micro", BytesPerOperation = Results }, new JsonSerializerOptions { WriteIndented = true }));
+        }
     }
 
     private static void Measure(string name, Action action)
@@ -440,6 +447,7 @@ internal static class Micro
             bytes = (GC.GetAllocatedBytesForCurrentThread() - before) / n;
         }
 
+        Results[name] = bytes;
         Console.WriteLine($"{name,-80} {bytes,8} B/op {best,8:F2} us/op");
     }
 
@@ -470,6 +478,7 @@ internal static class Micro
             bytes = (GC.GetTotalAllocatedBytes(precise: true) - before) / (callers * each);
         }
 
+        Results[name] = bytes;
         Console.WriteLine($"{name,-80} {bytes,8} B/op {best,8:F2} us/op (wall time per message)");
         _sampler?.Print(14);
     }
@@ -496,6 +505,7 @@ internal static class Micro
             bytes = (GC.GetTotalAllocatedBytes(precise: true) - before) / n;
         }
 
+        Results[name] = bytes;
         Console.WriteLine($"{name,-80} {bytes,8} B/op {best,8:F2} us/op");
         _sampler?.Print(14);
     }

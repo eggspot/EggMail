@@ -1,0 +1,6 @@
+# Override for the NON-durable Postfix result: the queue directory lives on RAM, so nothing is fsynced to a disk.
+# docker compose -f compose.yaml -f compose.postfix-tmpfs.yaml --profile postfix up -d --build
+services:
+  postfix:
+    tmpfs:
+      - /var/spool/postfix:mode=755

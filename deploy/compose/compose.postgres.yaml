@@ -1,0 +1,83 @@
+# EggMail with the PostgreSQL backend (the same image; the backend is selected by configuration).
+#
+#   cp .env.example .env            # then edit EGGMAIL_HOSTNAME, EGGMAIL_DB_PASSWORD (and EGGMAIL_IMAGE)
+#   mkdir -p secrets && printf '%s' 'a-long-admin-password' > secrets/admin_password.txt && chmod 644 secrets/admin_password.txt
+#   (644: the application runs as uid 1654 and Compose does not apply uid or mode to file secrets outside Swarm; keep the secrets/
+#   directory itself private to your user, mode 700, and out of version control)
+#   docker compose -f compose.postgres.yaml up -d
+#
+# This example uses one database role for the schema owner and the runtime role to stay short. The design calls for a schema-owner role
+# (migrations, partitions) and a least-privilege runtime role (docs/design.md section 4.3), and for managed PostgreSQL with HA in
+# production: point Storage__Postgres__* at it and drop the postgres service. EGGMAIL_DB_PASSWORD is placed inside a connection string,
+# so use letters and digits (or quote special characters the Npgsql way). More than one eggmail replica is safe on PostgreSQL.
+name: eggmail-postgres
+
+services:
+  postgres:
+    image: postgres:17.11     # a minor release is pinned; bump it deliberately (the 17 line gets security fixes in new minors)
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      POSTGRES_USER: eggmail
+      POSTGRES_PASSWORD: ${EGGMAIL_DB_PASSWORD:?set EGGMAIL_DB_PASSWORD}
+      POSTGRES_DB: eggmail
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eggmail -d eggmail"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+      start_interval: 2s
+
+  eggmail:
+    image: ${EGGMAIL_IMAGE:?set EGGMAIL_IMAGE, see .env.example}    # no default on purpose: there is no :latest before the first release; pin a minor line (:1.4) or a digest
+    hostname: ${EGGMAIL_HOSTNAME:?set EGGMAIL_HOSTNAME to the name in the PTR record of your sending IP}
+    restart: unless-stopped
+    stop_grace_period: 60s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      Hostname: ${EGGMAIL_HOSTNAME}
+      Storage__Backend: Postgres
+      Storage__Postgres__OwnerConnectionString: "Host=postgres;Database=eggmail;Username=eggmail;Password=${EGGMAIL_DB_PASSWORD}"
+      Storage__Postgres__RuntimeConnectionString: "Host=postgres;Database=eggmail;Username=eggmail;Password=${EGGMAIL_DB_PASSWORD}"
+      Mail__Database__Migrate: Auto        # Never = the serving process does not migrate; run `mta migrate-db` instead
+      Dashboard__BootstrapAdminUser: ${EGGMAIL_ADMIN_USER:-admin}
+      Dashboard__BootstrapAdminPasswordFile: /run/secrets/eggmail_admin_password
+      # Delivery__BounceDomain: bounces.example.com
+    ports:
+      - "587:5587"
+      - "465:4465"
+      - "2525:2525"
+      - "8443:8443"
+      - "127.0.0.1:8080:8080"
+      # - "25:2526"
+    volumes:
+      - eggmail-data:/data                  # bootstrap file and quarantined files; the queue and history live in PostgreSQL
+    secrets:
+      - eggmail_admin_password
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "/app/mta", "--healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+      start_interval: 2s
+
+secrets:
+  eggmail_admin_password:
+    file: ./secrets/admin_password.txt
+
+volumes:
+  pgdata:
+  eggmail-data:
