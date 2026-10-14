@@ -53,7 +53,7 @@ If STARTTLS is not offered or the handshake fails: `d.AllowsPlaintextFallback` s
 
 ### Configured level
 
-`OutboundTlsConfiguration.Level` (per domain; default `May`):
+`OutboundTlsConfiguration.Level` (per domain; default `May`). In the server the per-domain levels are the TLS policies an administrator manages through the API and the dashboard (`/api/v1/admin/tls-policies`, [../api.md](../api.md#relay-routes-and-tls-policies-role-admin-addition); `TlsPolicyTable` maps a recipient domain to the most specific pattern); `EnableMtaSts`, `EnableDane` and `RequireDane` are not per-domain settings there and stay at their defaults:
 
 | Level | Meaning |
 |---|---|

@@ -220,6 +220,7 @@ public sealed partial class RoutingAdminApi(
         CancellationToken ct = context.RequestAborted;
         CreateRelayRouteRequest body = await ApiJson.ReadBodyAsync<CreateRelayRouteRequest>(context, options.MaxBodyBytes).ConfigureAwait(false);
         var errors = new ValidationErrors();
+        body.UserName = string.IsNullOrWhiteSpace(body.UserName) ? null : body.UserName.Trim();
         var existing = await Config.GetRelayRoutesAsync(ct).ConfigureAwait(false);
         if (existing.Count >= MaxRelayRoutes)
         {
@@ -249,6 +250,16 @@ public sealed partial class RoutingAdminApi(
         RelayRouteRecord current = await FindRouteAsync(id, ct).ConfigureAwait(false);
         UpdateRelayRouteRequest body = await ApiJson.ReadBodyAsync<UpdateRelayRouteRequest>(context, options.MaxBodyBytes).ConfigureAwait(false);
         var errors = new ValidationErrors();
+        if (body.UserName is not null)
+        {
+            body.UserName = body.UserName.Trim();
+            if (body.UserName.Length == 0)
+            {
+                errors.Add("userName", "Cannot be empty; use removeCredentials to remove the credentials.");
+                body.UserName = null;
+            }
+        }
+
         var existing = await Config.GetRelayRoutesAsync(ct).ConfigureAwait(false);
 
         string tlsMode = body.TlsMode is null ? current.TlsMode.ToLowerInvariant() : ValidTlsMode(body.TlsMode, errors);

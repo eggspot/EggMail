@@ -138,6 +138,11 @@ public class ApiRoutingAdminTests : IAsyncLifetime
         (await _admin.PostAsync("/api/v1/admin/relay-routes", new { name = "nouser", host = "smtp.x.example", password = "p", domains = new[] { "a.example" } })).Problem(HttpStatusCode.BadRequest, "validation_failed");
         (await _admin.PostAsync("/api/v1/admin/relay-routes", new { name = "nopass", host = "smtp.x.example", userName = "u", domains = new[] { "a.example" } })).Problem(HttpStatusCode.BadRequest, "validation_failed");
         (await _admin.PatchAsync("/api/v1/admin/relay-routes/" + id, new { removeCredentials = true, userName = "u" })).Problem(HttpStatusCode.BadRequest, "validation_failed");
+        Reply blank = await _admin.PatchAsync("/api/v1/admin/relay-routes/" + id, new { userName = "   " });
+        blank.Problem(HttpStatusCode.BadRequest, "validation_failed");
+        Assert.Equal(["userName"], blank.ErrorFields);
+        // A blank user name on create means no credentials, and a stray password is then refused.
+        Assert.Null((await _admin.PostAsync("/api/v1/admin/relay-routes", new { name = "blank-user", host = "h.example", userName = " ", domains = new[] { "a.example" } })).Json.GetProperty("userName").GetString());
     }
 
     [Theory]
