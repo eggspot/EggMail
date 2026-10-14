@@ -71,6 +71,29 @@ public interface IDeliveryStore
 
     /// <summary>Expires deliveries older than their <c>ExpiresAt</c> that are not leased; returns the claimed rows to bounce.</summary>
     ValueTask<IReadOnlyList<ClaimedDelivery>> ClaimExpiredAsync(string owner, int max, DateTimeOffset now, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Cancels the pending deliveries of one message of <paramref name="tenantId"/> (decision 80). Atomic per delivery and serialized with
+    /// <see cref="ClaimAsync"/> and <see cref="RecordAttemptAsync"/>: a delivery that is not leased at <paramref name="now"/> is finished as
+    /// <see cref="DeliveryOutcome.Cancelled"/> exactly like a recorded attempt (row deleted, <c>cancelled</c> event and message status under
+    /// <see cref="HistoryMode.Full"/>, spool freed with the last recipient, no statistic counter, no webhook event, no bounce) and is never claimed again;
+    /// a delivery that is leased (a worker is, or may be, mid-transaction) is left untouched and reported as in flight, so cancelling can never race
+    /// a transmission. <paramref name="recipients"/> null cancels every pending recipient; otherwise only the listed addresses (compared case-insensitively).
+    /// A message of another tenant is indistinguishable from an unknown one (every list empty). Throws <see cref="StorageFencedException"/> while a
+    /// backend switch holds the queue.
+    /// </summary>
+    ValueTask<CancelResult> CancelAsync(Guid tenantId, Guid messageId, IReadOnlyList<string>? recipients, DateTimeOffset now, CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// What <see cref="IDeliveryStore.CancelAsync"/> did. <see cref="Cancelled"/> are the recipients finished as cancelled, <see cref="InFlight"/> the pending
+/// recipients that were leased and so left alone, <see cref="NotPending"/> the requested addresses with no pending delivery (already finished, or not a
+/// recipient of the message); the last is always empty when every recipient was requested. Addresses are the stored recipient text, except
+/// <see cref="NotPending"/>, which echoes the request.
+/// </summary>
+public sealed record CancelResult(IReadOnlyList<string> Cancelled, IReadOnlyList<string> InFlight, IReadOnlyList<string> NotPending)
+{
+    public static CancelResult None { get; } = new([], [], []);
 }
 
 public sealed record QueueStats(long Queued, long Leased, long Deferred, DateTimeOffset? OldestDueAt, long SpoolBytes);

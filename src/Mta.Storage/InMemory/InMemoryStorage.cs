@@ -470,103 +470,127 @@ internal sealed class MemoryDeliveries(MemoryState s) : IDeliveryStore
                 return default; // already final (duplicate report): nothing to do
             }
 
-            var info = new DeliveryRowInfo(row.Id, row.MessageId, row.TenantId, row.Recipient, row.RecipientDomain, row.SendingDomain, row.Source, row.Attempt);
-            AttemptPlan plan = AttemptPlanner.Plan(attempt, info);
-            DateTimeOffset at = StorageTime.Normalize(attempt.At);
-
-            // 1. suppression first (a crash after this and before step 2 only means the next try bounces again)
-            if (attempt.Suppress is { } reason)
-            {
-                s.Config.AddSuppressionCore(new SuppressionRecord(row.TenantId, row.Recipient, reason, AttemptPlanner.DescribeError(attempt) ?? "delivery", at, row.MessageId));
-            }
-
-            // 2. queue row
-            switch (plan.Action)
-            {
-                case QueueRowAction.Complete:
-                    s.Deliveries.Remove(row.Id);
-                    break;
-                case QueueRowAction.Reschedule:
-                    if (plan.CountAttempt)
-                    {
-                        row.Attempt++;
-                        row.LastError = plan.LastError;
-                    }
-
-                    row.DueAt = plan.NextAttemptAt!.Value;
-                    Unlease(row, plan);
-                    break;
-                default:
-                    Unlease(row, plan);
-                    break;
-            }
-
-            // 3. webhook outbox rows (same commit as the completion)
-            foreach (WebhookEventDraft draft in plan.CountAttempt ? attempt.WebhookEvents : [])
-            {
-                foreach (Guid endpointId in s.Config.EndpointsFor(row.TenantId, draft.EventType))
-                {
-                    Guid id = Ids.New(at);
-                    s.Outbox[id] = new WebhookOutboxEntity
-                    {
-                        Id = id,
-                        EndpointId = endpointId,
-                        TenantId = row.TenantId,
-                        EventType = draft.EventType,
-                        EventId = draft.EventId,
-                        PayloadJson = draft.PayloadJson,
-                        NextAttemptAt = at,
-                        State = WebhookOutboxState.Pending,
-                        LeaseUntil = StorageTime.Epoch,
-                        CreatedAt = at,
-                    };
-                }
-            }
-
-            // 4. spool and retained raw
-            bool lastRecipient = false;
-            if (plan.IsFinal && s.Spool.TryGetValue(row.MessageId, out var spool))
-            {
-                spool.PendingRecipients--;
-                lastRecipient = spool.PendingRecipients <= 0;
-                if (lastRecipient)
-                {
-                    if (spool.RetainRaw && s.IsFull)
-                    {
-                        s.RetainedRaw[row.MessageId] = new RetainedRawEntity
-                        {
-                            Day = StorageTime.DayNumber(row.MessageId),
-                            MessageId = row.MessageId,
-                            TenantId = row.TenantId,
-                            Raw = spool.Raw,
-                            RetainedAt = at,
-                        };
-                    }
-
-                    s.Spool.Remove(row.MessageId);
-                }
-            }
-
-            // 5. history events and index
-            if (s.IsFull && plan.Events.Count > 0)
-            {
-                RecordHistory(plan, row.MessageId, row.TenantId, lastRecipient && s.RetainedRaw.ContainsKey(row.MessageId));
-            }
-
-            // 6. statistics and the ring
-            DateTimeOffset hour = StorageTime.HourStart(at);
-            foreach (PlannedCounter c in plan.Counters)
-            {
-                s.Aggregator.Add(new StatKey(hour, row.TenantId, row.SendingDomain ?? "", row.RecipientDomain), c.Counter, c.Count);
-            }
-
-            foreach (RecentEvent e in plan.Ring)
-            {
-                s.Aggregator.AddRecent(e);
-            }
+            ApplyAttempt(row, attempt);
         }
 
         return default;
+    }
+
+    public ValueTask<CancelResult> CancelAsync(Guid tenantId, Guid messageId, IReadOnlyList<string>? recipients, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        s.Fence.ThrowIfClosed();
+        now = StorageTime.Normalize(now);
+        lock (s.Gate)
+        {
+            var pending = s.Deliveries.Values.Where(d => d.MessageId == messageId && d.TenantId == tenantId)
+                .Select(d => new PendingDelivery(d.Id, d.Recipient, d.TransferSwitchId is not null || d.LeaseUntil > now)).ToList();
+            CancelSelection selection = CancelPlanner.Select(pending, recipients);
+            foreach (PendingDelivery d in selection.Cancel)
+            {
+                ApplyAttempt(s.Deliveries[d.DeliveryId], CancelPlanner.AttemptFor(d.DeliveryId, now));
+            }
+
+            return ValueTask.FromResult(CancelPlanner.ResultOf(selection));
+        }
+    }
+
+    /// <summary>The consequences of one attempt on a delivery row, under the state lock.</summary>
+    private void ApplyAttempt(QueuedDeliveryEntity row, DeliveryAttempt attempt)
+    {
+        var info = new DeliveryRowInfo(row.Id, row.MessageId, row.TenantId, row.Recipient, row.RecipientDomain, row.SendingDomain, row.Source, row.Attempt);
+        AttemptPlan plan = AttemptPlanner.Plan(attempt, info);
+        DateTimeOffset at = StorageTime.Normalize(attempt.At);
+
+        // 1. suppression first (a crash after this and before step 2 only means the next try bounces again)
+        if (attempt.Suppress is { } reason)
+        {
+            s.Config.AddSuppressionCore(new SuppressionRecord(row.TenantId, row.Recipient, reason, AttemptPlanner.DescribeError(attempt) ?? "delivery", at, row.MessageId));
+        }
+
+        // 2. queue row
+        switch (plan.Action)
+        {
+            case QueueRowAction.Complete:
+                s.Deliveries.Remove(row.Id);
+                break;
+            case QueueRowAction.Reschedule:
+                if (plan.CountAttempt)
+                {
+                    row.Attempt++;
+                    row.LastError = plan.LastError;
+                }
+
+                row.DueAt = plan.NextAttemptAt!.Value;
+                Unlease(row, plan);
+                break;
+            default:
+                Unlease(row, plan);
+                break;
+        }
+
+        // 3. webhook outbox rows (same commit as the completion)
+        foreach (WebhookEventDraft draft in plan.CountAttempt ? attempt.WebhookEvents : [])
+        {
+            foreach (Guid endpointId in s.Config.EndpointsFor(row.TenantId, draft.EventType))
+            {
+                Guid id = Ids.New(at);
+                s.Outbox[id] = new WebhookOutboxEntity
+                {
+                    Id = id,
+                    EndpointId = endpointId,
+                    TenantId = row.TenantId,
+                    EventType = draft.EventType,
+                    EventId = draft.EventId,
+                    PayloadJson = draft.PayloadJson,
+                    NextAttemptAt = at,
+                    State = WebhookOutboxState.Pending,
+                    LeaseUntil = StorageTime.Epoch,
+                    CreatedAt = at,
+                };
+            }
+        }
+
+        // 4. spool and retained raw
+        bool lastRecipient = false;
+        if (plan.IsFinal && s.Spool.TryGetValue(row.MessageId, out var spool))
+        {
+            spool.PendingRecipients--;
+            lastRecipient = spool.PendingRecipients <= 0;
+            if (lastRecipient)
+            {
+                if (spool.RetainRaw && s.IsFull)
+                {
+                    s.RetainedRaw[row.MessageId] = new RetainedRawEntity
+                    {
+                        Day = StorageTime.DayNumber(row.MessageId),
+                        MessageId = row.MessageId,
+                        TenantId = row.TenantId,
+                        Raw = spool.Raw,
+                        RetainedAt = at,
+                    };
+                }
+
+                s.Spool.Remove(row.MessageId);
+            }
+        }
+
+        // 5. history events and index
+        if (s.IsFull && plan.Events.Count > 0)
+        {
+            RecordHistory(plan, row.MessageId, row.TenantId, lastRecipient && s.RetainedRaw.ContainsKey(row.MessageId));
+        }
+
+        // 6. statistics and the ring
+        DateTimeOffset hour = StorageTime.HourStart(at);
+        foreach (PlannedCounter c in plan.Counters)
+        {
+            s.Aggregator.Add(new StatKey(hour, row.TenantId, row.SendingDomain ?? "", row.RecipientDomain), c.Counter, c.Count);
+        }
+
+        foreach (RecentEvent e in plan.Ring)
+        {
+            s.Aggregator.AddRecent(e);
+        }
     }
 
     private static void Unlease(QueuedDeliveryEntity row, AttemptPlan plan)

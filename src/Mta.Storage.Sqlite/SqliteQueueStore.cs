@@ -45,6 +45,10 @@ internal static class QueueSql
         "SELECT message_id, tenant_id, recipient, recipient_domain, sending_domain, source, attempt FROM delivery_queue WHERE id = @id",
         "@id");
 
+    public static readonly Stmt CancelRows = new(
+        "SELECT id, recipient, recipient_domain, sending_domain, source, attempt, lease_until, transfer_switch_id FROM delivery_queue WHERE message_id = @m AND tenant_id = @t",
+        "@m", "@t");
+
     public static readonly Stmt DeliveryDelete = new("DELETE FROM delivery_queue WHERE id = @id", "@id");
 
     public static readonly Stmt DeliveryReschedule = new(
@@ -474,35 +478,113 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
             }
         }
 
-        bool needsRetention = false;
-        if (plan.IsFinal)
-        {
-            int pending = 1;
-            bool retain = false;
-            using (RawReader r = ctx.Command(QueueSql.SpoolDecrement).Set(0, row.MessageId).ExecuteReader())
-            {
-                if (r.Read())
-                {
-                    pending = r.GetInt32(0);
-                    retain = r.GetFlag(1);
-                }
-            }
+        bool needsRetention = plan.IsFinal && FreeSpoolIfLast(ctx, row.MessageId, s.Full);
 
-            if (pending <= 0)
+        return new AttemptOutcome(true, row, plan, needsRetention);
+    };
+
+    /// <summary>Counts one recipient of the message as final; with the last one, deletes the spool row (or marks it for the move of the raw message to history). True when the raw message must be retained.</summary>
+    private static bool FreeSpoolIfLast(WriterContext ctx, Guid messageId, bool full)
+    {
+        int pending = 1;
+        bool retain = false;
+        using (RawReader r = ctx.Command(QueueSql.SpoolDecrement).Set(0, messageId).ExecuteReader())
+        {
+            if (r.Read())
             {
-                if (retain && s.Full)
-                {
-                    ctx.Command(QueueSql.SpoolAwaitRetention).Set(0, row.MessageId).ExecuteNonQuery();
-                    needsRetention = true;
-                }
-                else
-                {
-                    ctx.Command(QueueSql.SpoolDelete).Set(0, row.MessageId).ExecuteNonQuery();
-                }
+                pending = r.GetInt32(0);
+                retain = r.GetFlag(1);
             }
         }
 
-        return new AttemptOutcome(true, row, plan, needsRetention);
+        if (pending > 0)
+        {
+            return false;
+        }
+
+        if (retain && full)
+        {
+            ctx.Command(QueueSql.SpoolAwaitRetention).Set(0, messageId).ExecuteNonQuery();
+            return true;
+        }
+
+        ctx.Command(QueueSql.SpoolDelete).Set(0, messageId).ExecuteNonQuery();
+        return false;
+    }
+
+    // Cancelling (decision 80)
+
+    private readonly record struct CancelState(Guid Tenant, Guid Message, IReadOnlyList<string>? Recipients, long NowMs, DateTimeOffset Now, bool Full);
+
+    private readonly record struct CancelledDelivery(DeliveryRowInfo Row, AttemptPlan Plan, bool NeedsRetention);
+
+    private sealed record CancelOutcome(CancelResult Result, List<CancelledDelivery> Done);
+
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
+    public async ValueTask<CancelResult> CancelAsync(Guid tenantId, Guid messageId, IReadOnlyList<string>? recipients, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        rt.Fence.ThrowIfClosed();
+        now = StorageTime.Normalize(now);
+        CancelOutcome outcome = await rt.QueueWriter.SubmitAsync(new CancelState(tenantId, messageId, recipients, StorageTime.ToUnixMs(now), now, rt.IsFull), CancelCommand, cancellationToken).ConfigureAwait(false);
+
+        // The queue rows are final; the rest is the same as after a recorded attempt (steps 3 to 5 of RecordAttemptAsync). The writer ran one
+        // transaction for all rows, so a claim cannot interleave: a row that was leased a moment later is simply not in the list.
+        foreach (CancelledDelivery done in outcome.Done)
+        {
+            bool rawRetained = false;
+            if (done.NeedsRetention)
+            {
+                rawRetained = await RetainAndFreeSpoolAsync(done.Row.MessageId, done.Row.TenantId, now, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (rt.IsFull)
+            {
+                try
+                {
+                    await history.ApplyAttemptAsync(done.Plan, done.Row.MessageId, done.Row.TenantId, rawRetained, cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    rt.Log.Write(MtaLogLevel.Error, "storage.sqlite", $"History events for cancelled delivery {done.Row.DeliveryId} could not be written.", ex);
+                }
+            }
+
+            foreach (RecentEvent e in done.Plan.Ring)
+            {
+                rt.Aggregator.AddRecent(e);
+            }
+        }
+
+        return outcome.Result;
+    }
+
+    private static readonly Func<WriterContext, CancelState, CancelOutcome> CancelCommand = static (ctx, s) =>
+    {
+        var pending = new List<PendingDelivery>();
+        var rows = new Dictionary<Guid, DeliveryRowInfo>();
+        using (RawReader r = ctx.Command(QueueSql.CancelRows).Set(0, s.Message).Set(1, s.Tenant).ExecuteReader())
+        {
+            while (r.Read())
+            {
+                Guid id = r.GetGuid(0);
+                string recipient = r.GetString(1);
+                bool locked = r.GetInt64(6) > s.NowMs || !r.IsDBNull(7);
+                pending.Add(new PendingDelivery(id, recipient, locked));
+                rows[id] = new DeliveryRowInfo(id, s.Message, s.Tenant, recipient, r.GetString(2), r.GetNullableString(3), (MessageSource)r.GetInt32(4), r.GetInt32(5));
+            }
+        }
+
+        CancelSelection selection = CancelPlanner.Select(pending, s.Recipients);
+        var done = new List<CancelledDelivery>(selection.Cancel.Count);
+        foreach (PendingDelivery d in selection.Cancel)
+        {
+            DeliveryRowInfo row = rows[d.DeliveryId];
+            AttemptPlan plan = AttemptPlanner.Plan(CancelPlanner.AttemptFor(d.DeliveryId, s.Now), row);
+            ctx.Command(QueueSql.DeliveryDelete).Set(0, d.DeliveryId).ExecuteNonQuery();
+            done.Add(new CancelledDelivery(row, plan, FreeSpoolIfLast(ctx, s.Message, s.Full)));
+        }
+
+        return new CancelOutcome(CancelPlanner.ResultOf(selection), done);
     };
 
     /// <summary>Copies the spool's raw message to retained storage, then deletes the spool row. Returns whether the copy exists.</summary>

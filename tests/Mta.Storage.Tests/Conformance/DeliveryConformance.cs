@@ -3,7 +3,7 @@ using Mta.Core;
 namespace Mta.Storage.Tests;
 
 /// <summary>Claiming, leases, expiry and recording attempts for every outcome.</summary>
-public abstract class DeliveryConformance : StorageTestBase
+public abstract partial class DeliveryConformance : StorageTestBase
 {
     // Claiming
 
