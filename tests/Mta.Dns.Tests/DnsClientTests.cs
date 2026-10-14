@@ -232,6 +232,17 @@ public class DnsClientTests
         Assert.Equal(DnsFailureReason.Timeout, ex.Reason);
     }
 
+    /// <summary>Polls a condition with a deadline far above any plausible load (the deadline only matters when the test is about to fail).</summary>
+    private static async Task UntilAsync(Func<bool> condition)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(60);
+        while (!condition())
+        {
+            Assert.True(DateTime.UtcNow < deadline, "condition not met within 60 s");
+            await Task.Delay(5);
+        }
+    }
+
     [Fact]
     public async Task Concurrent_identical_queries_share_one_network_query()
     {
@@ -243,11 +254,10 @@ public class DnsClientTests
         });
         var client = new DnsClient(transport, Opts(), new FakeClock());
 
-        var tasks = Enumerable.Range(0, 50).Select(_ => Task.Run(async () => await client.QueryAsync("example.com", DnsRecordType.A))).ToArray();
-        await Task.Delay(200);
+        // QueryAsync joins or starts the shared query synchronously, so when the next line runs all 50 callers have joined.
+        var tasks = Enumerable.Range(0, 50).Select(_ => client.QueryAsync("example.com", DnsRecordType.A).AsTask()).ToArray();
         var other = client.QueryAsync("example.com", DnsRecordType.AAAA).AsTask();   // different question: its own query
-        await Task.Delay(100);
-        Assert.Equal(2, transport.Calls);
+        await UntilAsync(() => transport.Calls == 2);
         gate.SetResult();
         var results = await Task.WhenAll(tasks);
         await other;
@@ -267,12 +277,11 @@ public class DnsClientTests
             throw new DnsException("down", DnsFailureReason.Network);
         });
         var client = new DnsClient(transport, Opts(), new FakeClock());
-        var tasks = Enumerable.Range(0, 10).Select(_ => Task.Run(async () =>
+        var tasks = Enumerable.Range(0, 10).Select(async _ =>
         {
             var ex = await Assert.ThrowsAsync<DnsException>(async () => await client.QueryAsync("example.com", DnsRecordType.A));
             return ex.Reason;
-        })).ToArray();
-        await Task.Delay(100);
+        }).ToArray();   // each caller has joined the shared query by the time Select returns (the call is made before the first await)
         gate.SetResult();
         Assert.All(await Task.WhenAll(tasks), reason => Assert.Equal(DnsFailureReason.Network, reason));
         Assert.Equal(1, transport.Calls);
@@ -291,7 +300,6 @@ public class DnsClientTests
         using var cts = new CancellationTokenSource();
         var cancelled = client.QueryAsync("example.com", DnsRecordType.A, cts.Token).AsTask();
         var patient = client.QueryAsync("example.com", DnsRecordType.A).AsTask();
-        await Task.Delay(50);
         cts.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await cancelled);
         gate.SetResult();

@@ -1,11 +1,11 @@
 using System.Buffers;
-using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text;
 using Xunit.Abstractions;
 
 namespace Mta.Dkim.Tests;
 
-/// <summary>Coarse performance and allocation guards. Limits are deliberately loose so they only catch order-of-magnitude regressions.</summary>
+/// <summary>Allocation and work guards. Nothing here asserts wall-clock time or throughput: those depend on the load of the machine, not on the code (see bench/Mta.Benchmarks for measurements).</summary>
 public class PerformanceTests
 {
     /// <summary>
@@ -82,56 +82,53 @@ public class PerformanceTests
     }
 
     [Fact]
-    public void Canonicalizing_and_hashing_runs_at_a_sane_speed()
+    public void Canonicalizing_and_hashing_a_large_body_matches_the_reference_in_one_pass()
     {
-        byte[] body = Msg.Bytes(MessageOfSize(1024 * 1024));
+        // No wall-clock threshold: throughput under a loaded CI runner is not a property of the code. What is checked is the
+        // result (byte-exact against the independent reference canonicalizer) and the work (one pass: the canonical byte
+        // count equals the reference length, and nothing is allocated, see Body_canonicalization_and_hashing_allocate_nothing_after_warmup).
+        // Throughput numbers belong to the benchmark project (bench/Mta.Benchmarks).
+        string body = MessageOfSize(1024 * 1024);
         Span<byte> hash = stackalloc byte[32];
-        DkimVerifier.HashBody(body, true, long.MaxValue, hash, out _);
-        var sw = Stopwatch.StartNew();
-        const int rounds = 50;
-        for (int i = 0; i < rounds; i++) { DkimVerifier.HashBody(body, true, long.MaxValue, hash, out _); }
-        sw.Stop();
-        double mbPerSecond = rounds * (body.Length / 1048576.0) / sw.Elapsed.TotalSeconds;
-        _output.WriteLine($"relaxed body canonicalization + SHA-256: {mbPerSecond:F0} MB/s");
-        Assert.True(mbPerSecond > 20, $"too slow: {mbPerSecond:F1} MB/s");
+        foreach (bool relaxed in new[] { true, false })
+        {
+            DkimVerifier.HashBody(Msg.Bytes(body), relaxed, long.MaxValue, hash, out long total);
+            byte[] expected = Msg.Bytes(Reference.Body(body, relaxed));
+            Assert.Equal(expected.Length, total);
+            Assert.Equal(Convert.ToBase64String(SHA256.HashData(expected)), Convert.ToBase64String(hash));
+        }
     }
 
     [Fact]
-    public async Task Sign_and_verify_throughput_is_sane()
+    public async Task Repeated_signing_and_verification_stays_correct()
     {
+        // The former version asserted signatures per second, which depends on the host load rather than on the code.
         var signer = Msg.Signer();
         var verifier = Msg.Verifier(Msg.Dns(TestKeys.Rsa2048));
         string message = MessageOfSize(1024);
-        byte[] bytes = Msg.Bytes(message);
-        signer.Sign(bytes);
-
-        var sw = Stopwatch.StartNew();
-        const int count = 200;
-        for (int i = 0; i < count; i++) { signer.Sign(bytes); }
-        double signPerSecond = count / sw.Elapsed.TotalSeconds;
-
-        byte[] signed = Msg.Bytes(Msg.Sign(signer, message));
-        await verifier.VerifyAsync(signed);
-        sw.Restart();
-        for (int i = 0; i < count; i++) { await verifier.VerifyAsync(signed); }
-        double verifyPerSecond = count / sw.Elapsed.TotalSeconds;
-
-        _output.WriteLine($"sign {signPerSecond:F0}/s, verify {verifyPerSecond:F0}/s (1 KB message, RSA-2048, single thread)");
-        Assert.True(signPerSecond > 20, $"signing too slow: {signPerSecond:F1}/s");
-        Assert.True(verifyPerSecond > 50, $"verification too slow: {verifyPerSecond:F1}/s");
+        const int count = 100;
+        for (int i = 0; i < count; i++)
+        {
+            byte[] signed = Msg.Bytes(Msg.Sign(signer, message + i));
+            var results = await verifier.VerifyAsync(signed);
+            Assert.Equal(DkimStatus.Pass, Assert.Single(results).Status);
+        }
     }
 
     [Fact]
-    public async Task Hostile_message_with_many_headers_and_signatures_is_processed_quickly()
+    public async Task Hostile_message_with_many_headers_and_signatures_is_bounded_by_the_limits_not_by_the_clock()
     {
         var sb = new StringBuilder();
         for (int i = 0; i < 1000; i++) { sb.Append("DKIM-Signature: v=1; a=rsa-sha256; d=d.example; s=s; h=").Append(string.Join(":", Enumerable.Repeat("x-a", 400))).Append("; bh=AAAA; b=AAAA\r\n"); }
         sb.Append(Msg.Simple());
-        var verifier = Msg.Verifier(new Mta.Dns.StaticDnsResolver(), configure: o => o.MaxHeaderCount = 2000);
-        var sw = Stopwatch.StartNew();
-        var results = await verifier.VerifyAsync(Msg.Bytes(sb.ToString()));
-        sw.Stop();
+        var dns = new Mta.Dns.StaticDnsResolver();
+        var verifier = Msg.Verifier(dns, configure: o => o.MaxHeaderCount = 2000);
+
+        // The deterministic bound is the work done, not the time it took: every signature is reported, but at most the
+        // configured number of them reaches the DNS (the key lookup) and none passes. The wait is only a hang guard.
+        var results = await verifier.VerifyAsync(Msg.Bytes(sb.ToString())).AsTask().WaitAsync(TimeSpan.FromMinutes(5));
         Assert.Equal(1000, results.Count);
-        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(5), $"took {sw.Elapsed}");
+        Assert.DoesNotContain(results, r => r.Status == DkimStatus.Pass);
+        Assert.True(dns.QueryCount <= 5, $"{dns.QueryCount} DNS queries for one hostile message");
     }
 }

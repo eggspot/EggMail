@@ -83,4 +83,26 @@ public class PackageFreeStackTests
             Assert.Contains($"src/{p}/{p}.csproj", slnx.Replace('\\', '/'));
         }
     }
+
+    [Fact]
+    public void No_source_project_depends_on_the_fuzzing_projects_or_fuzzing_packages()
+    {
+        // The fuzz harness and its targets (fuzz/) reference the protocol assemblies; it must never be the other way round, and the
+        // coverage-guided tooling (SharpFuzz) is allowed only in fuzz/Mta.Fuzz.Harness.
+        string srcDirectory = Path.Combine(RepoRoot(), "src");
+        foreach (string csproj in Directory.EnumerateFiles(srcDirectory, "*.csproj", SearchOption.AllDirectories))
+        {
+            var doc = XDocument.Load(csproj);
+            foreach (var reference in doc.Descendants().Where(e => e.Name.LocalName is "ProjectReference" or "PackageReference"))
+            {
+                string include = ((string?)reference.Attribute("Include") ?? string.Empty).Replace((char)92, (char)47);
+                Assert.DoesNotContain("fuzz", include, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
+        var harness = XDocument.Load(Path.Combine(RepoRoot(), "fuzz", "Mta.Fuzz.Harness", "Mta.Fuzz.Harness.csproj"));
+        Assert.Contains(harness.Descendants("PackageReference"), r => (string?)r.Attribute("Include") == "SharpFuzz");
+        var targets = XDocument.Load(Path.Combine(RepoRoot(), "fuzz", "Mta.Fuzz.Targets", "Mta.Fuzz.Targets.csproj"));
+        Assert.Empty(targets.Descendants("PackageReference"));   // the targets themselves stay BCL-only
+    }
 }

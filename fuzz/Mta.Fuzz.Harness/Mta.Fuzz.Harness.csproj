@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Driver for the coverage-guided fuzzers (libFuzzer via libfuzzer-dotnet; see .github/workflows/fuzz.yml) and for replaying inputs.
+    The SharpFuzz package lives here and only here: it must never be referenced by a protocol assembly.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>Mta.Fuzz.Harness</RootNamespace>
+    <AssemblyName>Mta.Fuzz.Harness</AssemblyName>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="SharpFuzz" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Mta.Fuzz.Targets\Mta.Fuzz.Targets.csproj" />
+  </ItemGroup>
+</Project>

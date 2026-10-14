@@ -1,0 +1,8 @@
+From: g: a@b.example, c@d.example;
+To: <@route:a@b>, (comment (nested)) x@y
+Cc: "unterminated
+Subject: folded
+  value
+	with tab
+
+body

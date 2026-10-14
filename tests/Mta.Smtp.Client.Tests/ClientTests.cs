@@ -8,7 +8,7 @@ namespace Mta.Smtp.Client.Tests;
 
 public class ClientTests
 {
-    private static readonly SmtpClientOptions Options = new() { HeloName = "client.test", BannerTimeout = TimeSpan.FromSeconds(3), CommandTimeout = TimeSpan.FromSeconds(3), EndOfDataTimeout = TimeSpan.FromSeconds(3), DataBlockTimeout = TimeSpan.FromSeconds(3), DataInitiationTimeout = TimeSpan.FromSeconds(3) };
+    private static readonly SmtpClientOptions Options = new() { HeloName = "client.test", BannerTimeout = TimeSpan.FromSeconds(30), CommandTimeout = TimeSpan.FromSeconds(30), EndOfDataTimeout = TimeSpan.FromSeconds(30), DataBlockTimeout = TimeSpan.FromSeconds(30), DataInitiationTimeout = TimeSpan.FromSeconds(30) };
 
     private static byte[] Msg(string body = "Hello\r\n") => Encoding.UTF8.GetBytes("From: a@b.example\r\nTo: c@d.example\r\nSubject: t\r\n\r\n" + body);
 

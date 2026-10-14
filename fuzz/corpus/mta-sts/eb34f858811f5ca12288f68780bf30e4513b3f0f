@@ -1,0 +1,4 @@
+version: STSv1
+mode: testing
+mx: a.example.org
+max_age: 86400

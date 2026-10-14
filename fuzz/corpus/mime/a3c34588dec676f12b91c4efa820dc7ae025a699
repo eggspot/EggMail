@@ -1,0 +1,26 @@
+From: a@example.com
+To: b@example.net
+Subject: =?UTF-8?B?w6TDtsO8?= =?utf-8?Q?caf=C3=A9_menu?=
+Content-Type: multipart/mixed; boundary="b1"
+
+--b1
+Content-Type: text/plain
+
+plain
+--b1
+Content-Type: multipart/alternative; boundary=b2
+
+--b2
+Content-Type: text/html; charset=iso-8859-1
+Content-Transfer-Encoding: quoted-printable
+
+<p>caf=E9</p>=
+
+--b2--
+--b1
+Content-Type: application/pdf; name="a.pdf"
+Content-Disposition: attachment; filename*=UTF-8''%E2%82%AC.pdf
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQK
+--b1--

@@ -59,13 +59,13 @@ jobs:
           for i in $(seq 1 30); do docker exec pg pg_isready -U eggmail && break || sleep 1; done
       # Let's Encrypt's Pebble test CA and its challenge test server for the ACME integration tests (tests/Mta.Integration.Tests/Acme).
       # Host networking so Pebble reaches the DNS server (:8053) of the challenge test server on 127.0.0.1. PEBBLE_VA_NOSLEEP drops the random
-      # 1-5 s validation delay, PEBBLE_WFE_NONCEREJECT=0 and PEBBLE_AUTHZREUSE=0 make the CA deterministic (no random bad nonces, no reused
-      # authorizations that would skip the challenge). Challenges are really validated (DNS-01 against pebble-challtestsrv): no PEBBLE_VA_ALWAYS_VALID.
+      # 1-5 s validation delay, PEBBLE_WFE_NONCEREJECT=0 and PEBBLE_AUTHZREUSE=100 make the CA deterministic (no random bad nonces; a valid
+      # authorization is always reused. 0 would not disable reuse: Pebble reuses at random in 1 % of the orders even then). Challenges are really validated (DNS-01 against pebble-challtestsrv): no PEBBLE_VA_ALWAYS_VALID.
       - name: Pebble ACME test CA for the ACME tests
         run: |
           docker run -d --name challtestsrv --network host ghcr.io/letsencrypt/pebble-challtestsrv:2.10.1 \
             -http01 "" -https01 "" -tlsalpn01 "" -doh ""
-          docker run -d --name pebble --network host -e PEBBLE_VA_NOSLEEP=1 -e PEBBLE_WFE_NONCEREJECT=0 -e PEBBLE_AUTHZREUSE=0 \
+          docker run -d --name pebble --network host -e PEBBLE_VA_NOSLEEP=1 -e PEBBLE_WFE_NONCEREJECT=0 -e PEBBLE_AUTHZREUSE=100 \
             ghcr.io/letsencrypt/pebble:2.10.1 -config test/config/pebble-config.json -dnsserver 127.0.0.1:8053
           docker cp pebble:/test/certs/pebble.minica.pem "$RUNNER_TEMP/pebble.minica.pem"
           for i in $(seq 1 30); do curl -sf --cacert "$RUNNER_TEMP/pebble.minica.pem" https://localhost:14000/dir >/dev/null && break || sleep 1; done

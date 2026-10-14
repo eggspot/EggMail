@@ -1,0 +1,6 @@
+Received: from a by b
+Received: from c by d
+Bcc: hidden@example.com
+Return-Path: <old@example.com>
+From: x@example.com
+

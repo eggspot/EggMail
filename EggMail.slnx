@@ -29,6 +29,7 @@
     <Project Path="tests/Mta.Dkim.Tests/Mta.Dkim.Tests.csproj" />
     <Project Path="tests/Mta.Dns.Tests/Mta.Dns.Tests.csproj" />
     <Project Path="tests/Mta.Dsn.Tests/Mta.Dsn.Tests.csproj" />
+    <Project Path="tests/Mta.Fuzz.Tests/Mta.Fuzz.Tests.csproj" />
     <Project Path="tests/Mta.Host.Tests/Mta.Host.Tests.csproj" />
     <Project Path="tests/Mta.Integration.Tests/Mta.Integration.Tests.csproj" />
     <Project Path="tests/Mta.Mime.Tests/Mta.Mime.Tests.csproj" />
@@ -43,6 +44,10 @@
     <Project Path="tests/Mta.Storage.Tests/Mta.Storage.Tests.csproj" />
     <Project Path="tests/Mta.Tls.Tests/Mta.Tls.Tests.csproj" />
     <Project Path="tests/Mta.Webhooks.Tests/Mta.Webhooks.Tests.csproj" />
+  </Folder>
+  <Folder Name="/fuzz/">
+    <Project Path="fuzz/Mta.Fuzz.Harness/Mta.Fuzz.Harness.csproj" />
+    <Project Path="fuzz/Mta.Fuzz.Targets/Mta.Fuzz.Targets.csproj" />
   </Folder>
   <Folder Name="/bench/">
     <Project Path="bench/Mta.Benchmarks/Mta.Benchmarks.csproj" />
