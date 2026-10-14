@@ -22,6 +22,7 @@ public static class ApiCodes
     public const string MessageNotFound = "message_not_found";
     public const string AttachmentsNotStored = "attachments_not_stored";
     public const string NotReady = "not_ready";
+    public const string QueryTooSlow = "query_too_slow";
     public const string Conflict = "conflict";
     public const string UnsupportedMediaType = "unsupported_media_type";
     public const string ServerError = "server_error";
@@ -45,6 +46,7 @@ public static class ApiCodes
         MessageNotFound => "Message not found",
         AttachmentsNotStored => "Attachments were not stored",
         NotReady => "Not ready",
+        QueryTooSlow => "Query too slow",
         Conflict => "Conflict",
         UnsupportedMediaType => "Unsupported media type",
         TenantDisabled => "Account disabled",
@@ -94,6 +96,9 @@ public sealed class ApiException : Exception
 
     public static ApiException RateLimited(string detail, TimeSpan retryAfter) =>
         new(StatusCodes.Status429TooManyRequests, ApiCodes.RateLimited, detail, headers: new Dictionary<string, string> { ["Retry-After"] = RetryAfterSeconds(retryAfter) });
+
+    /// <summary>The database refused to run the query for longer (read-only role <c>statement_timeout</c>); the client should narrow it. 503, but not "try again".</summary>
+    public static ApiException QueryTooSlow(string detail) => new(StatusCodes.Status503ServiceUnavailable, ApiCodes.QueryTooSlow, detail);
 
     public static ApiException NotReady(string detail) =>
         new(StatusCodes.Status503ServiceUnavailable, ApiCodes.NotReady, detail, headers: new Dictionary<string, string> { ["Retry-After"] = "5" });

@@ -45,6 +45,11 @@ public sealed class PostgresStorage : IStorage
             throw new ArgumentException("Postgres options out of range (pool size, partitions ahead, batch size, flush interval, command timeout).");
         }
 
+        if (pg.ReadOnlyStatementTimeoutSeconds < 1 || pg.ReadOnlyIdleInTransactionTimeoutSeconds < 1 || pg.ReadOnlyMaxPoolSize < 1)
+        {
+            throw new ArgumentException("Postgres read-only options out of range (statement timeout, idle-in-transaction timeout, pool size must each be at least 1).");
+        }
+
         _options = options;
         _rt = new PostgresRuntime(options, clock, log);
         _stats = new PostgresStatsStore(_rt);
@@ -94,8 +99,18 @@ public sealed class PostgresStorage : IStorage
             {
                 string? runtimeRole = _rt.SingleRole ? null : _rt.RuntimeRole;
                 await using NpgsqlConnection owner = await _rt.Owner.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-                await using var cmd = new NpgsqlCommand(PostgresMigrator.GenerateScript(runtimeRole), owner) { CommandTimeout = 300 };
-                await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                await using var cmd = new NpgsqlCommand(PostgresMigrator.GenerateScript(runtimeRole, _rt.ReadOnlyRoleToGrant), owner) { CommandTimeout = 300 };
+                try
+                {
+                    await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                }
+                catch (PostgresException ex) when (ex.SqlState == "42704" && _rt.ReadOnlyRoleToGrant is { } missing)
+                {
+                    // undefined_object: the GRANT names a role that does not exist
+                    throw new InvalidOperationException(
+                        $"The migration could not grant the read-only role '{missing}' (Postgres:ReadOnlyConnectionString): it does not exist ({ex.MessageText}). " +
+                        $"Create it first, as a login role (CREATE ROLE {missing} LOGIN PASSWORD '...'), or remove Postgres:ReadOnlyConnectionString.", ex);
+                }
             }
 
             int version = await PostgresMigrator.GetDatabaseVersionAsync(_rt.Data, cancellationToken).ConfigureAwait(false);
@@ -106,6 +121,7 @@ public sealed class PostgresStorage : IStorage
                     "Enable Postgres:AutoMigrate or apply PostgresMigrator.GenerateScript() as the owner role.");
             }
 
+            await CheckReadOnlyRoleAsync(cancellationToken).ConfigureAwait(false);
             _rt.ConfigStore = new EfConfigStore<PostgresDbContext>(new PostgresConfigAccess(_rt.Data, PostgresModelHooks.Instance, _options.Postgres.MaxPoolSize));
             if (_rt.IsFull)
             {
@@ -150,6 +166,35 @@ public sealed class PostgresStorage : IStorage
         {
             _flushCts = new CancellationTokenSource();
             _flushLoop = FlushLoopAsync(_options.Postgres.StatsFlushInterval, _flushCts.Token);
+        }
+    }
+
+    /// <summary>
+    /// With a read-only connection string: opens it once and reads a history table, so a wrong password, a role without the grants (the schema was migrated by a script made
+    /// without the read-only role) or a role that was never created stops the start with that explanation, not on the first dashboard query.
+    /// </summary>
+    private async Task CheckReadOnlyRoleAsync(CancellationToken cancellationToken)
+    {
+        if (!_rt.SeparateReader)
+        {
+            return;
+        }
+
+        try
+        {
+            await using NpgsqlConnection connection = await _rt.Reader.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            await using var cmd = new NpgsqlCommand("SELECT 1 FROM message_index LIMIT 1", connection);
+            await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrors.InsufficientPrivilege)
+        {
+            throw new InvalidOperationException(
+                $"The read-only role '{_rt.ReadOnlyRole}' (Postgres:ReadOnlyConnectionString) cannot read the history tables. Apply the migration with the read-only role named " +
+                "(Postgres:AutoMigrate, or mta migrate-db with the same configuration, or PostgresMigrator.GenerateScript(runtimeRole, readOnlyRole) as the owner).", ex);
+        }
+        catch (Exception ex) when (PostgresErrors.IsUnavailable(ex) || ex is PostgresException)
+        {
+            throw new InvalidOperationException($"The read-only connection (Postgres:ReadOnlyConnectionString, role '{_rt.ReadOnlyRole}') cannot be used: {ex.Message}", ex);
         }
     }
 
@@ -206,6 +251,11 @@ public sealed class PostgresStorage : IStorage
         }
 
         await _rt.Data.DisposeAsync().ConfigureAwait(false);
+        if (_rt.SeparateReader)
+        {
+            await _rt.Reader.DisposeAsync().ConfigureAwait(false);
+        }
+
         await _rt.Owner.DisposeAsync().ConfigureAwait(false);
     }
 }

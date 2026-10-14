@@ -45,6 +45,16 @@ public sealed class SwitchActivator(IConfigurationRoot configuration, string boo
                 list.Add(new PointerSetting("Storage:Postgres:OwnerConnectionString", owner, true));
             }
 
+            if (target.Postgres.ReadOnlyConnectionString is { Length: > 0 } readOnly)
+            {
+                // Carried so the dashboard's reads keep using the read-only role after the switch instead of silently falling back to the runtime role.
+                list.Add(new PointerSetting("Storage:Postgres:ReadOnlyConnectionString", readOnly, true));
+                if (target.Postgres.ReadOnlyStatementTimeoutSeconds != defaults.Postgres.ReadOnlyStatementTimeoutSeconds)
+                {
+                    list.Add(new PointerSetting("Storage:Postgres:ReadOnlyStatementTimeoutSeconds", target.Postgres.ReadOnlyStatementTimeoutSeconds.ToString(CultureInfo.InvariantCulture), false));
+                }
+            }
+
             if (!target.Postgres.AutoMigrate)
             {
                 list.Add(new PointerSetting("Mail:Database:Migrate", "Never", false));

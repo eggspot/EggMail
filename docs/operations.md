@@ -48,6 +48,10 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | `Sqlite:RetentionDeletePause` | `00:00:00.020` | Pause between those batches so intake stays responsive |
 | `Storage:Postgres:OwnerConnectionString` | none | Owner role: runs migrations and partition DDL |
 | `Storage:Postgres:RuntimeConnectionString` | none | Runtime role: normal work (required for PostgreSQL). With only one of the two set it serves both roles and health warns |
+| `Storage:Postgres:ReadOnlyConnectionString` | none | Optional read-only role for the read queries of the dashboard and the API (message search, detail, events, statistics); must name a `Username` and point at the primary; the migration grants it `SELECT` on the history and statistics tables only. Without it those queries use the runtime role |
+| `Storage:Postgres:ReadOnlyStatementTimeoutSeconds` | 5 | `statement_timeout` of the read-only connections; a query that runs longer is cancelled and answered `503 query_too_slow` |
+| `Storage:Postgres:ReadOnlyIdleInTransactionTimeoutSeconds` | 10 | `idle_in_transaction_session_timeout` of the read-only connections |
+| `Storage:Postgres:ReadOnlyMaxPoolSize` | 8 | Connection pool of the read-only role |
 | `Storage:Postgres:MaxPoolSize` | 32 | Connection pool of the runtime role (the owner role has a small pool of its own) |
 | `Storage:Postgres:PartitionsAheadDays` | 7 | Day partitions of the history tables created ahead by maintenance |
 | `Storage:Postgres:StatsFlushInterval` | `00:00:10` | As `Sqlite:StatsFlushInterval` |
@@ -246,6 +250,19 @@ Checklist for the first real-CA run: a domain whose zone is in Cloudflare and a 
 Backups run while the server runs (`VACUUM INTO` per file) every `Backup:IntervalHours` into `<data>/backups/eggmail-backup-<UTC>/`; the newest `Backup:Keep` are kept. Put `Backup:Directory` on another disk when possible and copy backups off the host.
 
 To restore: stop EggMail, copy the files of one backup directory over the data directory (replace `config.db`, `queue.db`, `stats.db`, `history.db` together), start. The state returns to the moment of the backup; mail accepted since is lost. If a file is found corrupt at start (possible after power loss with `Sqlite:SyncMode=Off`) it is moved aside (quarantined), the instance starts with a fresh file, and a warning is shown. If `config.db` is quarantined the instance starts without tenants and keys: restore it from a backup. PostgreSQL: use `pg_dump` or your platform's backups.
+
+## PostgreSQL roles
+
+Three logins are supported (design section 4.3): the **owner** (migrations and partition DDL: `Storage:Postgres:OwnerConnectionString`), the **runtime** role (everything the application does: `Storage:Postgres:RuntimeConnectionString`), and an optional **read-only** role for the read queries of the dashboard and the API. To use the read-only role create it once, then restart (the start applies the grants, or run `mta migrate-db` when `Mail:Database:Migrate=Never`):
+
+```sql
+CREATE ROLE eggmail_ro LOGIN PASSWORD '...';
+ALTER ROLE eggmail_ro CONNECTION LIMIT 8;                  -- matches Storage:Postgres:ReadOnlyMaxPoolSize
+ALTER ROLE eggmail_ro SET statement_timeout = '5s';        -- optional: the application sets the same timeouts itself
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;                -- PostgreSQL before 15 lets everyone create tables in public (15 and later do not)
+```
+
+and set `Storage:Postgres:ReadOnlyConnectionString` to a connection string for it, pointing at the primary (not a replica: reads would lag the writes). The connections are also started `read-only` (`default_transaction_read_only=on`). The role can read the history and statistics tables and nothing else: no write, no secrets, no queue. If it cannot, or the password is wrong or the role does not exist, the start stops with the reason; later, an unusable or too privileged role shows as a health warning without taking the instance out of service. A query that runs past the timeout answers `503 query_too_slow`. Behind a pooler in transaction mode let the `options` startup parameter through (PgBouncer: `ignore_startup_parameters = options`).
 
 ## Monitoring
 

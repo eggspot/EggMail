@@ -259,6 +259,26 @@ internal sealed class PostgresMaintenance(PostgresRuntime rt, PostgresQueueStore
         return written;
     }
 
+    /// <summary>
+    /// The point of the read-only role is that it cannot change anything and cannot read what is secret: warn when it can write one of its tables, or read any table that
+    /// is not one of <see cref="PostgresMigrator.ReadOnlyTables"/> (tenants, keys, settings, certificates, credentials, the queue...).
+    /// </summary>
+    private static async Task CheckReadOnlyRoleAsync(PostgresRuntime rt, List<string> warnings, Dictionary<string, string> details, CancellationToken ct)
+    {
+        await using NpgsqlConnection c = await rt.Reader.OpenConnectionAsync(ct).ConfigureAwait(false);
+        await using var cmd = new NpgsqlCommand(
+            "SELECT EXISTS (SELECT 1 FROM pg_tables t WHERE t.schemaname = 'public' AND t.tablename !~ '_p[0-9]{8}$' AND (" +
+            "(t.tablename = ANY($1) AND (has_table_privilege(current_user, format('%I.%I', t.schemaname, t.tablename), 'INSERT') OR has_table_privilege(current_user, format('%I.%I', t.schemaname, t.tablename), 'UPDATE') " +
+            "OR has_table_privilege(current_user, format('%I.%I', t.schemaname, t.tablename), 'DELETE') OR has_table_privilege(current_user, format('%I.%I', t.schemaname, t.tablename), 'TRUNCATE'))) " +
+            "OR (t.tablename <> ALL($1) AND has_table_privilege(current_user, format('%I.%I', t.schemaname, t.tablename), 'SELECT'))))", c);
+        cmd.Parameters.TextArray(PostgresMigrator.ReadOnlyTables);
+        if ((bool)(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false))!)
+        {
+            warnings.Add("postgres_read_only_role_too_privileged");
+            details["read_only_error"] = "The read-only role can write a history table or read a table that is not one of the history and statistics tables (secrets, queue, configuration).";
+        }
+    }
+
     public async ValueTask<StorageHealth> GetHealthAsync(CancellationToken ct)
     {
         var warnings = new List<string>();
@@ -269,6 +289,7 @@ internal sealed class PostgresMaintenance(PostgresRuntime rt, PostgresQueueStore
             ["role_split"] = rt.SingleRole ? "false" : "true",
             ["runtime_role"] = rt.RuntimeRole ?? "",
             ["owner_role"] = rt.OwnerRole ?? "",
+            ["read_only_role"] = rt.SeparateReader ? rt.ReadOnlyRole ?? "" : "",
             ["schema_version_expected"] = PostgresMigrator.CurrentVersion.ToString(CultureInfo.InvariantCulture),
         };
 
@@ -315,6 +336,20 @@ internal sealed class PostgresMaintenance(PostgresRuntime rt, PostgresQueueStore
             ready = false;
             warnings.Add("postgres_unavailable");
             details["error"] = rt.Unavailable(ex).Message;
+        }
+
+        if (rt.SeparateReader && ready)
+        {
+            // Its own failure domain: the read-only role is an optimisation of the dashboard's reads, so a broken one is a warning, never "not ready" for mail.
+            try
+            {
+                await CheckReadOnlyRoleAsync(rt, warnings, details, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                warnings.Add("postgres_read_only_unavailable");
+                details["read_only_error"] = ex.Message;
+            }
         }
 
         if (rt.SingleRole)
