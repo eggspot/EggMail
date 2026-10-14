@@ -78,7 +78,7 @@ The consequences of an outcome are computed by one shared function, so SQLite an
 
 `Suppress=Complaint` adds a `complained` event and counter; `PossibleDuplicate` adds a `possible_duplicate` event and sets the sticky flag on a surviving row. Webhook events fan out to the tenant's **enabled** endpoints whose list contains the event type or `*` (an empty list receives nothing), in the same transaction as the row completion. The spool counter is decremented in that transaction; the last recipient frees the spool row. Recording an attempt for a delivery that is already gone is a no-op, so reports are safe to repeat.
 
-### Cancelling (`IDeliveryStore.CancelAsync`, decision 85)
+### Cancelling (`IDeliveryStore.CancelAsync`, decision 86)
 
 One shared decision function (`CancelPlanner`) splits the message's waiting rows into "cancel" (not leased, not marked for a switch), "in flight" (leased), "transfer-held" and "not waiting" (a *named* recipient without a row), so the backends cannot disagree; the result also carries how many rows were waiting (`Waiting`, whatever was requested), which the API uses to tell an unknown or finished message from one whose named recipients are not waiting. Each cancelled row then goes through `AttemptPlanner.Plan` with a `Cancelled` attempt, exactly as a recorded attempt; a row whose lease ran out without a report (`lease_owner` set) or that is flagged `possible_duplicate` is planned with the doubt, so its events say so (`possible_duplicate`). The webhook event of each cancelled row comes from a callback of the caller (storage cannot reference `Mta.Webhooks`) and its outbox rows are written in the same transaction as the deletion.
 

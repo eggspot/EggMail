@@ -4,7 +4,7 @@ using Mta.Storage.Transfer;
 namespace Mta.Storage.Tests;
 
 /// <summary>
-/// Cancelling waiting deliveries (decision 85): what is finished, what is left alone because a worker holds it, and that a cancelled
+/// Cancelling waiting deliveries (decision 86): what is finished, what is left alone because a worker holds it, and that a cancelled
 /// delivery can never come back. Runs on every backend and in both history modes.
 /// </summary>
 public abstract partial class DeliveryConformance

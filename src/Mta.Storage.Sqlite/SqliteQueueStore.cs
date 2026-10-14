@@ -518,7 +518,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
         return false;
     }
 
-    // Cancelling (decision 85)
+    // Cancelling (decision 86)
 
     private readonly record struct CancelState(Guid Tenant, Guid Message, IReadOnlyList<string>? Recipients, long NowMs, DateTimeOffset Now, bool Full, Mta.Storage.Transfer.SwitchGate Fence, Func<CancelledDeliveryInfo, WebhookEventDraft?>? WebhookEvent, WebhookTarget[] Targets);
 

@@ -508,3 +508,72 @@ export interface SwitchStatus {
   updatedAt?: string;
   error?: string | null;
 }
+
+// ---- relay routes and TLS policies (admin; docs/api.md "Relay routes and TLS policies") ----
+
+export type RelayTlsMode = 'none' | 'starttls' | 'required' | 'verify' | 'implicit';
+
+export interface RelayRoute {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  tlsMode: RelayTlsMode;
+  userName: string | null;
+  /** Whether a password is stored. The password itself is never returned. */
+  hasPassword: boolean;
+  priority: number;
+  enabled: boolean;
+  domains: string[];
+  warnings: string[];
+}
+
+/** Create body. `password` is write-only. */
+export interface RelayRouteCreate {
+  name: string;
+  host: string;
+  port?: number;
+  tlsMode?: RelayTlsMode;
+  userName?: string;
+  password?: string;
+  priority?: number;
+  enabled?: boolean;
+  domains: string[];
+}
+
+/** Patch body: every member is optional; `password` is write-only and `removeCredentials` clears the user name and password. */
+export interface RelayRoutePatch {
+  name?: string;
+  host?: string;
+  port?: number;
+  tlsMode?: RelayTlsMode;
+  userName?: string;
+  password?: string;
+  removeCredentials?: boolean;
+  priority?: number;
+  enabled?: boolean;
+  domains?: string[];
+}
+
+export type TlsPolicyLevel = 'none' | 'may' | 'encrypt' | 'verify';
+
+export interface TlsPolicy {
+  id: string;
+  domainPattern: string;
+  level: TlsPolicyLevel;
+  warnings: string[];
+}
+
+export interface TlsPolicyCreate {
+  domainPattern: string;
+  level: TlsPolicyLevel;
+  /** Required by the server to save level none for the pattern "*". */
+  acknowledgeInsecure?: boolean;
+}
+
+export interface TlsPolicyPatch {
+  domainPattern?: string;
+  level?: TlsPolicyLevel;
+  /** Required by the server when the update makes the policy level none for "*". */
+  acknowledgeInsecure?: boolean;
+}

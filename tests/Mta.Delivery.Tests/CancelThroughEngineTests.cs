@@ -3,7 +3,7 @@ using Mta.Storage;
 
 namespace Mta.Delivery.Tests;
 
-/// <summary>Cancelling (decision 85) through the real engine, processor, SMTP client and a loopback remote server.</summary>
+/// <summary>Cancelling (decision 86) through the real engine, processor, SMTP client and a loopback remote server.</summary>
 [Collection("delivery-pipeline")]
 public class CancelThroughEngineTests
 {

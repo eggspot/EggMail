@@ -469,7 +469,7 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
         return new AttemptResult(true, row, plan);
     }
 
-    // Cancelling (decision 85)
+    // Cancelling (decision 86)
 
     public async ValueTask<CancelResult> CancelAsync(Guid tenantId, Guid messageId, IReadOnlyList<string>? recipients, DateTimeOffset now, Func<CancelledDeliveryInfo, WebhookEventDraft?>? webhookEvent, CancellationToken cancellationToken)
     {

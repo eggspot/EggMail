@@ -79,7 +79,7 @@ public interface IDeliveryStore
     ValueTask<IReadOnlyList<ClaimedDelivery>> ClaimExpiredAsync(string owner, int max, DateTimeOffset now, CancellationToken cancellationToken);
 
     /// <summary>
-    /// Cancels the waiting deliveries of one message of <paramref name="tenantId"/> (decision 85). Atomic and serialized with
+    /// Cancels the waiting deliveries of one message of <paramref name="tenantId"/> (decision 86). Atomic and serialized with
     /// <see cref="ClaimAsync"/> and <see cref="RecordAttemptAsync"/>: a delivery that is not leased at <paramref name="now"/> is finished as
     /// <see cref="DeliveryOutcome.Cancelled"/> exactly like a recorded attempt (row deleted, <c>cancelled</c> event and message status under
     /// <see cref="HistoryMode.Full"/>, spool freed with the last recipient, webhook rows for <paramref name="webhookEvent"/>, no statistic counter, no bounce)

@@ -7,6 +7,12 @@ using Mta.Storage;
 
 namespace Mta.Host.Hosting;
 
+/// <summary>Makes the delivery engine of this process reload relay routes and TLS policies as soon as the API changed them.</summary>
+internal sealed class DeliveryEngineRoutingNotifier(Mta.Delivery.DeliveryEngine engine) : IRoutingConfigNotifier
+{
+    public void Changed() => engine.RequestConfigRefresh();
+}
+
 /// <summary>Connects the HTTP API (<c>Mta.Host/Api</c>) to the runtime: the services it needs from the process, the routes, and the first administrator.</summary>
 public static class ApiHosting
 {
@@ -22,6 +28,7 @@ public static class ApiHosting
             services.AddSingleton(acme);
         }
 
+        services.AddSingleton<IRoutingConfigNotifier>(new DeliveryEngineRoutingNotifier(runtime.Delivery));
         AddSwitchService(services, loaded, runtime);
         services.AddEggMailApi(loaded);
     }

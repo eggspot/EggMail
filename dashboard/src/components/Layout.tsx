@@ -27,6 +27,8 @@ export const NAV_ITEMS: NavItem[] = [
   { href: '/admin/users', label: 'Users', admin: true },
   { href: '/admin/status', label: 'Server status', admin: true },
   { href: '/admin/certificates', label: 'Certificates', admin: true },
+  { href: '/admin/relay-routes', label: 'Relay routes', admin: true },
+  { href: '/admin/tls-policies', label: 'TLS policies', admin: true },
   { href: '/admin/storage', label: 'Storage switch', admin: true },
 ];
 

@@ -63,6 +63,7 @@ public static class EggMailApiExtensions
         services.TryAddSingleton<StatsApi>();
         services.TryAddSingleton<TenantSettingsApi>();
         services.TryAddSingleton<AdminApi>();
+        services.TryAddSingleton<RoutingAdminApi>();
         services.TryAddSingleton<UsersApi>();
         return services;
     }
@@ -91,6 +92,7 @@ public static class EggMailApiExtensions
             Webhooks = config.Webhooks,
             LockedKeys = lockedKeys,
             MetricsEnabled = config.Observability.MetricsEndpointEnabled,
+            AllowPrivateMxAddresses = config.Delivery.AllowPrivateMxAddresses,
             MaxBodyBytes = api.MaxBodyBytes,
             MaxSendBodyBytes = api.MaxSendBodyBytes,
             MaxInFlightSendBytes = api.MaxInFlightSendBytes,
@@ -135,6 +137,7 @@ public static class EggMailApiExtensions
         sp.GetRequiredService<StatsApi>().Map(api);
         sp.GetRequiredService<TenantSettingsApi>().Map(api);
         sp.GetRequiredService<AdminApi>().Map(api);
+        sp.GetRequiredService<RoutingAdminApi>().Map(api);
         sp.GetRequiredService<UsersApi>().Map(api);
         api.MapFallback("{**path}", (HttpContext context) => new ProblemResult(ApiException.NotFound($"No endpoint {context.Request.Method} {context.Request.Path.Value}.")));
 
