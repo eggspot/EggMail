@@ -22,7 +22,7 @@ internal static class Cli
     {
         (string command, string[] rest) = SplitCommand(args);
         // Every command that handles mail, addresses or accounts needs working Unicode; --version, --healthcheck and self-test (which reports it) do not.
-        if (command is "serve" or "migrate-db" or "migrate-storage" or "admin" && !UnicodeSelfTest.Enforce(RequiresUnicodeSupport(rest), UnicodeLog(command), Console.Error))
+        if (command is "serve" or "migrate-db" or "migrate-storage" or "admin" or "secrets" && !UnicodeSelfTest.Enforce(RequiresUnicodeSupport(rest), UnicodeLog(command), Console.Error))
         {
             return UnicodeSelfTest.FailedExitCode;
         }
@@ -203,7 +203,19 @@ internal static class Cli
 
         // Backend switch startup gate (design 4.6): a confirmed target becomes Active, a fenced source or an unactivated target stays quiet.
         var gate = await StartupGate.EvaluateAsync(storage, clock, startupLog, CancellationToken.None).ConfigureAwait(false);
-        await using var runtime = await EggMailRuntime.CreateAsync(config, storage, clock, startupLog, CancellationToken.None).ConfigureAwait(false);
+        EggMailRuntime createdRuntime;
+        try
+        {
+            createdRuntime = await EggMailRuntime.CreateAsync(config, storage, clock, startupLog, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Mta.Host.Secrets.SecretsConfigurationException ex)
+        {
+            // The stored key ring does not fit Secrets:* (a wrong key, a switched protection): say what to do instead of a stack trace.
+            Console.Error.WriteLine("configuration error: " + ex.Message);
+            return 2;
+        }
+
+        await using var runtime = createdRuntime;
         await ApiHosting.EnsureBootstrapAdminAsync(config, storage, clock, startupLog, CancellationToken.None).ConfigureAwait(false);
 
         builder.Services.AddSingleton(loaded);

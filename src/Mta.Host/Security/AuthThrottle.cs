@@ -12,7 +12,7 @@ namespace Mta.Host.Security;
 /// window of its oldest counted failure expires. Memory is bounded: expired entries are dropped opportunistically.
 /// <para><b>Replicas.</b> With a shared <see cref="IReplicaCoordination"/> (PostgreSQL) the failures are counted in the database, in buckets of a fifteenth of the window per hashed
 /// key (a sliding window with that resolution: a failure counts until the end of its bucket plus the window), so the budget is for all replicas together and an attacker who
-/// spreads attempts over replicas gets the same budget as one who does not (DESIGN-DECIDED, decision 79). The cost is one indexed read per login attempt and one small write per
+/// spreads attempts over replicas gets the same budget as one who does not (DESIGN-DECIDED, decision 80). The cost is one indexed read per login attempt and one small write per
 /// failed attempt, next to a PBKDF2 verification of 600,000 iterations; nothing on the mail path. If the database cannot be reached the throttle falls back to this process's own
 /// counts (a failed-login lockout must not take sign-in down with the database, and the credential lookup would fail anyway). Without a shared store (SQLite, one process) the
 /// in-memory counts are exact. Use <see cref="CheckAsync"/>, <see cref="RecordFailureAsync"/> and <see cref="RecordSuccessAsync"/>; the synchronous methods see this process only.</para>

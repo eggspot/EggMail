@@ -491,6 +491,7 @@ State machine (**proposed** in earlier research; the decisions record is truncat
 - API keys are shown once and stored as SHA-256 digests (high-entropy keys); constant-time comparison via `CryptographicOperations.FixedTimeEquals`.
 - SMTP auth: PLAIN and LOGIN only, only after TLS, so passwords can be stored as hashes (CRAM-MD5 would need plaintext).
 - DKIM private keys, webhook secrets, TLS private keys and the ACME account key are protected with ASP.NET Core Data Protection; the Data Protection key ring is persisted in the config store and itself protected by a certificate or KMS (`Secrets:KeyProtection = Certificate | Kms | None`; `None` is for dev only). That certificate or KMS credential is deployment configuration outside the database and comes from the `*_FILE` secret convention. Never delete old Data Protection keys. Backend switching re-protects secrets under the target's ring through a bundle-specific Data Protection key ring (§4.6).
+  *Implemented:* `Kms` is a pluggable key-wrapping provider with a built-in file/environment key and no cloud service (decision 79).
 - Dashboard passwords: PBKDF2 from the BCL (iteration count per current OWASP guidance, to be set) or an Argon2 library.
 - Encryption at rest is a storage-layer responsibility (volume or database); application-level envelope encryption is deferred behind an interface.
 
@@ -504,7 +505,7 @@ Preact + Vite recommended. Build in a Node stage of the Dockerfile and copy only
 
 ## 10. Deployment
 
-- **PostgreSQL backend ("Full"):** app + managed Postgres via compose (app + `postgres:17` with a `pg_isready` healthcheck) or a Kubernetes Deployment. More than one replica is safe (no local blobs; `SKIP LOCKED` claims; advisory-locked retention job; the failed-login budget, the per-destination limits and what destinations told a replica are shared through the database, see decision 79 and [operations.md](operations.md#running-more-than-one-replica)).
+- **PostgreSQL backend ("Full"):** app + managed Postgres via compose (app + `postgres:17` with a `pg_isready` healthcheck) or a Kubernetes Deployment. More than one replica is safe (no local blobs; `SKIP LOCKED` claims; advisory-locked retention job; the failed-login budget, the per-destination limits and what destinations told a replica are shared through the database, see decision 80 and [operations.md](operations.md#running-more-than-one-replica)).
 - **SQLite backend ("Lite"), the default:** one container, one volume mounted at `/data` (ReadWriteOnce, local), one replica, recreate rollout. Characteristics of the backend (§4.2), not missing features.
 - **Switching backends** is manual and symmetric (§4.6); the guided action cannot provision Postgres or change container topology.
 - **Image:** **a single Docker image** that runs out of the box (SQLite backend, one volume at `/data`, the default ports of §7.1) and selects the PostgreSQL backend by configuration (`Storage:Backend=Postgres`) in the same image. Chiseled, with ICU (the `-extra` variant) plus a startup Unicode self-test (silent failure in invariant mode is a risk). ReadyToRun; no trimming (EF is not trim-safe). Pin versions. Release process, registry, tags and quick-start snippets: [release.md](release.md).

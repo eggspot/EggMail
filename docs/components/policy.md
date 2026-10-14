@@ -10,7 +10,7 @@ Pure, deterministic policy logic the scheduler and the SMTP/API intake consult. 
 | Reply classification | `ReplyClassifier`, `DeliveryClass` | decision R (possible duplicate is handled by the delivery layer, not here) |
 | Per-destination throttling | `DestinationThrottle` | design 3, 7.2 |
 | Circuit breakers | `RouteHealth` | design 7.2 |
-| State shared between replicas | `ReplicaStateExchange` | design 4.2, decision 79 |
+| State shared between replicas | `ReplicaStateExchange` | design 4.2, decision 80 |
 | Relay fallback | `RoutePlanner` | decision 18, design 7.2 |
 | Sending limits and warm-up | `SendingLimits`, `WarmupSchedule`, `ISendingCounterStore` | design 2.4 (rate limits and warm-up are identical on both backends) |
 | Sender and tenancy | `SenderPolicy` | design 8 |
@@ -82,7 +82,7 @@ Per route (`direct`, relay names) and per MX host. Closed, then Open after 5 con
 
 ## Replicas
 
-`ReplicaStateExchange` (DESIGN-DECIDED, decision 79) runs every 5 s on a replica whose storage offers `IStorage.Replicas` (PostgreSQL; the in-memory backend for tests; SQLite does not, being one process): beat (`replica_heartbeat`), set this replica's share on the throttle from the sorted list of replicas seen in the last 20 s, publish the slowdowns and opened circuits it collected (`replica_signal`, valid until the retry time or two minutes), apply those of the others. A signal is applied once however often it is read. A failed exchange keeps the last share and the unpublished signals and is retried at the next beat; the replica leaves the set at shutdown. The delivery hot path touches memory only: the database is asked every 5 s, not per message. Not shared, on purpose: the sending counters beyond decision 55 (a cap can be overshot by what the other replicas send in one 10 s flush interval), the API `SendBudget` and the SMTP connection limits (per process resources).
+`ReplicaStateExchange` (DESIGN-DECIDED, decision 80) runs every 5 s on a replica whose storage offers `IStorage.Replicas` (PostgreSQL; the in-memory backend for tests; SQLite does not, being one process): beat (`replica_heartbeat`), set this replica's share on the throttle from the sorted list of replicas seen in the last 20 s, publish the slowdowns and opened circuits it collected (`replica_signal`, valid until the retry time or two minutes), apply those of the others. A signal is applied once however often it is read. A failed exchange keeps the last share and the unpublished signals and is retried at the next beat; the replica leaves the set at shutdown. The delivery hot path touches memory only: the database is asked every 5 s, not per message. Not shared, on purpose: the sending counters beyond decision 55 (a cap can be overshot by what the other replicas send in one 10 s flush interval), the API `SendBudget` and the SMTP connection limits (per process resources).
 
 ## Relay fallback chain (`RoutePlanner`)
 

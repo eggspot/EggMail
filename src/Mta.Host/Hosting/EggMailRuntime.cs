@@ -44,6 +44,9 @@ public sealed class EggMailRuntime : IAsyncDisposable
     public required SmtpConnectionPool Pool { get; init; }
     public required RoutePlanner Routes { get; init; }
     public required SendingLimits Limits { get; init; }
+    /// <summary>Whether every key at rest is protected (not only: the mode is not <c>None</c>); what the backend switch tells a target about this instance.</summary>
+    public bool KeysProtectedAtRest { get; init; }
+
     public AcmeRenewalService? Acme { get; init; }
 
     /// <summary>The circuit breakers per route and MX host (shared among replicas through <see cref="ReplicaExchange"/>).</summary>
@@ -71,6 +74,11 @@ public sealed class EggMailRuntime : IAsyncDisposable
         IAcmeOrderRunner? acmeRunnerOverride = null, IDnsChallengeProvider? acmeDnsOverride = null)
     {
         var secrets = Mta.Host.Secrets.SecretsFactory.Create(config.Secrets, storage.Config);
+        foreach (string warning in Mta.Host.Secrets.SecretsFactory.Warnings(config.Secrets, storage.Config))
+        {
+            log.Write(MtaLogLevel.Warning, "startup", warning);
+        }
+
         if (config.Secrets.KeyProtection == KeyProtectionMode.None)
         {
             log.Write(MtaLogLevel.Warning, "startup", "Secrets:KeyProtection is None: the Data Protection key ring is stored unprotected. Use a certificate in production.");
@@ -186,6 +194,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
 
         var runtime = new EggMailRuntime
         {
+            KeysProtectedAtRest = Mta.Host.Secrets.SecretsFactory.KeysProtectedAtRest(config.Secrets, storage.Config),
             Config = config, Storage = storage, Clock = clock, Log = log, Secrets = secrets, Certificates = certificates, Verp = verp,
             Submission = submission, AuthThrottle = throttle, SmtpServer = smtp, Delivery = delivery, Webhooks = webhooks, Dns = dns,
             Pool = pool, Routes = routes, Limits = limits, Acme = acme, TlsReports = reports, Health = routeHealth, DestinationThrottle = destinationThrottle, ReplicaExchange = replicaExchange,

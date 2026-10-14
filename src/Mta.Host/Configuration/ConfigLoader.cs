@@ -386,6 +386,8 @@ public static class ConfigLoader
             errors.Add("Delivery:PublicSendingIp is not an IP address.");
         }
 
+        Secrets.SecretsConfigurationCheck.Validate(c.Secrets, errors);
+
         if (c.Delivery.Workers < 1)
         {
             errors.Add("Delivery:Workers must be at least 1.");

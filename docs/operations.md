@@ -36,7 +36,7 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | Key | Default | Meaning |
 |---|---|---|
 | `Hostname` | machine name | Name in SMTP greetings, `Received` headers and EHLO; should match the PTR record of the sending IP |
-| `Startup:RequireUnicodeSupport` | true | Refuse to run `serve`, `migrate-db`, `migrate-storage` and `admin` when the Unicode self-test fails (see "Unicode support" below); `false` only logs a warning |
+| `Startup:RequireUnicodeSupport` | true | Refuse to run `serve`, `migrate-db`, `migrate-storage`, `admin` and `secrets` when the Unicode self-test fails (see "Unicode support" below); `false` only logs a warning |
 | `Storage:Backend` | `Sqlite` | `Sqlite` or `Postgres` (same image) |
 | `Sqlite:DataDirectory` | `/data` | Where the database files live (mount a volume here) |
 | `Sqlite:SyncMode` | `Off` | `Off`, `Normal`, `Full` for queue and stats files. **`Off` is safe against a process kill but not against power loss or an OS crash**: files can corrupt and acknowledged mail can be lost. Use `Normal` or `Full`, or PostgreSQL, if you need that |
@@ -139,9 +139,12 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | `Acme:PropagationDelay` | `00:00:30` | Wait after publishing the challenge record |
 | `Acme:RenewAtRemainingFraction` | 0.3333 | Renew when this fraction of the lifetime remains (between 0 and 1) |
 | `Acme:CheckInterval` | `01:00:00` | How often the renewal service looks |
-| `Secrets:KeyProtection` | `None` | `Certificate` (with `Secrets:CertificatePath`) for production. `None` stores the key ring unprotected and logs a warning |
+| `Secrets:KeyProtection` | `None` | `Certificate` (with `Secrets:CertificatePath`) or `Kms` (see "Protecting the key ring" below) for production. `None` stores the key ring unprotected and logs a warning |
 | `Secrets:CertificatePath` | none | PFX that protects the Data Protection key ring (deployment configuration, never in the database) |
 | `Secrets:CertificatePasswordFile` | none | File holding its password |
+| `Secrets:KmsProvider` | `LocalKey` | With `Kms`: the key service that wraps the key ring. Only `LocalKey` is built in |
+| `Secrets:KmsKeyFile` | none | `LocalKey`: file with the 32-byte wrapping key (base64, hex or raw). A mounted secret; preferred |
+| `Secrets:KmsKey` | none | `LocalKey`: the same key as base64 or hex in a value, for platforms that only pass environment variables |
 
 ### HTTP API and dashboard
 
@@ -337,9 +340,24 @@ Alert also on the readiness warnings of `/readyz` (`sqlite_sync_off`, `sqlite_qu
 
 EggMail sends 8-bit bodies with `BODY=8BITMIME` and internationalized mail with `SMTPUTF8` when the receiving server offers them, and converts or refuses when it does not. Three permanent failures name this in the bounce text (none of them suppresses the recipient): `5.6.1` the server has no 8BITMIME and the message could not be converted to 7-bit (the text says why, for example 8-bit header fields in an attached message); `5.6.9` the message has UTF-8 header fields and the server has no SMTPUTF8 (a change from earlier versions, which sent such mail as is; headers are not downgraded, RFC 6857); `5.6.7` the sender or recipient address has non-ASCII characters before the `@` and the server has no SMTPUTF8 (when only some recipients are affected the others are delivered, and the affected ones are offered to the domain's other mail hosts first). A configured `Delivery:BounceDomain` makes the envelope sender an ASCII bounce address, which avoids `5.6.7` for the sender. Bounce reports about internationalized recipients are RFC 6533 reports (`message/global-delivery-status`).
 
+## Protecting the key ring (`Secrets:KeyProtection`)
+
+DKIM keys, webhook secrets, TLS private keys and the ACME account key are encrypted with ASP.NET Core Data Protection; the key ring itself lives in the database. `Certificate` encrypts the ring with a PFX held outside the database. `Kms` wraps every ring element with a key that is kept outside the database: with `Secrets:KmsProvider=LocalKey` that is a random 32-byte key from a mounted file or an environment value.
+
+```sh
+umask 077 && openssl rand -base64 32 > /run/secrets/eggmail-keyring.key     # readable by the EggMail user only
+# Secrets__KeyProtection=Kms  Secrets__KmsKeyFile=/run/secrets/eggmail-keyring.key
+```
+
+`Secrets:KmsKey` (the key in an environment value) works but is visible in the process environment; the start logs a warning, as it does for a key file that other users can read. Elements are sealed with AES-256-GCM and record the provider and a key id, so starting with another key stops with a message naming both. A missing or unusable key is a configuration error at start (exit 2).
+
+**The stored ring must fit the configuration.** At start the ring is inspected before Data Protection touches it (otherwise a key it cannot read would be treated as missing and a new one created, stranding everything protected by the old ring). The start is refused, with a message, when the key is not the one the ring was wrapped with, when the ring holds keys encrypted with a certificate but `Secrets:KeyProtection` is not `Certificate`, or keys wrapped by `Kms` while it is not `Kms`. A ring that still holds keys written in the clear (from before protection was switched on) starts with a warning, and the backend switch does not count the instance as protected. **Changing `Secrets:KeyProtection`, or the key, on a ring that already holds keys is only supported with `mta secrets rewrap`**: with the server stopped and after a backup, `mta secrets rewrap` shows what it would change, `mta secrets rewrap --apply` protects keys stored in the clear and, with `--from-kms-key-file OLD`, moves keys wrapped by the previous key to the configured one. Keys encrypted with a certificate are not converted.
+
+**Keep the key: without it the ring, and with it every secret in the database, cannot be opened.** There is no other key rotation. A cloud key service (AWS KMS, Azure Key Vault, Google Cloud KMS) is not included: it is an `IKeyWrapProvider` registered with `KeyWrapProviders.Register` in a custom build of the host and selected by `Secrets:KmsProvider`; see [open-questions.md](open-questions.md). Backend switching works with any of the modes (the source's key must be reachable during the export).
+
 ## Unicode support
 
-Internationalized domain names and Unicode normalization depend on ICU. In invariant globalization mode (`DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1`, `InvariantGlobalization=true`, or a host without `libicu`) .NET gives wrong answers for anything outside ASCII without any error: an upper case or decomposed IDN becomes the wrong A-label, so a sender domain no longer matches the one that was registered. Before `mta serve`, `migrate-db`, `migrate-storage` and `admin` do anything they therefore run a self-test (A-labels of a precomposed, an upper case, a decomposed and a CJK name, U-label round trip, NFC normalization) and, if it fails, print what was wrong and how to fix it and exit with code 71 before opening any storage (`--version`, `--healthcheck` and `self-test` itself are exempt). The probes go through the same code the mail pipeline uses for domain names (`DnsName`, the address parser). `mta self-test` runs the same test and prints the result (exit 0 or 71): use it to check an image or a host. The published image is the chiseled `-extra` variant with ICU. `Startup:RequireUnicodeSupport=false` starts anyway with a warning in the log (not recommended).
+Internationalized domain names and Unicode normalization depend on ICU. In invariant globalization mode (`DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1`, `InvariantGlobalization=true`, or a host without `libicu`) .NET gives wrong answers for anything outside ASCII without any error: an upper case or decomposed IDN becomes the wrong A-label, so a sender domain no longer matches the one that was registered. Before `mta serve`, `migrate-db`, `migrate-storage`, `admin` and `secrets` do anything they therefore run a self-test (A-labels of a precomposed, an upper case, a decomposed and a CJK name, U-label round trip, NFC normalization) and, if it fails, print what was wrong and how to fix it and exit with code 71 before opening any storage (`--version`, `--healthcheck` and `self-test` itself are exempt). The probes go through the same code the mail pipeline uses for domain names (`DnsName`, the address parser). `mta self-test` runs the same test and prints the result (exit 0 or 71): use it to check an image or a host. The published image is the chiseled `-extra` variant with ICU. `Startup:RequireUnicodeSupport=false` starts anyway with a warning in the log (not recommended).
 
 ## Upgrades
 
@@ -355,7 +373,7 @@ Four things the server counts or learns while running are written to the databas
 
 Only with the PostgreSQL backend (SQLite is one process on one volume, by design). Point every replica at the same database with the same `Secrets` configuration; each replica generates a unique name for itself at start. Nothing needs to be configured for the replicas to find each other: they beat in the database every 5 seconds.
 
-What is shared between replicas, and what is not (decision 79):
+What is shared between replicas, and what is not (decision 80):
 
 | What | With N replicas |
 |---|---|
