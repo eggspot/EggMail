@@ -227,35 +227,35 @@ internal sealed partial class InMemoryConfigStore : IConfigStore
         }
     }
 
-    public ValueTask<DashboardUserWriteResult> ReplaceDashboardUserGuardedAsync(DashboardUser replacement, bool endSessions, byte[]? keepSessionHash, CancellationToken ct)
+    public ValueTask<DashboardUserUpdate> UpdateDashboardUserGuardedAsync(Guid id, Func<DashboardUser, DashboardUser> change, bool endSessions, byte[]? keepSessionHash, CancellationToken ct)
     {
-        var e = replacement.ToEntity();
         lock (_gate)
         {
-            if (!_dashboardUsers.TryGetValue(e.Id, out var current))
+            if (!_dashboardUsers.TryGetValue(id, out var current))
             {
-                return R(DashboardUserWriteResult.NotFound);
+                return R(new DashboardUserUpdate(DashboardUserWriteResult.NotFound, null));
             }
 
+            var e = (change(current.ToRecord()) with { Id = id }).ToEntity();
             bool isEnabledAdmin = current.Role == DashboardRole.Admin && current.Enabled;
             bool staysEnabledAdmin = e.Role == DashboardRole.Admin && e.Enabled;
-            if (isEnabledAdmin && !staysEnabledAdmin && !_dashboardUsers.Values.Any(u => u.Id != e.Id && u.Role == DashboardRole.Admin && u.Enabled))
+            if (isEnabledAdmin && !staysEnabledAdmin && !_dashboardUsers.Values.Any(u => u.Id != id && u.Role == DashboardRole.Admin && u.Enabled))
             {
-                return R(DashboardUserWriteResult.WouldRemoveLastAdmin);
+                return R(new DashboardUserUpdate(DashboardUserWriteResult.WouldRemoveLastAdmin, null));
             }
 
-            if (_dashboardUsers.Values.Any(u => u.UserName == e.UserName && u.Id != e.Id))
+            if (_dashboardUsers.Values.Any(u => u.UserName == e.UserName && u.Id != id))
             {
                 throw Conflict("dashboard_user.user_name");
             }
 
-            _dashboardUsers[e.Id] = e;
+            _dashboardUsers[id] = e;
             if (endSessions)
             {
-                _dashboardSessions.RemoveAll(s => s.UserId == e.Id && (keepSessionHash is null || !s.IdHash.AsSpan().SequenceEqual(keepSessionHash)));
+                _dashboardSessions.RemoveAll(s => s.UserId == id && (keepSessionHash is null || !s.IdHash.AsSpan().SequenceEqual(keepSessionHash)));
             }
 
-            return R(DashboardUserWriteResult.Applied);
+            return R(new DashboardUserUpdate(DashboardUserWriteResult.Applied, e.ToRecord()));
         }
     }
 

@@ -85,7 +85,7 @@ public sealed record DashboardUser(Guid Id, string UserName, string PasswordHash
 /// </summary>
 public sealed record DashboardSession(byte[] IdHash, Guid UserId, string CsrfToken, DateTimeOffset CreatedAt, DateTimeOffset LastSeenAt, DateTimeOffset ExpiresAt);
 
-/// <summary>Outcome of a guarded dashboard user write (<see cref="IConfigStore.ReplaceDashboardUserGuardedAsync"/>, <see cref="IConfigStore.DeleteDashboardUserGuardedAsync"/>).</summary>
+/// <summary>Outcome of a guarded dashboard user write (<see cref="IConfigStore.UpdateDashboardUserGuardedAsync"/>, <see cref="IConfigStore.DeleteDashboardUserGuardedAsync"/>).</summary>
 public enum DashboardUserWriteResult : byte
 {
     /// <summary>The change was stored.</summary>
@@ -97,6 +97,9 @@ public enum DashboardUserWriteResult : byte
     /// <summary>Nothing was changed: it would have left the installation without an enabled administrator.</summary>
     WouldRemoveLastAdmin,
 }
+
+/// <summary>The result of <see cref="IConfigStore.UpdateDashboardUserGuardedAsync"/>: what happened and, when <see cref="DashboardUserWriteResult.Applied"/>, the stored user.</summary>
+public readonly record struct DashboardUserUpdate(DashboardUserWriteResult Result, DashboardUser? User);
 
 public sealed record SettingRecord(string Key, Guid? TenantId, string ValueJson, DateTimeOffset UpdatedAt);
 
@@ -241,17 +244,18 @@ public interface IConfigStore : IRuntimeStateStore
     ValueTask<bool> DeleteDashboardUserAsync(Guid id, CancellationToken ct);
 
     /// <summary>
-    /// Replaces the stored user that has <paramref name="replacement"/>'s id with <paramref name="replacement"/> (the same rules as
-    /// <see cref="UpsertDashboardUserAsync"/> for the user name), in one atomic write with the last-administrator check: when the user is
-    /// currently an enabled administrator, the replacement is not, and no other enabled administrator exists, nothing changes and
+    /// Applies <paramref name="change"/> to the stored user <paramref name="id"/> (read, change and write are one atomic write, so a concurrent
+    /// disable cannot be overwritten by a password change made from an older copy; <paramref name="change"/> must be a pure function of its
+    /// argument, it may run more than once, and it must keep the user name and id) with the last-administrator check: when the user is currently an
+    /// enabled administrator, the changed user is not, and no other enabled administrator exists, nothing changes and
     /// <see cref="DashboardUserWriteResult.WouldRemoveLastAdmin"/> is returned. Two concurrent calls cannot both succeed, on any backend.
     /// With <paramref name="endSessions"/> the user's sessions are deleted in the same write, except the one whose digest is
     /// <paramref name="keepSessionHash"/>. An unknown id is <see cref="DashboardUserWriteResult.NotFound"/> (nothing is created).
     /// </summary>
-    ValueTask<DashboardUserWriteResult> ReplaceDashboardUserGuardedAsync(DashboardUser replacement, bool endSessions, byte[]? keepSessionHash, CancellationToken ct);
+    ValueTask<DashboardUserUpdate> UpdateDashboardUserGuardedAsync(Guid id, Func<DashboardUser, DashboardUser> change, bool endSessions, byte[]? keepSessionHash, CancellationToken ct);
 
     /// <summary>
-    /// Deletes a user and the user's sessions with the same last-administrator check as <see cref="ReplaceDashboardUserGuardedAsync"/>
+    /// Deletes a user and the user's sessions with the same last-administrator check as <see cref="UpdateDashboardUserGuardedAsync"/>
     /// (deleting the only enabled administrator changes nothing and returns <see cref="DashboardUserWriteResult.WouldRemoveLastAdmin"/>).
     /// </summary>
     ValueTask<DashboardUserWriteResult> DeleteDashboardUserGuardedAsync(Guid id, CancellationToken ct);

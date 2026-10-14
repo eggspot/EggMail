@@ -201,30 +201,30 @@ public sealed partial class EfConfigStore<TContext>(IConfigDbAccess<TContext> db
             return c.Set<DashboardUserEntity>().Where(u => u.Id == id).ExecuteDelete() > 0;
         }, ct).ConfigureAwait(false);
 
-    public async ValueTask<DashboardUserWriteResult> ReplaceDashboardUserGuardedAsync(DashboardUser replacement, bool endSessions, byte[]? keepSessionHash, CancellationToken ct)
-    {
-        var e = replacement.ToEntity();
-        return await Write(c =>
+    public async ValueTask<DashboardUserUpdate> UpdateDashboardUserGuardedAsync(Guid id, Func<DashboardUser, DashboardUser> change, bool endSessions, byte[]? keepSessionHash, CancellationToken ct) =>
+        await Write(c =>
         {
-            // Config writes are serialized (the SQLite writer thread, the PostgreSQL advisory lock), so the check and the change are atomic.
+            // Config writes are serialized (the SQLite writer thread, the PostgreSQL advisory lock), so read, check and change are atomic.
             var users = c.Set<DashboardUserEntity>();
-            var current = users.AsNoTracking().Where(u => u.Id == e.Id).Select(u => new { u.Role, u.Enabled }).FirstOrDefault();
-            if (current is null)
+            var currentEntity = users.AsNoTracking().Where(u => u.Id == id).FirstOrDefault();
+            if (currentEntity is null)
             {
-                return DashboardUserWriteResult.NotFound;
+                return new DashboardUserUpdate(DashboardUserWriteResult.NotFound, null);
             }
 
-            bool isEnabledAdmin = current.Role == DashboardRole.Admin && current.Enabled;
+            DashboardUser changed = change(currentEntity.ToRecord());
+            var e = (changed with { Id = id }).ToEntity();
+            bool isEnabledAdmin = currentEntity.Role == DashboardRole.Admin && currentEntity.Enabled;
             bool staysEnabledAdmin = e.Role == DashboardRole.Admin && e.Enabled;
-            if (isEnabledAdmin && !staysEnabledAdmin && !users.Any(u => u.Id != e.Id && u.Role == DashboardRole.Admin && u.Enabled))
+            if (isEnabledAdmin && !staysEnabledAdmin && !users.Any(u => u.Id != id && u.Role == DashboardRole.Admin && u.Enabled))
             {
-                return DashboardUserWriteResult.WouldRemoveLastAdmin;
+                return new DashboardUserUpdate(DashboardUserWriteResult.WouldRemoveLastAdmin, null);
             }
 
             Upsert(c, e, e.Id);
             if (endSessions)
             {
-                var sessions = c.Set<DashboardSessionEntity>().Where(s => s.UserId == e.Id);
+                var sessions = c.Set<DashboardSessionEntity>().Where(s => s.UserId == id);
                 if (keepSessionHash is not null)
                 {
                     sessions = sessions.Where(s => s.IdHash != keepSessionHash);
@@ -233,9 +233,8 @@ public sealed partial class EfConfigStore<TContext>(IConfigDbAccess<TContext> db
                 sessions.ExecuteDelete();
             }
 
-            return DashboardUserWriteResult.Applied;
+            return new DashboardUserUpdate(DashboardUserWriteResult.Applied, e.ToRecord());
         }, ct).ConfigureAwait(false);
-    }
 
     public async ValueTask<DashboardUserWriteResult> DeleteDashboardUserGuardedAsync(Guid id, CancellationToken ct) =>
         await Write(c =>
