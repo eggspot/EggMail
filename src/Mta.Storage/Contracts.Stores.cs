@@ -24,6 +24,12 @@ public interface IStorage : IAsyncDisposable
     /// </summary>
     Transfer.IStorageTransfer? Transfer => null;
 
+    /// <summary>
+    /// What several replicas on one database exchange (liveness, signals about remote destinations, failed-login counts). Null for SQLite, which is one process by
+    /// design, where the in-process state is already exact.
+    /// </summary>
+    IReplicaCoordination? Replicas => null;
+
     /// <summary>Creates or migrates the schema, runs startup integrity checks (SQLite) and prepares writers.</summary>
     Task InitializeAsync(CancellationToken cancellationToken);
 }

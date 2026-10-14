@@ -188,6 +188,19 @@ public class PgRuntimeState : RuntimeStateConformance
     }
 }
 
+public class PgReplicaCoordination : ReplicaCoordinationConformance
+{
+    private readonly PgHarness _pg = new();
+
+    protected override Task<IStorage> CreateAsync(StorageOptions options) => _pg.CreateAsync(options, Clock);
+
+    public override async Task DisposeAsync()
+    {
+        await base.DisposeAsync();
+        await _pg.DisposeAsync();
+    }
+}
+
 public class PgConfig : ConfigConformance
 {
     private readonly PgHarness _pg = new();

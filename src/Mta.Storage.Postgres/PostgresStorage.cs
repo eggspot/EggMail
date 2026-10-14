@@ -33,6 +33,7 @@ public sealed class PostgresStorage : IStorage
     private Task? _flushLoop;
     private PostgresMaintenance? _maintenance;
     private EfStorageTransfer? _transfer;
+    private readonly PostgresReplicaCoordination _replicas;
     private int _initialized;
     private int _disposed;
 
@@ -50,6 +51,7 @@ public sealed class PostgresStorage : IStorage
         _stats = new PostgresStatsStore(_rt);
         _history = new PostgresHistoryStore(_rt);
         _queue = new PostgresQueueStore(_rt, _history);
+        _replicas = new PostgresReplicaCoordination(_rt);
     }
 
     /// <summary>Creates the storage. Call <see cref="InitializeAsync"/> before use.</summary>
@@ -75,6 +77,8 @@ public sealed class PostgresStorage : IStorage
     public IStorageMaintenance Maintenance => _maintenance ?? throw NotInitialized();
 
     public IStorageTransfer Transfer => _transfer ?? throw NotInitialized();
+
+    public IReplicaCoordination? Replicas => _replicas;
 
     /// <summary>The shared runtime state (data sources, partition manager) for the PostgreSQL-specific tests.</summary>
     internal PostgresRuntime Runtime => _rt;

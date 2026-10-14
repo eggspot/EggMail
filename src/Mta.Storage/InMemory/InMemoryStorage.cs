@@ -57,6 +57,8 @@ public sealed class InMemoryStorage : IStorage
 
     public IStorageTransfer Transfer { get; }
 
+    public IReplicaCoordination? Replicas { get; } = new InMemoryReplicaCoordination();
+
     public Task InitializeAsync(CancellationToken cancellationToken)
     {
         return Task.CompletedTask;

@@ -46,6 +46,30 @@ public readonly struct RouteHealthKey : IEquatable<RouteHealthKey>
 
     /// <inheritdoc />
     public override string ToString() => Kind == RouteHealthKind.Route ? "route:" + Name : "mx:" + Name;
+
+    /// <summary>Reads what <see cref="ToString"/> wrote (<c>route:name</c> or <c>mx:host</c>).</summary>
+    public static bool TryParse(string? text, out RouteHealthKey key)
+    {
+        key = default;
+        if (text is null)
+        {
+            return false;
+        }
+
+        if (text.StartsWith("route:", StringComparison.Ordinal) && text.Length > 6)
+        {
+            key = ForRoute(text[6..]);
+            return true;
+        }
+
+        if (text.StartsWith("mx:", StringComparison.Ordinal) && text.Length > 3)
+        {
+            key = ForMxHost(text[3..]);
+            return true;
+        }
+
+        return false;
+    }
 }
 
 /// <summary>Circuit breaker states.</summary>
@@ -148,6 +172,7 @@ public sealed class RouteHealth
     }
 
     private readonly ConcurrentDictionary<RouteHealthKey, Entry> _entries = new();
+    private readonly ConcurrentDictionary<RouteHealthKey, (long RetryAtTicks, long CooldownTicks)> _opened = new();
     private readonly RouteHealthOptions _options;
     private readonly IClock _clock;
     private int _reports;
@@ -298,6 +323,7 @@ public sealed class RouteHealth
                         _options.MaxCooldown.Ticks);
                     Open(entry, now, next);
                     entry.ProbeInFlight = false;
+                    NoteOpened(key, entry);
                 }
                 else if (entry.State == CircuitState.Closed)
                 {
@@ -309,6 +335,7 @@ public sealed class RouteHealth
                     if (++entry.ConsecutiveFailures >= _options.FailureThreshold)
                     {
                         Open(entry, now, _options.Cooldown.Ticks);
+                        NoteOpened(key, entry);
                     }
                 }
 
@@ -320,6 +347,63 @@ public sealed class RouteHealth
         }
 
         MaybeSweep(now);
+    }
+
+    /// <summary>
+    /// Takes the circuits this replica opened (or re-opened after a failed probe) since the last call, not those it adopted from another replica, so the host can tell the others.
+    /// Each key appears once with its latest retry time and cooldown.
+    /// </summary>
+    public void DrainOpened(List<(RouteHealthKey Key, DateTimeOffset RetryAt, TimeSpan Cooldown)> into)
+    {
+        foreach (var kv in _opened)
+        {
+            if (_opened.TryRemove(kv))
+            {
+                into.Add((kv.Key, At(kv.Value.RetryAtTicks), TimeSpan.FromTicks(kv.Value.CooldownTicks)));
+            }
+        }
+    }
+
+    /// <summary>
+    /// Opens the circuit of <paramref name="key"/> until <paramref name="retryAt"/> because another replica found the target down, so this replica does not spend its
+    /// own failed connection attempts to learn the same. A target that is closed here opens; one that is already open is only extended; one being probed here is left
+    /// alone (this replica's probe will tell). Not passed on again. Whatever replica probes first after the retry time decides, as for a circuit opened here.
+    /// </summary>
+    public void ApplyPeerOpen(in RouteHealthKey key, DateTimeOffset retryAt, TimeSpan cooldown)
+    {
+        long now = _clock.UtcNow.UtcTicks;
+        if (retryAt.UtcTicks <= now)
+        {
+            return;
+        }
+
+        while (true)
+        {
+            Entry entry = _entries.GetOrAdd(key, static _ => new Entry());
+            lock (entry.Gate)
+            {
+                if (entry.Evicted)
+                {
+                    continue;
+                }
+
+                entry.LastTouchTicks = now;
+                if (entry.State == CircuitState.Closed)
+                {
+                    entry.ConsecutiveFailures = Math.Max(entry.ConsecutiveFailures, _options.FailureThreshold);
+                    entry.LastError ??= "opened because another replica could not connect";
+                    Open(entry, now, cooldown.Ticks);
+                    entry.RetryAtTicks = retryAt.UtcTicks;
+                }
+                else if (entry.State == CircuitState.Open && retryAt.UtcTicks > entry.RetryAtTicks)
+                {
+                    entry.RetryAtTicks = retryAt.UtcTicks;
+                    entry.CooldownTicks = Math.Max(entry.CooldownTicks, cooldown.Ticks);
+                }
+            }
+
+            return;
+        }
     }
 
     /// <summary>The state of one target without changing it (Open is reported as HalfOpen once its cooldown has elapsed).</summary>
@@ -350,6 +434,8 @@ public sealed class RouteHealth
 
     /// <summary>Drops closed, idle entries. Returns the number removed.</summary>
     public int Sweep() => SweepCore(_clock.UtcNow.UtcTicks);
+
+    private void NoteOpened(in RouteHealthKey key, Entry entry) => _opened[key] = (entry.RetryAtTicks, entry.CooldownTicks);
 
     private static void Open(Entry entry, long now, long cooldownTicks)
     {
