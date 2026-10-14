@@ -80,7 +80,7 @@ public class CancelThroughEngineTests
         // And once it is final there is nothing left to cancel.
         result = await CancelAsync(f, id, "rcpt@dest.example");
         Assert.Empty(result.Cancelled);
-        Assert.Equal(["rcpt@dest.example"], result.NotPending);
+        Assert.Equal(["rcpt@dest.example"], result.NotWaiting);
     }
 
     [Fact]
@@ -95,5 +95,26 @@ public class CancelThroughEngineTests
         await f.WaitForEventAsync(id, MessageEventType.Delivered);
         Assert.Equal(["keep@dest.example"], Assert.Single(f.Remote.Messages).Recipients);
         Assert.Equal("partial", (await f.Storage.History.GetAsync(DeliveryFixture.Tenant, id, default))!.Summary.Status);
+    }
+
+    [Fact]
+    public async Task A_cancelled_message_publishes_message_cancelled_and_nothing_else_reaches_the_remote()
+    {
+        await using var f = new DeliveryFixture(startEngine: false);
+        var endpoint = new WebhookEndpointRecord(Guid.NewGuid(), DeliveryFixture.Tenant, "https://hooks.example.com/x", [1], ["message.cancelled"], true, null, null, DateTimeOffset.UtcNow, null);
+        await f.Storage.Config.UpsertWebhookEndpointAsync(endpoint, default);
+        var id = await f.EnqueueAsync(["gone@dest.example"]);
+
+        CancelResult result = await f.Storage.Deliveries.CancelAsync(DeliveryFixture.Tenant, id, null, DateTimeOffset.UtcNow, Mta.Webhooks.WebhookEventFactory.ForCancelled, default);
+
+        Assert.Equal(["gone@dest.example"], result.Cancelled);
+        f.StartEngine();
+        var sentinel = await f.EnqueueAsync(["after@dest.example"]);
+        await f.WaitForEventAsync(sentinel, MessageEventType.Delivered);
+        var item = Assert.Single(await f.Storage.Webhooks.ClaimDueAsync("test", 10, DateTimeOffset.UtcNow.AddMinutes(1), TimeSpan.FromMinutes(1), default));
+        Assert.Equal("message.cancelled", item.EventType);
+        Assert.Equal(endpoint.Id, item.EndpointId);
+        Assert.Contains(Mta.Core.Ids.ToCompact(id), item.PayloadJson);
+        Assert.Equal(["after@dest.example"], Assert.Single(f.Remote.Messages).Recipients);
     }
 }
