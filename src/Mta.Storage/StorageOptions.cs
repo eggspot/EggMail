@@ -144,4 +144,20 @@ public sealed class PostgresOptions
 
     /// <summary>Command timeout in seconds for hot-path statements (Npgsql default 30).</summary>
     public int CommandTimeoutSeconds { get; init; } = 30;
+
+    /// <summary>
+    /// Optional third role (design section 4.3): a login that can only <c>SELECT</c> the history and statistics tables, used for the dashboard's
+    /// queries (message search, detail, events, retained raw, statistics). The schema migration grants it exactly those tables. Unset: those queries
+    /// run as the runtime role.
+    /// </summary>
+    public string? ReadOnlyConnectionString { get; init; }
+
+    /// <summary><c>statement_timeout</c> of the read-only connections, so a heavy dashboard query cannot hold the database (design: for example 5 s).</summary>
+    public int ReadOnlyStatementTimeoutSeconds { get; init; } = 5;
+
+    /// <summary><c>idle_in_transaction_session_timeout</c> of the read-only connections.</summary>
+    public int ReadOnlyIdleInTransactionTimeoutSeconds { get; init; } = 10;
+
+    /// <summary>Maximum Npgsql pool size of the read-only connections (design: about 8 for the dashboard).</summary>
+    public int ReadOnlyMaxPoolSize { get; init; } = 8;
 }
