@@ -333,9 +333,6 @@ public sealed class DestinationThrottle
     /// <summary>The number of keys currently tracked.</summary>
     public int TrackedKeyCount => Volatile.Read(ref _count);
 
-    /// <summary>The number of replicas this replica shares the destinations' ceilings with (1 when it is alone).</summary>
-    public int ReplicaCount => _share.Count;
-
     /// <summary>
     /// Tells the throttle it is replica <paramref name="index"/> (0-based rank among the live replicas, the same ordering on every replica) of <paramref name="count"/>
     /// sharing one set of remote destinations. Every ceiling is divided so the replicas together stay within it: the connection ceiling is split into whole connections
@@ -358,17 +355,27 @@ public sealed class DestinationThrottle
         _share = next;
         foreach (var kv in _states)
         {
-            ThrottleState state = kv.Value;
-            lock (state.Gate)
+            lock (kv.Value.Gate)
             {
-                ThrottleLimits old = state.Ceiling;
-                ThrottleLimits scaled = Scale(state.FullCeiling, next);
-                state.Ceiling = scaled;
-                state.ConcurrencyLimit = Math.Clamp((int)Math.Ceiling(state.ConcurrencyLimit * (double)scaled.MaxConcurrentConnections / old.MaxConcurrentConnections), Math.Min(_options.MinConcurrentConnections, scaled.MaxConcurrentConnections), scaled.MaxConcurrentConnections);
-                state.Rate = Math.Clamp(state.Rate * scaled.MaxMessagesPerMinute / old.MaxMessagesPerMinute, Math.Min(MinRate(next), scaled.MaxMessagesPerMinute), scaled.MaxMessagesPerMinute);
-                state.Tokens = Math.Min(state.Tokens, state.Capacity(_options.BurstSeconds));
+                Rescale(kv.Value, next);
             }
         }
+    }
+
+    /// <summary>Moves a state to <paramref name="share"/>: the ceilings are recomputed and what the destination has learned is scaled by the same ratio. Call under the state's lock; a state already at the share is unchanged.</summary>
+    private void Rescale(ThrottleState state, ReplicaShare share)
+    {
+        ThrottleLimits old = state.Ceiling;
+        ThrottleLimits scaled = Scale(state.FullCeiling, share);
+        if (scaled == old)
+        {
+            return;
+        }
+
+        state.Ceiling = scaled;
+        state.ConcurrencyLimit = Math.Clamp((int)Math.Ceiling(state.ConcurrencyLimit * (double)scaled.MaxConcurrentConnections / old.MaxConcurrentConnections), Math.Min(_options.MinConcurrentConnections, scaled.MaxConcurrentConnections), scaled.MaxConcurrentConnections);
+        state.Rate = Math.Clamp(state.Rate * scaled.MaxMessagesPerMinute / old.MaxMessagesPerMinute, Math.Min(MinRate(share), scaled.MaxMessagesPerMinute), scaled.MaxMessagesPerMinute);
+        state.Tokens = Math.Min(state.Tokens, state.Capacity(_options.BurstSeconds));
     }
 
     /// <summary>
@@ -645,9 +652,22 @@ public sealed class DestinationThrottle
         double rate = Math.Clamp(_options.InitialMessagesPerMinute / share.Count, Math.Min(MinRate(share), ceiling.MaxMessagesPerMinute), ceiling.MaxMessagesPerMinute);
         var created = new ThrottleState(key, full, ceiling, concurrency, rate, now, _options.BurstSeconds);
         ThrottleState winner = _states.GetOrAdd(key, created);
-        if (ReferenceEquals(winner, created) && Interlocked.Increment(ref _count) > _options.MaxTrackedKeys)
+        if (ReferenceEquals(winner, created))
         {
-            SweepCore(now, force: true, keep: created);
+            // The share may have changed between reading it and adding the state, in which case SetReplicaShare did not see this state.
+            ReplicaShare current = _share;
+            if (!ReferenceEquals(current, share))
+            {
+                lock (created.Gate)
+                {
+                    Rescale(created, current);
+                }
+            }
+
+            if (Interlocked.Increment(ref _count) > _options.MaxTrackedKeys)
+            {
+                SweepCore(now, force: true, keep: created);
+            }
         }
 
         return winner;

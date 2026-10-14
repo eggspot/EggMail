@@ -51,12 +51,14 @@ internal static class ReplicaHarness
         },
     };
 
-    /// <summary>Starts one replica: its own storage object over the shared database, initialized, with its runtime (which joins the replica set before it delivers).</summary>
+    /// <summary>Starts one replica: its own storage object over the shared database, initialized, with its runtime, which has joined the replica set (as the host does before the delivery engine starts).</summary>
     public static async Task<EggMailRuntime> StartAsync(MtaConfig config, IClock clock, IMtaLog log, IDnsResolver dns)
     {
         var storage = PostgresStorage.Create(config.Storage, clock, log);
         await storage.InitializeAsync(default);
-        return await EggMailRuntime.CreateAsync(config, storage, clock, log, default, dns);
+        var runtime = await EggMailRuntime.CreateAsync(config, storage, clock, log, default, dns);
+        await runtime.ReplicaExchange!.ExchangeAsync(default);
+        return runtime;
     }
 
     public static async Task SeedAsync(IStorage storage, params string[] domains)
@@ -441,6 +443,7 @@ public sealed class MultiReplicaChaosTests : IAsyncLifetime
         foreach (var runtime in _replicas)
         {
             _engines.Add(Task.Run(() => runtime.Delivery.RunAsync(_stop.Token)));
+            _engines.Add(Task.Run(() => runtime.ReplicaExchange!.RunAsync(_stop.Token)));   // the replicas beat and share their limits while they work
         }
     }
 

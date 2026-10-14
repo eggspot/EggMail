@@ -139,21 +139,10 @@ public sealed class EggMailRuntime : IAsyncDisposable
             InitialConcurrentConnections = config.Delivery.Throttle.InitialConnections,
             InitialMessagesPerMinute = config.Delivery.Throttle.InitialMessagesPerMinute,
         });
-        // Replicas on one database share the per-destination ceilings and tell each other what remote destinations did; takes part before this replica delivers anything.
+        // Replicas on one database share the per-destination ceilings and tell each other what remote destinations did (ReplicaExchangeService runs it).
         ReplicaStateExchange? replicaExchange = storage.Replicas is { } coordination
             ? new ReplicaStateExchange(coordination, deliveryOptions.Owner, clock, destinationThrottle, routeHealth, log: log)
             : null;
-        if (replicaExchange is not null)
-        {
-            try
-            {
-                await replicaExchange.ExchangeAsync(ct).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                log.Write(MtaLogLevel.Warning, "replicas", "could not join the replica set at start; the periodic exchange will retry (the destination ceilings are not shared until it succeeds)", ex);
-            }
-        }
 
         var services = new DeliveryServices
         {
