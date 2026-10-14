@@ -121,3 +121,14 @@ describe('Settings page', () => {
     expect(await screen.findByText('Content:RetentionDays')).toBeTruthy();
   });
 });
+
+describe('Settings page: restart hint', () => {
+  it('says when a stored value only applies at the next start', async () => {
+    mockFetch({
+      'GET /api/v1/settings': { items: [] },
+      'GET /api/v1/admin/settings': { items: [{ key: 'Retention:MetadataDays', value: 30, type: 'number', description: 'Days to keep events.', requiresRestart: true }] },
+    });
+    renderWithApp(<Settings />, { role: 'admin' });
+    expect(await screen.findByText(/Takes effect the next time the server starts/)).toBeTruthy();
+  });
+});

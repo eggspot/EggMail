@@ -168,4 +168,39 @@ describe('DomainDetail: DKIM rotation', () => {
     fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Cancel' }));
     expect(m.callsTo('POST', '/api/v1/domains/d1/dkim/rotate')).toHaveLength(0);
   });
+
+  const withPending = () =>
+    makeDomain({
+      dkim: { selector: 'eggmail2', publicKey: 'NEWKEY', active: false, createdAt: '2026-10-12T08:00:00.000Z', retiredAt: null },
+      dkimKeys: [
+        { selector: 'eggmail1', publicKey: 'OLDKEY', active: true, createdAt: '2026-09-01T00:00:00.000Z', retiredAt: null },
+        { selector: 'eggmail2', publicKey: 'NEWKEY', active: false, createdAt: '2026-10-12T08:00:00.000Z', retiredAt: null },
+      ],
+    });
+
+  it('shows the signing key, the pending key as waiting for DNS, and cancels a pending rotation after confirmation', async () => {
+    const cancelled = makeDomain({ dkimKeys: [{ selector: 'eggmail1', publicKey: 'OLDKEY', active: true, createdAt: '2026-09-01T00:00:00.000Z', retiredAt: null }] });
+    const m = mockFetch({ 'GET /api/v1/domains/:id': withPending(), 'DELETE /api/v1/domains/:id/dkim/rotate': cancelled });
+    renderWithApp(<DomainDetail id="d1" />);
+    // The card describes the key that signs, not the pending one.
+    expect((await screen.findByTestId('dkim-public-key')).textContent).toBe('OLDKEY');
+    expect(screen.getByText('Key rotation pending')).toBeTruthy();
+    expect(screen.getByText('Waiting for DNS')).toBeTruthy();
+    expect(screen.getByText('Signing')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel pending rotation' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(m.callsTo('DELETE', '/api/v1/domains/d1/dkim/rotate')).toHaveLength(0);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel rotation' }));
+    await waitFor(() => expect(m.callsTo('DELETE', '/api/v1/domains/d1/dkim/rotate')).toHaveLength(1));
+    await waitFor(() => expect(screen.queryByText('Key rotation pending')).toBeNull());
+    expect(screen.queryByRole('button', { name: 'Cancel pending rotation' })).toBeNull();
+  });
+
+  it('offers no cancel button without a pending key', async () => {
+    mockFetch({ 'GET /api/v1/domains/:id': makeDomain({ dkimKeys: [{ selector: 'eggmail1', publicKey: 'K', active: true, createdAt: '2026-09-01T00:00:00.000Z', retiredAt: null }] }) });
+    renderWithApp(<DomainDetail id="d1" />);
+    await screen.findByRole('button', { name: 'Rotate DKIM key' });
+    expect(screen.queryByRole('button', { name: 'Cancel pending rotation' })).toBeNull();
+  });
 });
