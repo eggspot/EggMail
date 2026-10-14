@@ -1,7 +1,7 @@
 // Core endpoints: health, capabilities, session, me, and the /__mock control endpoints.
 import { randomBytes } from 'node:crypto';
 import { HttpError } from '../lib.mjs';
-import { USERS, WARNING_TEXT } from '../app.mjs';
+import { WARNING_TEXT } from '../app.mjs';
 
 export function capabilities(state) {
   const o = state.options;
@@ -35,8 +35,8 @@ export function register(r, state) {
       if (fails && fails.count >= MAX_FAILURES && fails.until > Date.now()) {
         throw new HttpError(429, 'rate_limited', 'Too many failed sign-in attempts.', {}, { 'Retry-After': String(Math.ceil((fails.until - Date.now()) / 1000)) });
       }
-      const account = USERS[user];
-      if (!account || account.password !== password) {
+      const account = state.accounts.find((a) => a.userName === user.trim().toLowerCase());
+      if (!account || !account.enabled || account.password !== password) {
         const f = fails && fails.until > Date.now() ? fails : { count: 0, until: Date.now() + 60_000 };
         f.count += 1;
         state.loginFailures.set(user, f);
@@ -45,9 +45,9 @@ export function register(r, state) {
       state.loginFailures.delete(user);
       const sid = randomBytes(24).toString('hex');
       const csrf = randomBytes(16).toString('hex');
-      state.sessions.set(sid, { user, role: account.role, tenantId: account.tenantId, csrf });
+      state.sessions.set(sid, { userId: account.id, user: account.userName, role: account.role, tenantId: account.tenantId, csrf });
       ctx.setCookie.push(`${COOKIE}=${sid}; Path=/; HttpOnly; SameSite=Strict`);
-      return { user, role: account.role, tenantId: account.tenantId };
+      return { user: account.userName, role: account.role, tenantId: account.tenantId };
     },
     { public: true },
   );

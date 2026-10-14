@@ -20,7 +20,9 @@ const Suppressions = lazy(() => import('./pages/Suppressions'));
 const Credentials = lazy(() => import('./pages/Credentials'));
 const Statistics = lazy(() => import('./pages/Statistics'));
 const Settings = lazy(() => import('./pages/Settings'));
+const Account = lazy(() => import('./pages/Account'));
 const Tenants = lazy(() => import('./pages/admin/Tenants'));
+const Users = lazy(() => import('./pages/admin/Users'));
 const Status = lazy(() => import('./pages/admin/Status'));
 const Certificates = lazy(() => import('./pages/admin/Certificates'));
 const StorageSwitch = lazy(() => import('./pages/admin/StorageSwitch'));
@@ -87,6 +89,7 @@ const CredentialsPage = tenantRoute(Credentials);
 const StatisticsPage = tenantRoute(Statistics);
 const SettingsPage = tenantRoute(Settings);
 const TenantsPage = adminRoute(Tenants);
+const UsersPage = adminRoute(Users);
 const StatusPage = adminRoute(Status);
 const CertificatesPage = adminRoute(Certificates);
 const StoragePage = adminRoute(StorageSwitch);
@@ -110,7 +113,9 @@ function Routes() {
             <Route path="/credentials" component={CredentialsPage} />
             <Route path="/statistics" component={StatisticsPage} />
             <Route path="/settings" component={SettingsPage} />
+            <Route path="/account" component={Account} />
             <Route path="/admin/tenants" component={TenantsPage} />
+            <Route path="/admin/users" component={UsersPage} />
             <Route path="/admin/status" component={StatusPage} />
             <Route path="/admin/certificates" component={CertificatesPage} />
             <Route path="/admin/storage" component={StoragePage} />

@@ -48,6 +48,19 @@ export const USERS = {
   tenant: { password: 'eggmail', role: 'tenant', tenantId: 't_acme' },
 };
 
+/** The mock's dashboard accounts (the ones in USERS), as the user management API lists them. */
+function seedAccounts() {
+  return Object.entries(USERS).map(([userName, u], i) => ({
+    id: `u_${userName}`,
+    userName,
+    password: u.password,
+    role: u.role,
+    tenantId: u.tenantId,
+    enabled: true,
+    createdAt: `2026-08-0${i + 1}T09:00:00.000Z`,
+  }));
+}
+
 export function defaultOptions(env = {}) {
   const history = String(env.MOCK_HISTORY || 'full').toLowerCase();
   const backend = String(env.MOCK_BACKEND || 'sqlite').toLowerCase();
@@ -134,7 +147,8 @@ export async function createMockServer(optionOverrides = {}) {
   const options = { ...defaultOptions(process.env), ...optionOverrides };
   const state = {
     options,
-    sessions: new Map(), // sid -> { user, role, tenantId, csrf }
+    sessions: new Map(), // sid -> { userId, user, role, tenantId, csrf }
+    accounts: seedAccounts(), // dashboard users (mock/routes/users.mjs manages them)
     loginFailures: new Map(), // user -> { count, until }
     tenantStores: new Map(),
     shared: {}, // modules keep cross-tenant data here
@@ -158,6 +172,7 @@ export async function createMockServer(optionOverrides = {}) {
     state.tenantStores.clear();
     state.shared = {};
     state.sessions.clear();
+    state.accounts = seedAccounts();
     state.loginFailures.clear();
     for (const hook of state.resetHooks) hook();
   };
