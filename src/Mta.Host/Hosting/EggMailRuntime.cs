@@ -46,6 +46,9 @@ public sealed class EggMailRuntime : IAsyncDisposable
     public required SendingLimits Limits { get; init; }
     public AcmeRenewalService? Acme { get; init; }
 
+    /// <summary>The circuit breakers per route and MX host (shared among replicas through <see cref="ReplicaExchange"/>).</summary>
+    public required RouteHealth Health { get; init; }
+
     /// <summary>The per-destination connection and rate limits of the delivery engine (shared among replicas through <see cref="ReplicaExchange"/>).</summary>
     public required DestinationThrottle DestinationThrottle { get; init; }
 
@@ -196,7 +199,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
         {
             Config = config, Storage = storage, Clock = clock, Log = log, Secrets = secrets, Certificates = certificates, Verp = verp,
             Submission = submission, AuthThrottle = throttle, SmtpServer = smtp, Delivery = delivery, Webhooks = webhooks, Dns = dns,
-            Pool = pool, Routes = routes, Limits = limits, Acme = acme, TlsReports = reports, DestinationThrottle = destinationThrottle, ReplicaExchange = replicaExchange,
+            Pool = pool, Routes = routes, Limits = limits, Acme = acme, TlsReports = reports, Health = routeHealth, DestinationThrottle = destinationThrottle, ReplicaExchange = replicaExchange,
             CounterPersistence = counterPersistence, TlsJournal = tlsJournal, TlsCollector = collector,
         };
         runtime._owned.Add(certificateMeters);
