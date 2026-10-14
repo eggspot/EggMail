@@ -275,7 +275,7 @@ public sealed class AcmeRenewalService
             // backed off, never thrown: an exception escaping here would end the renewal loop until the next restart.
             int failures = (renewal?.Failures ?? 0) + 1;
             var retryAt = now + Backoff(failures);
-            await _config.UpsertAcmeRenewalAsync(new AcmeRenewalRecord(name, "failed", now, retryAt, failures, ex.Message, null, null), ct).ConfigureAwait(false);
+            await _config.UpsertAcmeRenewalAsync(new AcmeRenewalRecord(name, "failed", now, retryAt, failures, ex.Message, null, renewal?.AriJson), ct).ConfigureAwait(false);
             _log.Write(MtaLogLevel.Error, "acme", $"certificate order for '{name}' failed (attempt {failures}); next try {retryAt:u}", ex);
             return false;
         }

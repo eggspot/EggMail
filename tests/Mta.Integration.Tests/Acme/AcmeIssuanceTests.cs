@@ -155,6 +155,7 @@ public abstract class AcmeIssuanceTests : IAsyncLifetime
 
     protected async Task Renewal_replaces_the_row_when_a_third_of_the_lifetime_is_leftAsync()
     {
+        _h.UseRenewalInfo = false; // the lifetime rule; the CA's advice is tested in AcmeRenewalInfoPebbleTests
         string host = AcmeTestNames.Unique();
         using var dns = new ChallengeServerDns();
         var service = _h.CreateService(dns, [host]);
@@ -280,7 +281,7 @@ public abstract class AcmeIssuanceTests : IAsyncLifetime
 
         // The lease is released: the second replica now finds a fresh certificate and still does nothing.
         Assert.False(await second.CheckOnceAsync(default));
-        Assert.Empty(otherReplica.Requests);
+        Assert.DoesNotContain(otherReplica.Requests, r => r.Method == "POST"); // it may ask the CA about renewal timing (GET), but orders nothing
         gated.Dispose();
     }
 

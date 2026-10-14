@@ -1,7 +1,14 @@
 <Project>
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <!-- Lets the "Transitive security pins" below replace the versions that packages bring in on their own (Data Protection, MimeKit). -->
+    <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>
   </PropertyGroup>
+  <ItemGroup Label="Transitive security pins">
+    <!-- CVE-2026-84008 and the GHSA-7hqp/c399/r955 advisories (NuGet audit, warnings are errors): 10.0.12 is vulnerable, 10.0.13 is the fix. Drop when the packages above require it. -->
+    <PackageVersion Include="System.Security.Cryptography.Pkcs" Version="10.0.13" />
+    <PackageVersion Include="System.Security.Cryptography.Xml" Version="10.0.13" />
+  </ItemGroup>
   <ItemGroup Label="Tests">
     <PackageVersion Include="xunit" Version="2.9.3" />
     <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.5" />
@@ -11,7 +18,7 @@
     <PackageVersion Include="FsCheck.Xunit" Version="3.3.2" />
     <PackageVersion Include="Testcontainers.PostgreSql" Version="4.16.0" />
     <PackageVersion Include="BenchmarkDotNet" Version="0.15.8" />
-    <PackageVersion Include="Microsoft.Diagnostics.Tracing.TraceEvent" Version="3.1.16" />
+    <PackageVersion Include="Microsoft.Diagnostics.Tracing.TraceEvent" Version="3.1.21" />
     <PackageVersion Include="Microsoft.AspNetCore.TestHost" Version="10.0.12" />
   </ItemGroup>
   <ItemGroup Label="Fuzzing (only fuzz/Mta.Fuzz.Harness; never a protocol assembly)">

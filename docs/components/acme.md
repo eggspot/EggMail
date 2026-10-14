@@ -26,9 +26,21 @@ The design supports **DNS-01 only** ([decisions.md](../decisions.md) 19, design 
 5. The certificate row is **replaced** (same name, same id, new version) so the poller of every replica sees one change and no old certificate stays active next to the new one. The chain is stored as sent by the CA (leaf plus intermediates), the private key as PKCS#8 protected with Data Protection.
 6. Renewal row `issued`, failures 0.
 
-Renewal is due when a third of the lifetime is left (`Acme:RenewAtRemainingFraction`) or when the configured names changed. A failed attempt of any kind (the CA refusing, unreachable or too slow; the DNS provider failing; an unreadable chain) is recorded in the renewal row (`failed`, failure count, last error, next attempt) and backed off 10, 20, 40 minutes, … up to 6 hours; it is never thrown, so the renewal loop survives. The old certificate keeps being served.
+Renewal is due when the CA's advice says so (ARI, next section), when a third of the lifetime is left (`Acme:RenewAtRemainingFraction`) if there is no advice, or when the configured names changed. A failed attempt of any kind (the CA refusing, unreachable or too slow; the DNS provider failing; an unreadable chain) is recorded in the renewal row (`failed`, failure count, last error, next attempt) and backed off 10, 20, 40 minutes, … up to 6 hours; it is never thrown, so the renewal loop survives. The old certificate keeps being served.
 
 When the CA rejects the anti-replay nonce (`badNonce`; they expire and are per front end), the order is repeated up to four times in total, keeping an account that an earlier attempt registered.
+
+## Renewal timing: ACME Renewal Information (ARI, RFC 9773)
+
+Design §7.3 says "renew using ARI". `Acme:UseRenewalInfo` (default true) turns it on; `CertesOrderRunner.GetRenewalInfoAsync` asks the CA, `AcmeRenewalSchedule` (pure rules) decides, `AcmeRenewalService` persists.
+
+* **Asking.** When the CA's directory has `renewalInfo`, the service GETs `<renewalInfo>/<certID>` where certID is `base64url(Authority Key Identifier)` `.` `base64url(serial)` of the certificate in use (Certes builds it). No account is needed. A directory without `renewalInfo` is remembered for a day (the lifetime rule applies).
+* **Window.** The answer is a suggested window. The service picks **one random time inside it** the first time it sees that window and keeps it while the CA repeats the window (picking again at every poll would drift to the end); a different window picks again. A pick that is already in the past, or a window in the past (what a CA answers for a revoked certificate or after an incident), means renew at the next check.
+* **Polling.** `Retry-After` is honoured within one minute and one day (no header: 6 hours), so the CA is asked a few times a day at most; the effective cadence is never faster than `Acme:CheckInterval` (hourly), which is also the precision of "renew at the chosen time".
+* **Failure.** An error, a window that ends before it starts or an unparsable answer is recorded (`error`) and the CA is asked again after an hour; the lifetime rule decides meanwhile (an earlier valid window of the same certificate is kept). The CA being unable to answer never blocks a renewal.
+* **Safety floor** (DESIGN-DECIDED): whatever the advice says, a certificate with a sixth of its lifetime or less left is renewed, so a wrong or stale window cannot let it expire. The lifetime rule remains the fallback and the names-changed rule still applies first.
+* **`replaces`.** An order that renews a certificate sharing a name with it carries the certificate id in `replaces` (RFC 9773 section 5) when the CA advertises ARI, so it can treat the order as a renewal (rate limits) and mark the old certificate replaced. If the CA refuses the link (`alreadyReplaced`, unknown certificate, …) the order is repeated without it, never failed for that reason.
+* **State.** Stored as JSON in the existing `acme_renewal.ari_json` column of the certificate's row (window, chosen time, last/next check, explanation URL, error, unsupported flag; keyed by the certificate's thumbprint, so advice for an older certificate is ignored). No schema change; it moves with the switch bundle with the rest of the row. A failed order keeps it; a new certificate clears it.
 
 ## Serving
 
@@ -45,7 +57,9 @@ When the CA rejects the anti-replay nonce (`badNonce`; they expire and are per f
 | Issues a certificate and stores it encrypted | New order, challenge, finalize, one active ACME row for the requested name, chain (leaf + intermediate) verifies against Pebble's root, private key only as ciphertext and usable, TXT record created and deleted, renewal row `issued`, no second order while fresh |
 | Wildcard and base name | Two authorizations, one TXT name, two values; both names in the certificate |
 | Account key | Account row exists, key protected, reused by a "restarted" service (no second registration, same row) and a changed name set replaces the certificate row |
-| Renewal | Not renewed at 60 % of the lifetime, renewed at 70 %: same row id, new thumbprint, store version up, same account |
+| Renewal (lifetime rule, ARI off) | Not renewed at 60 % of the lifetime, renewed at 70 %: same row id, new thumbprint, store version up, same account |
+| ARI against Pebble (`AcmeRenewalInfoPebbleTests`) | Pebble accepts the certificate id; its window is stored; not due at 40 % of the lifetime, due at 70 %; the renewal order carries `replaces` and succeeds; advice is cleared by the new certificate. A window set through Pebble's management API in the future (2 to 3 days) overrides the lifetime rule; a window in the past renews at once; unparsable advice falls back to the lifetime rule; a second order replacing an already replaced certificate falls back to a plain order |
+| ARI rules and service (`Mta.Host.Tests/AcmeRenewalInfoTests.cs`, no CA) | Random position in the window and its stability, Retry-After bounds, invalid and failed answers, due earlier and later than the lifetime rule, the safety floor, window in the past, advice JSON; the service with a scripted CA and a fake clock (Retry-After honoured, window changes followed, no ARI, failing ARI, off switch, failed order keeps the advice, other names skip the question) |
 | Failed validation | No TXT record: failure recorded with the CA's explanation, back-off 10 min, no order inside the window, account kept after the failed order, recovery after the window clears the state; back-off grows 10/20/40 min |
 | Rejected identifier | A name on Pebble's blocklist is a recorded failure before any challenge |
 | Two replicas | While one order is in flight the second replica sees the lease, makes no request and publishes nothing; a dashboard request bypasses the back-off |
@@ -68,6 +82,6 @@ Run them locally with the two Pebble binaries (no Docker needed): see [developme
 
 * **Not verified against a production CA.** Pebble follows RFC 8555 but is not Let's Encrypt: rate limits, CAA checks, the real DNS propagation of Cloudflare and the real profiles are not exercised. See [operations.md](../operations.md#tls-certificates-and-acme) for the staging run.
 * Only DNS-01 and only Cloudflare as provider; no HTTP-01, TLS-ALPN-01 or EAB.
-* ACME Renewal Information (ARI) is not used although the design mentions it (the `acme_renewal` row has a field for it that is never filled); renewal is purely lifetime-based. Revocation is not implemented.
+* ARI is verified against Pebble's draft-03 implementation only (the certificate id format is the same as in RFC 9773); Let's Encrypt's production answers are untested. ARI does not cover the CA-initiated revocation of a certificate that is still being served beyond what the CA puts in its window. Revoking a certificate ourselves is not implemented.
 * No certificate profile selection (Let's Encrypt `classic`/`tlsserver`/`shortlived`).
 * The ACME account email is only used at registration; changing `Acme:Email` does not update an existing account.
