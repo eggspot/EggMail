@@ -1,0 +1,4 @@
+version: STSv1
+version: STSv1
+mode: enforce
+mode: testing

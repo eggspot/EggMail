@@ -62,12 +62,11 @@ public class ConcurrencyTests : PgTestBase
             await lockRow.ExecuteScalarAsync();
         }
 
-        var started = System.Diagnostics.Stopwatch.StartNew();
-        var claimed = await ClaimAsync();
-        started.Stop();
+        // A claim that waited for the locked row would never return (the lock is held until this test releases it), so a
+        // generous wait is a hang guard, not a time assertion.
+        var claimed = await ClaimAsync().WaitAsync(TimeSpan.FromSeconds(60));
 
         Assert.Equal(2, claimed.Count);
-        Assert.True(started.Elapsed < TimeSpan.FromSeconds(5), "the claim must not wait for the locked row");
         await tx.RollbackAsync();
         Assert.Single(await ClaimAsync(owner: "worker-2"));
     }

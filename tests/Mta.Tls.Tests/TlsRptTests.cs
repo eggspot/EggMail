@@ -98,6 +98,21 @@ public class TlsRptRecordParserTests
         Assert.Null(await new TlsRptRecordLookup(dns).LookupAsync("bad domain"));
         Assert.Null(await new TlsRptRecordLookup(new ThrowingDnsResolver()).LookupAsync("example.com"));
     }
+
+    [Fact]
+    public void A_https_endpoint_with_an_invalid_idn_host_is_refused_not_thrown()
+    {
+        // Found by the fuzzer: Uri.IdnHost throws UriFormatException for a host that is not valid IDNA (here U+FFFD, what an invalid
+        // UTF-8 byte in a TXT record becomes). The parser's contract is "never throws on malformed input".
+        string uri = "https://reports.example�epor.example.com/tlsrpt";
+        Assert.False(TlsRptRecordParser.TryParseEndpoint(uri, out var endpoint));
+        Assert.Null(endpoint);
+
+        Assert.True(TlsRptRecordParser.TryParse("v=TLSRPTv1; rua=" + uri + ",mailto:r@example.com", out var record));
+        var only = Assert.Single(record!.Endpoints);
+        Assert.Equal(TlsRptEndpointKind.Mailto, only.Kind);
+        Assert.False(TlsRptRecordParser.TryParse("v=TLSRPTv1; rua=" + uri, out _));
+    }
 }
 
 public class TlsRptCollectorTests

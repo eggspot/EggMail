@@ -174,7 +174,7 @@ Carried from the earlier plan version (storage-engine-specific gates dropped); t
 | Phase | Gate to leave |
 |---|---|
 | 0 | Smuggling and STARTTLS-injection suites pass on the skeleton; benchmark baseline recorded; CI guard on package references active |
-| 1 | Fuzzers (SharpFuzz) run clean for a set time budget on every parser; DNS codec round-trips real packets; interop with Postfix/Exim/Haraka as peers |
+| 1 | Fuzzers (SharpFuzz) run clean for a set time budget on every parser (`.github/workflows/fuzz.yml`, [security.md](security.md#fuzzing)); DNS codec round-trips real packets; interop with Postfix/Exim/Haraka as peers |
 | 2 | Delivery to a sink meets the allocation and throughput budgets; interop matrix passes; DKIM signatures verify at Gmail (`Authentication-Results`) |
 | 3 | SPF/DMARC/DKIM results match a reference implementation on a shared corpus; MTA-STS and DANE tested against real policies; bounces correlate end to end |
 | 4 | OWASP ASVS L2 checklist on API and dashboard; strict CSP verified; ACME renewal tested through a forced expiry |

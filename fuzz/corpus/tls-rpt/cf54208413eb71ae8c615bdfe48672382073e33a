@@ -1,0 +1,1 @@
+v=TLSRPTv1; rua=mailto:a@example.com?subject=x&body=y, mailto:b@example.org , https://x.example/y, ftp://nope, https://

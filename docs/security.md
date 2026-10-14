@@ -9,7 +9,7 @@ Status of the security work, written to be checked against the code and the test
 | **SMTP in (submission and bounce listeners)** | Spoofing, tampering, DoS, elevation (open relay) | Only CRLF ends a line and `.` terminator is recognised by a state machine, so smuggling variants are refused (`DataScanner`); bare CR/LF refused; commands sent behind `STARTTLS` are discarded (injection guard); `BDAT` chunks are inert; AUTH PLAIN/LOGIN only after TLS; per-IP and global connection caps, in-flight byte budget, line/size/recipient/error limits, timeouts; no path from an unauthenticated session to the delivery queue (the bounce listener accepts only signed bounce addresses and never queues mail for delivery); sender domain must belong to the tenant and be verified (`SenderPolicy`) | `Mta.Smtp.Protocol.Tests` (smuggling vectors, chunk independence), `Mta.Smtp.Server.Tests` (STARTTLS injection, limits, garbage fuzz), `Mta.Host.Tests` (`IngestTests`: auth, unowned sender domain, relay attempts on the bounce listener, forged bounce token) |
 | **SMTP out (delivery)** | Tampering (downgrade), information disclosure | STARTTLS stripping/injection guard in the client; MTA-STS and DANE policy resolution per MX, enforced validation; per-domain TLS level overrides; `possible_duplicate` marking; DKIM signing at delivery; envelope sender is a signed VERP token | `Mta.Smtp.Client.Tests`, `Mta.Tls.Tests`, `Mta.Delivery.Tests` |
 | **DNS** | Spoofing, DoS | Random IDs and source-port randomisation by the OS, answer must match the question, optional 0x20, bounded CNAME chains, response size and record limits, DNSSEC/AD bit only trusted when configured; MX hosts that resolve to special-use addresses are excluded by default (`Delivery:AllowPrivateMxAddresses=false`) | `Mta.Dns.Tests` |
-| **Hostile message content (MIME, DKIM, SPF, ARC parsers)** | DoS, crashes | Explicit limits on header bytes/count, nesting depth, parts, decoded size, parameters, addresses; parsers never throw on input and set anomaly flags; allocation budgets; seeded mutation fuzzing and exhaustive prefix/deletion sweeps; differential tests against MimeKit | `Mta.Mime.Tests`, `Mta.Dkim.Tests`, `Mta.Auth.Tests` |
+| **Hostile message content (MIME, DKIM, SPF, ARC parsers)** | DoS, crashes | Explicit limits on header bytes/count, nesting depth, parts, decoded size, parameters, addresses; parsers never throw on input and set anomaly flags; allocation budgets; seeded mutation fuzzing and exhaustive prefix/deletion sweeps; differential tests against MimeKit; coverage-guided fuzzing (see [Fuzzing](#fuzzing)) | `Mta.Mime.Tests`, `Mta.Dkim.Tests`, `Mta.Auth.Tests`, `Mta.Fuzz.Tests`, `.github/workflows/fuzz.yml` |
 | **HTTP out (webhooks, MTA-STS fetch, TLS-RPT)** | SSRF | Resolved addresses are validated and connections are made to the validated address; private, loopback, link-local and metadata ranges denied unless allow-listed per tenant; no redirects; HTTPS by default; response size/time limits | `Mta.Webhooks.Tests`, `Mta.Tls.Tests` |
 | **Credentials** | Spoofing, brute force | Passwords: PBKDF2-SHA256, 600,000 iterations, per-password salt, constant work for unknown users; API keys: 256-bit random, only a SHA-256 digest is stored, constant-time comparison; failed-login throttling shared between SMTP AUTH and the API | `Mta.Host.Tests` (`SecurityTests`, `IngestTests`) |
 | **Secrets at rest** | Information disclosure | DKIM private keys, webhook secrets, TLS private keys, ACME account key and relay passwords are protected with ASP.NET Core Data Protection (one purpose string per kind); the key ring lives in the config store and is encrypted with a certificate (`Secrets:KeyProtection=Certificate`) or wrapped with a key held outside the database (`Kms`, AES-256-GCM, a mounted key file); a ring that does not match the configuration stops the start; `None` is allowed for development and logs a warning; backend switch bundles never contain clear-text secrets (separate bundle key ring, passphrase-protected PKCS#12) | `Mta.Host.Tests` (`SecretsTests`), `Mta.Storage.Portability.Tests` |
@@ -23,7 +23,42 @@ Status of the security work, written to be checked against the code and the test
 2. Hostile input never throws out of the parser, never allocates proportionally to a claimed (not actual) size, and never loops without consuming input.
 3. Text that comes from the network is sanitised before it reaches a log, a header, a DSN or a webhook payload (control characters, CR/LF).
 4. Round trip and differential tests against a reference implementation exist where one is available.
-5. Seeded mutation tests run in the normal test suite; crashers found by external fuzzers are added as regression tests.
+5. The parser has a fuzz target in `fuzz/Mta.Fuzz.Targets` (with invariants, not only "does not throw"), seeds in `fuzz/corpus`, and runs in `Mta.Fuzz.Tests`; every crasher, hang or invariant violation found by a fuzzer is fixed, covered by a unit test, and kept as an input in `fuzz/regressions/<target>/`.
+
+## Fuzzing
+
+Two layers, both driven by the same targets (`fuzz/Mta.Fuzz.Targets`, one per parser or group of parsers; none of the protocol assemblies references them, and `Mta.ArchitectureTests` checks that):
+
+| Target | What it exercises | Invariants checked besides "no exception" |
+|---|---|---|
+| `smtp-protocol` | line scanner, command parser, reply parser, EHLO capabilities, DATA scanner, SASL PLAIN, xtext | consumed counts in range; a DATA stream scanned in one call and resumed at other boundaries gives identical output and status (the smuggling defense does not depend on read boundaries) |
+| `smtp-session` | a real `SmtpServer` on loopback (open bounce listener and STARTTLS submission listener) fed the bytes, then half-closed | the server closes the connection; every reply it sent parses as an SMTP reply |
+| `mime` | header list, addresses, dates, RFC 2047, MIME tree, content extractor, validator, header editor, line endings | limits (headers, parts, depth, decoded bytes), body untouched by the editor, no control characters in extracted text |
+| `dkim` | `DkimVerifier` over a whole message (tag-value parser, canonicalization, hashes) and the key record parser | result count and status values |
+| `spf` | record parser, macro parser and expander, evaluator (the fuzzed text is served as the record of every domain) | DNS lookup and void lookup limits, expansion length |
+| `dns-message` | response parser (compression pointers, all record types), name normalization, query writer | only `DnsException(MalformedResponse)`, counts below the header's claims, normalization idempotent |
+| `dsn-arf` | inbound DSN and ARF parser (the bounce listener) | recipient cap; no control characters in any extracted field |
+| `mta-sts` | policy file (bytes and string), `_mta-sts` TXT record | MX pattern cap, `max_age` range |
+| `tls-rpt` | TXT record and endpoints | 1 to 8 endpoints, scheme consistent |
+| `auth-headers` | DMARC record, Authentication-Results, ARC chain | |
+| `dmarc-aggregate` | XML and gzip report reader | |
+
+**1. In every `dotnet test`** (`tests/Mta.Fuzz.Tests`): the built-in seeds, the checked-in corpus (`fuzz/corpus`), every past finding (`fuzz/regressions`), every prefix of every seed, and a fixed number of seeded mutations per target (the mutator is deterministic, the seed is a constant). Nothing asserts elapsed time: a hang is caught by a 10 minute limit per test, unbounded allocation by a byte budget measured on the running thread, a crash or broken invariant by the exception. About ten seconds in total (26 s on the CI runner).
+
+**2. Coverage-guided, scheduled** (`.github/workflows/fuzz.yml`, weekly and `workflow_dispatch`, one job on `ubuntu-latest`): the harness is published, the protocol assemblies are instrumented with SharpFuzz (`SharpFuzz.CommandLine` 2.3.0, the same version as the `SharpFuzz` package) and each target runs under libFuzzer through `libfuzzer-dotnet` (release `v2025.05.02.0904`, SHA-256 verified) for `seconds_per_target` (default 300), starting from `fuzz/corpus` and `fuzz/regressions`, with a dictionary generated from the mutator tokens. Crash, timeout and out-of-memory inputs are uploaded as the `fuzz-findings` artifact (30 days), the grown corpus as `fuzz-corpus`, a summary table goes to the job summary, and the job fails when any target has a finding. The fuzzed process runs with a 2 GiB GC heap limit so runaway allocation is an `OutOfMemoryException`, not an OOM kill.
+
+Reproduce a finding locally (no fuzzer needed): `dotnet run --project fuzz/Mta.Fuzz.Harness -c Release -- replay <target> <file>`. After the fix add a unit test next to the parser and copy the input to `fuzz/regressions/<target>/<what-it-was>`; the next `dotnet test` replays it. New seeds: add them to the target and run `... -- export-corpus fuzz/corpus` (a test fails when the checked-in corpus lacks a built-in seed). Longer local runs of the same mutator: `... -- mutate <target> <iterations> <seed>`.
+
+**What the fuzzers found so far** (each fixed, with a unit test and a regression input):
+
+| Target | Finding | Fix |
+|---|---|---|
+| `tls-rpt` | `TlsRptRecordParser.TryParseEndpoint` threw `UriFormatException` (from `Uri.IdnHost`) for an https endpoint whose host is not valid IDNA, for example a TXT record with an invalid UTF-8 byte in the host. The parser is documented as never throwing; the caller's catch-all hid it. | host check wrapped, endpoint refused |
+| `dsn-arf` | `InboundReportParser` returned `Action`, `Final-Recipient`, `Original-Recipient`, `Remote-MTA` and `Reporting-MTA` without removing control characters (a lone CR survives the line splitting), against its documented contract. The bounce processor only acts on `failed` and validates addresses, so there is no known exploit path. | every extracted field goes through the sanitiser (control characters to blanks, 1024 character cap) |
+| `spf` | `SpfDomainName.TryNormalizeExpanded` dropped leftmost labels one at a time, copying the string each time: quadratic, 78 MB allocated for a 16 KB input made of one-character labels. Reachable through macro expansion, where `MaxMacroExpansionLength` bounds the input. | one search for the cut, one copy |
+| `dmarc-aggregate` | `XmlReader` has no depth limit and its time grows with the square of the nesting depth (10,000 levels of `<a>`: 0.1 s, 40,000: about 2 s), so a few megabytes of nested elements in a report attachment would have taken hours. | a first pass that only walks the nodes and refuses depth above 32 (a report needs about 6) |
+
+The `smtp-session` target also showed that a long loopback run exhausts the ephemeral ports (an environment limit, not a server bug); the target resets its connections and backs off.
 
 ## Operational guidance
 
@@ -35,7 +70,7 @@ Status of the security work, written to be checked against the code and the test
 ## Known gaps
 
 - **No external audit.** Recommended before production-critical use ([plan.md](plan.md)).
-- No coverage-guided fuzzing (SharpFuzz) runs in CI yet; fuzzing is seeded mutation inside the unit tests.
+- Coverage-guided fuzzing runs weekly and on demand ([Fuzzing](#fuzzing)), not on every pull request, and only for minutes per target; a clean run is evidence, not proof. A long campaign (hours per target) has not been done.
 - Container hardening, Trivy/Grype scans, `testssl.sh` and Internet.nl checks, and the SMTP attack suites from the design (smtpsmug, EAST, slowloris tooling) have not been run against a deployed instance.
 - ACME has not been verified against a real certificate authority.
 - Rate limits and circuit-breaker state are per process.

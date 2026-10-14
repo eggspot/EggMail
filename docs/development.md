@@ -24,7 +24,7 @@ Postgres-backed tests read `EGGMAIL_TEST_POSTGRES` (a connection string to an ex
 # 1. DNS-01 only: switch the other challenge servers off. Listens on :8053 (DNS) and :8055 (management).
 pebble-challtestsrv -http01 "" -https01 "" -tlsalpn01 "" -doh ""
 # 2. Pebble, from a checkout/tarball of the same release (it reads test/config and test/certs relative to the working directory).
-PEBBLE_VA_NOSLEEP=1 PEBBLE_WFE_NONCEREJECT=0 PEBBLE_AUTHZREUSE=0 pebble -config test/config/pebble-config.json -dnsserver 127.0.0.1:8053
+PEBBLE_VA_NOSLEEP=1 PEBBLE_WFE_NONCEREJECT=0 PEBBLE_AUTHZREUSE=100 pebble -config test/config/pebble-config.json -dnsserver 127.0.0.1:8053
 # 3. The tests.
 EGGMAIL_TEST_ACME_DIRECTORY=https://localhost:14000/dir \
 EGGMAIL_TEST_ACME_CA_FILE=<pebble checkout>/test/certs/pebble.minica.pem \
@@ -38,7 +38,7 @@ EGGMAIL_TEST_ACME_CA_FILE=<pebble checkout>/test/certs/pebble.minica.pem \
 | `EGGMAIL_TEST_ACME_CHALLTESTSRV` | Management API of the challenge test server, default `http://localhost:8055` |
 | `EGGMAIL_TEST_ACME_MANAGEMENT` | Pebble's management API (issuing roots), default `https://<directory host>:15000` |
 
-Pebble knobs: `PEBBLE_VA_NOSLEEP=1` removes the random 1 to 5 s validation delay; `PEBBLE_WFE_NONCEREJECT=0` and `PEBBLE_AUTHZREUSE=0` make the CA deterministic (by default it rejects 5 % of nonces and reuses authorizations at random, which would skip the challenge). The tests also pass with `PEBBLE_WFE_NONCEREJECT=15` (the order is repeated on `badNonce`). Do not use `PEBBLE_VA_ALWAYS_VALID`: the tests rely on real validation. Pebble picks one of its certificate profiles (90 or 6 days) at random for each order; the tests derive the renewal schedule from the issued certificate. On macOS repeated runs can exhaust the ephemeral ports Pebble uses for its DNS queries ("can't assign requested address"); wait a minute between runs.
+Pebble knobs: `PEBBLE_VA_NOSLEEP=1` removes the random 1 to 5 s validation delay; `PEBBLE_WFE_NONCEREJECT=0` and `PEBBLE_AUTHZREUSE=100` make the CA deterministic (by default it rejects 5 % of nonces and reuses a valid authorization in half of the orders). **`PEBBLE_AUTHZREUSE=0` does not turn reuse off**: Pebble draws `rand.Intn(100) > percent`, so 0 still reuses in 1 % of the orders, which made the tests flake with "Cannot update challenge with status valid"; 100 reuses always, and two tests assert exactly that (the second order of a name publishes no TXT record). The tests also pass with `PEBBLE_WFE_NONCEREJECT=15` (the order is repeated on `badNonce`). Do not use `PEBBLE_VA_ALWAYS_VALID`: the tests rely on real validation. Pebble picks one of its certificate profiles (90 or 6 days) at random for each order; the tests derive the renewal schedule from the issued certificate. On macOS repeated runs can exhaust the ephemeral ports Pebble uses for its DNS queries ("can't assign requested address"); wait a minute between runs.
 
 ## Project map
 
@@ -55,6 +55,20 @@ Defaults: SQLite backend in `Sqlite:DataDirectory` (default `/data`), SMTP on 55
 ## Load and sink tools
 
 `src/Mta.Tools` builds `mta-tools` (see [benchmarks.md](benchmarks.md)). Benchmarks use BenchmarkDotNet: `dotnet run -c Release --project bench/Mta.Benchmarks -- --filter "*Dkim*"`.
+
+## Fuzzing
+
+`dotnet test` includes `tests/Mta.Fuzz.Tests` (seeds, checked-in corpus, past findings and a fixed number of seeded mutations per parser, no timing assertions). The long, coverage-guided runs are `.github/workflows/fuzz.yml` (weekly, or run it by hand with the `seconds_per_target` and `targets` inputs). Details, the list of targets and how to add a regression input are in [security.md](security.md#fuzzing).
+
+```sh
+dotnet run --project fuzz/Mta.Fuzz.Harness -c Release -- list
+dotnet run --project fuzz/Mta.Fuzz.Harness -c Release -- mutate dns-message 200000 7     # longer local run of the same mutator
+dotnet run --project fuzz/Mta.Fuzz.Harness -c Release -- replay mime path/to/crash-file  # reproduce a finding
+```
+
+## Tests and time
+
+Tests never assert elapsed time, throughput or process memory (they measure the load of the machine, not the code): waits are signals or polls with a deadline far above any plausible load, "no hang" is a generous limit that only turns a hang into a failure, and "bounded work" is asserted on results and on the allocated bytes of the running thread. Throughput belongs to `bench/`.
 
 ## Conventions
 

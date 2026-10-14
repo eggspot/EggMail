@@ -164,15 +164,20 @@ public sealed class AcmeHotSwapTests : IAsyncLifetime
         var row = await WaitForCertificateAsync(c => c.Source == "acme");
         await WaitUntilServedAsync(row.Thumbprint);
 
-        // The CA is fine but the DNS provider is not: the renewal order fails, is recorded, and nothing changes for the listeners.
-        _clock.Advance((row.NotAfter - row.NotBefore) * 0.7);
+        // The names change, so a new order is due; the CA is fine but the DNS provider is not (the new name's TXT record never appears; the old
+        // name's authorization is still valid and not challenged again): the order fails, is recorded, and nothing changes for the listeners.
         var failing = new SilentDns();
-        var service = new AcmeRenewalService(_runtime.Storage.Config, _runtime.Secrets, new CertesOrderRunner(Pebble.CreateTransport()), failing,
-            _runtime.Config.Acme, _clock, _log);
+        var changed = new AcmeSection
+        {
+            Enabled = true, DirectoryUrl = Pebble.Directory, Email = "ops@acme-test.example", PropagationDelay = TimeSpan.Zero,
+            Domains = [_host, AcmeTestNames.Unique("extra")],
+        };
+        var service = new AcmeRenewalService(_runtime.Storage.Config, _runtime.Secrets, new CertesOrderRunner(Pebble.CreateTransport()), failing, changed, _clock, _log);
         Assert.False(await service.CheckOnceAsync(default).WaitAsync(TimeSpan.FromMinutes(2)));
 
         var renewal = Assert.Single(await _runtime.Storage.Config.GetAcmeRenewalsAsync(default));
         Assert.Equal("failed", renewal.Status);
+        Assert.Equal(1, failing.Requests);
         Assert.Equal(row.Thumbprint, Assert.Single(await _runtime.Storage.Config.GetCertificatesAsync(default), c => c.Source == "acme").Thumbprint);
         await _runtime.Certificates.ReloadAsync(force: true, default);
         Assert.Equal(row.Thumbprint, (await ProbeSmtpAsync()).Thumbprint);

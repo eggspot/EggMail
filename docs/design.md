@@ -491,7 +491,7 @@ State machine (**proposed** in earlier research; the decisions record is truncat
 - API keys are shown once and stored as SHA-256 digests (high-entropy keys); constant-time comparison via `CryptographicOperations.FixedTimeEquals`.
 - SMTP auth: PLAIN and LOGIN only, only after TLS, so passwords can be stored as hashes (CRAM-MD5 would need plaintext).
 - DKIM private keys, webhook secrets, TLS private keys and the ACME account key are protected with ASP.NET Core Data Protection; the Data Protection key ring is persisted in the config store and itself protected by a certificate or KMS (`Secrets:KeyProtection = Certificate | Kms | None`; `None` is for dev only). That certificate or KMS credential is deployment configuration outside the database and comes from the `*_FILE` secret convention. Never delete old Data Protection keys. Backend switching re-protects secrets under the target's ring through a bundle-specific Data Protection key ring (§4.6).
-  *Implemented:* `Kms` is a pluggable key-wrapping provider with a built-in file/environment key and no cloud service (decision 74).
+  *Implemented:* `Kms` is a pluggable key-wrapping provider with a built-in file/environment key and no cloud service (decision 76).
 - Dashboard passwords: PBKDF2 from the BCL (iteration count per current OWASP guidance, to be set) or an Argon2 library.
 - Encryption at rest is a storage-layer responsibility (volume or database); application-level envelope encryption is deferred behind an interface.
 

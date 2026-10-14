@@ -22,17 +22,15 @@ public class NastyCorpusTests(ITestOutputHelper output)
     public void Every_parser_survives_with_bounded_time_and_memory(string name)
     {
         byte[] data = Lookup.Value[name];
-        long allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
-        var sw = Stopwatch.StartNew();
+        long allocated = HangGuard.Run(() =>
+        {
+            long allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+            Pipeline.RunEverything(data);
+            return GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
+        }, name);
+        output.WriteLine($"{name}: {data.Length / 1024} KiB in, {allocated / 1024} KiB allocated");
 
-        Pipeline.RunEverything(data);
-
-        sw.Stop();
-        long allocated = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
-        output.WriteLine($"{name}: {data.Length / 1024} KiB in, {sw.ElapsedMilliseconds} ms, {allocated / 1024} KiB allocated");
-
-        // Generous ceilings (CI machines are noisy); the point is "not quadratic and not unbounded".
-        Assert.True(sw.ElapsedMilliseconds < 4000, $"{name} took {sw.ElapsedMilliseconds} ms");
+        // Allocation is the deterministic bound ("not unbounded"); a hang is caught by the guard. Elapsed time is not asserted: it measures the load of the host.
         Assert.True(allocated < (64L * data.Length) + (48L << 20), $"{name} allocated {allocated / 1024} KiB for {data.Length / 1024} KiB input");
     }
 

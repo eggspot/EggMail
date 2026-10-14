@@ -221,8 +221,8 @@ public class ApiStorageSwitchTests : IAsyncLifetime
     {
         Reply start = await _admin.PostAsync(Base + "/start", Body(mode: "drain", start: true));
         Assert.Equal(HttpStatusCode.Accepted, start.Status);
-        await Task.Delay(400);
-        Assert.Equal("draining", (await _admin.GetAsync(Base)).Str("state")); // one message is still queued
+        await UntilAsync("draining");   // one message is still queued, so the switch stays in this state
+        Assert.Equal("draining", (await _admin.GetAsync(Base)).Str("state"));
 
         // Deliver it (what the scheduler would do), and the switch continues by itself.
         foreach (ClaimedDelivery d in await _f.Storage.Deliveries.ClaimAsync("w", 10, _f.Clock.UtcNow.AddMinutes(1), TimeSpan.FromMinutes(1), default))

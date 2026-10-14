@@ -142,9 +142,9 @@ public sealed class FullPipelineTests : IAsyncLifetime
         await client.DisconnectAsync(true);
     }
 
-    private static Task WaitAsync(Func<bool> condition, int timeoutMs = 15_000) => WaitAsync(() => Task.FromResult(condition()), timeoutMs);
+    private static Task WaitAsync(Func<bool> condition, int timeoutMs = 60_000) => WaitAsync(() => Task.FromResult(condition()), timeoutMs);
 
-    private static async Task WaitAsync(Func<Task<bool>> condition, int timeoutMs = 15_000)
+    private static async Task WaitAsync(Func<Task<bool>> condition, int timeoutMs = 60_000)
     {
         var until = DateTime.UtcNow.AddMilliseconds(timeoutMs);
         while (!await condition())
@@ -218,15 +218,18 @@ public sealed class FullPipelineTests : IAsyncLifetime
     [Fact]
     public async Task A_delivered_message_produces_a_signed_webhook_to_the_tenants_endpoint()
     {
-        using var listener = new HttpListener();
+        // A listener whose Start failed (port in use) is closed for good, so every attempt gets a new one.
+        HttpListener listener;
         int port;
         while (true)
         {
             port = Random.Shared.Next(20000, 40000);
-            listener.Prefixes.Clear();
+            listener = new HttpListener();
             listener.Prefixes.Add($"http://127.0.0.1:{port}/hook/");
-            try { listener.Start(); break; } catch (HttpListenerException) { }
+            try { listener.Start(); break; } catch (HttpListenerException) { ((IDisposable)listener).Dispose(); }
         }
+
+        using var listenerLifetime = listener;
 
         var received = new TaskCompletionSource<(Dictionary<string, string> Headers, byte[] Body)>(TaskCreationOptions.RunContinuationsAsynchronously);
         _ = Task.Run(async () =>

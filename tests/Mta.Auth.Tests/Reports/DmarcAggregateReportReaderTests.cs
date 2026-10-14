@@ -165,4 +165,24 @@ public class DmarcAggregateReportReaderTests
         Assert.Throws<ArgumentNullException>(() => DmarcAggregateReportReader.TryRead((Stream)null!, out _));
         Assert.Throws<ArgumentNullException>(() => DmarcAggregateReportReader.TryRead((byte[])null!, out _));
     }
+
+    [Fact]
+    public async Task Deeply_nested_elements_are_refused_without_parsing_them()
+    {
+        // Found by the fuzzer: XmlReader has no depth limit and its time grows with the square of the depth (40,000 levels took about two
+        // seconds, a document of a few megabytes would have taken hours). No timing is asserted: the depth check answers before the
+        // document is loaded, and a hang guard turns a regression into a failure instead of a stuck test run.
+        string nested = "<feedback><report_metadata>" + string.Concat(Enumerable.Repeat("<a>", 300_000)) + "x" + string.Concat(Enumerable.Repeat("</a>", 300_000)) + "</report_metadata></feedback>";
+        bool parsed = await Task.Run(() => DmarcAggregateReportReader.TryRead(Encoding.UTF8.GetBytes(nested), out _)).WaitAsync(TimeSpan.FromMinutes(2));
+        Assert.False(parsed);
+    }
+
+    [Fact]
+    public void A_nesting_depth_within_the_limit_is_still_parsed()
+    {
+        string xml = "<feedback><report_metadata><org_name>o</org_name><email>e@x</email><report_id>1</report_id><date_range><begin>1</begin><end>2</end></date_range></report_metadata>"
+            + "<policy_published><domain>example.com</domain><p>none</p></policy_published></feedback>";
+        Assert.True(DmarcAggregateReportReader.TryRead(Encoding.UTF8.GetBytes(xml), out var report));
+        Assert.Equal("example.com", report!.PolicyPublished.Domain);
+    }
 }
