@@ -15,6 +15,7 @@ namespace Mta.Delivery.Tests;
 /// 8-bit bodies (RFC 6152) and internationalized mail (RFC 6531/6533) through the whole outbound pipeline against a loopback
 /// receiving server that does or does not advertise 8BITMIME and SMTPUTF8.
 /// </summary>
+[Collection("delivery-pipeline")]
 public class EightBitAndInternationalDeliveryTests
 {
     private const string AsciiHeaders = "From: sender@example.org\r\nTo: rcpt@dest.example\r\nSubject: Hello\r\nMessage-ID: <t@example.org>\r\nDate: Mon, 12 Oct 2026 08:00:00 +0000\r\n";
