@@ -15,7 +15,7 @@ Per group, in order:
 7. Per recipient the reply is classified (`ReplyClassifier`): 2xx at end of data delivers, permanent classes fail (only `PermanentRecipient` suppresses), the rest are deferred with `RetrySchedule` or expire when the next retry would pass the delivery's lifetime.
 8. Results are recorded with `RecordAttemptAsync` (storage writes the event, statistics and webhook outbox rows in the same commit). For permanent failures and expiries of SMTP-submitted mail a bounce message (RFC 3464) is queued **before** recording, because recording the last recipient frees the stored message.
 
-A connection lost after the end of data was sent is deferred with the `possible_duplicate` flag. `QuiesceAsync` stops claiming, waits up to the timeout, cancels what is left (recorded as `AbortedBySwitch`, requeued unchanged, flagged possible duplicate only when the end of the message data had begun to be written, see `SmtpClientConnection.EndOfDataStarted`) and releases the leases (decision R).
+A connection lost after the end of data was sent is deferred with the `possible_duplicate` flag. A delivery whose lease ran out while its holder was still sending is claimed again by another replica (or the same engine), which sets the row's flag; when the first holder reports, the attempt planner also reads the row's flag, so the report carries `possible_duplicate` too (decision 80). `QuiesceAsync` stops claiming, waits up to the timeout, cancels what is left (recorded as `AbortedBySwitch`, requeued unchanged, flagged possible duplicate only when the end of the message data had begun to be written, see `SmtpClientConnection.EndOfDataStarted`) and releases the leases (decision R).
 
 ### Metrics and traces
 

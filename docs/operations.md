@@ -12,7 +12,7 @@ Tested deployment files are in `deploy/` (the release workflow tests them agains
 | Docker Compose, PostgreSQL | `deploy/compose/compose.postgres.yaml` | EggMail plus `postgres:17`; one database role for both duties (use a managed PostgreSQL with an owner and a runtime role in production) |
 | DANE: local validating resolver | `deploy/compose/compose.unbound.yaml` (add with a second `-f`), `deploy/kubernetes/components/unbound` | Unbound sidecar, sets `Dns:Servers`, `Dns:RequestDnssec` and `Dns:TrustAuthenticatedData` together |
 | Kubernetes, SQLite | `deploy/kubernetes/sqlite` | StatefulSet (one replica, ReadWriteOnce claim), `fsGroup` for the volume, startup/liveness (`/healthz`) and readiness (`/readyz`) probes |
-| Kubernetes, PostgreSQL | `deploy/kubernetes/postgres` | Deployment (raise `replicas` for availability), connection strings from a Secret |
+| Kubernetes, PostgreSQL | `deploy/kubernetes/postgres` | Deployment (raise `replicas` for availability; read [Running more than one replica](#running-more-than-one-replica) first), connection strings from a Secret |
 | Both Kubernetes variants | `deploy/kubernetes/base` | Services (SMTP as a LoadBalancer with `externalTrafficPolicy: Local` so client addresses survive), NetworkPolicy of design 7.1, ConfigMap |
 
 Things that are easy to get wrong:
@@ -349,7 +349,30 @@ Take a backup, pull the new image, restart. Schema changes run at start (SQLite:
 
 ## State kept across restarts
 
-Four things the server counts or learns while running are written to the database in the background, so a restart (and, on PostgreSQL, another replica) sees them: the last DNS check result of every record of a domain, the hourly and daily sending counters behind the sending caps (`Sending:GlobalPerHour` and the others) and the warm-up, the TLS-RPT counters, and the reports that could not be delivered yet. They are flushed every 10 seconds (counters) and every minute (TLS-RPT) and when the process stops, so a graceful restart loses nothing and a crash loses at most that last interval (the caps may then be overshot by what was sent in those seconds). With several replicas on one PostgreSQL database the caps are shared with a lag of one flush interval and each daily TLS report is sent once. Global settings changed in the dashboard (`/admin/settings`) are stored at once and applied at the next start.
+Four things the server counts or learns while running are written to the database in the background, so a restart (and, on PostgreSQL, another replica) sees them: the last DNS check result of every record of a domain, the hourly and daily sending counters behind the sending caps (`Sending:GlobalPerHour` and the others) and the warm-up, the TLS-RPT counters, and the reports that could not be delivered yet. They are flushed every 10 seconds (counters) and every minute (TLS-RPT) and when the process stops, so a graceful restart loses nothing and a crash loses at most that last interval (the caps may then be overshot by what was sent in those seconds). With several replicas on one PostgreSQL database the caps are shared with a lag of one flush interval and each daily TLS report is sent once ([Running more than one replica](#running-more-than-one-replica)). Global settings changed in the dashboard (`/admin/settings`) are stored at once and applied at the next start.
+
+## Running more than one replica
+
+Only with the PostgreSQL backend (SQLite is one process on one volume, by design). Point every replica at the same database with the same `Secrets` configuration; each replica generates a unique name for itself at start. Nothing needs to be configured for the replicas to find each other: they beat in the database every 5 seconds.
+
+What is shared between replicas, and what is not (decision 79):
+
+| What | With N replicas |
+|---|---|
+| Queue, history, suppressions, configuration, certificates and ACME renewal, domain verification | One copy in the database; claims use `SKIP LOCKED`, renewals and checks take leases |
+| Failed-login lockout (`SMTP AUTH` and the API/dashboard sign-in) | One budget for all replicas (10 failures per address and per user name in 15 minutes), counted in the database as digests. If the database cannot be reached each replica counts on its own until it is back |
+| Connections and messages per minute to one destination (`Delivery:Throttle:*`) | The ceiling holds for all replicas together: each takes its share (a ceiling of 20 connections is 7, 7 and 6 on three replicas). A replica that joins or leaves is noticed within about 5 s (a replica that dies within 20 s); until then the sum of the shares can be above a ceiling for a few seconds. Set `Delivery:Throttle:MaxConnections` at least as high as the number of replicas, otherwise every replica still gets one |
+| A destination that throttled one replica, a mail server found down | The other replicas slow down or skip it within about 5 s. Each replica still probes a down server itself once the cool-down is over |
+| Sending caps and warm-up (`Sending:*`) | Shared through the database with a lag of one flush interval (10 s): a cap can be overshot by what the other replicas send in those seconds. Set a hard ceiling lower by that amount |
+| TLS reports | One report per domain and day, with every replica's counts |
+| Inbound connection limits (`Smtp:MaxConnections`, `MaxConnectionsPerIp`, `MaxInFlightBytes`), the API request memory budget | Per replica (they protect that process); behind a load balancer the per-address limit is per replica |
+
+Things to get right:
+
+- **Clocks.** Replicas must agree on the time to within about 20 seconds (NTP). The replica set, the leases and the failed-login buckets are timed by each replica's own clock.
+- **Rolling updates.** A new replica joins the set before it delivers; the old one leaves when it stops (SIGTERM; give it the 60 s grace). A replica killed without leaving is dropped by the others after 20 seconds, and in the meantime it holds a share that nobody uses.
+- **A delivery that was being sent when its replica died** is picked up by another replica when its lease (`Delivery:ClaimLease`, 15 minutes) runs out and is flagged `possible_duplicate`. Lower the lease only if remote conversations are short: a delivery that takes longer than the lease is sent by two replicas, both flagged.
+- **Connections.** Keep the sum of the pool sizes of all replicas below about half of `max_connections` of the database (design section 4.2). The exchange adds a handful of tiny statements per replica every 5 seconds and one read per login attempt.
 
 ## Graceful shutdown
 
