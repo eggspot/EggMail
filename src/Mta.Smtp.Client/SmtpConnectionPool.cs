@@ -35,6 +35,7 @@ public sealed class SmtpConnectionPool : IAsyncDisposable
     public int IdleConnections => Volatile.Read(ref _idleCount);
 
     /// <summary>Gets a ready connection (idle reuse or a fresh connect). Dispose the lease to return or discard it.</summary>
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<PooledConnection> RentAsync(SmtpRemoteTarget target, CancellationToken ct = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -57,6 +58,7 @@ public sealed class SmtpConnectionPool : IAsyncDisposable
         return new PooledConnection(this, target.PoolKey, fresh);
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     internal async ValueTask ReturnAsync(string key, SmtpClientConnection connection, bool discard)
     {
         if (discard || _disposed || !connection.IsReusable || connection.TransactionsCompleted >= _maxTransactionsPerConnection ||
@@ -93,6 +95,7 @@ public sealed class SmtpConnectionPool : IAsyncDisposable
         Interlocked.Increment(ref _idleCount);
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     private static async ValueTask CloseAsync(SmtpClientConnection c)
     {
         await c.QuitAsync().ConfigureAwait(false);
@@ -130,6 +133,7 @@ public sealed class SmtpConnectionPool : IAsyncDisposable
         }
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     public async ValueTask DisposeAsync()
     {
         if (_disposed) { return; }
@@ -165,6 +169,7 @@ public sealed class PooledConnection : IAsyncDisposable
     /// <summary>Do not return this connection to the pool (after an error or a surprising reply).</summary>
     public void Discard() => _discard = true;
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     public async ValueTask DisposeAsync()
     {
         if (_returned) { return; }
