@@ -91,6 +91,8 @@ public sealed class WriterMetrics
 
     internal void RecordBatch(int size, long commitTicks)
     {
+        SqliteMetrics.CommitDuration.Record((double)commitTicks / Stopwatch.Frequency, new KeyValuePair<string, object?>("file", File));
+        SqliteMetrics.WriterBatchSize.Record(size, new KeyValuePair<string, object?>("file", File));
         Interlocked.Increment(ref _batches);
         Interlocked.Add(ref _commands, size);
         Interlocked.Exchange(ref _lastBatch, size);
@@ -106,7 +108,11 @@ public sealed class WriterMetrics
         }
     }
 
-    internal void RecordFailedBatch() => Interlocked.Increment(ref _failedBatches);
+    internal void RecordFailedBatch()
+    {
+        SqliteMetrics.WriterBatchFailures.Add(1, new KeyValuePair<string, object?>("file", File));
+        Interlocked.Increment(ref _failedBatches);
+    }
 
     internal void RecordIndividual() => Interlocked.Increment(ref _commands);
 }
@@ -188,6 +194,9 @@ internal sealed class SqliteFileWriter : IAsyncDisposable
     }
 
     public WriterMetrics Metrics { get; }
+
+    /// <summary>Commands waiting in the queue right now (a live read, unlike the sampled <see cref="WriterMetrics.QueueDepth"/>).</summary>
+    public int PendingCommands => _channel.Reader.Count;
 
     public SqliteFile File => _file;
 

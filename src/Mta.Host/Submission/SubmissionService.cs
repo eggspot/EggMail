@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Mta.Core;
 using Mta.Mime;
 using Mta.Policy;
@@ -186,7 +187,25 @@ public sealed class SubmissionService
             Tags = request.Tags is { Count: > 0 } tags ? tags.Distinct(StringComparer.Ordinal).ToList() : null,
         };
 
+        using Activity? span = MessageTrace.Start(MessageTrace.SubmitSpan, messageId);
+        if (span is not null)
+        {
+            span.SetTag("mta.tenant.id", Ids.ToCompact(request.Tenant.Id));
+            span.SetTag("mta.message.source", request.Source.ToString());
+            span.SetTag("mta.message.recipients", recipients.Count);
+            span.SetTag("mta.message.size", raw.Length);
+        }
+
         var result = await _storage.Intake.AcceptAsync(accepted, ct).ConfigureAwait(false);
+        if (span is not null)
+        {
+            span.SetTag("mta.submit.outcome", result.Status == IntakeStatus.Accepted ? "accepted" : "duplicate");
+            if (result.Status != IntakeStatus.Accepted)
+            {
+                span.SetTag("mta.submit.original_message_id", Ids.ToCompact(result.MessageId));   // an idempotent repeat: the message that counts is the first one
+            }
+        }
+
         return new SubmissionResult(result.Status == IntakeStatus.Accepted ? SubmissionStatus.Accepted : SubmissionStatus.Duplicate, result.MessageId, IdempotencyFingerprint: result.IdempotencyFingerprint);
     }
 

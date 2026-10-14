@@ -69,6 +69,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
 
         var certificates = new DatabaseCertificateProvider(storage.Config, secrets, config.Hostname, config.Tls, clock, log);
         await certificates.InitializeAsync(ct).ConfigureAwait(false);
+        var certificateMeters = Mta.Host.Tls.TlsMetrics.Attach(certificates, clock);
         var verp = await VerpKeyStore.LoadOrCreateAsync(storage.Config, ct).ConfigureAwait(false);
 
         var dns = dnsOverride ?? CreateDns(config);
@@ -173,6 +174,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
             Pool = pool, Routes = routes, Limits = limits, Acme = acme, TlsReports = reports,
             CounterPersistence = counterPersistence, TlsJournal = tlsJournal, TlsCollector = collector,
         };
+        runtime._owned.Add(certificateMeters);
         runtime._owned.Add(pool);
         runtime._owned.Add(smtp);
         return runtime;
