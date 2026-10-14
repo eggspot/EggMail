@@ -170,7 +170,7 @@ internal sealed class SqliteFile
 
         if (version >= 1)
         {
-            // One step per version, each in its own transaction: a file at 1 goes through 2 and 3 to 4, a file at 3 goes to 4.
+            // One step per version, each in its own transaction: a file at 1 goes through 2, 3 and 4 to 5, a file at 3 goes through 4 to 5.
             if (version == 1)
             {
                 UpgradeFromV1(connection);
@@ -181,7 +181,12 @@ internal sealed class SqliteFile
                 UpgradeFromV2(connection);
             }
 
-            UpgradeFromV3(connection);
+            if (version <= 3)
+            {
+                UpgradeFromV3(connection);
+            }
+
+            UpgradeFromV4(connection);
             return;
         }
 
@@ -353,6 +358,25 @@ internal sealed class SqliteFile
         cmd.Transaction = tx;
         cmd.CommandText = "SELECT count(*) FROM pragma_table_info('" + table + "') WHERE name = '" + column + "'";
         return Convert.ToInt64(cmd.ExecuteScalar(), CultureInfo.InvariantCulture) > 0;
+    }
+
+    /// <summary>Version 5 added <c>delivery_queue.headers_utf8</c> (the message's headers are internationalized); existing rows get false. Skipped when the column already exists (a file taken back to an older version by hand).</summary>
+    private void UpgradeFromV4(SqliteConnection connection)
+    {
+        using var tx = connection.BeginTransaction();
+        if (Kind == SqliteFileKind.Queue && !ColumnExists(connection, tx, "delivery_queue", "headers_utf8"))
+        {
+            using var alter = connection.CreateCommand();
+            alter.Transaction = tx;
+            alter.CommandText = "ALTER TABLE \"delivery_queue\" ADD COLUMN \"headers_utf8\" INTEGER NOT NULL DEFAULT 0";
+            alter.ExecuteNonQuery();
+        }
+
+        using var cmd = connection.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = "PRAGMA user_version=5";
+        cmd.ExecuteNonQuery();
+        tx.Commit();
     }
 
     /// <summary>Turns <c>CREATE TABLE "t" (...);</c> into a <c>WITHOUT ROWID</c> table for the listed tables.</summary>

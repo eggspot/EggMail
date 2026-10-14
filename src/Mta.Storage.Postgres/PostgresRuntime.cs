@@ -162,7 +162,9 @@ internal sealed class PostgresRuntime
             builder.AutoPrepareMinUsages = 2;
         }
 
-        return new NpgsqlDataSourceBuilder(builder.ConnectionString).Build();
+        // The name becomes the "db.client.connection.pool.name" label of Npgsql's pool metrics. Unnamed, Npgsql uses the connection string
+        // (host, user, database), which is both long and an information leak in a scrape; two fixed names are bounded and say what they are.
+        return new NpgsqlDataSourceBuilder(builder.ConnectionString) { Name = runtimePool ? "eggmail-runtime" : "eggmail-owner" }.Build();
     }
 
     /// <summary>
