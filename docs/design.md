@@ -237,7 +237,7 @@ Separate files keep a stats rollup or history retention job from stalling queue 
 
 - a **startup log warning** at `Warning` level, naming each file running with `synchronous=OFF` and the safer settings;
 - a **persistent dashboard banner** on every page while any data file runs with `Off` (not permanently dismissible; a per-session collapse is acceptable);
-- a **metric and health detail**: a gauge for each file's sync mode (name proposed, e.g. `eggmail_sqlite_sync_mode`) and a `warnings` entry (`sqlite_sync_off`) in the health detail. Readiness is not failed by it, because the configuration is a supported choice;
+- a **metric and health detail**: a gauge for each file (`mta_storage_sqlite_sync_off`, 1 when that file runs with `Off`) and a `warnings` entry (`sqlite_sync_off`) in the health detail. Readiness is not failed by it, because the configuration is a supported choice;
 - the **README** text and the quick-start documentation ([release.md](release.md)).
 
 Reason: an acknowledgement gate adds friction to the single-container quick start and, in the owner's judgment, is not what comparable tools do (not independently verified). The documented safer knobs are `Sqlite:SyncMode=Normal` (safe from corruption, may lose recent commits on power loss) and `Sqlite:SyncMode=Full` (durable). The startup integrity check and quarantine recovery below stay.

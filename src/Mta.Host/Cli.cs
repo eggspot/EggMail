@@ -127,6 +127,15 @@ internal static class Cli
         return 0;
     }
 
+    private static ObservabilityOptions ObservabilityOptionsFrom(ObservabilitySection section) => new()
+    {
+        OtlpEndpoint = section.OtlpEndpoint,
+        PrometheusEnabled = section.MetricsEndpointEnabled,
+        OtlpTransport = Enum.Parse<OtlpTransport>(section.OtlpProtocol, ignoreCase: true),
+        TraceSampleRatio = section.TraceSampleRatio,
+        ServiceVersion = typeof(Cli).Assembly.GetName().Version?.ToString(3) ?? "0.0.0",
+    };
+
     private static async Task<int> ServeAsync(string[] args)
     {
         if (Load(args) is not { } loaded)
@@ -134,12 +143,14 @@ internal static class Cli
             return 2;
         }
 
+        var observability = ObservabilityOptionsFrom(loaded.Config.Observability);
         var builder = WebApplication.CreateBuilder(args);
-        builder.Logging.ClearProviders().AddJsonConsole();
+        builder.Logging.ClearProviders().AddJsonConsole().AddMtaOtlpLogging(observability);
         builder.Logging.AddFilter("Microsoft.AspNetCore", LogLevel.Warning);
 
-        using var startupFactory = LoggerFactory.Create(b => b.AddJsonConsole());
-        var startupLog = new MtaLogAdapter(startupFactory);
+        // The factory behind the runtime's own log (IMtaLog): JSON console, and OTLP when an endpoint is configured.
+        using var startupLogs = OtlpLoggerFactory.Create(observability, b => b.AddJsonConsole());
+        var startupLog = new MtaLogAdapter(startupLogs.Factory);
         var clock = SystemClock.Instance;
         // One process owns a SQLite data directory (the offline migrate-storage commands take the same lock).
         using DataDirectoryLock? directoryLock = loaded.Config.Storage.Backend == StorageBackend.Sqlite ? DataDirectoryLock.Acquire(loaded.Config.Storage.Sqlite.DataDirectory) : null;
@@ -158,7 +169,11 @@ internal static class Cli
         builder.Services.AddSingleton(runtime);
         builder.Services.AddSingleton(storage);
         builder.Services.AddSingleton<IClock>(clock);
-        builder.Services.AddMtaObservability(new ObservabilityOptions { OtlpEndpoint = config.Observability.OtlpEndpoint, ServiceVersion = typeof(Cli).Assembly.GetName().Version?.ToString(3) ?? "0.0.0" });
+        builder.Services.AddMtaObservability(observability);
+        if (config.Observability.QueueSampleSeconds > 0)
+        {
+            builder.Services.AddHostedService(_ => new QueueGaugesService(runtime, TimeSpan.FromSeconds(config.Observability.QueueSampleSeconds)));   // in every mode: the dashboard shows the queue of a fenced source too
+        }
         var switchState = new SwitchRuntimeState(gate);
         var switchControl = new HostSwitchControl(runtime, switchState);
         builder.Services.AddSingleton(gate);

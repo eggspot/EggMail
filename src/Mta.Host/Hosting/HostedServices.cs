@@ -161,7 +161,7 @@ internal sealed class BackupService(EggMailRuntime runtime) : BackgroundService
         }
 
         string directory = backup.Directory ?? Path.Combine(runtime.Config.Storage.Sqlite.DataDirectory, "backups");
-        var scheduler = new Backup.BackupScheduler(runtime.Storage, runtime.Clock, directory, TimeSpan.FromHours(backup.IntervalHours), backup.Keep, runtime.Log);
+        using var scheduler = new Backup.BackupScheduler(runtime.Storage, runtime.Clock, directory, TimeSpan.FromHours(backup.IntervalHours), backup.Keep, runtime.Log);
         using var timer = new PeriodicTimer(TimeSpan.FromMinutes(10));
         try
         {
