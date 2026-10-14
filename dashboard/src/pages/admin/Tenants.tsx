@@ -69,7 +69,7 @@ function RenameDialog({ tenant, onClose, onSaved }: { tenant: Tenant; onClose: (
 
 export default function Tenants(_props: Record<string, unknown>) {
   useDocumentTitle('Tenants');
-  const { setTenantId, tenantId } = useApp();
+  const { setTenantId, tenantId, refreshTenants } = useApp();
   const list = useApi(() => api.tenants(), []);
   const [toggle, setToggle] = useState<Tenant | null>(null);
   const [rename, setRename] = useState<Tenant | null>(null);
@@ -81,6 +81,7 @@ export default function Tenants(_props: Record<string, unknown>) {
     setMessage(`${t.name} is now ${next}.`);
     setToggle(null);
     list.reload();
+    void refreshTenants().catch(() => {});
   });
 
   const tenants = list.data ?? [];
@@ -150,6 +151,8 @@ export default function Tenants(_props: Record<string, unknown>) {
         onCreated={(t) => {
           setMessage(`Tenant ${t.name} created.`);
           list.reload();
+          // The first tenant of a fresh install becomes the one acted on; later ones are only added to the picker.
+          void refreshTenants(tenantId ? undefined : t.id).catch(() => {});
         }}
       />
 
@@ -181,6 +184,7 @@ export default function Tenants(_props: Record<string, unknown>) {
             setRename(null);
             setMessage(`Renamed to ${t.name}.`);
             list.reload();
+            void refreshTenants().catch(() => {});
           }}
         />
       )}

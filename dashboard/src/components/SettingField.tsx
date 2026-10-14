@@ -34,6 +34,7 @@ export function SettingField({ item, value, onChange, error }: { item: SettingIt
     <>
       {item.description}
       {locked && <> This value is set by deployment configuration and cannot be changed here.</>}
+      {item.requiresRestart && !locked && <> Takes effect the next time the server starts.</>}
     </>
   );
   const label = item.key;

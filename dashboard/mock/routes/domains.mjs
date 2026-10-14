@@ -39,7 +39,8 @@ function makeDomain(name, status, opts = {}) {
     nextCheckAt: opts.nextCheckAt ?? iso(Date.now() + 3_600_000),
     lastError: opts.lastError ?? null,
     records: makeRecords(name, selector, key, opts.statuses),
-    dkim: { selector, publicKey: key, active: true, createdAt: daysAgo(opts.ageDays ?? 30) },
+    dkim: { selector, publicKey: key, active: true, createdAt: daysAgo(opts.ageDays ?? 30), retiredAt: null },
+    dkimKeys: [{ selector, publicKey: key, active: true, createdAt: daysAgo(opts.ageDays ?? 30), retiredAt: null }],
     _verifies: 0,
     _lastVerifyAt: 0,
   };
@@ -113,6 +114,7 @@ export function register(r) {
         ageDays: 0,
       });
       d.dkim.publicKey = fakeKey(Date.now() % 100000);
+      d.dkimKeys[0].publicKey = d.dkim.publicKey;
       d.records[0].value = d.records[0].expected = `v=DKIM1; k=rsa; p=${d.dkim.publicKey}`;
       getDomains(ctx).push(d);
       return { status: 201, body: view(d) };
@@ -158,16 +160,34 @@ export function register(r) {
     { tenant: true },
   );
 
+  // Like the server: the new key is published as advice and does not sign until its record is found; one rotation at a time.
   r.post(
     '/api/v1/domains/:id/dkim/rotate',
     (ctx) => {
       const d = find(ctx);
-      const n = parseInt(d.dkim.selector.replace(/\D+/g, ''), 10) || 1;
+      if (d.dkimKeys.some((k) => !k.active && !k.retiredAt)) throw new HttpError(409, 'conflict', 'A key rotation is already pending.');
+      const n = Math.max(...d.dkimKeys.map((k) => parseInt(k.selector.replace(/\D+/g, ''), 10) || 1));
       const selector = `eggmail${n + 1}`;
       const key = fakeKey(n * 31 + randomBytes(1)[0]);
       const value = `v=DKIM1; k=rsa; p=${key}`;
-      d.dkim = { selector, publicKey: key, active: true, createdAt: iso() };
+      const created = { selector, publicKey: key, active: false, createdAt: iso(), retiredAt: null };
+      d.dkimKeys.push(created);
+      d.dkim = created;
       d.records.push({ type: 'TXT', host: `${selector}._domainkey.${d.name}`, value, ttl: 3600, purpose: 'dkim', status: 'pending', expected: value, found: null });
+      return view(d);
+    },
+    { tenant: true },
+  );
+
+  r.delete(
+    '/api/v1/domains/:id/dkim/rotate',
+    (ctx) => {
+      const d = find(ctx);
+      const pending = d.dkimKeys.filter((k) => !k.active && !k.retiredAt);
+      if (!pending.length) throw new HttpError(404, 'not_found', 'No key rotation is pending.');
+      d.dkimKeys = d.dkimKeys.filter((k) => !pending.includes(k));
+      d.records = d.records.filter((rec) => !(rec.purpose === 'dkim' && pending.some((k) => rec.host.startsWith(`${k.selector}._domainkey.`))));
+      d.dkim = d.dkimKeys[d.dkimKeys.length - 1];
       return view(d);
     },
     { tenant: true },

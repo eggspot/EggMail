@@ -1,11 +1,13 @@
 import { http, itemsOf, setCsrfToken, request } from './client';
 import type {
+  AcmeRenewal,
   AdminStatus,
   ApiKey,
   Capabilities,
   CertificateInfo,
   DeliveryEvent,
   Domain,
+  MaintenanceState,
   Me,
   MessageDetail,
   MessageQuery,
@@ -70,6 +72,7 @@ export const api = {
   deleteDomain: (id: string) => http.del<void>(`/api/v1/domains/${enc(id)}`),
   verifyDomain: (id: string) => http.post<Domain>(`/api/v1/domains/${enc(id)}/verify`),
   rotateDkim: (id: string) => http.post<Domain>(`/api/v1/domains/${enc(id)}/dkim/rotate`),
+  cancelDkimRotation: (id: string) => http.del<Domain>(`/api/v1/domains/${enc(id)}/dkim/rotate`),
 
   // ---- suppressions ----
   suppressions: (cursor?: string, limit = 50) => http.get<Page<Suppression>>('/api/v1/suppressions', { cursor, limit }),
@@ -83,6 +86,7 @@ export const api = {
   updateWebhook: (id: string, patch: Partial<Pick<Webhook, 'url' | 'event_types' | 'enabled'>>) => http.patch<Webhook>(`/api/v1/webhooks/${enc(id)}`, patch),
   deleteWebhook: (id: string) => http.del<void>(`/api/v1/webhooks/${enc(id)}`),
   rotateWebhookSecret: (id: string) => http.post<Webhook>(`/api/v1/webhooks/${enc(id)}/rotate-secret`),
+  removePreviousWebhookSecret: (id: string) => http.del<void>(`/api/v1/webhooks/${enc(id)}/previous-secret`),
   testWebhook: (id: string) => http.post<{ outboxId?: string } | undefined>(`/api/v1/webhooks/${enc(id)}/test`),
   webhookAttempts: async (id: string, limit = 50) => itemsOf(await http.get<WebhookAttempt[] | Page<WebhookAttempt>>(`/api/v1/webhooks/${enc(id)}/attempts`, { limit })),
   replayWebhookEvent: (outboxId: string) => http.post<void>(`/api/v1/webhook-events/${enc(outboxId)}/replay`),
@@ -117,7 +121,9 @@ export const api = {
   uploadCertificate: (body: { certificatePem?: string; privateKeyPem?: string; pfxBase64?: string; pfxPassword?: string }) =>
     http.post<CertificateInfo>('/api/v1/admin/certificates', body),
   requestAcmeCertificate: (domains: string[]) => http.post<{ status: string; message?: string }>('/api/v1/admin/certificates/acme', { domains }),
-  runMaintenance: () => http.post<void>('/api/v1/admin/maintenance/run'),
+  acmeRenewals: async () => itemsOf(await http.get<AcmeRenewal[] | Page<AcmeRenewal>>('/api/v1/admin/certificates/acme')),
+  runMaintenance: () => http.post<{ status?: string } | undefined>('/api/v1/admin/maintenance/run'),
+  maintenance: () => http.get<MaintenanceState>('/api/v1/admin/maintenance'),
 
   // ---- storage switch (never automatic) ----
   switchPreflight: (body: SwitchRequest) => http.post<PreflightReport>('/api/v1/admin/storage/switch/preflight', body),

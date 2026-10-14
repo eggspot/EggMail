@@ -13,10 +13,10 @@ describe('buildSrcDoc', () => {
     expect(doc).toContain(`content="${FRAME_CSP}"`);
   });
 
-  it('blocks everything except inline styles and data images', () => {
+  it('blocks everything except data images', () => {
     expect(FRAME_CSP).toContain("default-src 'none'");
     expect(FRAME_CSP).toContain('img-src data:');
-    expect(FRAME_CSP).toContain("style-src 'unsafe-inline'");
+    expect(FRAME_CSP).not.toContain('unsafe-inline');
     expect(FRAME_CSP).not.toMatch(/script-src|connect-src|frame-src/);
   });
 
@@ -56,6 +56,6 @@ describe('MessageHtmlFrame', () => {
 
   it('explains that remote content is blocked', () => {
     const { container } = render(<MessageHtmlFrame html="x" />);
-    expect(container.textContent).toContain('Remote images, scripts, forms and links are blocked');
+    expect(container.textContent).toContain('Remote content, scripts, forms, links and styling are blocked');
   });
 });

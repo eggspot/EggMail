@@ -64,9 +64,27 @@ describe('mock domains', () => {
     const d = (await mock.get('/api/v1/domains')).data.find((x) => x.name === 'example.com');
     const res = await mock.post(`/api/v1/domains/${d.id}/dkim/rotate`);
     expect(res.data.dkim.selector).toBe('eggmail2');
+    // The new key does not sign yet; the old one keeps signing.
+    expect(res.data.dkim.active).toBe(false);
+    expect(res.data.dkimKeys.map((k) => [k.selector, k.active])).toEqual([['eggmail1', true], ['eggmail2', false]]);
     const hosts = res.data.records.filter((r) => r.purpose === 'dkim').map((r) => r.host);
     expect(hosts).toContain('eggmail1._domainkey.example.com');
     expect(hosts).toContain('eggmail2._domainkey.example.com');
+    // One rotation at a time.
+    expect((await mock.post(`/api/v1/domains/${d.id}/dkim/rotate`)).status).toBe(409);
+  });
+
+  it('cancels a pending rotation and 404s when none is pending', async () => {
+    mock = await startMock();
+    await mock.login('tenant');
+    const d = (await mock.get('/api/v1/domains')).data.find((x) => x.name === 'example.com');
+    expect((await mock.del(`/api/v1/domains/${d.id}/dkim/rotate`)).status).toBe(404);
+    await mock.post(`/api/v1/domains/${d.id}/dkim/rotate`);
+    const res = await mock.del(`/api/v1/domains/${d.id}/dkim/rotate`);
+    expect(res.status).toBe(200);
+    expect(res.data.dkimKeys.map((k) => k.selector)).toEqual(['eggmail1']);
+    expect(res.data.dkim.selector).toBe('eggmail1');
+    expect(res.data.records.filter((r) => r.purpose === 'dkim').map((r) => r.host)).toEqual(['eggmail1._domainkey.example.com']);
   });
 
   it('deletes and then 404s', async () => {
