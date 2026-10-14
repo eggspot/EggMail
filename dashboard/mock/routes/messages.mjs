@@ -335,7 +335,9 @@ function statusAfter(m) {
 }
 
 function cancelMessage(ctx) {
-  const m = findMessage(ctx);
+  // Cancelling acts on the queue and needs no history: with History:Mode=statsonly it works too (and answers without a status).
+  const statsOnly = ctx.options.history === 'statsonly';
+  const m = store(ctx).find((x) => x.id === ctx.params.id);
   const b = ctx.body ?? {};
   const errors = [];
   for (const k of Object.keys(b)) if (k !== 'recipients') errors.push({ field: k, message: 'Unknown member.' });
@@ -352,26 +354,37 @@ function cancelMessage(ctx) {
   }
   if (errors.length) throw new HttpError(400, 'validation_failed', 'One or more fields are invalid.', { errors });
 
-  const waiting = waitingOf(m);
+  const notFound = () => new HttpError(404, 'message_not_found', 'No message with that id (unknown, or older than the event retention).');
+  const waiting = m ? waitingOf(m) : [];
+  if (!m || (statsOnly && waiting.length === 0)) throw notFound(); // without history a finished message cannot be told from an unknown one
   const want = requested ? new Set(requested.map((a) => a.toLowerCase())) : null;
   const selected = waiting.filter((a) => !want || want.has(a.toLowerCase())).sort((x, y) => x.localeCompare(y));
   const inFlight = selected.filter(isInFlight);
   const cancelled = selected.filter((a) => !isInFlight(a));
-  const notPending = requested ? requested.filter((a) => !waiting.some((w) => w.toLowerCase() === a.toLowerCase())) : [];
+  const notWaiting = requested ? requested.filter((a) => !waiting.some((w) => w.toLowerCase() === a.toLowerCase())) : [];
   if (cancelled.length === 0) {
+    if (inFlight.length === 0 && !statsOnly) {
+      // A repeated request whose work is done: every named recipient has a cancelled event (or, without names, the message is cancelled).
+      const done = new Set(m.events.filter((e) => e.type === 'cancelled' && e.recipient).map((e) => e.recipient.toLowerCase()));
+      const again = requested ? requested.every((a) => done.has(a.toLowerCase())) : waiting.length === 0 && m.status === 'cancelled';
+      if (again) return { id: m.id, status: m.status, cancelled: [], inFlight: [], transferHeld: [], notWaiting: [] };
+    }
     throw new HttpError(
       409,
       'conflict',
       inFlight.length > 0
-        ? 'Every recipient that is still waiting is being delivered right now. Try again when the attempt has ended (a recipient that is deferred can be cancelled then).'
-        : 'No recipient of this message is waiting for delivery: each is delivered, failed, expired, suppressed or already cancelled.',
-      { in_flight: inFlight, not_pending: notPending },
+        ? 'Every recipient that is still waiting is being delivered right now. Try again when the attempt has ended (a recipient that is deferred can be cancelled between attempts).'
+        : waiting.length === 0
+          ? 'No recipient of this message is waiting for delivery: each is delivered, failed, expired, suppressed or already cancelled.'
+          : 'None of the named recipients is waiting for delivery.',
+      { inFlight, transferHeld: [], notWaiting },
     );
   }
   const at = iso();
   for (const a of cancelled) m.events.push(ev('cancelled', at, { recipient: a, message: 'Cancelled before delivery.' }));
   m.status = statusAfter(m);
-  return { id: m.id, status: m.status, cancelled, inFlight, notPending };
+  const body = { id: m.id, cancelled, inFlight, transferHeld: [], notWaiting };
+  return statsOnly ? body : { ...body, status: m.status };
 }
 
 // ---- sending ----

@@ -65,14 +65,18 @@ test.describe('sign-in, sign-out and CSRF', () => {
     const mine = await new ApiClient(stack.baseURL).signIn(ADMIN_USER, ADMIN_PASSWORD);
     await context.addCookies([{ name: 'eggmail_session', value: mine.sessionCookieValue, url: stack.baseURL, httpOnly: true, sameSite: 'Strict' }]);
     await page.goto('/admin/tenants');
-    await expect(page.getByRole('heading', { name: 'Tenants', exact: true })).toBeVisible();
-    // The heading is drawn before the page's own requests (tenant list, capabilities) have answered. A request still in flight when the
-    // session ends gets the 401 and sends the page to the form on its own, so the "next action" below would find no form to fill.
+    // The page is fully loaded before the session is ended: the heading appears before the tenant list has been fetched, and a
+    // request still in flight when the session disappears is answered 401, which replaces the whole page with the sign-in form
+    // while the test is typing into it ("element was detached from the DOM").
+    await expect(page.getByRole('heading', { name: 'All tenants', exact: true })).toBeVisible();
     await page.waitForLoadState('networkidle');
     // The session is ended on the server (as if it had expired or been signed out elsewhere).
     await mine.ok('DELETE', '/api/v1/session');
+    // The page does not know yet: nothing it shows changes until it makes a request. The next action is that request.
     await page.getByLabel('Name', { exact: true }).fill('after-expiry');
+    const refused = page.waitForResponse((r) => r.url().endsWith('/api/v1/admin/tenants') && r.request().method() === 'POST');
     await page.getByRole('button', { name: 'Create tenant' }).click();
+    expect((await refused).status()).toBe(401);
     await expect(page.getByRole('button', { name: 'Sign in' })).toBeVisible();
   });
 

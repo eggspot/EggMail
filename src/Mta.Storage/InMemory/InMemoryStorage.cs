@@ -30,6 +30,7 @@ public sealed class InMemoryStorage : IStorage
         Webhooks = new MemoryWebhooks(_state);
         Maintenance = new MemoryMaintenance(_state);
         Transfer = new MemoryTransfer(_state);
+        Replicas = new InMemoryReplicaCoordination(_state.Clock);
         TimeSpan interval = statsFlushInterval ?? TimeSpan.FromSeconds(10);
         if (interval > TimeSpan.Zero)
         {
@@ -56,6 +57,8 @@ public sealed class InMemoryStorage : IStorage
     public IStorageMaintenance Maintenance { get; }
 
     public IStorageTransfer Transfer { get; }
+
+    public IReplicaCoordination? Replicas { get; }
 
     public Task InitializeAsync(CancellationToken cancellationToken)
     {
@@ -476,18 +479,27 @@ internal sealed class MemoryDeliveries(MemoryState s) : IDeliveryStore
         return default;
     }
 
-    public ValueTask<CancelResult> CancelAsync(Guid tenantId, Guid messageId, IReadOnlyList<string>? recipients, DateTimeOffset now, CancellationToken cancellationToken)
+    public ValueTask<CancelResult> CancelAsync(Guid tenantId, Guid messageId, IReadOnlyList<string>? recipients, DateTimeOffset now, Func<CancelledDeliveryInfo, WebhookEventDraft?>? webhookEvent, CancellationToken cancellationToken)
     {
         s.Fence.ThrowIfClosed();
         now = StorageTime.Normalize(now);
         lock (s.Gate)
         {
-            var pending = s.Deliveries.Values.Where(d => d.MessageId == messageId && d.TenantId == tenantId)
-                .Select(d => new PendingDelivery(d.Id, d.Recipient, d.TransferSwitchId is not null || d.LeaseUntil > now)).ToList();
-            CancelSelection selection = CancelPlanner.Select(pending, recipients);
+            s.Fence.ThrowIfClosed();   // again under the lock that every queue change takes
+            var waiting = s.Deliveries.Values.Where(d => d.MessageId == messageId && d.TenantId == tenantId)
+                .Select(d => new PendingDelivery(
+                    d.Id,
+                    d.Recipient,
+                    d.EnvelopeFrom,
+                    d.Attempt,
+                    CancelPlanner.OutcomeMayBeUnknown(d.PossibleDuplicate, d.LeaseOwner is not null),
+                    d.TransferSwitchId is not null ? CancelHold.TransferHeld : d.LeaseUntil > now ? CancelHold.Leased : CancelHold.None)).ToList();
+            CancelSelection selection = CancelPlanner.Select(waiting, recipients);
             foreach (PendingDelivery d in selection.Cancel)
             {
-                ApplyAttempt(s.Deliveries[d.DeliveryId], CancelPlanner.AttemptFor(d.DeliveryId, now));
+                QueuedDeliveryEntity row = s.Deliveries[d.DeliveryId];
+                row.PossibleDuplicate = d.PossibleDuplicate;   // the row is deleted next; the planner reads the flag from it
+                ApplyAttempt(row, CancelPlanner.AttemptFor(d, messageId, tenantId, now, webhookEvent));
             }
 
             return ValueTask.FromResult(CancelPlanner.ResultOf(selection));
@@ -497,7 +509,7 @@ internal sealed class MemoryDeliveries(MemoryState s) : IDeliveryStore
     /// <summary>The consequences of one attempt on a delivery row, under the state lock.</summary>
     private void ApplyAttempt(QueuedDeliveryEntity row, DeliveryAttempt attempt)
     {
-        var info = new DeliveryRowInfo(row.Id, row.MessageId, row.TenantId, row.Recipient, row.RecipientDomain, row.SendingDomain, row.Source, row.Attempt);
+        var info = new DeliveryRowInfo(row.Id, row.MessageId, row.TenantId, row.Recipient, row.RecipientDomain, row.SendingDomain, row.Source, row.Attempt, row.PossibleDuplicate);
         AttemptPlan plan = AttemptPlanner.Plan(attempt, info);
         DateTimeOffset at = StorageTime.Normalize(attempt.At);
 

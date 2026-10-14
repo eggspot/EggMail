@@ -14,7 +14,7 @@ describe('mock messages: cancel', () => {
     await mock.login('tenant');
     const r = await mock.post(`/api/v1/messages/${WAITING_ID}/cancel`, { recipients: ['AYO7@outlook.com', 'stranger@x.test'] });
     expect(r.status).toBe(200);
-    expect(r.data).toMatchObject({ id: WAITING_ID, cancelled: ['ayo7@outlook.com'], inFlight: [], notPending: ['stranger@x.test'] });
+    expect(r.data).toMatchObject({ id: WAITING_ID, cancelled: ['ayo7@outlook.com'], inFlight: [], notWaiting: ['stranger@x.test'] });
     const ev = await mock.get(`/api/v1/messages/${WAITING_ID}/events`);
     expect(ev.data.filter((e) => e.type === 'cancelled').map((e) => e.recipient)).toEqual(['ayo7@outlook.com']);
     expect((await mock.get(`/api/v1/messages/${WAITING_ID}`)).data.status).toBe('deferred');
@@ -23,9 +23,14 @@ describe('mock messages: cancel', () => {
     expect(rest.status).toBe(200);
     expect(rest.data.cancelled).toEqual(['noor2@gmail.com']);
     expect(rest.data.status).toBe('cancelled');
+    // Repeating a request whose work is done is a success with nothing cancelled; asking for someone who was never waiting is a conflict.
     const again = await mock.post(`/api/v1/messages/${WAITING_ID}/cancel`);
-    expect(again.status).toBe(409);
-    expect(again.data.code).toBe('conflict');
+    expect(again.status).toBe(200);
+    expect(again.data).toMatchObject({ cancelled: [], status: 'cancelled' });
+    expect((await mock.post(`/api/v1/messages/${WAITING_ID}/cancel`, { recipients: ['noor2@gmail.com'] })).status).toBe(200);
+    const stranger = await mock.post(`/api/v1/messages/${WAITING_ID}/cancel`, { recipients: ['stranger@x.test'] });
+    expect(stranger.status).toBe(409);
+    expect(stranger.data.code).toBe('conflict');
   });
 
   it('leaves a recipient whose delivery is running and reports it in flight', async () => {
@@ -37,7 +42,7 @@ describe('mock messages: cancel', () => {
     expect(r.data.inFlight).toEqual(['inflight1@gmail.com']);
     const only = await mock.post(`/api/v1/messages/${INFLIGHT_ID}/cancel`);
     expect(only.status).toBe(409);
-    expect(only.data.in_flight).toEqual(['inflight1@gmail.com']);
+    expect(only.data.inFlight).toEqual(['inflight1@gmail.com']);
   });
 
   it('validates the body and answers 404 for unknown messages, 409 for finished ones', async () => {
@@ -51,5 +56,16 @@ describe('mock messages: cancel', () => {
     expect((await mock.post(`/api/v1/messages/${WAITING_ID}/cancel`, { all: true })).status).toBe(400);
     expect((await mock.post('/api/v1/messages/ffffffffffffffffffffffffffffffff/cancel')).data.code).toBe('message_not_found');
     expect((await mock.post(`/api/v1/messages/${RAW_ID}/cancel`)).status).toBe(409);
+  });
+
+  it('works without history (no status in the answer) and then cannot tell a finished message from an unknown one', async () => {
+    mock = await startMock({ history: 'statsonly' });
+    await mock.login('tenant');
+    const r = await mock.post(`/api/v1/messages/${WAITING_ID}/cancel`);
+    expect(r.status).toBe(200);
+    expect(r.data.cancelled).toHaveLength(2);
+    expect('status' in r.data).toBe(false);
+    expect((await mock.post(`/api/v1/messages/${WAITING_ID}/cancel`)).data.code).toBe('message_not_found');
+    expect((await mock.get(`/api/v1/messages/${WAITING_ID}`)).status).toBe(410);
   });
 });

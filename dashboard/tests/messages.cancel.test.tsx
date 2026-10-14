@@ -43,7 +43,7 @@ describe('Cancel delivery', () => {
   });
 
   it('asks which recipients, sends exactly those and reloads the message', async () => {
-    const m = mockFetch(base({ [CANCEL]: ok({ id: MSG_ID, status: 'deferred', cancelled: ['b@gmail.com'], inFlight: [], notPending: [] }) }));
+    const m = mockFetch(base({ [CANCEL]: ok({ id: MSG_ID, status: 'deferred', cancelled: ['b@gmail.com'], inFlight: [], transferHeld: [], notWaiting: [] }) }));
     renderWithApp(<MessageDetail id={MSG_ID} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Cancel delivery' }));
     const dialog = await screen.findByRole('dialog');
@@ -76,20 +76,23 @@ describe('Cancel delivery', () => {
     expect(within(dialog).getByText('a@gmail.com')).toBeTruthy();
   });
 
-  it('refuses to send an empty selection', async () => {
+  it('keeps the confirm button disabled while no recipient is selected', async () => {
     const m = mockFetch(base());
     renderWithApp(<MessageDetail id={MSG_ID} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Cancel delivery' }));
     const dialog = await screen.findByRole('dialog');
     fireEvent.click(within(dialog).getByRole('checkbox', { name: 'a@gmail.com' }));
     fireEvent.click(within(dialog).getByRole('checkbox', { name: 'b@gmail.com' }));
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel delivery to 0 recipients' }));
-    expect((await within(dialog).findByRole('alert')).textContent).toContain('Select at least one recipient');
+    const confirm = within(dialog).getByRole('button', { name: 'Cancel delivery to 0 recipients' }) as HTMLButtonElement;
+    expect(confirm.disabled).toBe(true);
+    fireEvent.click(confirm);
     expect(m.callsTo('POST', `/api/v1/messages/${MSG_ID}/cancel`)).toHaveLength(0);
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: 'b@gmail.com' }));
+    expect((within(dialog).getByRole('button', { name: 'Cancel delivery to 1 recipient' }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it('reports the recipients that are being delivered and were left alone', async () => {
-    mockFetch(base({ [CANCEL]: ok({ id: MSG_ID, status: 'deferred', cancelled: ['b@gmail.com'], inFlight: ['a@gmail.com'], notPending: [] }) }));
+    mockFetch(base({ [CANCEL]: ok({ id: MSG_ID, status: 'deferred', cancelled: ['b@gmail.com'], inFlight: ['a@gmail.com'], transferHeld: [], notWaiting: [] }) }));
     renderWithApp(<MessageDetail id={MSG_ID} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Cancel delivery' }));
     fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Cancel delivery to 2 recipients' }));
@@ -100,7 +103,7 @@ describe('Cancel delivery', () => {
   it('shows the server explanation of a conflict inside the dialog', async () => {
     mockFetch(
       base({
-        [CANCEL]: problem(409, 'conflict', { detail: 'Every recipient that is still waiting is being delivered right now. Try again when the attempt has ended.', in_flight: ['a@gmail.com'] }),
+        [CANCEL]: problem(409, 'conflict', { detail: 'Every recipient that is still waiting is being delivered right now. Try again when the attempt has ended.', inFlight: ['a@gmail.com'] }),
       }),
     );
     renderWithApp(<MessageDetail id={MSG_ID} />);
@@ -115,8 +118,31 @@ describe('Cancel delivery', () => {
     const m = mockFetch(base());
     renderWithApp(<MessageDetail id={MSG_ID} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Cancel delivery' }));
-    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Cancel' }));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Keep sending' }));
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(m.calls.filter((c) => c.method === 'POST')).toHaveLength(0);
+  });
+
+  it('says so when the server found nothing left to cancel (a repeated request) and when a switch holds recipients', async () => {
+    mockFetch(base({ [CANCEL]: ok({ id: MSG_ID, status: 'cancelled', cancelled: [], inFlight: [], transferHeld: [], notWaiting: [] }) }));
+    const first = renderWithApp(<MessageDetail id={MSG_ID} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel delivery' }));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Cancel delivery to 2 recipients' }));
+    expect((await screen.findByTestId('cancel-result')).textContent).toContain('Nothing left to cancel');
+    first.unmount();
+
+    mockFetch(base({ [CANCEL]: ok({ id: MSG_ID, cancelled: ['b@gmail.com'], inFlight: [], transferHeld: ['a@gmail.com'], notWaiting: [] }) }));
+    renderWithApp(<MessageDetail id={MSG_ID} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel delivery' }));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Cancel delivery to 2 recipients' }));
+    expect((await screen.findByTestId('cancel-result')).textContent).toContain('a storage backend switch holds them: a@gmail.com');
+  });
+
+  it('is disabled with an explanation when the delivery events could not be loaded', async () => {
+    mockFetch(base({ [`GET /api/v1/messages/${MSG_ID}/events`]: problem(500, 'server_error') }));
+    renderWithApp(<MessageDetail id={MSG_ID} />);
+    const button = (await screen.findByRole('button', { name: 'Cancel delivery' })) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(button.title).toContain('could not be loaded');
   });
 });

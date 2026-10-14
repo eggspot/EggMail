@@ -348,7 +348,7 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
         // 1. Lock the delivery row. A repeated report of the same attempt waits here and then finds the row gone.
         DeliveryRowInfo row;
         await using (var select = new NpgsqlCommand(
-            "SELECT message_id, tenant_id, recipient, recipient_domain, sending_domain, source, attempt FROM delivery_queue WHERE id = $1 FOR UPDATE", connection, tx))
+            "SELECT message_id, tenant_id, recipient, recipient_domain, sending_domain, source, attempt, possible_duplicate FROM delivery_queue WHERE id = $1 FOR UPDATE", connection, tx))
         {
             select.Parameters.Uuid(a.DeliveryId);
             await using NpgsqlDataReader r = await select.ExecuteReaderAsync(ct).ConfigureAwait(false);
@@ -357,7 +357,7 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
                 return new AttemptResult(false, default, null);
             }
 
-            row = new DeliveryRowInfo(a.DeliveryId, r.GetGuid(0), r.GetGuid(1), r.GetString(2), r.GetString(3), r.GetNullableString(4), (MessageSource)r.GetInt16(5), r.GetInt32(6));
+            row = new DeliveryRowInfo(a.DeliveryId, r.GetGuid(0), r.GetGuid(1), r.GetString(2), r.GetString(3), r.GetNullableString(4), (MessageSource)r.GetInt16(5), r.GetInt32(6), r.GetBoolean(7));
         }
 
         AttemptResult result = await ApplyAttemptLockedAsync(connection, tx, row, a, targets, historyDayWritten, ct).ConfigureAwait(false);
@@ -469,9 +469,9 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
         return new AttemptResult(true, row, plan);
     }
 
-    // Cancelling (decision 80)
+    // Cancelling (decision 84)
 
-    public async ValueTask<CancelResult> CancelAsync(Guid tenantId, Guid messageId, IReadOnlyList<string>? recipients, DateTimeOffset now, CancellationToken cancellationToken)
+    public async ValueTask<CancelResult> CancelAsync(Guid tenantId, Guid messageId, IReadOnlyList<string>? recipients, DateTimeOffset now, Func<CancelledDeliveryInfo, WebhookEventDraft?>? webhookEvent, CancellationToken cancellationToken)
     {
         rt.Fence.ThrowIfClosed();
         now = StorageTime.Normalize(now);
@@ -479,8 +479,10 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
         CancelResult result;
         try
         {
+            WebhookTarget[] targets = webhookEvent is null ? [] : await rt.GetWebhookTargetsAsync(cancellationToken).ConfigureAwait(false);
             int? historyDay = null;
-            (result, done) = await WithPartitionRetryAsync(() => CancelCoreAsync(tenantId, messageId, recipients, now, d => historyDay = d, cancellationToken), () => historyDay, cancellationToken).ConfigureAwait(false);
+            (result, done) = await WithPartitionRetryAsync(
+                () => CancelCoreAsync(tenantId, messageId, recipients, now, webhookEvent, targets, d => historyDay = d, cancellationToken), () => historyDay, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (PostgresErrors.IsUnavailable(ex))
         {
@@ -504,36 +506,41 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
         return result;
     }
 
-    private async Task<(CancelResult Result, List<AttemptResult> Done)> CancelCoreAsync(Guid tenantId, Guid messageId, IReadOnlyList<string>? recipients, DateTimeOffset now, Action<int?> historyDayWritten, CancellationToken ct)
+    private async Task<(CancelResult Result, List<AttemptResult> Done)> CancelCoreAsync(
+        Guid tenantId, Guid messageId, IReadOnlyList<string>? recipients, DateTimeOffset now, Func<CancelledDeliveryInfo, WebhookEventDraft?>? webhookEvent, WebhookTarget[] targets, Action<int?> historyDayWritten, CancellationToken ct)
     {
         await using NpgsqlConnection connection = await rt.Data.OpenConnectionAsync(ct).ConfigureAwait(false);
         await using NpgsqlTransaction tx = await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
 
-        // Lock every pending row of the message in id order. A claim skips locked rows and never waits (no deadlock); a recorded attempt or another
-        // cancel holding a row makes this wait, and the lease column read afterwards is the committed one. A row that a claim committed first has a
-        // lease in the future and is reported as in flight, so cancel and claim cannot both win a row.
-        var pending = new List<PendingDelivery>();
-        var rows = new Dictionary<Guid, DeliveryRowInfo>();
+        // Lock every waiting row of the message in id order (an index on message_id finds them). A claim skips locked rows and never waits (no deadlock); a
+        // recorded attempt or another cancel holding a row makes this wait, and the columns read afterwards are the committed ones. A row that a claim committed
+        // first has a lease in the future and is reported as in flight, so cancel and claim cannot both win a row.
+        var waiting = new List<PendingDelivery>();
+        var rows = new Dictionary<Guid, (string Domain, string? SendingDomain, MessageSource Source)>();
         await using (var select = new NpgsqlCommand(
-            "SELECT id, recipient, recipient_domain, sending_domain, source, attempt, lease_until, transfer_switch_id FROM delivery_queue WHERE message_id = $1 AND tenant_id = $2 ORDER BY id FOR UPDATE", connection, tx))
+            "SELECT id, recipient, recipient_domain, sending_domain, source, attempt, lease_until, transfer_switch_id, lease_owner, possible_duplicate, envelope_from " +
+            "FROM delivery_queue WHERE message_id = $1 AND tenant_id = $2 ORDER BY id FOR UPDATE", connection, tx))
         {
             select.Parameters.Uuid(messageId).Uuid(tenantId);
             await using NpgsqlDataReader r = await select.ExecuteReaderAsync(ct).ConfigureAwait(false);
             while (await r.ReadAsync(ct).ConfigureAwait(false))
             {
                 Guid id = r.GetGuid(0);
-                string recipient = r.GetString(1);
-                bool locked = r.GetInstant(6) > now || !r.IsDBNull(7);
-                pending.Add(new PendingDelivery(id, recipient, locked));
-                rows[id] = new DeliveryRowInfo(id, messageId, tenantId, recipient, r.GetString(2), r.GetNullableString(3), (MessageSource)r.GetInt16(4), r.GetInt32(5));
+                CancelHold hold = !r.IsDBNull(7) ? CancelHold.TransferHeld : r.GetInstant(6) > now ? CancelHold.Leased : CancelHold.None;
+                waiting.Add(new PendingDelivery(id, r.GetString(1), r.GetString(10), r.GetInt32(5), CancelPlanner.OutcomeMayBeUnknown(r.GetBoolean(9), !r.IsDBNull(8)), hold));
+                rows[id] = (r.GetString(2), r.GetNullableString(3), (MessageSource)r.GetInt16(4));
             }
         }
 
-        CancelSelection selection = CancelPlanner.Select(pending, recipients);
+        rt.Fence.ThrowIfClosed();   // again, with the rows locked: a switch that fenced the queue meanwhile has the last word
+        CancelSelection selection = CancelPlanner.Select(waiting, recipients);
         var done = new List<AttemptResult>(selection.Cancel.Count);
         foreach (PendingDelivery d in selection.Cancel)
         {
-            done.Add(await ApplyAttemptLockedAsync(connection, tx, rows[d.DeliveryId], CancelPlanner.AttemptFor(d.DeliveryId, now), [], historyDayWritten, ct).ConfigureAwait(false));
+            var (domain, sendingDomain, source) = rows[d.DeliveryId];
+            var row = new DeliveryRowInfo(d.DeliveryId, messageId, tenantId, d.Recipient, domain, sendingDomain, source, d.Attempt, d.PossibleDuplicate);
+            DeliveryAttempt attempt = CancelPlanner.AttemptFor(d, messageId, tenantId, now, webhookEvent);
+            done.Add(await ApplyAttemptLockedAsync(connection, tx, row, attempt, targets, historyDayWritten, ct).ConfigureAwait(false));
         }
 
         await tx.CommitAsync(ct).ConfigureAwait(false);

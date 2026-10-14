@@ -21,10 +21,14 @@ public sealed class AcmeRenewalService
     private readonly AcmeSection _options;
     private readonly IClock _clock;
     private readonly IMtaLog _log;
+    private readonly Func<double> _random;
     private readonly string _owner = "acme-" + Ids.ToCompact(Ids.New())[..12];
 
-    public AcmeRenewalService(IConfigStore config, ISecretProtector protector, IAcmeOrderRunner runner, IDnsChallengeProvider dns, AcmeSection options, IClock? clock = null, IMtaLog? log = null)
+    /// <param name="random">Position inside a CA's renewal window (a number in [0, 1)); tests fix it.</param>
+    public AcmeRenewalService(IConfigStore config, ISecretProtector protector, IAcmeOrderRunner runner, IDnsChallengeProvider dns, AcmeSection options, IClock? clock = null, IMtaLog? log = null,
+        Func<double>? random = null)
     {
+        _random = random ?? Random.Shared.NextDouble;
         _config = config;
         _protector = protector;
         _runner = runner;
@@ -42,9 +46,7 @@ public sealed class AcmeRenewalService
             return true;
         }
 
-        var wanted = wantedDomains.Select(d => d.ToLowerInvariant()).OrderBy(d => d).ToList();
-        var have = current.Subjects.Select(d => d.ToLowerInvariant()).OrderBy(d => d).ToList();
-        if (!wanted.SequenceEqual(have))
+        if (NamesDiffer(current, wantedDomains))
         {
             return true;
         }
@@ -52,6 +54,13 @@ public sealed class AcmeRenewalService
         var lifetime = current.NotAfter - current.NotBefore;
         var remaining = current.NotAfter - now;
         return remaining <= lifetime * remainingFraction;
+    }
+
+    private static bool NamesDiffer(CertificateRecord current, IReadOnlyList<string> wantedDomains)
+    {
+        var wanted = wantedDomains.Select(d => d.ToLowerInvariant()).OrderBy(d => d).ToList();
+        var have = current.Subjects.Select(d => d.ToLowerInvariant()).OrderBy(d => d).ToList();
+        return !wanted.SequenceEqual(have);
     }
 
     /// <summary>Backoff after <paramref name="failures"/> consecutive failures: 10 min, 20 min, 40 min, … capped at 6 hours.</summary>
@@ -136,18 +145,85 @@ public sealed class AcmeRenewalService
         return await RenewAsync(name, wanted, force: true, ct).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Is the certificate due? Without a certificate, or with other names than wanted: yes. Otherwise the CA's advice (ARI) decides when it is enabled and the
+    /// CA gives some, else the lifetime rule (<see cref="AcmeRenewalSchedule"/>). What the CA answers is saved in the renewal row, in that column only.
+    /// </summary>
+    private async Task<bool> IsDueAsync(string name, CertificateRecord? current, IReadOnlyList<string> domains, AcmeRenewalRecord? renewal, DateTimeOffset now, CancellationToken ct)
+    {
+        if (current is null || NamesDiffer(current, domains))
+        {
+            return true;
+        }
+
+        if (!_options.UseRenewalInfo)
+        {
+            return NeedsRenewal(current, domains, now, _options.RenewAtRemainingFraction);
+        }
+
+        var advice = AcmeRenewalAdvice.Parse(renewal?.AriJson, current.Thumbprint);
+        if (AcmeRenewalSchedule.ShouldCheck(advice, now))
+        {
+            advice = await FetchAdviceAsync(current, advice, now, ct).ConfigureAwait(false);
+            try
+            {
+                // Only the advice column: the row is shared with the other replicas, whose status and back-off must not be overwritten with what was read before the question.
+                await _config.SetAcmeRenewalAdviceAsync(name, advice.ToJson(), ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                // The advice in hand is still used for this decision; a database problem must not hold up a renewal or the other certificates.
+                _log.Write(MtaLogLevel.Warning, "acme", $"the renewal advice for certificate '{name}' could not be saved ({ex.Message}); using it for this check only", ex);
+            }
+        }
+
+        return AcmeRenewalSchedule.IsDue(advice, current.NotBefore, current.NotAfter, now, _options.RenewAtRemainingFraction, _options.CheckInterval);
+    }
+
+    /// <summary>Asks the CA for its renewal advice; a CA that cannot answer never throws here (the lifetime rule applies until it can).</summary>
+    private async Task<AcmeRenewalAdvice> FetchAdviceAsync(CertificateRecord current, AcmeRenewalAdvice? previous, DateTimeOffset now, CancellationToken ct)
+    {
+        try
+        {
+            var info = await _runner.GetRenewalInfoAsync(_options.DirectoryUrl, current.ChainPem, ct).ConfigureAwait(false);
+            if (info is null)
+            {
+                _log.Write(MtaLogLevel.Debug, "acme", $"the CA offers no renewal information; certificate '{current.Name}' renews by its lifetime");
+                return AcmeRenewalSchedule.FromDirectoryWithoutRenewalInfo(current.Thumbprint, now);
+            }
+
+            var advice = AcmeRenewalSchedule.FromInfo(current.Thumbprint, info, previous, now, _random);
+            if (previous?.RenewAt != advice.RenewAt)
+            {
+                _log.Write(MtaLogLevel.Information, "acme",
+                    $"the CA suggests renewing certificate '{current.Name}' between {info.WindowStart:u} and {info.WindowEnd:u}; planned for {advice.RenewAt:u}" + (info.ExplanationUrl is null ? "" : $" ({info.ExplanationUrl})"));
+            }
+
+            return advice;
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            var failed = AcmeRenewalSchedule.FromFailure(current.Thumbprint, previous, now, ex.Message, transient: ex is AcmeException { Transient: true } or HttpRequestException or TimeoutException);
+            _log.Write(MtaLogLevel.Warning, "acme", $"renewal information for certificate '{current.Name}' is unavailable ({ex.Message}); using the {(previous is { HasWindow: true } ? "earlier window" : "lifetime rule")}, asking again at {failed.NextCheckAt:u}", ex);
+            return failed;
+        }
+    }
+
     private async Task<bool> RenewAsync(string name, IReadOnlyList<string> domains, bool force, CancellationToken ct)
     {
         var now = _clock.UtcNow;
         var current = (await _config.GetCertificatesAsync(ct).ConfigureAwait(false))
             .Where(c => c.Active && c.Source == "acme" && c.Name == name)
             .OrderByDescending(c => c.NotAfter).FirstOrDefault();
-        if (!force && !NeedsRenewal(current, domains, now, _options.RenewAtRemainingFraction))
+        var renewal = (await _config.GetAcmeRenewalsAsync(ct).ConfigureAwait(false)).FirstOrDefault(r => r.CertificateName == name);
+        if (!force)
         {
-            return false;
+            if (!await IsDueAsync(name, current, domains, renewal, now, ct).ConfigureAwait(false))
+            {
+                return false;
+            }
         }
 
-        var renewal = (await _config.GetAcmeRenewalsAsync(ct).ConfigureAwait(false)).FirstOrDefault(r => r.CertificateName == name);
         if (!force && renewal?.NextAttemptAt is { } next && next > now)
         {
             return false;
@@ -162,6 +238,13 @@ public sealed class AcmeRenewalService
 
         try
         {
+            // The row read before the CA was asked may be stale by now (another replica may have failed an order and set a back-off in the meantime): read it again under the lease.
+            renewal = (await _config.GetAcmeRenewalsAsync(ct).ConfigureAwait(false)).FirstOrDefault(r => r.CertificateName == name);
+            if (!force && renewal?.NextAttemptAt is { } backoff && backoff > now)
+            {
+                return false;
+            }
+
             _log.Write(MtaLogLevel.Information, "acme", $"ordering certificate '{name}' for {string.Join(", ", domains)}");
             await _config.UpsertAcmeRenewalAsync(new AcmeRenewalRecord(name, "ordering", now, null, renewal?.Failures ?? 0, renewal?.LastError, null, renewal?.AriJson), ct).ConfigureAwait(false);
 
@@ -177,7 +260,9 @@ public sealed class AcmeRenewalService
                 accountSaved = true;
             }
 
-            var request = new AcmeOrderRequest(_options.DirectoryUrl, _options.Email ?? "", domains, accountKey, _options.PropagationDelay, SaveAccountAsync);
+            // A certificate that shares a name with the order is the one this order renews: say so (ARI "replaces"); the runner does it where the CA supports it.
+            string? replaces = current is not null && current.Subjects.Intersect(domains, StringComparer.OrdinalIgnoreCase).Any() ? current.ChainPem : null;
+            var request = new AcmeOrderRequest(_options.DirectoryUrl, _options.Email ?? "", domains, accountKey, _options.PropagationDelay, SaveAccountAsync, replaces);
             var issued = await _runner.IssueAsync(request, _dns, ct).ConfigureAwait(false);
             if (!accountSaved)
             {
@@ -204,7 +289,7 @@ public sealed class AcmeRenewalService
             // backed off, never thrown: an exception escaping here would end the renewal loop until the next restart.
             int failures = (renewal?.Failures ?? 0) + 1;
             var retryAt = now + Backoff(failures);
-            await _config.UpsertAcmeRenewalAsync(new AcmeRenewalRecord(name, "failed", now, retryAt, failures, ex.Message, null, null), ct).ConfigureAwait(false);
+            await _config.UpsertAcmeRenewalAsync(new AcmeRenewalRecord(name, "failed", now, retryAt, failures, ex.Message, null, renewal?.AriJson), ct).ConfigureAwait(false);
             _log.Write(MtaLogLevel.Error, "acme", $"certificate order for '{name}' failed (attempt {failures}); next try {retryAt:u}", ex);
             return false;
         }

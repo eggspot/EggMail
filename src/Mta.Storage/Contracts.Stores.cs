@@ -24,6 +24,12 @@ public interface IStorage : IAsyncDisposable
     /// </summary>
     Transfer.IStorageTransfer? Transfer => null;
 
+    /// <summary>
+    /// What several replicas on one database exchange (liveness, signals about remote destinations, failed-login counts). Null for SQLite, which is one process by
+    /// design, where the in-process state is already exact.
+    /// </summary>
+    IReplicaCoordination? Replicas => null;
+
     /// <summary>Creates or migrates the schema, runs startup integrity checks (SQLite) and prepares writers.</summary>
     Task InitializeAsync(CancellationToken cancellationToken);
 }
@@ -73,27 +79,36 @@ public interface IDeliveryStore
     ValueTask<IReadOnlyList<ClaimedDelivery>> ClaimExpiredAsync(string owner, int max, DateTimeOffset now, CancellationToken cancellationToken);
 
     /// <summary>
-    /// Cancels the pending deliveries of one message of <paramref name="tenantId"/> (decision 80). Atomic per delivery and serialized with
+    /// Cancels the waiting deliveries of one message of <paramref name="tenantId"/> (decision 84). Atomic and serialized with
     /// <see cref="ClaimAsync"/> and <see cref="RecordAttemptAsync"/>: a delivery that is not leased at <paramref name="now"/> is finished as
     /// <see cref="DeliveryOutcome.Cancelled"/> exactly like a recorded attempt (row deleted, <c>cancelled</c> event and message status under
-    /// <see cref="HistoryMode.Full"/>, spool freed with the last recipient, no statistic counter, no webhook event, no bounce) and is never claimed again;
-    /// a delivery that is leased (a worker is, or may be, mid-transaction) is left untouched and reported as in flight, so cancelling can never race
-    /// a transmission. <paramref name="recipients"/> null cancels every pending recipient; otherwise only the listed addresses (compared case-insensitively).
-    /// A message of another tenant is indistinguishable from an unknown one (every list empty). Throws <see cref="StorageFencedException"/> while a
-    /// backend switch holds the queue.
+    /// <see cref="HistoryMode.Full"/>, spool freed with the last recipient, webhook rows for <paramref name="webhookEvent"/>, no statistic counter, no bounce)
+    /// and is never claimed again. A delivery that is leased (a worker is, or may be, mid-transaction) or held by a backend switch is left untouched and
+    /// reported, so cancelling can never race a transmission. A delivery whose lease ran out while its holder never reported (<c>lease_owner</c> still set) or
+    /// that carries the <c>possible_duplicate</c> flag may already have been sent: it is cancelled, and its events say so (<c>possible_duplicate</c>).
+    /// <paramref name="recipients"/> null cancels every waiting recipient; otherwise only the listed addresses (compared case-insensitively, whole address).
+    /// A message of another tenant is indistinguishable from an unknown one (every list empty, <see cref="CancelResult.Waiting"/> 0). Works in both history
+    /// modes (the queue row is what is cancelled; events are written only under <see cref="HistoryMode.Full"/>). Throws <see cref="StorageFencedException"/>
+    /// while a backend switch holds the queue, checked again inside the atomic step.
     /// </summary>
-    ValueTask<CancelResult> CancelAsync(Guid tenantId, Guid messageId, IReadOnlyList<string>? recipients, DateTimeOffset now, CancellationToken cancellationToken);
+    /// <param name="webhookEvent">Builds the webhook event for one cancelled delivery (null: none). Called inside the atomic step, once per cancelled delivery: it must be quick and must not call back into storage.</param>
+    ValueTask<CancelResult> CancelAsync(Guid tenantId, Guid messageId, IReadOnlyList<string>? recipients, DateTimeOffset now, Func<CancelledDeliveryInfo, WebhookEventDraft?>? webhookEvent, CancellationToken cancellationToken);
 }
 
+/// <summary>One delivery that <see cref="IDeliveryStore.CancelAsync"/> is cancelling, for the webhook event. <see cref="Attempt"/> is the number of attempts made before.</summary>
+public sealed record CancelledDeliveryInfo(Guid DeliveryId, Guid MessageId, Guid TenantId, string EnvelopeFrom, string Recipient, int Attempt, bool PossibleDuplicate, DateTimeOffset At);
+
 /// <summary>
-/// What <see cref="IDeliveryStore.CancelAsync"/> did. <see cref="Cancelled"/> are the recipients finished as cancelled, <see cref="InFlight"/> the pending
-/// recipients that were leased and so left alone, <see cref="NotPending"/> the requested addresses with no pending delivery (already finished, or not a
-/// recipient of the message); the last is always empty when every recipient was requested. Addresses are the stored recipient text, except
-/// <see cref="NotPending"/>, which echoes the request.
+/// What <see cref="IDeliveryStore.CancelAsync"/> did, by recipient address (the stored text, except <see cref="NotWaiting"/>, which echoes the request).
+/// <see cref="Cancelled"/> were finished as cancelled. A waiting recipient that was not cancelled is in <see cref="InFlight"/> (leased: a delivery attempt
+/// holds it) or <see cref="TransferHeld"/> (marked by a backend switch). <see cref="NotWaiting"/> are the requested addresses with no waiting delivery
+/// (already finished, or not a recipient of the message); it is always empty when every recipient was requested. <see cref="Waiting"/> is how many
+/// deliveries of the message were waiting before the call, whatever was requested: 0 means unknown message, another tenant's message, or a message that
+/// is finished.
 /// </summary>
-public sealed record CancelResult(IReadOnlyList<string> Cancelled, IReadOnlyList<string> InFlight, IReadOnlyList<string> NotPending)
+public sealed record CancelResult(IReadOnlyList<string> Cancelled, IReadOnlyList<string> InFlight, IReadOnlyList<string> TransferHeld, IReadOnlyList<string> NotWaiting, int Waiting)
 {
-    public static CancelResult None { get; } = new([], [], []);
+    public static CancelResult None { get; } = new([], [], [], [], 0);
 }
 
 public sealed record QueueStats(long Queued, long Leased, long Deferred, DateTimeOffset? OldestDueAt, long SpoolBytes);

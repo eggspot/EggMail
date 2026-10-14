@@ -23,6 +23,11 @@ test.describe('cancelling a queued message', () => {
   test('a deferred message is cancelled from its detail page and is never sent', async ({ adminPage: page, admin, tenant, stack }) => {
     const { domain, recipientDomain, key } = await setUp(admin, tenant, stack);
     const subject = unique('Cancel me ');
+    // An endpoint of the tenant that subscribes to the new event type (loopback receivers need the tenant allowlist).
+    await admin.ok('PUT', '/api/v1/settings', { values: { 'Webhooks:AllowedNetworks': '127.0.0.0/8' } }, { tenantId: tenant.id });
+    const hookUrl = `${stack.webhooks.url}?cancel=${unique('')}`;
+    const hook = await admin.ok('POST', '/api/v1/webhooks', { url: hookUrl, event_types: ['message.cancelled'] }, { tenantId: tenant.id });
+    stack.webhooks.respondWith(200);
     const sent = await sendViaApi(stack, key, { from: `hello@${domain.name}`, to: [`defer1@${recipientDomain}`], subject, text: 'never delivered' });
     expect(sent.status).toBe(202);
 
@@ -35,7 +40,7 @@ test.describe('cancelling a queued message', () => {
     await page.getByRole('button', { name: 'Cancel delivery', exact: true }).click();
     const dialog = page.getByRole('dialog');
     await expect(dialog).toContainText(`defer1@${recipientDomain}`);
-    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await dialog.getByRole('button', { name: 'Keep sending', exact: true }).click();
     await expect(page.getByRole('dialog')).toHaveCount(0);
     await expect(page.locator('dl.kv').first()).toContainText('deferred');
 
@@ -48,14 +53,26 @@ test.describe('cancelling a queued message', () => {
     await expect(timeline.locator('[data-event-type="cancelled"]')).toContainText(`defer1@${recipientDomain}`);
     await expect(page.getByRole('button', { name: 'Cancel delivery', exact: true })).toHaveCount(0); // nothing left to cancel
 
-    // The server agrees: a second cancel is a conflict, the list shows the status, and the sink never saw the message.
-    const again = await admin.request('POST', `/api/v1/messages/${new URL(page.url()).pathname.split('/').pop()}/cancel`, undefined, { tenantId: tenant.id });
-    expect(again.status).toBe(409);
+    // The server agrees: repeating the request is a success with nothing cancelled, asking for a recipient that was never waiting is a conflict, the
+    // list shows the status, the sink never saw the message, and the endpoint received a signed message.cancelled event.
+    const messageId = new URL(page.url()).pathname.split('/').pop();
+    const again = await admin.request('POST', `/api/v1/messages/${messageId}/cancel`, undefined, { tenantId: tenant.id });
+    expect(again.status).toBe(200);
+    expect(again.body).toMatchObject({ cancelled: [], status: 'cancelled' });
+    const stranger = await admin.request('POST', `/api/v1/messages/${messageId}/cancel`, { recipients: [`nobody@${recipientDomain}`] }, { tenantId: tenant.id });
+    expect(stranger.status).toBe(409);
     await page.goto('/messages');
     await page.getByLabel('Status').selectOption('cancelled');
     await search(page);
     await expect(messageRow(page, subject)).toBeVisible();
     expect(stack.sink.received.some((m) => m.data.includes(`Subject: ${subject}`))).toBe(false);
+
+    const target = new URL(hookUrl);
+    await expect.poll(() => stack.webhooks.requests.some((r) => r.url === target.pathname + target.search && JSON.parse(r.body).type === 'message.cancelled'), { timeout: 60_000 }).toBe(true);
+    const event = stack.webhooks.requests.find((r) => r.url === target.pathname + target.search);
+    expect(JSON.parse(event.body).data).toMatchObject({ message_id: messageId, recipient: `defer1@${recipientDomain}`, attempt: 1 });
+    expect(event.headers['webhook-signature']).toMatch(/^v1,/);
+    expect(hook.secret).toBeTruthy();
   });
 
   test('one recipient of several is cancelled and the others keep waiting', async ({ adminPage: page, admin, tenant, stack }) => {

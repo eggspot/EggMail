@@ -64,8 +64,11 @@ internal sealed class AcmeHarness : IAsyncDisposable
     }
 
     /// <summary>A renewal service as a freshly started process would build it: its own runner (no cached state), the shared store and clock.</summary>
-    public AcmeRenewalService CreateService(IDnsChallengeProvider dns, IEnumerable<string> domains, RecordingHandler? http = null, IAcmeOrderRunner? runner = null) =>
-        new(Storage.Config, Secrets, runner ?? new CertesOrderRunner(http ?? Http), dns, Section(domains), Clock, Log);
+    public AcmeRenewalService CreateService(IDnsChallengeProvider dns, IEnumerable<string> domains, RecordingHandler? http = null, IAcmeOrderRunner? runner = null, Func<double>? random = null) =>
+        new(Storage.Config, Secrets, runner ?? new CertesOrderRunner(http ?? Http), dns, Section(domains), Clock, Log, random);
+
+    /// <summary>Follow the CA's renewal information (the default); tests of the plain lifetime rule switch it off.</summary>
+    public bool UseRenewalInfo { get; set; } = true;
 
     public AcmeSection Section(IEnumerable<string> domains) => new()
     {
@@ -74,6 +77,7 @@ internal sealed class AcmeHarness : IAsyncDisposable
         Email = "ops@acme-test.example",
         Domains = [.. domains],
         PropagationDelay = TimeSpan.Zero,
+        UseRenewalInfo = UseRenewalInfo,
     };
 
     public async ValueTask DisposeAsync()

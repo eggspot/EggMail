@@ -46,6 +46,22 @@ internal sealed class PostgresRuntime
         // with request traffic for connections (a request that holds a runtime connection may need a partition created).
         Owner = BuildDataSource(owner, pg, runtimePool: false);
         Partitions = new PostgresPartitions(Owner);
+        Coordination = BuildCoordinationDataSource(runtime, pg);
+
+        if (!string.IsNullOrWhiteSpace(pg.ReadOnlyConnectionString))
+        {
+            ReadOnlyRole = new NpgsqlConnectionStringBuilder(pg.ReadOnlyConnectionString).Username;
+            if (string.IsNullOrWhiteSpace(ReadOnlyRole))
+            {
+                throw new ArgumentException("Postgres:ReadOnlyConnectionString must name the role to connect as (Username=...): the migration grants that role its SELECT privileges.");
+            }
+            Reader = BuildReaderDataSource(pg.ReadOnlyConnectionString, pg);
+            SeparateReader = true;
+        }
+        else
+        {
+            Reader = Data;
+        }
     }
 
     public StorageOptions Options { get; }
@@ -64,6 +80,29 @@ internal sealed class PostgresRuntime
     /// <summary>Normal operation: claims, intake, history, statistics, configuration.</summary>
     public NpgsqlDataSource Data { get; }
 
+    /// <summary>
+    /// The dashboard's read queries (history search, detail, events, retained raw, statistics). The read-only role with a <c>statement_timeout</c> when
+    /// <c>Postgres:ReadOnlyConnectionString</c> is set (design section 4.3), otherwise the same data source as <see cref="Data"/>.
+    /// </summary>
+    public NpgsqlDataSource Reader { get; }
+
+    /// <summary>True when <see cref="Reader"/> is its own data source (a read-only connection string was given).</summary>
+    public bool SeparateReader { get; }
+
+    public string? ReadOnlyRole { get; }
+
+    /// <summary>The read-only role the migration has to grant (null when there is none, or it is the runtime or owner role, which can read already).</summary>
+    public string? ReadOnlyRoleToGrant =>
+        SeparateReader && !string.IsNullOrWhiteSpace(ReadOnlyRole)
+        && !string.Equals(ReadOnlyRole, RuntimeRole, StringComparison.Ordinal) && !string.Equals(ReadOnlyRole, OwnerRole, StringComparison.Ordinal)
+            ? ReadOnlyRole : null;
+
+    /// <summary>
+    /// The replica coordination (heartbeat, signals, failed-login counts): a pool of two connections of its own, so a burst of claims or intake cannot starve the heartbeat (a
+    /// replica that cannot beat is dropped by the others) nor can a stuck coordination statement take a connection from the mail path.
+    /// </summary>
+    public NpgsqlDataSource Coordination { get; }
+
     /// <summary>Schema owner: migrations, partition DDL and maintenance locks. A small pool of its own; it connects as the runtime role when only one connection string was given.</summary>
     public NpgsqlDataSource Owner { get; }
 
@@ -76,6 +115,41 @@ internal sealed class PostgresRuntime
     public PostgresPartitions Partitions { get; }
 
     public EfConfigStore<PostgresDbContext> ConfigStore { get; set; } = null!;
+
+    private static NpgsqlDataSource BuildReaderDataSource(string connectionString, PostgresOptions pg)
+    {
+        var builder = new NpgsqlConnectionStringBuilder(connectionString);
+        if (!builder.ContainsKey("Application Name") || string.IsNullOrEmpty(builder.ApplicationName))
+        {
+            builder.ApplicationName = "eggmail-readonly";
+        }
+
+        if (!builder.ContainsKey("Maximum Pool Size"))
+        {
+            builder.MaxPoolSize = Math.Max(1, pg.ReadOnlyMaxPoolSize);
+        }
+
+        if (!builder.ContainsKey("Command Timeout"))
+        {
+            // The server's statement_timeout fires first, so a slow query is reported as such rather than as a client-side timeout.
+            builder.CommandTimeout = Math.Max(pg.CommandTimeoutSeconds, pg.ReadOnlyStatementTimeoutSeconds + 5);
+        }
+
+        // Startup options, not SET: they are the session defaults, so the connection reset when a connection returns to the pool (DISCARD ALL) keeps them.
+        // A pooler in front of the database must pass the "options" startup parameter (PgBouncer: ignore_startup_parameters = options); the role can also carry the same settings (ALTER ROLE ... SET).
+        string timeouts = string.Create(System.Globalization.CultureInfo.InvariantCulture,
+            $"-c statement_timeout={pg.ReadOnlyStatementTimeoutSeconds * 1000} -c idle_in_transaction_session_timeout={pg.ReadOnlyIdleInTransactionTimeoutSeconds * 1000} -c default_transaction_read_only=on");
+        builder.Options = string.IsNullOrWhiteSpace(builder.Options) ? timeouts : builder.Options + " " + timeouts;
+        return new NpgsqlDataSourceBuilder(builder.ConnectionString).Build();
+    }
+
+    private static NpgsqlDataSource BuildCoordinationDataSource(string connectionString, PostgresOptions pg)
+    {
+        var builder = new NpgsqlConnectionStringBuilder(connectionString) { ApplicationName = "eggmail-coordination", MaxPoolSize = 2, MinPoolSize = 0, MaxAutoPrepare = 0 };
+        builder.Timeout = Math.Min(builder.Timeout > 0 ? builder.Timeout : 15, 5);
+        builder.CommandTimeout = Math.Clamp(pg.CommandTimeoutSeconds, 1, 5);
+        return new NpgsqlDataSourceBuilder(builder.ConnectionString) { Name = "eggmail-coordination" }.Build();
+    }
 
     private static NpgsqlDataSource BuildDataSource(string connectionString, PostgresOptions pg, bool runtimePool)
     {
@@ -120,6 +194,7 @@ internal sealed class PostgresRuntime
         {
             Data.Clear();
             Owner.Clear();
+            Coordination.Clear();
         }
 
         return PostgresErrors.Unavailable(inner);

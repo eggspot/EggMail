@@ -150,6 +150,31 @@ public abstract partial class DeliveryConformance : StorageTestBase
     }
 
     [Fact]
+    public async Task A_holder_that_reports_after_its_lease_was_taken_over_records_a_possible_duplicate()
+    {
+        var m = await AcceptAsync(Msg(to: ["a@example.org"]));
+        var slow = Assert.Single(await ClaimAsync(owner: "worker-1", lease: TimeSpan.FromMinutes(1)));
+        Assert.False(slow.PossibleDuplicate);
+
+        Clock.Advance(TimeSpan.FromMinutes(2));                         // worker-1 is still sending when its lease runs out
+        var takeover = Assert.Single(await ClaimAsync(owner: "worker-2"));
+        Assert.True(takeover.PossibleDuplicate);
+
+        // worker-1 finishes first. It did not know about the takeover, but the message may now have been sent by both, so the delivery is reported as such.
+        await RecordAsync(slow, DeliveryOutcome.Delivered, smtp: 250);
+        if (IsFull)
+        {
+            var events = await Storage.History.GetEventsAsync(TenantA, m.MessageId, CancellationToken.None);
+            Assert.Contains(events, e => e.Type == MessageEventType.Delivered);
+            Assert.Contains(events, e => e.Type == MessageEventType.PossibleDuplicate);
+        }
+
+        // worker-2's report of the same delivery finds it final and changes nothing.
+        await RecordAsync(takeover, DeliveryOutcome.Delivered, smtp: 250);
+        Assert.Equal(0, (await Storage.Deliveries.GetQueueStatsAsync(CancellationToken.None)).Leased);
+    }
+
+    [Fact]
     public async Task Releasing_expired_leases_flags_possible_duplicate_but_a_graceful_release_does_not()
     {
         await AcceptAsync(Msg(to: ["a@example.org", "b@example.org"]));

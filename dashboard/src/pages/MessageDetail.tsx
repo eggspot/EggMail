@@ -179,26 +179,21 @@ function ResendControl({ id, disabled }: { id: string; disabled: boolean }) {
   );
 }
 
-function CancelControl({ id, status, waiting, onDone }: { id: string; status: string; waiting: string[]; onDone: () => void }) {
+function CancelControl({ id, status, waiting, eventsFailed, onDone }: { id: string; status: string; waiting: string[]; eventsFailed: boolean; onDone: () => void }) {
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState<string[]>([]);
   const [result, setResult] = useState<CancelMessageResponse | null>(null);
-  const [pickError, setPickError] = useState<unknown>(undefined);
   const action = useAction((recipients: string[]) => api.cancelMessage(id, recipients));
-  const cancellable = isCancellableStatus(status) && waiting.length > 0;
+  const cancellable = isCancellableStatus(status);
 
   const show = () => {
     setResult(null);
-    setPickError(undefined);
     action.clearError();
     setSelected(waiting);
     setOpen(true);
   };
   const confirm = async () => {
-    if (selected.length === 0) {
-      setPickError(new Error('Select at least one recipient.'));
-      return;
-    }
+    if (selected.length === 0) return; // the button is disabled then; this keeps a stray call from sending an empty list
     const r = await action.run(selected);
     if (r) {
       setResult(r);
@@ -206,10 +201,15 @@ function CancelControl({ id, status, waiting, onDone }: { id: string; status: st
       onDone();
     }
   };
+  const shown = cancellable && (eventsFailed || waiting.length > 0);
   return (
     <>
-      {cancellable && (
-        <Button onClick={show} title="Stop delivery to the recipients that have not received this message yet">
+      {shown && (
+        <Button
+          onClick={show}
+          disabled={eventsFailed}
+          title={eventsFailed ? 'The delivery events could not be loaded, so it is not known which recipients are still waiting. Reload the events first.' : 'Stop delivery to the recipients that have not received this message yet'}
+        >
           Cancel delivery
         </Button>
       )}
@@ -217,22 +217,16 @@ function CancelControl({ id, status, waiting, onDone }: { id: string; status: st
         <ConfirmDialog
           title="Cancel delivery?"
           confirmLabel={selected.length === 1 ? 'Cancel delivery to 1 recipient' : `Cancel delivery to ${selected.length} recipients`}
+          dismissLabel="Keep sending"
+          confirmDisabled={selected.length === 0}
           busy={action.busy}
-          error={pickError ?? action.error}
+          error={action.error}
           onConfirm={confirm}
           onCancel={() => setOpen(false)}
         >
           <p>The message will not be sent to the recipients you select, now or on a later retry. This cannot be undone; to send it again use Resend.</p>
           {waiting.length > 1 ? (
-            <CheckboxGroup
-              legend="Recipients that have not received it yet"
-              options={waiting}
-              selected={selected}
-              onChange={(next) => {
-                setPickError(undefined);
-                setSelected(next);
-              }}
-            />
+            <CheckboxGroup legend="Recipients that have not received it yet" options={waiting} selected={selected} onChange={setSelected} />
           ) : (
             <p>
               Recipient: <code>{waiting[0]}</code>
@@ -245,14 +239,24 @@ function CancelControl({ id, status, waiting, onDone }: { id: string; status: st
       )}
       {result && (
         <div class="resend-result" data-testid="cancel-result">
-          <Notice tone="ok" title={result.cancelled.length === 1 ? 'Delivery cancelled for 1 recipient' : `Delivery cancelled for ${result.cancelled.length} recipients`}>
-            <p>{result.cancelled.join(', ')}</p>
+          <Notice
+            tone={result.cancelled.length > 0 ? 'ok' : 'info'}
+            title={
+              result.cancelled.length === 0
+                ? 'Nothing left to cancel'
+                : result.cancelled.length === 1
+                  ? 'Delivery cancelled for 1 recipient'
+                  : `Delivery cancelled for ${result.cancelled.length} recipients`
+            }
+          >
+            {result.cancelled.length > 0 ? <p>{result.cancelled.join(', ')}</p> : <p>The selected recipients were already cancelled.</p>}
             {result.inFlight.length > 0 && (
               <p>
                 Not cancelled, because a delivery attempt is running right now: {result.inFlight.join(', ')}. It finishes normally; open this page again afterwards to see the outcome.
               </p>
             )}
-            {result.notPending.length > 0 && <p>Not waiting for delivery any more: {result.notPending.join(', ')}.</p>}
+            {result.transferHeld.length > 0 && <p>Not cancelled, because a storage backend switch holds them: {result.transferHeld.join(', ')}. Try again when the switch is finished or rolled back.</p>}
+            {result.notWaiting.length > 0 && <p>Not waiting for delivery any more: {result.notWaiting.join(', ')}.</p>}
           </Notice>
         </div>
       )}
@@ -290,6 +294,7 @@ function Detail({ id }: { id: string }) {
               id={d.id}
               status={d.status}
               waiting={events.data ? waitingRecipients(d.recipients, events.data) : []}
+              eventsFailed={events.error !== undefined}
               onDone={() => {
                 detail.reload();
                 events.reload();

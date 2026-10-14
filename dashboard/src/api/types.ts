@@ -174,13 +174,15 @@ export interface ResendResponse {
 /** POST /messages/{id}/cancel: what happened to each recipient that was named (or, without names, to each one still waiting). */
 export interface CancelMessageResponse {
   id: string;
-  /** The message status after the cancel. */
-  status: MessageStatus;
+  /** The message status after the cancel; absent when the server does not record per-message history. */
+  status?: MessageStatus;
   cancelled: string[];
   /** Waiting recipients that a delivery attempt holds right now: left alone, they finish normally. */
   inFlight: string[];
+  /** Waiting recipients that a storage backend switch holds: left alone until the switch is finished or rolled back. */
+  transferHeld: string[];
   /** Named recipients that were not waiting (already finished, or not recipients of this message). */
-  notPending: string[];
+  notWaiting: string[];
 }
 
 // ---- domains ----

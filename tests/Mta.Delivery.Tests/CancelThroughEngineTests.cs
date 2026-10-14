@@ -3,12 +3,12 @@ using Mta.Storage;
 
 namespace Mta.Delivery.Tests;
 
-/// <summary>Cancelling (decision 80) through the real engine, processor, SMTP client and a loopback remote server.</summary>
+/// <summary>Cancelling (decision 84) through the real engine, processor, SMTP client and a loopback remote server.</summary>
 [Collection("delivery-pipeline")]
 public class CancelThroughEngineTests
 {
     private static Task<CancelResult> CancelAsync(DeliveryFixture f, Guid messageId, params string[] recipients) =>
-        f.Storage.Deliveries.CancelAsync(DeliveryFixture.Tenant, messageId, recipients.Length == 0 ? null : recipients, DateTimeOffset.UtcNow, default).AsTask();
+        f.Storage.Deliveries.CancelAsync(DeliveryFixture.Tenant, messageId, recipients.Length == 0 ? null : recipients, DateTimeOffset.UtcNow, null, default).AsTask();
 
     [Fact]
     public async Task A_message_cancelled_before_its_first_attempt_is_never_sent()
@@ -47,7 +47,7 @@ public class CancelThroughEngineTests
         QueueStats stats = await f.Storage.Deliveries.GetQueueStatsAsync(default);
         Assert.Equal(0, stats.Queued + stats.Leased + stats.Deferred);
         // Even far in the future there is nothing to claim, so no retry can ever start.
-        Assert.Empty(await f.Storage.Deliveries.ClaimAsync("later", 10, DateTimeOffset.UtcNow.AddDays(30), TimeSpan.FromMinutes(1), default));
+        Assert.Empty(await f.Storage.Deliveries.ClaimAsync("later", 10, DateTimeOffset.UtcNow.AddDays(2), TimeSpan.FromMinutes(1), default));
         Assert.Empty(f.Remote.Messages);
         Assert.Equal("cancelled", (await f.Storage.History.GetAsync(DeliveryFixture.Tenant, id, default))!.Summary.Status);
     }

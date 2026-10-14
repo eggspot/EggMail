@@ -187,6 +187,32 @@ public class EventFactoryTests
     public void Event_types(DeliveryOutcome outcome, string type) => Assert.Equal(type, WebhookEventFactory.EventTypeFor(outcome));
 
     [Fact]
+    public void A_cancellation_is_published_by_the_cancel_with_the_shape_of_the_other_message_events()
+    {
+        var at = new DateTimeOffset(2026, 10, 14, 12, 0, 0, TimeSpan.Zero);
+        Guid message = Ids.New(at), delivery = Ids.New(at);
+        var draft = WebhookEventFactory.ForCancelled(new CancelledDeliveryInfo(delivery, message, Guid.NewGuid(), "s@example.com", "r@dest.example", 2, true, at));
+
+        Assert.Equal("message.cancelled", draft.EventType);
+        Assert.Contains("message.cancelled", WebhookEventFactory.AllEventTypes);
+        using var doc = System.Text.Json.JsonDocument.Parse(draft.PayloadJson);
+        var root = doc.RootElement;
+        Assert.Equal("message.cancelled", root.GetProperty("type").GetString());
+        Assert.Equal($"evt_{Ids.ToCompact(draft.EventId)}", root.GetProperty("id").GetString());
+        Assert.Equal("2026-10-14T12:00:00.000Z", root.GetProperty("timestamp").GetString());
+        var data = root.GetProperty("data");
+        Assert.Equal(Ids.ToCompact(message), data.GetProperty("message_id").GetString());
+        Assert.Equal(Ids.ToCompact(delivery), data.GetProperty("delivery_id").GetString());
+        Assert.Equal("s@example.com", data.GetProperty("from").GetString());
+        Assert.Equal("r@dest.example", data.GetProperty("recipient").GetString());
+        Assert.Equal(2, data.GetProperty("attempt").GetInt32());
+        Assert.True(data.GetProperty("possible_duplicate").GetBoolean());
+
+        var clean = WebhookEventFactory.ForCancelled(new CancelledDeliveryInfo(delivery, message, Guid.NewGuid(), "", "r@dest.example", 0, false, at));
+        Assert.False(System.Text.Json.JsonDocument.Parse(clean.PayloadJson).RootElement.GetProperty("data").TryGetProperty("possible_duplicate", out _));
+    }
+
+    [Fact]
     public void Internal_outcomes_have_no_public_event()
     {
         var d = Delivery();

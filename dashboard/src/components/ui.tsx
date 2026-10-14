@@ -334,6 +334,8 @@ export function ConfirmDialog({
   busy,
   error,
   requirePhrase,
+  dismissLabel = 'Cancel',
+  confirmDisabled = false,
 }: {
   title: string;
   children: ComponentChildren;
@@ -344,9 +346,13 @@ export function ConfirmDialog({
   busy?: boolean;
   error?: unknown;
   requirePhrase?: string;
+  /** Label of the button that closes the dialog without doing anything ("Cancel" unless that word means something else on the page). */
+  dismissLabel?: string;
+  /** Keeps the confirm button disabled, for example while nothing is selected. */
+  confirmDisabled?: boolean;
 }) {
   const [typed, setTyped] = useState('');
-  const ok = !requirePhrase || typed.trim() === requirePhrase;
+  const ok = !confirmDisabled && (!requirePhrase || typed.trim() === requirePhrase);
   return (
     <Dialog title={title} onClose={onCancel}>
       <div class="stack">
@@ -356,7 +362,7 @@ export function ConfirmDialog({
         )}
         {error !== undefined && error !== null && <ErrorNotice error={error} />}
         <div class="row end">
-          <Button onClick={onCancel}>Cancel</Button>
+          <Button onClick={onCancel}>{dismissLabel}</Button>
           <Button variant={danger ? 'danger' : 'primary'} onClick={onConfirm} disabled={!ok} busy={busy}>
             {confirmLabel}
           </Button>
