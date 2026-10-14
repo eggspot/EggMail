@@ -126,6 +126,24 @@ public class IngestTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task The_smtputf8_flag_is_stored_when_the_headers_hold_utf8_and_not_for_rfc2047_encoded_headers()
+    {
+        using var client = await ConnectAsync();
+        var international = FormatOptions.Default.Clone();
+        international.International = true;
+        await client.SendAsync(international, Message(subject: "Grüße aus München", to: "rcpt1@dest.example"));
+        await client.SendAsync(Message(subject: "Grüße aus München", to: "rcpt2@dest.example"));
+
+        var claimed = await _storage.Deliveries.ClaimAsync("t", 10, DateTimeOffset.UtcNow.AddSeconds(1), TimeSpan.FromMinutes(1), default);
+
+        Assert.Equal(2, claimed.Count);
+        var utf8 = claimed.Single(d => d.Recipient.ToString() == "rcpt1@dest.example");
+        Assert.True(utf8.HeadersUtf8);
+        Assert.True(Mta.Mime.MessageInspector.HasValidUtf8Headers((await _storage.Deliveries.GetRawAsync(utf8.MessageId, default))!));
+        Assert.False(claimed.Single(d => d.Recipient.ToString() == "rcpt2@dest.example").HeadersUtf8);
+    }
+
+    [Fact]
     public async Task Wrong_password_and_unknown_user_are_refused_and_lock_out_after_repeated_failures()
     {
         using var bad = new SmtpClient { CheckCertificateRevocation = false, ServerCertificateValidationCallback = (_, _, _, _) => true };

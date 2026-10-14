@@ -118,7 +118,9 @@ public sealed class DeliveryEngine
                         int free = _options.MaxConcurrentGroups - PendingGroups;
                         if (free > 0)
                         {
+                            long claimStarted = System.Diagnostics.Stopwatch.GetTimestamp();
                             var claimed = await _s.Storage.Deliveries.ClaimAsync(_options.Owner, Math.Min(_options.ClaimBatchSize, free), now, _options.Lease, stopping).ConfigureAwait(false);
+                            DeliveryMetrics.ClaimDuration.Record(System.Diagnostics.Stopwatch.GetElapsedTime(claimStarted).TotalSeconds, new KeyValuePair<string, object?>("result", claimed.Count > 0 ? "claimed" : "empty"));
                             if (claimed.Count > 0)
                             {
                                 DeliveryMetrics.Claimed.Add(claimed.Count);

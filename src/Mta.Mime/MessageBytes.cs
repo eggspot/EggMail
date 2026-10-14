@@ -357,7 +357,8 @@ public static class TransferEncoder
 
     /// <summary>
     /// Writes <paramref name="data"/> (text with CRLF or LF line breaks) as quoted-printable with soft line breaks so
-    /// that no line exceeds 76 characters; trailing white space is encoded; hard line breaks are written as CRLF.
+    /// that no line exceeds 76 characters; trailing white space is encoded; hard line breaks are written as CRLF. A '-' that a soft
+    /// break would place at the start of a line is encoded (=2D), so a soft break can never create a line that looks like a MIME delimiter.
     /// </summary>
     public static void WriteQuotedPrintable(ReadOnlySpan<byte> data, IBufferWriter<byte> writer)
     {
@@ -392,6 +393,13 @@ public static class TransferEncoder
                         dst[w++] = (byte)'\r';
                         dst[w++] = (byte)'\n';
                         column = 0;
+                        if (b == (byte)'-')
+                        {
+                            // A soft break must not bring "--" to the start of a line: after decoding it is not there, but a MIME parser reading the
+                            // encoded text sees a delimiter line ("--boundary") that the content never had (boundary forgery).
+                            literal = false;
+                            need = 3;
+                        }
                     }
 
                     if (literal)

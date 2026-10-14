@@ -41,6 +41,22 @@ if (opt.Get("sink-only", "false") == "true")
     return await SinkOnly.RunAsync(opt, allocProfile);
 }
 
+// --metrics true attaches the Prometheus exporter (what a production process always has, so every instrument records) and a queue sampler;
+// --trace true also attaches a trace listener that records every span (the upper bound of tracing; production samples a fraction). Both
+// default to off: no listener, the way the library benchmarks run.
+using var prometheus = opt.Get("metrics", "false") == "true" ? new Mta.Observability.PrometheusTextExporter() : null;
+using var traceListener = opt.Get("trace", "false") == "true" ? AttachTraceListener() : null;
+static System.Diagnostics.ActivityListener AttachTraceListener()
+{
+    var listener = new System.Diagnostics.ActivityListener
+    {
+        ShouldListenTo = s => s.Name == MessageTrace.SourceName,
+        Sample = (ref System.Diagnostics.ActivityCreationOptions<System.Diagnostics.ActivityContext> _) => System.Diagnostics.ActivitySamplingResult.AllDataAndRecorded,
+    };
+    System.Diagnostics.ActivitySource.AddActivityListener(listener);
+    return listener;
+}
+
 string backend = opt.Get("backend", "sqlite");
 var sync = Enum.Parse<SqliteSyncMode>(opt.Get("sync", "off"), ignoreCase: true);
 var history = Enum.Parse<HistoryMode>(opt.Get("history", "full"), ignoreCase: true);
