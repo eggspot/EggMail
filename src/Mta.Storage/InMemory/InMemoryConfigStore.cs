@@ -722,6 +722,23 @@ internal sealed partial class InMemoryConfigStore : IConfigStore
         return default;
     }
 
+    public ValueTask SetAcmeRenewalAdviceAsync(string certificateName, string? ariJson, CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            if (_renewals.TryGetValue(certificateName, out var existing))
+            {
+                existing.AriJson = ariJson;
+            }
+            else
+            {
+                _renewals[certificateName] = new AcmeRenewalEntity { CertificateName = certificateName, Status = "issued", AriJson = ariJson };
+            }
+        }
+
+        return default;
+    }
+
     // Leases
 
     public ValueTask<LeaseRecord?> TryAcquireLeaseAsync(string name, string owner, TimeSpan duration, DateTimeOffset now, CancellationToken ct)

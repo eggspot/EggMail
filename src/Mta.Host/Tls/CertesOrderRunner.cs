@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using Certes;
+using Mta.Core;
 using Certes.Acme;
 using Certes.Acme.Resource;
 
@@ -17,17 +18,29 @@ public sealed class CertesOrderRunner : IAcmeOrderRunner
     /// <summary>An order is repeated this many times in total when the CA keeps rejecting the anti-replay nonce.</summary>
     private const int MaxBadNonceAttempts = 4;
 
+    /// <summary>No answer of a CA is larger than this (an ACME response is a few KB; the certificate chain is the largest).</summary>
+    private const long MaxResponseBytes = 1024 * 1024;
+
     private readonly HttpMessageHandler? _handler;
+    private readonly IMtaLog _log;
 
     /// <param name="handler">
     /// Transport for all requests to the CA (never disposed here). The default is a plain <see cref="HttpClient"/> with the system trust store;
     /// tests pass a handler that trusts a private test CA, and egress-controlled deployments can pass a proxying one.
     /// </param>
-    public CertesOrderRunner(HttpMessageHandler? handler = null) => _handler = handler;
-
-    public async Task<AcmeIssuedCertificate> IssueAsync(AcmeOrderRequest request, IDnsChallengeProvider dns, CancellationToken ct)
+    /// <param name="log">Where a refused <c>replaces</c> link is reported (Debug); none by default.</param>
+    public CertesOrderRunner(HttpMessageHandler? handler = null, IMtaLog? log = null)
     {
-        try
+        _handler = handler;
+        _log = log ?? NullMtaLog.Instance;
+    }
+
+    /// <summary>Our own client in every case, so it is disposed with the call (Certes would otherwise leave one behind), with the response size capped.</summary>
+    private HttpClient NewClient() =>
+        new(_handler ?? new HttpClientHandler(), disposeHandler: _handler is null) { MaxResponseContentBufferSize = MaxResponseBytes };
+
+    public Task<AcmeIssuedCertificate> IssueAsync(AcmeOrderRequest request, IDnsChallengeProvider dns, CancellationToken ct) =>
+        TranslateAsync(async () =>
         {
             var account = new AccountState { KeyPem = request.AccountKeyPem };
             for (int attempt = 1; ; attempt++)
@@ -43,10 +56,37 @@ public sealed class CertesOrderRunner : IAcmeOrderRunner
                     // account registered by an earlier attempt is kept in <see cref="AccountState"/> and reused.
                 }
             }
+        }, ct);
+
+    /// <summary>
+    /// ARI (RFC 9773): asks the CA when it wants the certificate renewed. The request needs no account. Null when the CA does not advertise
+    /// <c>renewalInfo</c> in its directory; <see cref="AcmeException"/> when it does and the answer is an error or unusable.
+    /// </summary>
+    public Task<AcmeRenewalInfo?> GetRenewalInfoAsync(string directoryUrl, string certificateChainPem, CancellationToken ct) =>
+        TranslateAsync(async () =>
+        {
+            var directory = new Uri(directoryUrl);
+            using var http = NewClient();
+            var acme = new AcmeContext(directory, null, new AcmeHttpClient(directory, http));
+            if ((await acme.GetDirectory().ConfigureAwait(false)).RenewalInfo is null)
+            {
+                return (AcmeRenewalInfo?)null;
+            }
+
+            string certificateId = new CertificateChain(certificateChainPem).GetRenewalInfoCertificateId();
+            var info = await acme.GetRenewalInfo(certificateId).ConfigureAwait(false);
+            return new AcmeRenewalInfo(info.SuggestedWindow.Start, info.SuggestedWindow.End, info.RetryAfter, info.ExplanationUrl?.ToString());
+        }, ct);
+
+    private static async Task<T> TranslateAsync<T>(Func<Task<T>> body, CancellationToken ct)
+    {
+        try
+        {
+            return await body().ConfigureAwait(false);
         }
         catch (AcmeRequestException ex)
         {
-            throw new AcmeException($"ACME server error: {ex.Error?.Detail ?? ex.Message}", ex);
+            throw new AcmeException($"ACME server error: {ex.Error?.Detail ?? ex.Message}", ex, transient: IsServerError(ex));
         }
         catch (Certes.AcmeException ex)
         {
@@ -55,7 +95,7 @@ public sealed class CertesOrderRunner : IAcmeOrderRunner
         catch (OperationCanceledException ex) when (!ct.IsCancellationRequested)
         {
             // HttpClient reports its own timeout as a cancellation; that is a failed attempt to back off from, not a shutdown.
-            throw new AcmeException("The ACME server did not answer in time.", ex);
+            throw new AcmeException("The ACME server did not answer in time.", ex, transient: true);
         }
         catch (AggregateException ex) when (!ct.IsCancellationRequested)
         {
@@ -63,15 +103,14 @@ public sealed class CertesOrderRunner : IAcmeOrderRunner
             var inner = ex.Flatten().InnerExceptions[0];
             throw new AcmeException(inner is OperationCanceledException
                 ? "The ACME server did not answer in time."
-                : $"The ACME server could not be reached or answered unexpectedly: {inner.Message}", inner);
+                : $"The ACME server could not be reached or answered unexpectedly: {inner.Message}", inner, transient: true);
         }
     }
 
     private async Task<AcmeIssuedCertificate> IssueOnceAsync(AcmeOrderRequest request, AccountState account, IDnsChallengeProvider dns, CancellationToken ct)
     {
         var directory = new Uri(request.DirectoryUrl);
-        // Our own client in every case, so it is disposed with the order (Certes would otherwise leave one behind per order).
-        using var http = _handler is null ? new HttpClient() : new HttpClient(_handler, disposeHandler: false);
+        using var http = NewClient();
         IAcmeHttpClient transport = new AcmeHttpClient(directory, http);
 
         AcmeContext acme;
@@ -102,6 +141,19 @@ public sealed class CertesOrderRunner : IAcmeOrderRunner
         public string? Url { get; set; }
     }
 
+    private static bool IsServerError(AcmeRequestException ex) =>
+        ex.Error is { } error && ((int)error.Status >= 500 || error.Type?.EndsWith(":serverInternal", StringComparison.Ordinal) == true);
+
+    /// <summary>
+    /// Refusals of the <c>replaces</c> link itself: the certificate was already replaced by another order, the CA does not know it or the order does not match
+    /// it (malformed, conflict, not found), or it belongs to another account. Rate limits and server errors are not: asking the CA again at once makes
+    /// them worse and the plain order would meet the same.
+    /// </summary>
+    private static bool IsRefusedReplacement(Certes.AcmeException ex) =>
+        ex is not AcmeRequestException request // the certificate id could not even be built (no authority key identifier)
+        || request.Error is { } error && ((int)error.Status == 404 || error.Type is { } type && (type.EndsWith(":alreadyReplaced", StringComparison.Ordinal) || type.EndsWith(":malformed", StringComparison.Ordinal)
+            || type.EndsWith(":conflict", StringComparison.Ordinal) || type.EndsWith(":unauthorized", StringComparison.Ordinal)));
+
     private static bool IsBadNonce(Exception exception)
     {
         for (var e = exception; e is not null; e = e.InnerException)
@@ -125,9 +177,32 @@ public sealed class CertesOrderRunner : IAcmeOrderRunner
         return false;
     }
 
-    private static async Task<AcmeIssuedCertificate> OrderAsync(AcmeContext acme, AcmeOrderRequest request, IDnsChallengeProvider dns, string? accountUrl, CancellationToken ct)
+    /// <summary>
+    /// A new order; when the certificate it renews is known and the CA advertises ARI, an order that names it (<c>replaces</c>, RFC 9773 section 5),
+    /// so the CA can tell a renewal from a new certificate (rate limits, and it marks the old one as replaced). The CA may refuse the link
+    /// (already replaced by another order, certificate unknown to it, no name in common); that must never stop the renewal, so the plain order follows.
+    /// </summary>
+    private async Task<IOrderContext> NewOrderAsync(AcmeContext acme, AcmeOrderRequest request)
     {
-        var order = await acme.NewOrder(request.Domains.ToList()).ConfigureAwait(false);
+        var names = request.Domains.ToList();
+        if (request.ReplacesCertificatePem is { } replaced && (await acme.GetDirectory().ConfigureAwait(false)).RenewalInfo is not null)
+        {
+            try
+            {
+                return await acme.NewReplacementOrder(names, new CertificateChain(replaced).GetRenewalInfoCertificateId()).ConfigureAwait(false);
+            }
+            catch (Certes.AcmeException ex) when (!IsBadNonce(ex) && IsRefusedReplacement(ex))
+            {
+                _log.Write(MtaLogLevel.Debug, "acme", $"the CA refused the replaces link ({ex.Message}); ordering without it");
+            }
+        }
+
+        return await acme.NewOrder(names).ConfigureAwait(false);
+    }
+
+    private async Task<AcmeIssuedCertificate> OrderAsync(AcmeContext acme, AcmeOrderRequest request, IDnsChallengeProvider dns, string? accountUrl, CancellationToken ct)
+    {
+        var order = await NewOrderAsync(acme, request).ConfigureAwait(false);
         var authorizations = await order.Authorizations().ConfigureAwait(false);
         var handles = new List<string>();
         var challenges = new List<(IAuthorizationContext Authz, IChallengeContext Challenge)>();
