@@ -1,4 +1,4 @@
-import { useState } from 'preact/hooks';
+import { useRef, useState } from 'preact/hooks';
 import { api } from '../../api/endpoints';
 import { fieldErrors } from '../../api/errorMessages';
 import type { DashboardUser, Role, Tenant } from '../../api/types';
@@ -7,7 +7,7 @@ import { formatDateTime } from '../../lib/format';
 import { useAction, useApi, useDocumentTitle } from '../../lib/hooks';
 import { useApp } from '../../state/app';
 
-const MIN_PASSWORD = 10;
+import { MAX_PASSWORD, MIN_PASSWORD, passwordProblem } from '../../lib/passwords';
 
 interface Secret {
   title: string;
@@ -29,7 +29,8 @@ function RoleAndTenant({
   onTenant: (t: string) => void;
   errors: Record<string, string>;
 }) {
-  const active = tenants.filter((t) => t.status === 'active');
+  // The tenant the user is in now stays selectable even when it is suspended (it would otherwise show "Choose a tenant" and hide where the user is).
+  const choices = tenants.filter((t) => t.status === 'active' || t.id === tenantId);
   return (
     <>
       <Field label="Role" error={errors.role} hint="Administrators manage the whole server. Tenant users see one tenant only.">
@@ -45,9 +46,9 @@ function RoleAndTenant({
           {({ id, describedBy, invalid }) => (
             <select id={id} value={tenantId} aria-describedby={describedBy} aria-invalid={invalid || undefined} onChange={(e) => onTenant((e.currentTarget as HTMLSelectElement).value)}>
               <option value="">Choose a tenant</option>
-              {active.map((t) => (
+              {choices.map((t) => (
                 <option key={t.id} value={t.id}>
-                  {t.name}
+                  {t.status === 'active' ? t.name : `${t.name} (suspended)`}
                 </option>
               ))}
             </select>
@@ -75,7 +76,7 @@ function CreateUser({ tenants, onCreated }: { tenants: Tenant[]; onCreated: (u: 
     const found: Record<string, string> = {};
     if (!userName.trim()) found.userName = 'Enter a user name.';
     if (role === 'tenant' && !tenantId) found.tenantId = 'Choose the tenant this user belongs to.';
-    if (password && password.length < MIN_PASSWORD) found.password = `Use at least ${MIN_PASSWORD} characters, or leave it empty to have one generated.`;
+    if (password && passwordProblem(password)) found.password = `${passwordProblem(password)} Or leave it empty to have one generated.`;
     setClientErrors(found);
     if (Object.keys(found).length) return;
     const created = await create.run();
@@ -98,7 +99,7 @@ function CreateUser({ tenants, onCreated }: { tenants: Tenant[]; onCreated: (u: 
           onInput={setPassword}
           error={errs.password}
           autocomplete="new-password"
-          hint={`Leave empty to generate one; it is shown once. At least ${MIN_PASSWORD} characters.`}
+          hint={`Leave empty to generate one; it is shown once. ${MIN_PASSWORD} to ${MAX_PASSWORD} characters.`}
         />
         <div>
           <Button type="submit" variant="primary" busy={create.busy}>
@@ -111,7 +112,7 @@ function CreateUser({ tenants, onCreated }: { tenants: Tenant[]; onCreated: (u: 
   );
 }
 
-function EditDialog({ user, tenants, onClose, onSaved }: { user: DashboardUser; tenants: Tenant[]; onClose: () => void; onSaved: (u: DashboardUser) => void }) {
+function EditDialog({ user, tenants, self, onClose, onSaved }: { user: DashboardUser; tenants: Tenant[]; self: boolean; onClose: () => void; onSaved: (u: DashboardUser) => void }) {
   const [role, setRole] = useState<Role>(user.role);
   const [tenantId, setTenantId] = useState(user.tenantId ?? '');
   const changed = role !== user.role || (role === 'tenant' && tenantId !== (user.tenantId ?? ''));
@@ -132,6 +133,11 @@ function EditDialog({ user, tenants, onClose, onSaved }: { user: DashboardUser; 
       >
         <RoleAndTenant role={role} tenantId={tenantId} tenants={tenants} onRole={setRole} onTenant={setTenantId} errors={errs} />
         <p class="muted small">The user is signed out everywhere when the role or the tenant changes.</p>
+        {self && changed && (
+          <p>
+            <strong>This is your own account.</strong> After this change you are signed out and, if you are no longer an administrator, cannot manage users.
+          </p>
+        )}
         {save.error !== undefined && !errs.role && !errs.tenantId && <ErrorNotice error={save.error} />}
         <div class="row end">
           <Button onClick={onClose}>Cancel</Button>
@@ -154,7 +160,7 @@ function ResetDialog({ user, onClose, onDone }: { user: DashboardUser; onClose: 
         class="stack"
         onSubmit={(e) => {
           e.preventDefault();
-          if (password && password.length < MIN_PASSWORD) return;
+          if (password && passwordProblem(password)) return;
           void reset.run();
         }}
         noValidate
@@ -165,14 +171,14 @@ function ResetDialog({ user, onClose, onDone }: { user: DashboardUser; onClose: 
           type="password"
           value={password}
           onInput={setPassword}
-          error={errs.password ?? (password && password.length < MIN_PASSWORD ? `Use at least ${MIN_PASSWORD} characters.` : undefined)}
+          error={errs.password ?? (password ? passwordProblem(password) : undefined)}
           autocomplete="new-password"
           hint="Leave empty to generate one; it is shown once."
         />
         {reset.error !== undefined && !errs.password && <ErrorNotice error={reset.error} />}
         <div class="row end">
           <Button onClick={onClose}>Cancel</Button>
-          <Button type="submit" variant="danger" busy={reset.busy} disabled={!!password && password.length < MIN_PASSWORD}>
+          <Button type="submit" variant="danger" busy={reset.busy} disabled={!!password && !!passwordProblem(password)}>
             Reset password
           </Button>
         </div>
@@ -187,7 +193,11 @@ export default function Users(_props: Record<string, unknown>) {
   const list = useApi(() => api.users(), []);
   const tenantList = useApi(() => api.tenants(), []);
   const [message, setMessage] = useState('');
-  const [secret, setSecret] = useState<Secret | null>(null);
+  // Generated passwords wait here until the administrator confirms each was saved: a second create or reset must not replace one that was never copied.
+  const [secrets, setSecrets] = useState<(Secret & { key: number })[]>([]);
+  const nextKey = useRef(0);
+  const addSecret = (title: string, value: string) => setSecrets((s) => [...s, { title, value, key: nextKey.current++ }]);
+  const isSelf = (u: DashboardUser) => u.userName === me?.user;
   const [toggle, setToggle] = useState<DashboardUser | null>(null);
   const [edit, setEdit] = useState<DashboardUser | null>(null);
   const [reset, setReset] = useState<DashboardUser | null>(null);
@@ -219,7 +229,9 @@ export default function Users(_props: Record<string, unknown>) {
           <span role="status">{message}</span>
         </Notice>
       )}
-      {secret && <OneTimeSecret title={secret.title} secret={secret.value} hint="Give it to the user over a safe channel. Only a hash is stored on the server." onDone={() => setSecret(null)} />}
+      {secrets.map((s) => (
+        <OneTimeSecret key={s.key} title={s.title} secret={s.value} hint="Give it to the user over a safe channel. Only a hash is stored on the server." onDone={() => setSecrets((all) => all.filter((x) => x.key !== s.key))} />
+      ))}
       {list.loading && !list.data && <Loading />}
       {list.error !== undefined && <ErrorNotice error={list.error} onRetry={list.reload} />}
       {list.data && (
@@ -283,7 +295,7 @@ export default function Users(_props: Record<string, unknown>) {
         tenants={tenants}
         onCreated={(u) => {
           setMessage(`User ${u.userName} created.`);
-          setSecret(u.password ? { title: `Password for "${u.userName}"`, value: u.password } : null);
+          if (u.password) addSecret(`Password for "${u.userName}"`, u.password);
           list.reload();
         }}
       />
@@ -301,6 +313,11 @@ export default function Users(_props: Record<string, unknown>) {
           }}
           onConfirm={() => void changeEnabled.run(toggle)}
         >
+          {isSelf(toggle) && toggle.enabled && (
+            <p>
+              <strong>This is your own account.</strong> You will be signed out at once.
+            </p>
+          )}
           <p>
             {toggle.enabled
               ? 'The user is signed out everywhere and cannot sign in until you enable the account again. The last enabled administrator cannot be disabled.'
@@ -320,12 +337,18 @@ export default function Users(_props: Record<string, unknown>) {
           }}
           onConfirm={() => void doDelete.run(remove)}
         >
+          {isSelf(remove) && (
+            <p>
+              <strong>This is your own account.</strong> You will be signed out and cannot sign in again.
+            </p>
+          )}
           <p>The account and its sessions are removed. This cannot be undone. The last enabled administrator cannot be deleted.</p>
         </ConfirmDialog>
       )}
       {edit && (
         <EditDialog
           user={edit}
+          self={isSelf(edit)}
           tenants={tenants}
           onClose={() => setEdit(null)}
           onSaved={(u) => {
@@ -342,7 +365,7 @@ export default function Users(_props: Record<string, unknown>) {
           onDone={(u) => {
             setReset(null);
             setMessage(`The password of ${u.userName} was reset and the user was signed out everywhere.`);
-            setSecret(u.password ? { title: `New password for "${u.userName}"`, value: u.password } : null);
+            if (u.password) addSecret(`New password for "${u.userName}"`, u.password);
             list.reload();
           }}
         />

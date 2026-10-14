@@ -46,6 +46,7 @@ internal sealed class PostgresRuntime
         // with request traffic for connections (a request that holds a runtime connection may need a partition created).
         Owner = BuildDataSource(owner, pg, runtimePool: false);
         Partitions = new PostgresPartitions(Owner);
+        Coordination = BuildCoordinationDataSource(runtime, pg);
 
         if (!string.IsNullOrWhiteSpace(pg.ReadOnlyConnectionString))
         {
@@ -96,6 +97,12 @@ internal sealed class PostgresRuntime
         && !string.Equals(ReadOnlyRole, RuntimeRole, StringComparison.Ordinal) && !string.Equals(ReadOnlyRole, OwnerRole, StringComparison.Ordinal)
             ? ReadOnlyRole : null;
 
+    /// <summary>
+    /// The replica coordination (heartbeat, signals, failed-login counts): a pool of two connections of its own, so a burst of claims or intake cannot starve the heartbeat (a
+    /// replica that cannot beat is dropped by the others) nor can a stuck coordination statement take a connection from the mail path.
+    /// </summary>
+    public NpgsqlDataSource Coordination { get; }
+
     /// <summary>Schema owner: migrations, partition DDL and maintenance locks. A small pool of its own; it connects as the runtime role when only one connection string was given.</summary>
     public NpgsqlDataSource Owner { get; }
 
@@ -134,6 +141,14 @@ internal sealed class PostgresRuntime
             $"-c statement_timeout={pg.ReadOnlyStatementTimeoutSeconds * 1000} -c idle_in_transaction_session_timeout={pg.ReadOnlyIdleInTransactionTimeoutSeconds * 1000} -c default_transaction_read_only=on");
         builder.Options = string.IsNullOrWhiteSpace(builder.Options) ? timeouts : builder.Options + " " + timeouts;
         return new NpgsqlDataSourceBuilder(builder.ConnectionString).Build();
+    }
+
+    private static NpgsqlDataSource BuildCoordinationDataSource(string connectionString, PostgresOptions pg)
+    {
+        var builder = new NpgsqlConnectionStringBuilder(connectionString) { ApplicationName = "eggmail-coordination", MaxPoolSize = 2, MinPoolSize = 0, MaxAutoPrepare = 0 };
+        builder.Timeout = Math.Min(builder.Timeout > 0 ? builder.Timeout : 15, 5);
+        builder.CommandTimeout = Math.Clamp(pg.CommandTimeoutSeconds, 1, 5);
+        return new NpgsqlDataSourceBuilder(builder.ConnectionString) { Name = "eggmail-coordination" }.Build();
     }
 
     private static NpgsqlDataSource BuildDataSource(string connectionString, PostgresOptions pg, bool runtimePool)
@@ -179,6 +194,7 @@ internal sealed class PostgresRuntime
         {
             Data.Clear();
             Owner.Clear();
+            Coordination.Clear();
         }
 
         return PostgresErrors.Unavailable(inner);

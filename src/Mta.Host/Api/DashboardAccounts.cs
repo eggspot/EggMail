@@ -82,9 +82,13 @@ public static class DashboardAccounts
     public static async ValueTask SetPasswordAsync(IConfigStore config, Guid userId, string newPassword, CancellationToken ct, int? hashIterations = null)
     {
         ValidatePassword(newPassword);
-        DashboardUser user = await config.GetDashboardUserAsync(userId, ct).ConfigureAwait(false) ?? throw new KeyNotFoundException("No such dashboard user.");
-        await config.UpsertDashboardUserAsync(user with { PasswordHash = Hash(newPassword, hashIterations) }, ct).ConfigureAwait(false);
-        await config.DeleteDashboardSessionsOfUserAsync(userId, ct).ConfigureAwait(false);
+        string hash = Hash(newPassword, hashIterations);
+        // One guarded write (the stored row is changed and the sessions end with it), not a read, an upsert and a delete that could undo a concurrent change.
+        DashboardUserUpdate result = await config.UpdateDashboardUserGuardedAsync(userId, u => u with { PasswordHash = hash }, endSessions: true, keepSessionHash: null, ct).ConfigureAwait(false);
+        if (result.Result == DashboardUserWriteResult.NotFound)
+        {
+            throw new KeyNotFoundException("No such dashboard user.");
+        }
     }
 
     private static string Hash(string password, int? iterations) => iterations is { } n ? PasswordHasher.Hash(password, n) : PasswordHasher.Hash(password);

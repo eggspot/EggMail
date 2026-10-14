@@ -40,7 +40,7 @@ public sealed class SessionApi(SessionService sessions, ApiAuthenticator auth, A
             errors.Add("user", "A user name is required.");
         }
 
-        if (string.IsNullOrEmpty(body.Password) || body.Password.Length > 1024)
+        if (string.IsNullOrEmpty(body.Password) || body.Password.Length > DashboardAccounts.MaximumPasswordLength)
         {
             errors.Add("password", "A password is required.");
         }

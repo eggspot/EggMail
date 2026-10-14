@@ -57,7 +57,7 @@ describe('Users page', () => {
     fireEvent.change(screen.getByLabelText('Tenant'), { target: { value: 't_acme' } });
     fireEvent.input(screen.getByLabelText('Password (optional)'), { target: { value: 'short' } });
     fireEvent.click(screen.getByRole('button', { name: 'Create user' }));
-    expect(await screen.findByText(/Use at least 10 characters, or leave it empty/)).toBeTruthy();
+    expect(await screen.findByText(/Use at least 10 characters\. Or leave it empty/)).toBeTruthy();
 
     fireEvent.input(screen.getByLabelText('Password (optional)'), { target: { value: '' } });
     fireEvent.click(screen.getByRole('button', { name: 'Create user' }));
@@ -155,6 +155,70 @@ describe('Users page', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Reset password' }));
     expect((await screen.findByTestId('secret-value')).textContent).toBe('Reset-Passw0rd-123456');
     expect(m.callsTo('POST', '/api/v1/admin/users/u2/reset-password')[0].body).toEqual({});
+  });
+
+  it('warns before you disable, delete or demote your own account', async () => {
+    mockFetch(routes());
+    renderWithApp(<Users />, { role: 'admin' }); // the signed-in user is "admin"
+    await screen.findByRole('table', { name: 'Dashboard users' });
+    fireEvent.click(screen.getByRole('button', { name: 'Disable admin' }));
+    expect(within(await screen.findByRole('dialog')).getByText(/This is your own account\./)).toBeTruthy();
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete admin' }));
+    expect(within(await screen.findByRole('dialog')).getByText(/You will be signed out and cannot sign in again/)).toBeTruthy();
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Change role of admin' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).queryByText(/This is your own account\./)).toBeNull(); // nothing changed yet
+    fireEvent.change(within(dialog).getByLabelText('Role'), { target: { value: 'tenant' } });
+    expect(within(dialog).getByText(/This is your own account\./)).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+
+    // Another user's row carries no such warning.
+    fireEvent.click(await screen.findByRole('button', { name: 'Disable jane' }));
+    expect(within(await screen.findByRole('dialog')).queryByText(/This is your own account\./)).toBeNull();
+  });
+
+  it('keeps the tenant of a user in a suspended tenant selectable, marked as suspended', async () => {
+    mockFetch(routes({ 'GET /api/v1/admin/users': [{ id: 'u4', userName: 'olly', role: 'tenant', tenantId: 't_old', enabled: true, createdAt: '2026-08-02T09:00:00.000Z' }] }));
+    renderWithApp(<Users />, { role: 'admin' });
+    await screen.findByRole('table', { name: 'Dashboard users' });
+    fireEvent.click(screen.getByRole('button', { name: 'Change role of olly' }));
+    const select = within(await screen.findByRole('dialog')).getByLabelText('Tenant') as HTMLSelectElement;
+    expect(select.value).toBe('t_old');
+    expect([...select.options].map((o) => o.textContent)).toEqual(['Choose a tenant', 'Acme Corp', 'Old Co (suspended)']);
+  });
+
+  it('keeps an unsaved generated password when a second one arrives', async () => {
+    let n = 0;
+    mockFetch(routes({ 'POST /api/v1/admin/users': () => json({ id: `u${10 + n}`, userName: `new${n}`, role: 'admin', enabled: true, createdAt: '2026-10-14T09:00:00.000Z', password: `Generated-${n++}-Password` }, 201) }));
+    renderWithApp(<Users />, { role: 'admin' });
+    await screen.findByRole('table', { name: 'Dashboard users' });
+    for (const name of ['first', 'second']) {
+      fireEvent.change(screen.getByLabelText('Role'), { target: { value: 'admin' } });
+      fireEvent.input(screen.getByLabelText('User name'), { target: { value: name } });
+      fireEvent.click(screen.getByRole('button', { name: 'Create user' }));
+      await waitFor(() => expect(screen.getAllByTestId('secret-value')).toHaveLength(name === 'first' ? 1 : 2));
+    }
+    expect(screen.getAllByTestId('secret-value').map((e) => e.textContent)).toEqual(['Generated-0-Password', 'Generated-1-Password']);
+    fireEvent.click(screen.getAllByRole('button', { name: 'I have saved it' })[0]);
+    expect(screen.getAllByTestId('secret-value').map((e) => e.textContent)).toEqual(['Generated-1-Password']);
+  });
+
+  it('refuses a password over the limit before sending it', async () => {
+    const m = mockFetch(routes());
+    renderWithApp(<Users />, { role: 'admin' });
+    await screen.findByRole('table', { name: 'Dashboard users' });
+    fireEvent.change(screen.getByLabelText('Role'), { target: { value: 'admin' } });
+    fireEvent.input(screen.getByLabelText('User name'), { target: { value: 'big' } });
+    fireEvent.input(screen.getByLabelText('Password (optional)'), { target: { value: 'x'.repeat(1025) } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create user' }));
+    expect(await screen.findByText(/Use at most 1024 characters\./)).toBeTruthy();
+    expect(m.callsTo('POST', '/api/v1/admin/users')).toHaveLength(0);
   });
 
   it('deletes a user after a confirmation', async () => {

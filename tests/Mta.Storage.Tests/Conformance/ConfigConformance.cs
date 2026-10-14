@@ -350,6 +350,40 @@ public abstract class ConfigConformance : StorageTestBase
         Assert.Equal("name-two", (await C.GetDashboardUserAsync(y.Id, Ct))!.UserName);
     }
 
+    [Fact]
+    public async Task A_session_is_added_only_for_the_user_a_sign_in_verified()
+    {
+        var user = NewUser("signs.in");
+        await C.UpsertDashboardUserAsync(user, Ct);
+        var good = NewSession(user.Id, "good");
+        Assert.True(await C.TryAddDashboardSessionForVerifiedUserAsync(good, user, Ct));
+        Assert.NotNull(await C.FindDashboardSessionAsync(good.IdHash, Ct));
+
+        // Each change between the verification and the insert refuses the session and stores nothing.
+        (string Name, Func<DashboardUser, DashboardUser> Change)[] changes =
+        [
+            ("password", u => u with { PasswordHash = "other-hash" }),
+            ("role", u => u with { Role = DashboardRole.Admin, TenantId = null }),
+            ("tenant", u => u with { TenantId = TenantB }),
+            ("disabled", u => u with { Enabled = false }),
+        ];
+        foreach (var (name, change) in changes)
+        {
+            await C.UpsertDashboardUserAsync(user, Ct);
+            var verified = user;
+            await C.UpsertDashboardUserAsync(change(user), Ct);
+            var refused = NewSession(user.Id, "refused-" + name);
+            Assert.False(await C.TryAddDashboardSessionForVerifiedUserAsync(refused, verified, Ct), name);
+            Assert.Null(await C.FindDashboardSessionAsync(refused.IdHash, Ct));
+        }
+
+        await C.UpsertDashboardUserAsync(user, Ct);
+        Assert.True(await C.DeleteDashboardUserAsync(user.Id, Ct));
+        var afterDelete = NewSession(user.Id, "after-delete");
+        Assert.False(await C.TryAddDashboardSessionForVerifiedUserAsync(afterDelete, user, Ct));
+        Assert.Null(await C.FindDashboardSessionAsync(afterDelete.IdHash, Ct));
+    }
+
     private async Task<DashboardUser> AddUserAsync(string name)
     {
         var user = NewUser(name);

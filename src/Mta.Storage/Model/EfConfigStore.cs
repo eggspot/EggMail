@@ -256,6 +256,23 @@ public sealed partial class EfConfigStore<TContext>(IConfigDbAccess<TContext> db
             return DashboardUserWriteResult.Applied;
         }, ct).ConfigureAwait(false);
 
+    public async ValueTask<bool> TryAddDashboardSessionForVerifiedUserAsync(DashboardSession session, DashboardUser verified, CancellationToken ct)
+    {
+        var e = session.ToEntity();
+        return await Write(c =>
+        {
+            var current = c.Set<DashboardUserEntity>().AsNoTracking().Where(u => u.Id == verified.Id).FirstOrDefault();
+            if (current is null || !current.Enabled || current.PasswordHash != verified.PasswordHash || current.Role != verified.Role || current.TenantId != verified.TenantId)
+            {
+                return false;
+            }
+
+            c.Set<DashboardSessionEntity>().Add(e);
+            c.SaveChanges();
+            return true;
+        }, ct).ConfigureAwait(false);
+    }
+
     public async ValueTask AddDashboardSessionAsync(DashboardSession session, CancellationToken ct)
     {
         var e = session.ToEntity();

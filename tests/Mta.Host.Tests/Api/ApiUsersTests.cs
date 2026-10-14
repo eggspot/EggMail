@@ -491,6 +491,181 @@ public class ApiUsersTests : IAsyncLifetime
         }
     }
 
+    // Races that must not undo or outlive a change (deterministic: the test seams run the concurrent change at the exact moment)
+
+    [Fact]
+    public async Task A_patch_built_from_a_stale_read_does_not_undo_a_concurrent_demotion()
+    {
+        Reply created = await _admin.PostAsync("/api/v1/admin/users", new { userName = "stale.admin", role = "admin", password = "an admin password" });
+        string id = created.Str("id");
+        Guid userId = Guid.Parse(id);
+        Assert.Equal(HttpStatusCode.OK, (await _admin.PatchAsync("/api/v1/admin/users/" + id, new { enabled = false })).Status);
+        UsersApi api = _f.Get<UsersApi>();
+        api.AfterReadForTest = async () =>
+        {
+            // Another administrator demotes the user after this request read it as an (disabled) administrator.
+            await _f.Storage.Config.UpdateDashboardUserGuardedAsync(userId, u => u with { Role = DashboardRole.Tenant, TenantId = ApiFixture.TenantAId }, true, null, default);
+        };
+        try
+        {
+            Reply r = await _admin.PatchAsync("/api/v1/admin/users/" + id, new { enabled = true });
+            Assert.Equal(HttpStatusCode.OK, r.Status);
+            Assert.Equal("tenant", r.Str("role"));
+        }
+        finally
+        {
+            api.AfterReadForTest = null;
+        }
+
+        var stored = (await _f.Storage.Config.GetDashboardUserAsync(userId, default))!;
+        Assert.Equal(DashboardRole.Tenant, stored.Role); // the stale read said "admin": the old code wrote that back, undoing the demotion
+        Assert.Equal(ApiFixture.TenantAId, stored.TenantId);
+        Assert.True(stored.Enabled);
+    }
+
+    [Fact]
+    public async Task A_role_change_that_cannot_be_applied_to_the_row_as_it_is_now_changes_nothing_and_is_a_conflict()
+    {
+        (string id, _) = await CreateTenantUserAsync("stale.tenant");
+        Guid userId = Guid.Parse(id);
+        UsersApi api = _f.Get<UsersApi>();
+        // The request read a tenant user and asks for "tenant" (nothing to add); before the write the row became an administrator.
+        api.AfterReadForTest = async () => await _f.Storage.Config.UpdateDashboardUserGuardedAsync(userId, u => u with { Role = DashboardRole.Admin, TenantId = null }, true, null, default);
+        try
+        {
+            (await _admin.PatchAsync("/api/v1/admin/users/" + id, new { role = "tenant" })).Problem(HttpStatusCode.Conflict, "conflict");
+        }
+        finally
+        {
+            api.AfterReadForTest = null;
+        }
+
+        var stored = (await _f.Storage.Config.GetDashboardUserAsync(userId, default))!;
+        Assert.Equal(DashboardRole.Admin, stored.Role);
+        Assert.Null(stored.TenantId);
+    }
+
+    [Fact]
+    public async Task A_password_change_does_not_overwrite_a_reset_that_happened_after_the_current_password_was_checked()
+    {
+        ApiClient alice = await _f.SignedInAsync("alice");
+        Guid aliceId = (await _f.Storage.Config.FindDashboardUserAsync("alice", default))!.Id;
+        UsersApi api = _f.Get<UsersApi>();
+        api.AfterReadForTest = async () => await _f.Storage.Config.UpdateDashboardUserGuardedAsync(aliceId, u => u with { PasswordHash = PasswordHasher.Hash("reset by the admin", 1000) }, true, null, default);
+        try
+        {
+            (await alice.PostAsync("/api/v1/me/password", new { currentPassword = ApiFixture.Password, newPassword = NewPassword })).Problem(HttpStatusCode.Conflict, "conflict");
+        }
+        finally
+        {
+            api.AfterReadForTest = null;
+        }
+
+        Assert.True(PasswordHasher.Verify("reset by the admin", (await _f.Storage.Config.GetDashboardUserAsync(aliceId, default))!.PasswordHash));
+    }
+
+    [Fact]
+    public async Task A_sign_in_that_was_verified_before_a_reset_does_not_get_a_session()
+    {
+        Guid aliceId = (await _f.Storage.Config.FindDashboardUserAsync("alice", default))!.Id;
+        SessionService sessions = _f.Get<SessionService>();
+        sessions.AfterPasswordVerifiedForTest = async () => await _f.Storage.Config.UpdateDashboardUserGuardedAsync(aliceId, u => u with { PasswordHash = PasswordHasher.Hash(NewPassword, 1000) }, true, null, default);
+        try
+        {
+            ApiClient client = _f.NewClient();
+            (await client.SignInAsync("alice", ApiFixture.Password)).Problem(HttpStatusCode.Unauthorized, "unauthorized");
+            Assert.Null(client.Cookie);
+        }
+        finally
+        {
+            sessions.AfterPasswordVerifiedForTest = null;
+        }
+
+        // No session was stored for the user, and the new password works.
+        Assert.Equal(HttpStatusCode.OK, (await _f.NewClient().SignInAsync("alice", NewPassword)).Status);
+    }
+
+    [Theory]
+    [InlineData("role")]
+    [InlineData("tenant")]
+    [InlineData("disable")]
+    [InlineData("delete")]
+    public async Task A_sign_in_that_was_verified_before_the_account_changed_does_not_get_a_session(string change)
+    {
+        Guid bobId = (await _f.Storage.Config.FindDashboardUserAsync("bob", default))!.Id;
+        SessionService sessions = _f.Get<SessionService>();
+        sessions.AfterPasswordVerifiedForTest = async () =>
+        {
+            switch (change)
+            {
+                case "role":
+                    await _f.Storage.Config.UpdateDashboardUserGuardedAsync(bobId, u => u with { Role = DashboardRole.Admin, TenantId = null }, true, null, default);
+                    break;
+                case "tenant":
+                    await _f.Storage.Config.UpdateDashboardUserGuardedAsync(bobId, u => u with { TenantId = ApiFixture.TenantAId }, true, null, default);
+                    break;
+                case "disable":
+                    await _f.Storage.Config.UpdateDashboardUserGuardedAsync(bobId, u => u with { Enabled = false }, true, null, default);
+                    break;
+                default:
+                    await _f.Storage.Config.DeleteDashboardUserGuardedAsync(bobId, default);
+                    break;
+            }
+        };
+        try
+        {
+            ApiClient client = _f.NewClient();
+            (await client.SignInAsync("bob", ApiFixture.Password)).Problem(HttpStatusCode.Unauthorized, "unauthorized");
+            Assert.Null(client.Cookie);
+        }
+        finally
+        {
+            sessions.AfterPasswordVerifiedForTest = null;
+        }
+    }
+
+    // Throttle shared between servers
+
+    [Fact]
+    public async Task The_current_password_check_counts_against_the_budget_shared_between_servers()
+    {
+        var coordination = new Mta.Storage.InMemory.InMemoryReplicaCoordination(_f.Clock);
+        await using ApiFixture a = await ApiFixture.StartAsync(new ApiFixtureOptions { ThrottleCoordination = coordination, ConfigureApi = o => o.PasswordHashIterations = 1000 });
+        await using ApiFixture b = await ApiFixture.StartAsync(new ApiFixtureOptions { SharedWith = a, ThrottleCoordination = coordination, ConfigureApi = o => o.PasswordHashIterations = 1000 });
+        ApiClient onA = await a.SignedInAsync("alice");
+        for (int i = 0; i < 5; i++)
+        {
+            (await onA.PostAsync("/api/v1/me/password", new { currentPassword = "not the password", newPassword = NewPassword })).Problem(HttpStatusCode.BadRequest, "validation_failed");
+        }
+
+        // The other server sees the lockout: sign-in and the password form are both refused there, even with the right password.
+        (await b.NewClient().PostAsync("/api/v1/session", new { user = "alice", password = ApiFixture.Password })).Problem(HttpStatusCode.TooManyRequests, "rate_limited");
+        ApiClient onB = b.NewClient();
+        onB.Cookie = onA.Cookie;
+        onB.Csrf = onA.Csrf;
+        (await onB.PostAsync("/api/v1/me/password", new { currentPassword = ApiFixture.Password, newPassword = NewPassword })).Problem(HttpStatusCode.TooManyRequests, "rate_limited");
+
+        // ... and the other way round: failures on B add to the same count.
+        Assert.True((await b.Throttle.CheckAsync(default, "user:alice")).IsLockedOut);
+        Assert.False((await b.Throttle.CheckAsync(default, "user:bob")).IsLockedOut);
+    }
+
+    // Self-service edge cases
+
+    [Fact]
+    public async Task An_admin_may_demote_themself_when_another_enabled_admin_exists_and_is_then_signed_out()
+    {
+        await _admin.PostAsync("/api/v1/admin/users", new { userName = "backup.admin", role = "admin", password = "an admin password" });
+        string rootId = (await _f.Storage.Config.FindDashboardUserAsync("root", default))!.Id.ToString("N");
+        Reply r = await _admin.PatchAsync("/api/v1/admin/users/" + rootId, new { role = "tenant", tenantId = TenantA });
+        Assert.Equal(HttpStatusCode.OK, r.Status);
+        (await _admin.GetAsync("/api/v1/me")).Problem(HttpStatusCode.Unauthorized, "unauthorized");
+        ApiClient backup = await SignInAsAsync("backup.admin", "an admin password");
+        // The demoted one can no longer undo it, and is now the one that could not remove the last administrator either.
+        Assert.Equal(HttpStatusCode.OK, (await backup.PatchAsync("/api/v1/admin/users/" + rootId, new { role = "admin" })).Status);
+        Assert.Equal(DashboardRole.Admin, (await _f.Storage.Config.GetDashboardUserAsync(Guid.Parse(rootId), default))!.Role);
+    }
+
     // Logs
 
     [Fact]
@@ -506,12 +681,20 @@ public class ApiUsersTests : IAsyncLifetime
         ApiClient alice = await _f.SignedInAsync("alice");
         await alice.PostAsync("/api/v1/me/password", new { currentPassword = ApiFixture.Password, newPassword = NewPassword + "x" });
 
+        // The exact lines: one per change, naming the actor and the target, with the facts that changed and nothing secret.
+        string[] lines = _logs.Lines.Where(l => l.StartsWith("Dashboard user ", StringComparison.Ordinal)).ToArray();
+        Guid aliceId = (await _f.Storage.Config.FindDashboardUserAsync("alice", default))!.Id;
+        Assert.Equal(
+            [
+                $"Dashboard user created: actor root, user {id} (logged), role=tenant",
+                $"Dashboard user password reset: actor root, user {id} (logged), password supplied",
+                $"Dashboard user updated: actor root, user {id} (logged), enabled=False role=tenant tenant={TenantA}",
+                $"Dashboard user deleted: actor root, user {id} (logged)",
+                $"Dashboard user password changed: actor alice, user {ApiJson.Id(aliceId)} (alice), other sessions ended",
+            ],
+            lines);
+
         string all = string.Join('\n', _logs.Lines);
-        Assert.Contains("created", all);
-        Assert.Contains("password reset", all);
-        Assert.Contains("password changed", all);
-        Assert.Contains("actor root", all);
-        Assert.Contains("logged", all);
         Assert.DoesNotContain(generated, all);
         Assert.DoesNotContain(NewPassword, all);
         Assert.DoesNotContain(ApiFixture.Password, all);

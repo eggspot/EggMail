@@ -359,7 +359,8 @@ public sealed class SessionService
         CancellationToken ct = context.RequestAborted;
         string ip = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
         string userKey = "user:" + Mta.Storage.Model.ConfigMapping.NormalizeUserName(userName); // the lookup's normalization: padding cannot buy a fresh budget
-        if (_throttle.IsLockedOut(out TimeSpan retryAfter, ip, userKey))
+        var check = await _throttle.CheckAsync(ct, ip, userKey).ConfigureAwait(false);
+        if (check.RetryAfter is { } retryAfter)
         {
             throw ApiException.RateLimited("Too many failed sign-in attempts. Try again later.", retryAfter);
         }
@@ -385,12 +386,36 @@ public sealed class SessionService
 
         if (!ok)
         {
-            _throttle.RecordFailure(ip, userKey);
+            await _throttle.RecordFailureAsync(ip, userKey).ConfigureAwait(false);
             throw ApiException.Unauthorized("Invalid user or password.");
         }
 
-        _throttle.RecordSuccess(userKey); // only the user's count: a valid account must not reset the address limit that guards password guessing elsewhere
-        if (PasswordHasher.NeedsRehash(user!.PasswordHash))
+        await _throttle.RecordSuccessAsync(check, userKey).ConfigureAwait(false); // only the user's count: a valid account must not reset the address limit that guards password guessing elsewhere
+        // A new sign-in replaces the session the browser presented (no fixation, no accumulation).
+        if (context.Request.Cookies.TryGetValue(_options.SessionCookieName, out string? previous) && !string.IsNullOrEmpty(previous))
+        {
+            await config.DeleteDashboardSessionAsync(HashSecret(previous), ct).ConfigureAwait(false);
+        }
+
+        await PurgeExpiredAsync(ct).ConfigureAwait(false);
+        if (AfterPasswordVerifiedForTest is { } hook)
+        {
+            await hook().ConfigureAwait(false);
+        }
+
+        DateTimeOffset now = _clock.UtcNow;
+        string secret = Base64Url(RandomNumberGenerator.GetBytes(32));
+        var session = new DashboardSession(HashSecret(secret), user!.Id, Base64Url(RandomNumberGenerator.GetBytes(16)), now, now, now + _options.SessionLifetime);
+
+        // The session is stored only if the user is still the one that was verified (same password hash, role and tenant, still enabled): a reset, a role
+        // change, a disable or a delete that happened while the password was being checked must not be outlived by this sign-in.
+        if (!await config.TryAddDashboardSessionForVerifiedUserAsync(session, user, ct).ConfigureAwait(false))
+        {
+            throw ApiException.Unauthorized("Invalid user or password.");
+        }
+
+        SetCookie(context, secret);
+        if (PasswordHasher.NeedsRehash(user.PasswordHash))
         {
             // Written through the guarded update so that the stored row is changed, not the copy read above: a concurrent disable, role change or
             // password reset must not be undone by an upgrade of the hash (and an upgrade of a hash that was reset in the meantime is skipped).
@@ -399,20 +424,11 @@ public sealed class SessionService
             await config.UpdateDashboardUserGuardedAsync(user.Id, u => u.PasswordHash == verifiedHash ? u with { PasswordHash = upgraded } : u, endSessions: false, keepSessionHash: null, ct).ConfigureAwait(false);
         }
 
-        // A new sign-in replaces the session the browser presented (no fixation, no accumulation).
-        if (context.Request.Cookies.TryGetValue(_options.SessionCookieName, out string? previous) && !string.IsNullOrEmpty(previous))
-        {
-            await config.DeleteDashboardSessionAsync(HashSecret(previous), ct).ConfigureAwait(false);
-        }
-
-        await PurgeExpiredAsync(ct).ConfigureAwait(false);
-        DateTimeOffset now = _clock.UtcNow;
-        string secret = Base64Url(RandomNumberGenerator.GetBytes(32));
-        var session = new DashboardSession(HashSecret(secret), user.Id, Base64Url(RandomNumberGenerator.GetBytes(16)), now, now, now + _options.SessionLifetime);
-        await config.AddDashboardSessionAsync(session, ct).ConfigureAwait(false);
-        SetCookie(context, secret);
         return user;
     }
+
+    /// <summary>Test seam: runs after the password was verified and before the session is stored, to make a concurrent change deterministic.</summary>
+    internal Func<Task>? AfterPasswordVerifiedForTest { get; set; }
 
     /// <summary>Ends the session the request presented (if any) and clears the cookie.</summary>
     public async ValueTask SignOutAsync(HttpContext context, byte[]? sessionHash)

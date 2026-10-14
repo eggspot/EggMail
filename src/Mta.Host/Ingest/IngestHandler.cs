@@ -56,8 +56,9 @@ public sealed class IngestHandler : ISmtpServerHandler
     public async ValueTask<SmtpAuthResult> AuthenticateAsync(SmtpSessionContext session, string authorizationId, string userName, string password, CancellationToken ct)
     {
         string ip = session.RemoteEndPoint.Address.ToString();
-        string userKey = "user:" + userName.ToLowerInvariant();
-        if (_throttle.IsLockedOut(out _, ip, userKey))
+        string userKey = "user:" + Mta.Storage.Model.ConfigMapping.NormalizeUserName(userName);   // the same key as the dashboard sign-in: one budget per account, whichever door
+        var check = await _throttle.CheckAsync(ct, ip, userKey).ConfigureAwait(false);
+        if (check.IsLockedOut)
         {
             return SmtpAuthResult.Rejected(AuthUnavailable);
         }
@@ -87,11 +88,11 @@ public sealed class IngestHandler : ISmtpServerHandler
         var tenant = ok ? await _storage.Config.GetTenantAsync(credential!.TenantId, ct).ConfigureAwait(false) : null;
         if (tenant is not { Enabled: true })
         {
-            _throttle.RecordFailure(ip, userKey);
+            await _throttle.RecordFailureAsync(ip, userKey).ConfigureAwait(false);
             return SmtpAuthResult.Failed;
         }
 
-        _throttle.RecordSuccess(ip, userKey);
+        await _throttle.RecordSuccessAsync(check, ip, userKey).ConfigureAwait(false);
         session.HandlerState = new State { Tenant = tenant, RemoteAddress = ip };
         return SmtpAuthResult.Succeeded(credential!.UserName);
     }

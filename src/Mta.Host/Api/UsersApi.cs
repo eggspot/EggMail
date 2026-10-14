@@ -81,6 +81,9 @@ public sealed class UsersApi(
 {
     private IConfigStore Config => storage.Config;
 
+    /// <summary>Test seam: runs after a PATCH validated its request and before it writes, to make a concurrent change deterministic.</summary>
+    internal Func<Task>? AfterReadForTest { get; set; }
+
     public void Map(RouteGroupBuilder api)
     {
         var users = api.MapGroup("/admin/users");
@@ -181,31 +184,49 @@ public sealed class UsersApi(
 
         var errors = new ValidationErrors();
         DashboardRole? newRole = ParseRole(body.Role, "role", errors, required: false);
-        DashboardRole role = newRole ?? current.Role;
-        Guid? tenantId = current.TenantId;
+        DashboardRole role = newRole ?? current.Role; // for validation only: the write below derives everything again from the row it reads
+        Guid? requestedTenant = null;
         if (role == DashboardRole.Admin)
         {
             if (body.TenantId is not null)
             {
                 errors.Add("tenantId", "An administrator does not belong to a tenant.");
             }
-
-            tenantId = null;
         }
         else if (body.TenantId is not null || current.Role != DashboardRole.Tenant)
         {
-            tenantId = await RequireActiveTenantAsync(body.TenantId, "tenantId", errors, ct).ConfigureAwait(false);
+            requestedTenant = await RequireActiveTenantAsync(body.TenantId, "tenantId", errors, ct).ConfigureAwait(false);
         }
 
         errors.ThrowIfAny();
-        bool endSessions = body.Enabled == false || role != current.Role || tenantId != current.TenantId;
+        if (AfterReadForTest is { } hook)
+        {
+            await hook().ConfigureAwait(false);
+        }
+
+        // Everything is derived from the stored row inside the write (not from the copy read above), so a change made in between, for example a
+        // demotion, is neither undone by this request's stale view nor lost: only the members the request names are changed. A request that
+        // names a role or a tenant ends the sessions (the dashboard sends only what changed).
+        bool endSessions = body.Enabled == false || newRole is not null || body.TenantId is not null;
         DashboardUserUpdate result = await Config.UpdateDashboardUserGuardedAsync(
             current.Id,
-            u => u with { Enabled = body.Enabled ?? u.Enabled, Role = role, TenantId = tenantId },
+            u =>
+            {
+                DashboardRole r = newRole ?? u.Role;
+                Guid? t = r == DashboardRole.Admin ? null : requestedTenant ?? u.TenantId;
+                return r == DashboardRole.Tenant && t is null
+                    ? u // a tenant user needs a tenant and a concurrent change removed the one this request relied on: change nothing; the check below answers 409
+                    : u with { Enabled = body.Enabled ?? u.Enabled, Role = r, TenantId = t };
+            },
             endSessions,
             keepSessionHash: null,
             ct).ConfigureAwait(false);
         DashboardUser updated = Applied(result);
+        if ((newRole is { } wantedRole && updated.Role != wantedRole) || (body.Enabled is { } wantedEnabled && updated.Enabled != wantedEnabled))
+        {
+            throw ApiException.Conflict("The user was changed by someone else while this request ran. Reload and try again.");
+        }
+
         Log("updated", caller, updated, $"enabled={updated.Enabled} role={SessionApi.RoleName(updated.Role)} tenant={(updated.TenantId is { } t ? ApiJson.Id(t) : "-")}");
         return ApiResults.Ok(ToResponse(updated));
     }
@@ -282,7 +303,8 @@ public sealed class UsersApi(
         // The current password is checked under the same lockout as sign-in (and SMTP AUTH): a stolen session must not be able to guess it.
         string ip = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
         string userKey = "user:" + ConfigMapping.NormalizeUserName(caller.Name);
-        if (throttle.IsLockedOut(out TimeSpan retryAfter, ip, userKey))
+        var check = await throttle.CheckAsync(ct, ip, userKey).ConfigureAwait(false);
+        if (check.RetryAfter is { } retryAfter)
         {
             throw ApiException.RateLimited("Too many failed password attempts. Try again later.", retryAfter);
         }
@@ -290,16 +312,28 @@ public sealed class UsersApi(
         DashboardUser user = await Config.GetDashboardUserAsync(userId, ct).ConfigureAwait(false) ?? throw ApiException.Unauthorized("The session has ended. Sign in again.");
         if (!await Task.Run(() => PasswordHasher.Verify(body.CurrentPassword!, user.PasswordHash), ct).ConfigureAwait(false))
         {
-            throttle.RecordFailure(ip, userKey);
+            await throttle.RecordFailureAsync(ip, userKey).ConfigureAwait(false);
             throw ApiException.Validation("currentPassword", "The current password is not correct.");
         }
 
-        throttle.RecordSuccess(userKey);
+        await throttle.RecordSuccessAsync(check, userKey).ConfigureAwait(false);
         string hash = await Task.Run(() => DashboardAccounts.HashPassword(body.NewPassword!, options.PasswordHashIterations), ct).ConfigureAwait(false);
 
         // Every other session of the user ends in the same write; the one that made the request stays, so the person is not thrown out of the page.
-        DashboardUserUpdate result = await Config.UpdateDashboardUserGuardedAsync(userId, u => u with { PasswordHash = hash }, endSessions: true, keepSessionHash: caller.SessionHash, ct).ConfigureAwait(false);
-        Applied(result);
+        // The change applies only to the password that was verified: if an administrator reset it meanwhile, the reset wins and this request is refused.
+        string verifiedHash = user.PasswordHash;
+        if (AfterReadForTest is { } hook)
+        {
+            await hook().ConfigureAwait(false);
+        }
+
+        DashboardUserUpdate result = await Config.UpdateDashboardUserGuardedAsync(
+            userId, u => u.PasswordHash == verifiedHash ? u with { PasswordHash = hash } : u, endSessions: true, keepSessionHash: caller.SessionHash, ct).ConfigureAwait(false);
+        if (Applied(result).PasswordHash != hash)
+        {
+            throw ApiException.Conflict("The password was changed by someone else while this request ran. Sign in again with the new password.");
+        }
+
         Log("password changed", caller, user, "other sessions ended");
         return ApiResults.NoContent();
     }

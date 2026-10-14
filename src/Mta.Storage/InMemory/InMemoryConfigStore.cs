@@ -279,6 +279,27 @@ internal sealed partial class InMemoryConfigStore : IConfigStore
         }
     }
 
+    public ValueTask<bool> TryAddDashboardSessionForVerifiedUserAsync(DashboardSession session, DashboardUser verified, CancellationToken ct)
+    {
+        var e = session.ToEntity();
+        lock (_gate)
+        {
+            if (!_dashboardUsers.TryGetValue(verified.Id, out var current) || !current.Enabled || current.PasswordHash != verified.PasswordHash
+                || current.Role != verified.Role || current.TenantId != verified.TenantId)
+            {
+                return R(false);
+            }
+
+            if (_dashboardSessions.Any(s => s.IdHash.AsSpan().SequenceEqual(e.IdHash)))
+            {
+                throw Conflict("dashboard_session");
+            }
+
+            _dashboardSessions.Add(e);
+            return R(true);
+        }
+    }
+
     public ValueTask AddDashboardSessionAsync(DashboardSession session, CancellationToken ct)
     {
         var e = session.ToEntity();

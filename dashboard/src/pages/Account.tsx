@@ -5,7 +5,7 @@ import { Button, Card, ErrorNotice, KeyValue, Notice, PageHeader, TextField } fr
 import { useAction, useDocumentTitle } from '../lib/hooks';
 import { useApp } from '../state/app';
 
-const MIN_PASSWORD = 10;
+import { MIN_PASSWORD, passwordProblem } from '../lib/passwords';
 
 /** The signed-in user's own account: who they are and a password change. */
 export default function Account(_props: Record<string, unknown>) {
@@ -32,7 +32,8 @@ export default function Account(_props: Record<string, unknown>) {
     setDone(false);
     const found: Record<string, string> = {};
     if (!current) found.currentPassword = 'Enter your current password.';
-    if (next.length < MIN_PASSWORD) found.newPassword = `Use at least ${MIN_PASSWORD} characters.`;
+    const problem = passwordProblem(next);
+    if (problem) found.newPassword = problem;
     else if (next === current) found.newPassword = 'The new password must differ from the current one.';
     if (again !== next) found.again = 'The two new passwords are not the same.';
     setClientErrors(found);

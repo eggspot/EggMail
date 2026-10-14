@@ -260,6 +260,14 @@ public interface IConfigStore : IRuntimeStateStore
     /// </summary>
     ValueTask<DashboardUserWriteResult> DeleteDashboardUserGuardedAsync(Guid id, CancellationToken ct);
 
+    /// <summary>
+    /// Adds <paramref name="session"/> only if the stored user still is the one a sign-in verified: it exists, is enabled and still has
+    /// <paramref name="verified"/>'s <see cref="DashboardUser.PasswordHash"/>, <see cref="DashboardUser.Role"/> and <see cref="DashboardUser.TenantId"/>
+    /// (check and insert are one write). False, and nothing added, when a password reset, a role or tenant change, a disable or a delete
+    /// happened between the verification and now, so a sign-in cannot outlive the change that was meant to end the user's access.
+    /// </summary>
+    ValueTask<bool> TryAddDashboardSessionForVerifiedUserAsync(DashboardSession session, DashboardUser verified, CancellationToken ct);
+
     ValueTask AddDashboardSessionAsync(DashboardSession session, CancellationToken ct);
     ValueTask<DashboardSession?> FindDashboardSessionAsync(byte[] idHash, CancellationToken ct);
 
