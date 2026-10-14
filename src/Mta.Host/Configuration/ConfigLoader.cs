@@ -250,6 +250,10 @@ public static class ConfigLoader
                 OwnerConnectionString = c["Storage:Postgres:OwnerConnectionString"],
                 RuntimeConnectionString = c["Storage:Postgres:RuntimeConnectionString"],
                 AutoMigrate = !string.Equals(c["Mail:Database:Migrate"], "Never", StringComparison.OrdinalIgnoreCase),
+                ReadOnlyConnectionString = c["Storage:Postgres:ReadOnlyConnectionString"],
+                ReadOnlyStatementTimeoutSeconds = c.GetValue("Storage:Postgres:ReadOnlyStatementTimeoutSeconds", d.Postgres.ReadOnlyStatementTimeoutSeconds),
+                ReadOnlyIdleInTransactionTimeoutSeconds = c.GetValue("Storage:Postgres:ReadOnlyIdleInTransactionTimeoutSeconds", d.Postgres.ReadOnlyIdleInTransactionTimeoutSeconds),
+                ReadOnlyMaxPoolSize = c.GetValue("Storage:Postgres:ReadOnlyMaxPoolSize", d.Postgres.ReadOnlyMaxPoolSize),
                 MaxPoolSize = c.GetValue("Storage:Postgres:MaxPoolSize", d.Postgres.MaxPoolSize),
                 PartitionsAheadDays = c.GetValue("Storage:Postgres:PartitionsAheadDays", d.Postgres.PartitionsAheadDays),
                 StatsFlushInterval = c.GetValue("Storage:Postgres:StatsFlushInterval", d.Postgres.StatsFlushInterval),
@@ -346,6 +350,34 @@ public static class ConfigLoader
         if (obs.QueueSampleSeconds is < 0 or > 3600)
         {
             errors.Add("Observability:QueueSampleSeconds must be between 0 (gauges off) and 3600.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(c.Storage.Postgres.ReadOnlyConnectionString))
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(new Npgsql.NpgsqlConnectionStringBuilder(c.Storage.Postgres.ReadOnlyConnectionString).Username))
+                {
+                    errors.Add("Storage:Postgres:ReadOnlyConnectionString must name the role to connect as (Username=...).");
+                }
+            }
+            catch (ArgumentException)
+            {
+                errors.Add("Storage:Postgres:ReadOnlyConnectionString is not a valid connection string.");
+            }
+        }
+
+        foreach (var (name, value) in new[]
+        {
+            ("Storage:Postgres:ReadOnlyStatementTimeoutSeconds", c.Storage.Postgres.ReadOnlyStatementTimeoutSeconds),
+            ("Storage:Postgres:ReadOnlyIdleInTransactionTimeoutSeconds", c.Storage.Postgres.ReadOnlyIdleInTransactionTimeoutSeconds),
+            ("Storage:Postgres:ReadOnlyMaxPoolSize", c.Storage.Postgres.ReadOnlyMaxPoolSize),
+        })
+        {
+            if (value < 1)
+            {
+                errors.Add($"{name} must be at least 1.");
+            }
         }
 
         if (c.Smtp.MaxRecipients is < 1 or > 1000)
