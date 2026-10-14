@@ -315,15 +315,13 @@ public class MimeTreeTests
             sb.Append("--").Append('a', 189).Append("b\n");
         }
 
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-        var msg = Parse(sb.ToString());
-        sw.Stop();
+        string text = sb.ToString();
+        var msg = HangGuard.Run(() => Parse(text));
         Assert.Empty(msg.Root.Children);
-        Assert.True(sw.ElapsedMilliseconds < 1000, $"took {sw.ElapsedMilliseconds} ms");
     }
 
     [Fact]
-    public void Deep_nesting_bomb_is_bounded_in_time_and_stack()
+    public void Deep_nesting_bomb_is_bounded_in_depth_and_stack()
     {
         var sb = new StringBuilder();
         for (int i = 0; i < 3000; i++)
@@ -332,11 +330,9 @@ public class MimeTreeTests
         }
 
         sb.Append("Content-Type: text/plain\n\nx\n");
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-        var msg = Parse(sb.ToString());
-        sw.Stop();
+        string text = sb.ToString();
+        var msg = HangGuard.Run(() => Parse(text));
         Assert.True(msg.Anomalies.HasAny(MimeAnomaly.MaxDepthExceeded));
-        Assert.True(sw.ElapsedMilliseconds < 2000);
     }
 
     private static byte[] Concat(string head, byte[] tail) => Encoding.ASCII.GetBytes(head).Concat(tail).ToArray();

@@ -17,6 +17,9 @@ public static class DmarcAggregateReportReader
     /// <summary>The maximum size of the XML document after decompression (64 MiB).</summary>
     public const int MaxDocumentBytes = 64 * 1024 * 1024;
 
+    /// <summary>Deepest element nesting accepted (the schema needs about six levels).</summary>
+    public const int MaxElementDepth = 32;
+
     /// <summary>Reads a report from a stream; gzip is detected from its magic number. Never throws for bad content.</summary>
     /// <param name="stream">The raw attachment.</param>
     /// <param name="report">The parsed report.</param>
@@ -92,6 +95,21 @@ public static class DmarcAggregateReportReader
             IgnoreComments = true,
             IgnoreProcessingInstructions = true,
         };
+
+        // XmlReader has no depth limit and parsing time grows with the square of the nesting depth (found by the fuzzer: 10,000 levels of
+        // "<a>" took 0.1 s, 40,000 levels about 2 s, so a document of a few megabytes would take hours). A real report is about six
+        // levels deep, so a pass that only walks the nodes and refuses anything deeper than MaxElementDepth comes first.
+        using (var scan = XmlReader.Create(new MemoryStream(xml), settings))
+        {
+            while (scan.Read())
+            {
+                if (scan.Depth > MaxElementDepth)
+                {
+                    return null;
+                }
+            }
+        }
+
         using var reader = XmlReader.Create(new MemoryStream(xml), settings);
         XDocument doc = XDocument.Load(reader, LoadOptions.None);
         XElement? root = doc.Root;

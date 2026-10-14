@@ -248,4 +248,39 @@ public class SpfMacroTests
         Assert.True(SpfDomainName.TryNormalizeExpanded("Mail.Example.COM.", out string? domain));
         Assert.Equal("mail.example.com", domain);
     }
+
+    [Fact]
+    public void Long_expansions_are_truncated_from_the_left_to_253_characters_in_one_step()
+    {
+        // 100 labels of 4 characters ("abc." = 4): the result keeps whole labels from the right, at most 253 characters.
+        string expanded = string.Concat(Enumerable.Repeat("abc.", 100)) + "com";
+        Assert.True(SpfDomainName.TryNormalizeExpanded(expanded, out string? domain));
+        Assert.True(domain!.Length <= 253);
+        Assert.StartsWith("abc.", domain);   // a label boundary, never a cut inside a label
+        Assert.EndsWith(".com", domain);
+        Assert.Equal(expanded[^domain.Length..], domain);
+
+        // A single label longer than 253 characters cannot be cut at a dot.
+        Assert.False(SpfDomainName.TryNormalizeExpanded(new string('a', 300), out _));
+        // Exactly 253 and 254 characters: the boundary of the cut.
+        string label63 = new('a', 63);
+        string d253 = string.Join('.', label63, label63, label63, new string('b', 61));
+        Assert.Equal(253, d253.Length);
+        Assert.True(SpfDomainName.TryNormalizeExpanded(d253, out string? same));
+        Assert.Equal(d253, same);
+        Assert.True(SpfDomainName.TryNormalizeExpanded("x." + d253, out string? cut));
+        Assert.Equal(d253, cut);
+    }
+
+    [Fact]
+    public void Truncating_a_long_expansion_of_many_short_labels_allocates_a_bounded_amount()
+    {
+        // Found by the fuzzer: dropping the leftmost labels one at a time copied the string for every label (78 MB for a 16 KB input).
+        string expanded = string.Concat(Enumerable.Repeat("a.", 8000)) + "com";
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        Assert.True(SpfDomainName.TryNormalizeExpanded(expanded, out string? domain));
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        Assert.True(domain!.Length <= 253);
+        Assert.True(allocated < 64 * 1024, $"allocated {allocated} bytes");
+    }
 }

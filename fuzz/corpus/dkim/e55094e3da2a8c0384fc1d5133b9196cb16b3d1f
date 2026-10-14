@@ -1,0 +1,10 @@
+DKIM-Signature: v=1; a=rsa-sha1; d=; s=; h=; bh=; b=
+From: Alice <alice@example.com>
+To: Bob <bob@example.net>
+Subject: Test message
+Date: Mon, 12 Oct 2026 12:00:00 +0000
+Message-ID: <1234@example.com>
+
+Hello,
+
+This is the body.

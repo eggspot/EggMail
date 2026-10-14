@@ -1,0 +1,8 @@
+ARC-Seal: i=1; a=rsa-sha256; t=1791806400; cv=none; d=example.com; s=sel; b=AAAA
+ARC-Message-Signature: i=1; a=rsa-sha256; c=relaxed/relaxed; d=example.com; s=sel; t=1791806400; h=from:to:subject; bh=AAAA; b=AAAA
+ARC-Authentication-Results: i=1; mx.example.com; spf=pass smtp.mailfrom=a@example.com
+From: a@example.com
+To: b@example.net
+Subject: x
+
+body

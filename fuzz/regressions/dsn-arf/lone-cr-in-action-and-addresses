@@ -1,0 +1,15 @@
+From: MAILER-DAEMON@mx.example.org
+To: b+token@bounce.example.com
+Content-Type: multipart/report; report-type=delivery-status; boundary="B"
+
+--B
+Content-Type: message/delivery-status
+
+Reporting-MTA: dns; mxinjected
+
+Final-Recipient: rfc822; a@x.example
+Original-Recipient: rfc822; o@x.example
+Action: failed
+Status: 5.1.1
+Remote-MTA: dns; r.example
+--B--

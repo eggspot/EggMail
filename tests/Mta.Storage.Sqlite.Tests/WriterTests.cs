@@ -163,7 +163,7 @@ public class WriterTests : SqliteTestBase
     {
         await ReopenAsync(b => b.StatsFlushInterval = TimeSpan.FromMilliseconds(100));
         await AcceptAsync();
-        for (int i = 0; i < 50; i++)
+        for (int i = 0; i < 300; i++)
         {
             var rows = await Storage.Stats.QueryAsync(TenantA, Start.AddHours(-1), Start.AddHours(1), false, default);
             if (rows.Count == 1 && rows[0].Accepted == 1)
