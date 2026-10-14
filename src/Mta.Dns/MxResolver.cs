@@ -332,6 +332,9 @@ public sealed class MxResolver
         }
     }
 
+    /// <summary>True for loopback, unspecified, broadcast, multicast and reserved addresses: the ones <see cref="MxResolverOptions.ExcludeSpecialAddresses"/> leaves out.</summary>
+    public static bool IsSpecialAddress(IPAddress address) => IsSpecial(address);
+
     private static bool IsSpecial(IPAddress address)
     {
         if (address.IsIPv4MappedToIPv6)

@@ -60,6 +60,16 @@ internal sealed class MutableDns : IDnsResolver
         return this;
     }
 
+    public MutableDns AddA(string name, string address)
+    {
+        lock (_gate)
+        {
+            _records.Add(new ARecord(Normalize(name), 300, IPAddress.Parse(address)));
+        }
+
+        return this;
+    }
+
     public MutableDns AddCname(string name, string target)
     {
         lock (_gate)

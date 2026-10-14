@@ -34,6 +34,13 @@ public sealed class SmtpTlsPolicy
     /// <summary>Certificate validation. Null accepts any certificate (opportunistic mode); the observed policy errors are still recorded.</summary>
     public RemoteCertificateValidationCallback? ValidationCallback { get; init; }
 
+    /// <summary>
+    /// What a pooled connection must have in common with this policy to be reused for it, beyond mode and requirement: the caller describes the validation it performs
+    /// (rule, mode, expected host name, DANE records). Two policies with different identities never share an idle connection, so a connection that was made without
+    /// the validation a later policy demands is never handed to it.
+    /// </summary>
+    public string? PoolIdentity { get; init; }
+
     public static readonly SmtpTlsPolicy Opportunistic = new();
     public static readonly SmtpTlsPolicy Disabled = new() { Mode = SmtpTlsMode.None };
 }
@@ -59,7 +66,22 @@ public sealed class SmtpRemoteTarget
     public IPAddress? LocalAddress { get; init; }
 
     /// <summary>Identity of this target in the connection pool (host, address, port, TLS policy, credentials).</summary>
-    public string PoolKey => _poolKey ??= $"{Host}|{Address}|{Port}|{Tls.Mode}|{Tls.Require}|{(Tls.ValidationCallback is null ? "any" : "validated")}|{Credentials?.UserName}";
+    public string PoolKey => _poolKey ??= $"{Host}|{Address}|{Port}|{Tls.Mode}|{Tls.Require}|{(Tls.ValidationCallback is null ? "any" : "validated")}|{Tls.PoolIdentity}|{CredentialsIdentity(Credentials)}";
+
+    // A process-wide random key: the fingerprint tells passwords apart inside this process and is useless anywhere else, so the pool key never holds a password or a replayable hash.
+    private static readonly byte[] FingerprintKey = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+
+    /// <summary>The user name and a keyed fingerprint of the password: another password for the same user (a rotated secret, a second route) never reuses an authenticated connection.</summary>
+    private static string CredentialsIdentity(SmtpCredentials? credentials)
+    {
+        if (credentials is null)
+        {
+            return "";
+        }
+
+        byte[] mac = System.Security.Cryptography.HMACSHA256.HashData(FingerprintKey, System.Text.Encoding.UTF8.GetBytes(credentials.Password));
+        return credentials.UserName + ":" + Convert.ToHexString(mac, 0, 8);
+    }
 
     private string? _poolKey;   // the properties are init-only, so the key never changes; it was rebuilt on every rent, return and dispose
 }

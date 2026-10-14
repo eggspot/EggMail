@@ -53,11 +53,24 @@ test.describe('relay routes', () => {
     await created.getByRole('button', { name: `Edit ${name}` }).click();
     const dialog = page.getByRole('dialog');
     await expect(dialog.getByLabel('Password', { exact: true })).toHaveAttribute('placeholder', 'unchanged');
-    await dialog.getByLabel('Port').fill('2525');
+    await dialog.getByLabel('Priority').fill('7');
     await dialog.getByRole('button', { name: 'Save' }).click();
     await expect(page.getByText(`Relay route ${name} saved.`)).toBeVisible();
-    await expect(row(page, name)).toContainText(':2525');
+    await expect(row(page, name)).toContainText('7');
     expect((await admin.ok('GET', `/api/v1/admin/relay-routes/${stored.id}`)).hasPassword).toBe(true);
+
+    // Moving the route (another port) with a stored login needs the password typed again: the form says so, and the server insists too.
+    await row(page, name).getByRole('button', { name: `Edit ${name}` }).click();
+    await page.getByRole('dialog').getByLabel('Port').fill('2525');
+    await page.getByRole('dialog').getByRole('button', { name: 'Save' }).click();
+    await expect(page.getByRole('dialog').getByText(/Type the password again/)).toBeVisible();
+    const refused = await admin.request('PATCH', `/api/v1/admin/relay-routes/${stored.id}`, { port: 2525 });
+    expect(refused.status).toBe(400);
+    expect(refused.body.errors.map((e) => e.field)).toEqual(['password']);
+    await page.getByRole('dialog').getByLabel('Password', { exact: true }).fill('correct-horse-relay-secret-2');
+    await page.getByRole('dialog').getByRole('button', { name: 'Save' }).click();
+    await expect(page.getByText(`Relay route ${name} saved.`)).toBeVisible();
+    await expect(row(page, name)).toContainText(':2525');
 
     // Disable, then remove the credentials.
     await row(page, name).getByRole('button', { name: `Disable ${name}` }).click();
@@ -84,17 +97,17 @@ test.describe('relay routes', () => {
     const before = (await admin.ok('GET', '/api/v1/admin/relay-routes')).length;
     await page.goto('/admin/relay-routes');
     await page.getByLabel('Name', { exact: true }).fill('direct');
-    await page.getByLabel('Host', { exact: true }).fill('not a host');
+    await page.getByLabel('Host', { exact: true }).fill('192.0.2.25');
     await page.getByLabel('Port').fill('70000');
     await page.getByLabel('Recipient domains').fill('ok.example\na*b.example');
     await page.getByRole('button', { name: 'Add relay route' }).click();
     await expect(page.getByText('"direct" is the name of direct delivery.')).toBeVisible();
-    await expect(page.getByText('Enter a host name such as smtp.relay.example')).toBeVisible();
+    await expect(page.getByText(/not an IP address: the address is looked up in DNS/).first()).toBeVisible();
     await expect(page.getByText('Must be between 1 and 65535.')).toBeVisible();
     await expect(page.getByText(/Entry 2: Use a domain name/)).toBeVisible();
     expect((await admin.ok('GET', '/api/v1/admin/relay-routes')).length).toBe(before);
 
-    // Credentials need TLS: the server refuses a password over tlsMode none.
+    // Credentials need TLS: the form says so before the request, and the server refuses a password over tlsMode none as well.
     await page.reload();
     await page.getByLabel('Name', { exact: true }).fill(unique('plain-'));
     await page.getByLabel('Host', { exact: true }).fill('smtp.relay.test');
@@ -103,8 +116,11 @@ test.describe('relay routes', () => {
     await page.getByLabel('Password', { exact: true }).fill('p');
     await page.getByLabel('Recipient domains').fill('x.partners.test');
     await page.getByRole('button', { name: 'Add relay route' }).click();
-    await expect(page.getByText(/Credentials need TLS/)).toBeVisible();
+    await expect(page.getByText(/Not with a login/)).toBeVisible();
     expect((await admin.ok('GET', '/api/v1/admin/relay-routes')).length).toBe(before);
+    const server = await admin.request('POST', '/api/v1/admin/relay-routes', { name: unique('plain-'), host: 'smtp.relay.test', tlsMode: 'none', userName: 'u', password: 'p', domains: ['x.partners.test'] });
+    expect(server.status).toBe(400);
+    expect(server.body.errors.map((e) => e.field)).toEqual(['tlsMode']);
   });
 
   test('the endpoints refuse callers without a session and tenant API keys', async ({ stack, admin, tenant }) => {
@@ -180,6 +196,17 @@ test.describe('TLS policies', () => {
     await page.getByLabel('Recipient domain').fill('*');
     await page.getByLabel('TLS level').selectOption('verify');
     await expect(page.getByText(/applies to every destination/i)).toBeVisible();
+
+    // Level none for every destination is only saved with an explicit acknowledgement, in the form and at the API.
+    await page.getByLabel('TLS level').selectOption('none');
+    await expect(page.getByText('This turns TLS off for every destination')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Add policy' })).toBeDisabled();
+    await page.getByLabel(/I understand that all mail will be sent without TLS/).check();
+    await expect(page.getByRole('button', { name: 'Add policy' })).toBeEnabled();
+    const refused = await admin.request('POST', '/api/v1/admin/tls-policies', { domainPattern: '*', level: 'none' });
+    expect(refused.status).toBe(400);
+    expect(refused.body.errors.map((e) => e.field)).toEqual(['acknowledgeInsecure']);
+    expect((await admin.ok('GET', '/api/v1/admin/tls-policies')).some((p) => p.domainPattern === '*')).toBe(false);
 
     const id = (await admin.ok('GET', '/api/v1/admin/tls-policies')).find((p) => p.domainPattern === pattern).id;
     await admin.ok('DELETE', `/api/v1/admin/tls-policies/${id}`);

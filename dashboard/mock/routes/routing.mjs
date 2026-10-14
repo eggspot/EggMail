@@ -7,7 +7,14 @@ const LEVELS = ['none', 'may', 'encrypt', 'verify'];
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const HOST_RE = /^[a-z0-9_]([a-z0-9_-]*[a-z0-9_])?(\.[a-z0-9_]([a-z0-9_-]*[a-z0-9_])?)*$/;
 const MAX_ROUTES = 50;
+const hostError = (value) => {
+  const host = String(value ?? '').trim().toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  if (host.includes(':') || /^\d+$/.test(host.split('.').at(-1) ?? '')) return 'Use a host name such as smtp.relay.example, not an IP address: the address is looked up in DNS.';
+  if (!host || host.includes('*') || !HOST_RE.test(host)) return 'Enter a host name such as smtp.relay.example.';
+  return null;
+};
 const MAX_POLICIES = 500;
+const ACK_TEXT = 'Level none for "*" turns TLS off for every destination and skips MTA-STS and DANE: set acknowledgeInsecure to true if that is meant.';
 
 function store(state) {
   const s = state.shared;
@@ -36,11 +43,13 @@ function routeView(r) {
   if (r.tlsMode === 'none') warnings.push('Mail goes to this relay in plaintext.');
   else if (r.tlsMode === 'starttls') warnings.push('TLS is only used when the relay offers it, and its certificate is not validated.');
   if (r.domains.includes('*')) warnings.push('Matches every recipient domain: this relay is used whenever direct delivery cannot connect.');
+  for (const d of r.domains) if (d.startsWith('*.') && !r.domains.includes(d.slice(2))) warnings.push(`${d} covers the subdomains of ${d.slice(2)} only, not ${d.slice(2)} itself; list ${d.slice(2)} as well to carry it.`);
   return { ...r, warnings };
 }
 
-function policyView(p) {
+function policyView(p, all = []) {
   const warnings = [];
+  if (p.domainPattern.startsWith('*.') && !all.some((o) => o.domainPattern === p.domainPattern.slice(2))) warnings.push(`${p.domainPattern} covers the subdomains of ${p.domainPattern.slice(2)} only, not ${p.domainPattern.slice(2)} itself, which has no policy of its own; add one for it too.`);
   if (p.level === 'none') warnings.push('Level none turns TLS off for these destinations and MTA-STS and DANE are not consulted: mail can go in plaintext even where the destination publishes an enforcing policy.');
   if (p.domainPattern === '*' && (p.level === 'encrypt' || p.level === 'verify')) {
     warnings.push(p.level === 'verify'
@@ -55,7 +64,7 @@ function checkDomains(fail, domains) {
   const out = [];
   domains.forEach((d, i) => {
     const p = normalizePattern(d);
-    if (p === null) fail(`domains[${i}]`, 'Use a domain name, "*.suffix" for a domain and everything below it, or "*" for every domain.');
+    if (p === null) fail(`domains[${i}]`, 'Use a domain name, "*.suffix" for every subdomain at any depth (not the domain itself), or "*" for every domain.');
     else if (!out.includes(p)) out.push(p);
   });
   return out;
@@ -81,8 +90,8 @@ export function register(r, state) {
       if (!NAME_RE.test(name)) fail('name', 'Use 1 to 64 letters, digits, dot, dash or underscore, starting with a letter or digit.');
       else if (name.toLowerCase() === 'direct') fail('name', '"direct" is the name of direct delivery.');
       else if (s.routes.some((x) => x.name.toLowerCase() === name.toLowerCase())) fail('name', 'A relay route with this name already exists.');
-      const host = String(b.host ?? '').trim().toLowerCase();
-      if (!host || host.includes('*') || !HOST_RE.test(host.replace(/\.$/, ''))) fail('host', 'Enter a host name such as smtp.relay.example, or an IP address.');
+      const hostProblem = hostError(b.host);
+      if (hostProblem) fail('host', hostProblem);
       const port = b.port ?? (tlsMode === 'implicit' ? 465 : 587);
       if (!Number.isInteger(port) || port < 1 || port > 65535) fail('port', 'Must be between 1 and 65535.');
       const priority = b.priority ?? 100;
@@ -107,7 +116,13 @@ export function register(r, state) {
     if (!route) throw new HttpError(404, 'not_found', 'Relay route not found.');
     const b = ctx.body || {};
     const next = { ...route };
-    validate((fail) => {
+    let failures = 0;
+    const errorsSoFar = () => failures > 0;
+    validate((rawFail) => {
+      const fail = (field, message) => {
+        failures += 1;
+        rawFail(field, message);
+      };
       if (b.tlsMode !== undefined) {
         const m = String(b.tlsMode).toLowerCase();
         if (!TLS_MODES.includes(m)) fail('tlsMode', `Must be one of: ${TLS_MODES.join(', ')}.`);
@@ -121,9 +136,9 @@ export function register(r, state) {
         else next.name = name;
       }
       if (b.host !== undefined) {
-        const host = String(b.host).trim().toLowerCase().replace(/\.$/, '');
-        if (!host || host.includes('*') || !HOST_RE.test(host)) fail('host', 'Enter a host name such as smtp.relay.example, or an IP address.');
-        else next.host = host;
+        const hostProblem = hostError(b.host);
+        if (hostProblem) fail('host', hostProblem);
+        else next.host = String(b.host).trim().toLowerCase().replace(/\.$/, '');
       }
       if (b.port !== undefined) {
         if (!Number.isInteger(b.port) || b.port < 1 || b.port > 65535) fail('port', 'Must be between 1 and 65535.');
@@ -153,6 +168,10 @@ export function register(r, state) {
         }
       }
       if (next.userName && next.tlsMode === 'none') fail('tlsMode', 'Credentials need TLS: with tlsMode none the password would be sent in plaintext.');
+      const moved = next.host !== route.host || next.port !== route.port || next.tlsMode !== route.tlsMode;
+      if (moved && next.userName && next.hasPassword && !b.password && b.removeCredentials !== true && !errorsSoFar()) {
+        fail('password', 'Changing the host, port or TLS mode of a route with a stored login needs the password again (or removeCredentials), so a stored secret is never sent somewhere you did not choose for it.');
+      }
     });
     Object.assign(route, next);
     return routeView(route);
@@ -166,11 +185,11 @@ export function register(r, state) {
   });
 
   // ---- TLS policies ----
-  r.get('/api/v1/admin/tls-policies', () => store(state).policies.map(policyView));
+  r.get('/api/v1/admin/tls-policies', () => store(state).policies.map((p, _i, all) => policyView(p, all)));
   r.get('/api/v1/admin/tls-policies/:id', (ctx) => {
     const p = store(state).policies.find((x) => x.id === ctx.params.id);
     if (!p) throw new HttpError(404, 'not_found', 'TLS policy not found.');
-    return policyView(p);
+    return policyView(p, store(state).policies);
   });
   r.post('/api/v1/admin/tls-policies', (ctx) => {
     const b = ctx.body || {};
@@ -179,14 +198,15 @@ export function register(r, state) {
     validate((fail) => {
       if (s.policies.length >= MAX_POLICIES) fail('domainPattern', `At most ${MAX_POLICIES} TLS policies.`);
       const p = normalizePattern(b.domainPattern);
-      if (p === null) fail('domainPattern', 'Use a domain name, "*.suffix" for a domain and everything below it, or "*" for every destination.');
+      if (p === null) fail('domainPattern', 'Use a domain name, "*.suffix" for every subdomain at any depth (not the domain itself), or "*" for every destination.');
       else if (s.policies.some((x) => x.domainPattern === p)) fail('domainPattern', 'A policy for this pattern already exists.');
       else pattern = p;
       if (!LEVELS.includes(String(b.level ?? '').toLowerCase())) fail('level', `Must be one of: ${LEVELS.join(', ')}.`);
+      if (pattern === '*' && String(b.level).toLowerCase() === 'none' && b.acknowledgeInsecure !== true) fail('acknowledgeInsecure', ACK_TEXT);
     });
     const policy = { id: newId(), domainPattern: pattern, level: String(b.level).toLowerCase() };
     s.policies.push(policy);
-    return { status: 201, body: policyView(policy) };
+    return { status: 201, body: policyView(policy, s.policies) };
   });
   r.patch('/api/v1/admin/tls-policies/:id', (ctx) => {
     const s = store(state);
@@ -197,7 +217,7 @@ export function register(r, state) {
     validate((fail) => {
       if (b.domainPattern !== undefined) {
         const p = normalizePattern(b.domainPattern);
-        if (p === null) fail('domainPattern', 'Use a domain name, "*.suffix" for a domain and everything below it, or "*" for every destination.');
+        if (p === null) fail('domainPattern', 'Use a domain name, "*.suffix" for every subdomain at any depth (not the domain itself), or "*" for every destination.');
         else if (s.policies.some((x) => x.id !== policy.id && x.domainPattern === p)) fail('domainPattern', 'A policy for this pattern already exists.');
         else next.domainPattern = p;
       }
@@ -205,9 +225,10 @@ export function register(r, state) {
         if (!LEVELS.includes(String(b.level).toLowerCase())) fail('level', `Must be one of: ${LEVELS.join(', ')}.`);
         else next.level = String(b.level).toLowerCase();
       }
+      if ((b.domainPattern !== undefined || b.level !== undefined) && next.domainPattern === '*' && next.level === 'none' && b.acknowledgeInsecure !== true) fail('acknowledgeInsecure', ACK_TEXT);
     });
     Object.assign(policy, next);
-    return policyView(policy);
+    return policyView(policy, s.policies);
   });
   r.delete('/api/v1/admin/tls-policies/:id', (ctx) => {
     const s = store(state);

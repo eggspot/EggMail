@@ -683,6 +683,7 @@ public sealed class DeliveryProcessor
         {
             Mode = SmtpTlsMode.StartTls,
             Require = decision.RequireTls,
+            PoolIdentity = decision.PoolIdentity,
             TargetHost = string.IsNullOrEmpty(decision.ExpectedHostname) ? mxHost : decision.ExpectedHostname,
             Protocols = decision.AllowedProtocols,
             ValidationCallback = validator.Callback,
@@ -776,6 +777,20 @@ public sealed class DeliveryProcessor
                 Error = ex.Message,
                 Tls = ex.Session,
                 Stage = ClientSmtpStage.StartTls,
+                Duration = Stopwatch.GetElapsedTime(started),
+                SendingIp = ex.LocalIpAddress?.ToString(),
+            };
+        }
+        catch (SmtpGreetingRejectedException ex) when (ex.Stage == ClientSmtpStage.Auth)
+        {
+            // The relay refused our login (a rotated or mistyped password, or no mechanism we can use): that is the operator's configuration, not a verdict on the
+            // message or the recipient. A permanent reply would bounce every message for the relay's domains; waiting lets the operator fix the route.
+            return new AttemptResult
+            {
+                Route = RouteAttemptResult.TemporaryReply,
+                Reply = SmtpReply.Create(454, "4.7.0", "relay authentication failed, will retry: " + string.Join(' ', ex.Reply.Lines)),
+                Error = ex.Message,
+                Stage = ClientSmtpStage.Auth,
                 Duration = Stopwatch.GetElapsedTime(started),
                 SendingIp = ex.LocalIpAddress?.ToString(),
             };

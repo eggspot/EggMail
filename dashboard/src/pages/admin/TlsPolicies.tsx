@@ -17,12 +17,14 @@ const levelTone = (l: TlsPolicyLevel) => (l === 'none' ? 'bad' : l === 'may' ? '
 function PolicyForm({ policy, onSaved, onCancel, submitLabel }: { policy?: TlsPolicy; onSaved: (p: TlsPolicy) => void; onCancel?: () => void; submitLabel: string }) {
   const [pattern, setPattern] = useState(policy?.domainPattern ?? '');
   const [level, setLevel] = useState<TlsPolicyLevel>(policy?.level ?? 'verify');
+  const [acknowledged, setAcknowledged] = useState(false);
+  const catchAllOff = pattern.trim() === '*' && level === 'none';
   const save = useAction(async () => {
-    const body = { domainPattern: pattern.trim(), level };
+    const body = { domainPattern: pattern.trim(), level, ...(catchAllOff ? { acknowledgeInsecure: true } : {}) };
     return policy ? api.updateTlsPolicy(policy.id, body) : api.createTlsPolicy(body);
   });
   const errs = fieldErrors(save.error);
-  const explained = !!errs.domainPattern || !!errs.level;
+  const explained = !!errs.domainPattern || !!errs.level || !!errs.acknowledgeInsecure;
   const chosen = TLS_LEVELS.find((l) => l.value === level);
   return (
     <form
@@ -44,7 +46,7 @@ function PolicyForm({ policy, onSaved, onCancel, submitLabel }: { policy?: TlsPo
           onInput={setPattern}
           error={errs.domainPattern}
           placeholder="example.com, *.example.com or *"
-          hint="A domain name, *.suffix for a domain and everything below it, or * for every destination. The most specific pattern wins."
+          hint="A domain name, *.suffix for every subdomain at any depth (add the domain itself separately to cover it), or * for every destination. The most specific pattern wins."
           autocomplete="off"
           spellcheck={false}
         />
@@ -61,13 +63,25 @@ function PolicyForm({ policy, onSaved, onCancel, submitLabel }: { policy?: TlsPo
         </Field>
       </div>
       {level === 'none' && <Notice tone="warn">Level none turns TLS off for these destinations. MTA-STS and DANE are not consulted for them.</Notice>}
+      {catchAllOff && (
+        <div class="stack">
+          <Notice tone="bad" title="This turns TLS off for every destination">
+            <p>Mail would go in plaintext everywhere, including to servers that publish an enforcing MTA-STS or DANE policy.</p>
+          </Notice>
+          <div class="check">
+            <input id={`ack-${policy?.id ?? 'new'}`} type="checkbox" checked={acknowledged} onChange={(e) => setAcknowledged((e.currentTarget as HTMLInputElement).checked)} />
+            <label for={`ack-${policy?.id ?? 'new'}`}>I understand that all mail will be sent without TLS and without MTA-STS or DANE</label>
+          </div>
+          {errs.acknowledgeInsecure && <div class="error-text">{errs.acknowledgeInsecure}</div>}
+        </div>
+      )}
       {pattern.trim() === '*' && (level === 'verify' || level === 'encrypt') && (
         <Notice tone="warn">This applies to every destination: mail to servers without {level === 'verify' ? 'a valid certificate or ' : ''}STARTTLS is deferred and finally bounces.</Notice>
       )}
       {save.error !== undefined && !explained && <ErrorNotice error={save.error} />}
       <div class="row end">
         {onCancel && <Button onClick={onCancel}>Cancel</Button>}
-        <Button type="submit" variant="primary" busy={save.busy} disabled={!pattern.trim()}>
+        <Button type="submit" variant="primary" busy={save.busy} disabled={!pattern.trim() || (catchAllOff && !acknowledged)}>
           {submitLabel}
         </Button>
       </div>
@@ -165,7 +179,8 @@ export default function TlsPolicies(_props: Record<string, unknown>) {
           <li>A destination with usable DANE (TLSA records, DNSSEC validated by your resolver) always gets DANE, whatever its level. MTA-STS is ignored for it, and a broken DANE setup is never overridden.</li>
           <li>Otherwise a destination with an MTA-STS policy in enforce mode needs TLS and a valid certificate, whatever its level; in testing mode the level is the floor.</li>
           <li>The level decides everything else. Only <code>none</code> can make a destination weaker than what it publishes, because it switches the lookups off.</li>
-          <li>The most specific pattern wins: an exact domain, then the longest <code>*.suffix</code>, then <code>*</code>.</li>
+          <li>The most specific pattern wins: an exact domain, then the longest <code>*.suffix</code>, then <code>*</code>. <code>*.example.com</code> covers every subdomain at any depth but not <code>example.com</code> itself; add a policy for it too.</li>
+          <li>A policy applies to direct delivery. Mail that goes through a relay route is only as protected as the connection to the relay and the relay's own onward delivery.</li>
         </ul>
         <p class="muted small">Changes reach the delivery engine of this server at once and other servers within 30 seconds. They apply to the next delivery attempt, including retries of mail already queued.</p>
       </Card>

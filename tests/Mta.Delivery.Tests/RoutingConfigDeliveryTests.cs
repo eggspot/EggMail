@@ -149,6 +149,95 @@ public class RoutingConfigDeliveryTests
         Assert.True(delivered.Single(e => e.Type == MessageEventType.Delivered).Tls!.Used);
     }
 
+    [Fact]
+    public async Task A_policy_raised_to_verify_is_not_served_by_an_idle_connection_that_never_validated_the_certificate()
+    {
+        await using var f = new DeliveryFixture(o => Refresh(o, TimeSpan.FromMilliseconds(50)), serverTls: true); // a self-signed certificate: valid for encrypt, refused by verify
+
+        long before = f.Engine.ConfigRefreshCount;
+        var policy = new TlsPolicyRecord(Ids.New(), "dest.example", TlsLevel.Encrypt);
+        await f.Storage.Config.UpsertTlsPolicyAsync(policy, default);
+        await WaitForReloadAsync(f, before);
+        var first = await f.EnqueueAsync(["a@dest.example"]);
+        await f.WaitForEventAsync(first, MessageEventType.Delivered);
+        Assert.True(Assert.Single(f.Remote.Messages).Tls);
+        await DeliveryFixture.WaitAsync(() => f.Services.Pool.IdleConnections == 1); // the encrypt-only connection waits in the pool
+
+        before = f.Engine.ConfigRefreshCount;
+        await f.Storage.Config.UpsertTlsPolicyAsync(policy with { Level = TlsLevel.Verify }, default);
+        await WaitForReloadAsync(f, before);
+        var second = await f.EnqueueAsync(["b@dest.example"]);
+        await f.WaitForEventAsync(second, MessageEventType.Deferred);
+        Assert.Single(f.Remote.Messages); // nothing went over the unvalidated connection
+    }
+
+    /// <summary>Reversible and purpose-bound like Data Protection, without a key ring.</summary>
+    private sealed class TestProtector : ISecretProtector
+    {
+        public byte[] Protect(ReadOnlySpan<byte> plaintext, string purpose) => [.. System.Text.Encoding.UTF8.GetBytes(purpose + "|"), .. plaintext.ToArray()];
+
+        public byte[] Unprotect(ReadOnlySpan<byte> protectedData, string purpose)
+        {
+            byte[] prefix = System.Text.Encoding.UTF8.GetBytes(purpose + "|");
+            if (!protectedData.StartsWith(prefix))
+            {
+                throw new System.Security.Cryptography.CryptographicException("wrong purpose");
+            }
+
+            return protectedData[prefix.Length..].ToArray();
+        }
+    }
+
+    [Fact]
+    public async Task A_relay_logs_in_with_the_protected_password_and_a_rotated_secret_takes_effect_at_once()
+    {
+        var protector = new TestProtector();
+        await using var f = new DeliveryFixture(o => Refresh(o, TimeSpan.FromMilliseconds(50)), serverTls: true, authListener: true, secrets: protector);
+        f.Services.Routes.DirectMxAvailable = false;
+        f.Remote.Authenticate = (user, password) => user == "relay-user" && password == "s3cret-one";
+        RelayRouteRecord Route(string password) => Relay("authed", f.RelayPort, "required") with { UserName = "relay-user", PasswordProtected = protector.Protect(System.Text.Encoding.UTF8.GetBytes(password), SecretPurposes.RelayPassword) };
+
+        long before = f.Engine.ConfigRefreshCount;
+        var route = Route("s3cret-one");
+        await f.Storage.Config.UpsertRelayRouteAsync(route, default);
+        await WaitForReloadAsync(f, before);
+        var first = await f.EnqueueAsync(["a@dest.example"]);
+        var events = await f.WaitForEventAsync(first, MessageEventType.Delivered);
+        Assert.Equal("authed", events.Single(e => e.Type == MessageEventType.Delivered).Route);
+        Assert.True(Assert.Single(f.Remote.Messages).Tls);
+        await DeliveryFixture.WaitAsync(() => f.Services.Pool.IdleConnections == 1); // the logged-in connection waits in the pool
+
+        // The secret is rotated at the relay and in EggMail: the old connection must not carry the next message, and the new password must be the one used.
+        f.Remote.Authenticate = (user, password) => user == "relay-user" && password == "s3cret-two";
+        before = f.Engine.ConfigRefreshCount;
+        await f.Storage.Config.UpsertRelayRouteAsync(Route("s3cret-two") with { Id = route.Id }, default);
+        await WaitForReloadAsync(f, before);
+        var second = await f.EnqueueAsync(["b@dest.example"]);
+        await f.WaitForEventAsync(second, MessageEventType.Delivered);
+        Assert.Equal(2, f.Remote.Messages.Count);
+
+        // A password the relay refuses delivers nothing, even though an authenticated connection with the earlier password is idle.
+        before = f.Engine.ConfigRefreshCount;
+        await f.Storage.Config.UpsertRelayRouteAsync(Route("wrong") with { Id = route.Id }, default);
+        await WaitForReloadAsync(f, before);
+        var third = await f.EnqueueAsync(["c@dest.example"]);
+        await DeliveryFixture.WaitAsync(() => f.EventsAsync(third).GetAwaiter().GetResult().Any(e => e.Type is MessageEventType.Deferred));
+        Assert.Equal(2, f.Remote.Messages.Count);
+    }
+
+    [Fact]
+    public void A_wildcard_policy_covers_the_subdomains_at_any_depth_and_not_the_domain_itself()
+    {
+        var table = new TlsPolicyTable(Mta.Tls.OutboundTlsConfiguration.Default);
+        table.Update([new TlsPolicyRecord(Ids.New(), "*.bank.example", TlsLevel.Verify)]);
+        Assert.Equal(Mta.Tls.TlsSecurityLevel.Verify, table.For("mail.bank.example").Level);
+        Assert.Equal(Mta.Tls.TlsSecurityLevel.Verify, table.For("a.b.bank.example").Level);
+        Assert.Equal(Mta.Tls.TlsSecurityLevel.May, table.For("bank.example").Level);
+        Assert.Equal(Mta.Tls.TlsSecurityLevel.May, table.For("notbank.example").Level);
+        table.Update([new TlsPolicyRecord(Ids.New(), "*.bank.example", TlsLevel.Verify), new TlsPolicyRecord(Ids.New(), "bank.example", TlsLevel.Encrypt)]);
+        Assert.Equal(Mta.Tls.TlsSecurityLevel.Encrypt, table.For("bank.example").Level);
+    }
+
     [Theory]
     [InlineData("none", SmtpTlsMode.None, false, false)]
     [InlineData("starttls", SmtpTlsMode.StartTls, false, false)]

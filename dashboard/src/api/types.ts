@@ -532,9 +532,13 @@ export interface TlsPolicy {
 export interface TlsPolicyCreate {
   domainPattern: string;
   level: TlsPolicyLevel;
+  /** Required by the server to save level none for the pattern "*". */
+  acknowledgeInsecure?: boolean;
 }
 
 export interface TlsPolicyPatch {
   domainPattern?: string;
   level?: TlsPolicyLevel;
+  /** Required by the server when the update makes the policy level none for "*". */
+  acknowledgeInsecure?: boolean;
 }

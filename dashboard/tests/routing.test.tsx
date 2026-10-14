@@ -76,11 +76,12 @@ describe('Relay routes page', () => {
     const body = m.callsTo('POST', '/api/v1/admin/relay-routes')[0].body as Record<string, unknown>;
     expect(body).toMatchObject({ name: 'office', host: 'smtp.relay.example', tlsMode: 'verify', userName: 'relay-user', password: 'hunter2-secret', domains: ['partner.example', '*.corp.example'], enabled: true });
     expect(body.port).toBeUndefined();
-    // The password is not kept anywhere on the page, in web storage, or in the table.
-    expect((screen.getByLabelText('Password') as HTMLInputElement).value).toBe('');
-    expect(document.body.textContent).not.toContain('hunter2-secret');
-    expect(JSON.stringify({ ...localStorage, ...sessionStorage })).not.toContain('hunter2-secret');
+    // The password is not kept anywhere: not in the form state (the field is empty again), not in the markup the table was rendered into, not in web storage.
     expect(await screen.findByRole('table', { name: 'Relay routes' })).toBeTruthy();
+    expect((screen.getByLabelText('Password') as HTMLInputElement).value).toBe('');
+    expect(document.body.innerHTML).not.toContain('hunter2-secret');
+    expect(JSON.stringify({ ...localStorage, ...sessionStorage })).not.toContain('hunter2-secret');
+    expect(m.callsTo('GET', '/api/v1/admin/relay-routes').every((c) => !JSON.stringify(c.body ?? '').includes('hunter2-secret'))).toBe(true);
   });
 
   it('shows field errors from the server next to the fields, including a domain entry', async () => {
@@ -90,7 +91,7 @@ describe('Relay routes page', () => {
         problem(400, 'validation_failed', {
           errors: [
             { field: 'host', message: 'Enter a host name such as smtp.relay.example, or an IP address.' },
-            { field: 'domains[1]', message: 'Use a domain name, "*.suffix" for a domain and everything below it, or "*" for every domain.' },
+            { field: 'domains[1]', message: 'Use a domain name, "*.suffix" for every subdomain at any depth (not the domain itself), or "*" for every domain.' },
           ],
         }),
     });
@@ -124,11 +125,11 @@ describe('Relay routes page', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Edit office' }));
     const dialog = await screen.findByRole('dialog');
     expect((within(dialog).getByLabelText('Password') as HTMLInputElement).placeholder).toBe('unchanged');
-    fireEvent.input(within(dialog).getByLabelText('Port'), { target: { value: '2525' } });
+    fireEvent.input(within(dialog).getByLabelText('Priority'), { target: { value: '7' } });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
     await screen.findByText('Relay route office saved.');
     const first = m.callsTo('PATCH', '/api/v1/admin/relay-routes/r1')[0].body as Record<string, unknown>;
-    expect(first.port).toBe(2525);
+    expect(first.priority).toBe(7);
     expect('password' in first).toBe(false);
     expect('userName' in first).toBe(false);
     expect('removeCredentials' in first).toBe(false);
@@ -180,6 +181,64 @@ describe('Relay routes page', () => {
     fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Delete route' }));
     expect(await screen.findByText('Relay route office deleted.')).toBeTruthy();
     expect(await screen.findByText('No relay routes')).toBeTruthy();
+  });
+
+  it('asks for the password again before the host, port or TLS mode of a route with a login changes, and says so before the request', async () => {
+    const m = mockFetch({
+      'GET /api/v1/admin/relay-routes': [route],
+      'PATCH /api/v1/admin/relay-routes/:id': (c: RecordedCall) => json({ ...route, ...(c.body as object) }),
+    });
+    renderWithApp(<RelayRoutes />, { role: 'admin' });
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit office' }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.input(within(dialog).getByLabelText('Port'), { target: { value: '2525' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+    expect(await within(dialog).findByText(/Type the password again/)).toBeTruthy();
+    expect(m.callsTo('PATCH', '/api/v1/admin/relay-routes/r1')).toHaveLength(0);
+
+    fireEvent.input(within(dialog).getByLabelText('Password'), { target: { value: 'typed-again' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(m.callsTo('PATCH', '/api/v1/admin/relay-routes/r1')).toHaveLength(1));
+    expect(m.callsTo('PATCH', '/api/v1/admin/relay-routes/r1')[0].body).toMatchObject({ port: 2525, password: 'typed-again', userName: 'relay-user' });
+  });
+
+  it('does not let an emptied user name silently keep the login, and refuses TLS mode none with one', async () => {
+    const m = mockFetch({ 'GET /api/v1/admin/relay-routes': [route], 'PATCH /api/v1/admin/relay-routes/:id': () => json(route) });
+    renderWithApp(<RelayRoutes />, { role: 'admin' });
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit office' }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.input(within(dialog).getByLabelText('User name'), { target: { value: '' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+    expect(await within(dialog).findByText(/An empty field keeps the stored login/)).toBeTruthy();
+
+    fireEvent.input(within(dialog).getByLabelText('User name'), { target: { value: 'relay-user' } });
+    fireEvent.change(within(dialog).getByLabelText('TLS'), { target: { value: 'none' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+    expect(await within(dialog).findByText(/Not with a login/)).toBeTruthy();
+    expect(m.callsTo('PATCH', '/api/v1/admin/relay-routes/r1')).toHaveLength(0);
+
+    // Removing the login first makes mode none possible.
+    fireEvent.click(within(dialog).getByLabelText('Remove the stored user name and password'));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(m.callsTo('PATCH', '/api/v1/admin/relay-routes/r1')).toHaveLength(1));
+    expect(m.callsTo('PATCH', '/api/v1/admin/relay-routes/r1')[0].body).toMatchObject({ tlsMode: 'none', removeCredentials: true });
+  });
+
+  it('only busies the button of the route being switched', async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    mockFetch({
+      'GET /api/v1/admin/relay-routes': [route, { ...route, id: 'r3', name: 'second' }],
+      'PATCH /api/v1/admin/relay-routes/:id': async () => {
+        await gate;
+        return json(route);
+      },
+    });
+    renderWithApp(<RelayRoutes />, { role: 'admin' });
+    fireEvent.click(await screen.findByRole('button', { name: 'Disable office' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Disable office' }).getAttribute('aria-busy')).toBe('true'));
+    expect(screen.getByRole('button', { name: 'Disable second' }).getAttribute('aria-busy')).toBeNull();
+    release();
   });
 
   it('shows a load error with a retry', async () => {
@@ -242,6 +301,39 @@ describe('TLS policies page', () => {
     fireEvent.change(screen.getByLabelText('TLS level'), { target: { value: 'verify' } });
     fireEvent.input(screen.getByLabelText('Recipient domain'), { target: { value: '*' } });
     expect(screen.getByText(/applies to every destination/i)).toBeTruthy();
+  });
+
+  it('needs an explicit acknowledgement before level none is saved for every destination, and sends it', async () => {
+    const m = mockFetch({
+      'GET /api/v1/admin/tls-policies': [],
+      'POST /api/v1/admin/tls-policies': (c: RecordedCall) => json({ id: 'p7', ...(c.body as object), warnings: [] }, 201),
+    });
+    renderWithApp(<TlsPolicies />, { role: 'admin' });
+    await screen.findByText('No policies');
+    fireEvent.input(screen.getByLabelText('Recipient domain'), { target: { value: '*' } });
+    fireEvent.change(screen.getByLabelText('TLS level'), { target: { value: 'none' } });
+    expect(screen.getByText('This turns TLS off for every destination')).toBeTruthy();
+    const submit = screen.getByRole('button', { name: 'Add policy' }) as HTMLButtonElement;
+    expect(submit.disabled).toBe(true);
+    fireEvent.click(screen.getByLabelText(/I understand that all mail will be sent without TLS/));
+    expect(submit.disabled).toBe(false);
+    fireEvent.click(submit);
+    await screen.findByText('Policy for * added.');
+    expect(m.callsTo('POST', '/api/v1/admin/tls-policies')[0].body).toEqual({ domainPattern: '*', level: 'none', acknowledgeInsecure: true });
+  });
+
+  it('sends no acknowledgement for anything else', async () => {
+    const m = mockFetch({
+      'GET /api/v1/admin/tls-policies': [],
+      'POST /api/v1/admin/tls-policies': (c: RecordedCall) => json({ id: 'p8', ...(c.body as object), warnings: [] }, 201),
+    });
+    renderWithApp(<TlsPolicies />, { role: 'admin' });
+    await screen.findByText('No policies');
+    fireEvent.input(screen.getByLabelText('Recipient domain'), { target: { value: 'legacy.example' } });
+    fireEvent.change(screen.getByLabelText('TLS level'), { target: { value: 'none' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add policy' }));
+    await screen.findByText('Policy for legacy.example added.');
+    expect(m.callsTo('POST', '/api/v1/admin/tls-policies')[0].body).toEqual({ domainPattern: 'legacy.example', level: 'none' });
   });
 
   it('edits the level and deletes after confirmation', async () => {

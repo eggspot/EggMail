@@ -108,6 +108,10 @@ public sealed class CreateTlsPolicyRequest
     /// <summary><c>none</c>, <c>may</c>, <c>encrypt</c> or <c>verify</c>.</summary>
     [JsonPropertyName("level")]
     public string? Level { get; set; }
+
+    /// <summary>Must be true to save level <c>none</c> for the pattern <c>*</c> (TLS off for every destination, MTA-STS and DANE not consulted).</summary>
+    [JsonPropertyName("acknowledgeInsecure")]
+    public bool? AcknowledgeInsecure { get; set; }
 }
 
 public sealed class UpdateTlsPolicyRequest
@@ -117,6 +121,10 @@ public sealed class UpdateTlsPolicyRequest
 
     [JsonPropertyName("level")]
     public string? Level { get; set; }
+
+    /// <summary>Must be true when the update makes the policy level <c>none</c> for the pattern <c>*</c>.</summary>
+    [JsonPropertyName("acknowledgeInsecure")]
+    public bool? AcknowledgeInsecure { get; set; }
 }
 
 public sealed record TlsPolicyResponse(Guid Id, string DomainPattern, string Level, IReadOnlyList<string> Warnings);
@@ -134,7 +142,8 @@ public sealed partial class RoutingAdminApi(
     IClock clock,
     ISecretProtector protector,
     ILogger<RoutingAdminApi> logger,
-    IRoutingConfigNotifier? notifier = null)
+    IRoutingConfigNotifier? notifier = null,
+    IDnsResolver? dns = null)
 {
     public const int MaxRelayRoutes = 50;
     public const int MaxTlsPolicies = 500;
@@ -169,19 +178,29 @@ public sealed partial class RoutingAdminApi(
 
     // Relay routes
 
-    private static RelayRouteResponse ToResponse(RelayRouteRecord r)
+    /// <summary>Both lists, read once per request: the advice about one record depends on the other list.</summary>
+    private sealed record Snapshot(IReadOnlyList<RelayRouteRecord> Routes, IReadOnlyList<TlsPolicyRecord> Policies);
+
+    private async Task<Snapshot> LoadAsync(CancellationToken ct) =>
+        new(await Config.GetRelayRoutesAsync(ct).ConfigureAwait(false), await Config.GetTlsPoliciesAsync(ct).ConfigureAwait(false));
+
+    private static RelayRouteResponse ToResponse(RelayRouteRecord r, Snapshot snapshot, string? extraWarning = null)
     {
         var warnings = new List<string>();
         string mode = r.TlsMode.ToLowerInvariant();
         bool credentials = !string.IsNullOrEmpty(r.UserName);
-        if (mode is "required" && credentials)
+        if (credentials && mode is "required" or "starttls")
         {
             warnings.Add("The certificate of this relay is not validated, so the password could be given to an impostor. Use tlsMode verify or implicit.");
         }
 
-        if (mode is "starttls" or "none")
+        if (mode == "starttls")
         {
-            warnings.Add(mode == "none" ? "Mail goes to this relay in plaintext." : "TLS is only used when the relay offers it, and its certificate is not validated.");
+            warnings.Add("TLS is only used when the relay offers it, and its certificate is not validated.");
+        }
+        else if (mode == "none")
+        {
+            warnings.Add("Mail goes to this relay in plaintext.");
         }
 
         if (r.Domains.Contains("*"))
@@ -189,30 +208,65 @@ public sealed partial class RoutingAdminApi(
             warnings.Add("Matches every recipient domain: this relay is used whenever direct delivery cannot connect.");
         }
 
+        foreach (string d in r.Domains.Where(d => d.StartsWith("*.", StringComparison.Ordinal) && !r.Domains.Contains(d[2..])))
+        {
+            warnings.Add($"{d} covers the subdomains of {d[2..]} only, not {d[2..]} itself; list {d[2..]} as well to carry it.");
+        }
+
+        foreach (TlsPolicyRecord p in snapshot.Policies.Where(p => p.Level is TlsLevel.Encrypt or TlsLevel.Verify && r.Domains.Any(d => PatternsOverlap(d, p.DomainPattern))).Take(3))
+        {
+            warnings.Add($"The TLS policy for {p.DomainPattern} ({LevelName(p.Level)}) applies to direct delivery only, not to the hop to this relay: mail for these domains is as protected as the connection to this relay and the relay's own onward delivery. The same holds for MTA-STS and DANE of the destination.");
+        }
+
+        if (extraWarning is not null)
+        {
+            warnings.Add(extraWarning);
+        }
+
         return new RelayRouteResponse(r.Id, r.Name, r.Host, r.Port, mode, r.UserName, r.PasswordProtected is { Length: > 0 }, r.Priority, r.Enabled, r.Domains, warnings);
+    }
+
+    /// <summary>True when some domain matches both patterns (exact name, <c>*.suffix</c> for every subdomain at any depth, or <c>*</c>).</summary>
+    internal static bool PatternsOverlap(string a, string b)
+    {
+        if (a == "*" || b == "*")
+        {
+            return true;
+        }
+
+        bool aw = a.StartsWith("*.", StringComparison.Ordinal);
+        bool bw = b.StartsWith("*.", StringComparison.Ordinal);
+        string ah = aw ? a[2..] : a, bh = bw ? b[2..] : b;
+        if (!aw && !bw)
+        {
+            return ah == bh;
+        }
+
+        if (aw && bw)
+        {
+            return ah == bh || ah.EndsWith("." + bh, StringComparison.Ordinal) || bh.EndsWith("." + ah, StringComparison.Ordinal);
+        }
+
+        (string exact, string suffix) = aw ? (bh, ah) : (ah, bh);
+        return exact.EndsWith("." + suffix, StringComparison.Ordinal);
     }
 
     private async Task<IResult> ListRoutesAsync(HttpContext context)
     {
         await auth.RequireAdminAsync(context).ConfigureAwait(false);
-        return ApiResults.Ok((await Config.GetRelayRoutesAsync(context.RequestAborted).ConfigureAwait(false)).Select(ToResponse).ToList());
+        Snapshot snapshot = await LoadAsync(context.RequestAborted).ConfigureAwait(false);
+        return ApiResults.Ok(snapshot.Routes.Select(r => ToResponse(r, snapshot)).ToList());
     }
 
     private async Task<IResult> GetRouteAsync(HttpContext context, string id)
     {
         await auth.RequireAdminAsync(context).ConfigureAwait(false);
-        return ApiResults.Ok(ToResponse(await FindRouteAsync(id, context.RequestAborted).ConfigureAwait(false)));
+        Snapshot snapshot = await LoadAsync(context.RequestAborted).ConfigureAwait(false);
+        return ApiResults.Ok(ToResponse(FindRoute(id, snapshot), snapshot));
     }
 
-    private async Task<RelayRouteRecord> FindRouteAsync(string id, CancellationToken ct)
-    {
-        if (ApiJson.TryParseId(id, out Guid guid) && (await Config.GetRelayRoutesAsync(ct).ConfigureAwait(false)).FirstOrDefault(r => r.Id == guid) is { } route)
-        {
-            return route;
-        }
-
-        throw ApiException.NotFound("Relay route not found.");
-    }
+    private static RelayRouteRecord FindRoute(string id, Snapshot snapshot) =>
+        ApiJson.TryParseId(id, out Guid guid) && snapshot.Routes.FirstOrDefault(r => r.Id == guid) is { } route ? route : throw ApiException.NotFound("Relay route not found.");
 
     private async Task<IResult> CreateRouteAsync(HttpContext context)
     {
@@ -221,14 +275,14 @@ public sealed partial class RoutingAdminApi(
         CreateRelayRouteRequest body = await ApiJson.ReadBodyAsync<CreateRelayRouteRequest>(context, options.MaxBodyBytes).ConfigureAwait(false);
         var errors = new ValidationErrors();
         body.UserName = string.IsNullOrWhiteSpace(body.UserName) ? null : body.UserName.Trim();
-        var existing = await Config.GetRelayRoutesAsync(ct).ConfigureAwait(false);
-        if (existing.Count >= MaxRelayRoutes)
+        Snapshot before = await LoadAsync(ct).ConfigureAwait(false);
+        if (before.Routes.Count >= MaxRelayRoutes)
         {
             errors.Add("name", $"At most {MaxRelayRoutes} relay routes.");
         }
 
         string tlsMode = ValidTlsMode(body.TlsMode ?? "verify", errors);
-        string name = ValidName(body.Name, existing, null, errors);
+        string name = ValidName(body.Name, before.Routes, null, errors);
         string host = ValidHost(body.Host, errors);
         int port = ValidPort(body.Port ?? (tlsMode == "implicit" ? 465 : 587), errors);
         int priority = ValidPriority(body.Priority ?? 100, errors);
@@ -236,18 +290,21 @@ public sealed partial class RoutingAdminApi(
         ValidateCredentials(body.UserName, body.Password, hasStoredPassword: false, tlsMode, errors);
         errors.ThrowIfAny();
 
-        byte[]? protectedPassword = string.IsNullOrEmpty(body.UserName) ? null : Protect(body.Password!);
-        var route = new RelayRouteRecord(Ids.New(clock.UtcNow), name, host, port, tlsMode, string.IsNullOrEmpty(body.UserName) ? null : body.UserName, protectedPassword, priority, body.Enabled ?? true, domains);
+        byte[]? protectedPassword = body.UserName is null ? null : Protect(body.Password!);
+        var route = new RelayRouteRecord(Ids.New(clock.UtcNow), name, host, port, tlsMode, body.UserName, protectedPassword, priority, body.Enabled ?? true, domains);
         await Config.UpsertRelayRouteAsync(route, ct).ConfigureAwait(false);
         Audit(caller, "created", route);
-        return ApiResults.Created("/api/v1/admin/relay-routes/" + ApiJson.Id(route.Id), ToResponse(route));
+        NotifyChanged();
+        string? addressWarning = await PrivateAddressWarningAsync(host, ct).ConfigureAwait(false);
+        return ApiResults.Created("/api/v1/admin/relay-routes/" + ApiJson.Id(route.Id), ToResponse(route, await LoadAsync(ct).ConfigureAwait(false), addressWarning));
     }
 
     private async Task<IResult> UpdateRouteAsync(HttpContext context, string id)
     {
         ApiCaller caller = await auth.RequireAdminAsync(context).ConfigureAwait(false);
         CancellationToken ct = context.RequestAborted;
-        RelayRouteRecord current = await FindRouteAsync(id, ct).ConfigureAwait(false);
+        Snapshot before = await LoadAsync(ct).ConfigureAwait(false);
+        RelayRouteRecord current = FindRoute(id, before);
         UpdateRelayRouteRequest body = await ApiJson.ReadBodyAsync<UpdateRelayRouteRequest>(context, options.MaxBodyBytes).ConfigureAwait(false);
         var errors = new ValidationErrors();
         if (body.UserName is not null)
@@ -260,10 +317,8 @@ public sealed partial class RoutingAdminApi(
             }
         }
 
-        var existing = await Config.GetRelayRoutesAsync(ct).ConfigureAwait(false);
-
         string tlsMode = body.TlsMode is null ? current.TlsMode.ToLowerInvariant() : ValidTlsMode(body.TlsMode, errors);
-        string name = body.Name is null ? current.Name : ValidName(body.Name, existing, current.Id, errors);
+        string name = body.Name is null ? current.Name : ValidName(body.Name, before.Routes, current.Id, errors);
         string host = body.Host is null ? current.Host : ValidHost(body.Host, errors);
         int port = body.Port is null ? current.Port : ValidPort(body.Port.Value, errors);
         int priority = body.Priority is null ? current.Priority : ValidPriority(body.Priority.Value, errors);
@@ -299,21 +354,59 @@ public sealed partial class RoutingAdminApi(
             errors.Add("tlsMode", "Not with stored credentials: the password would be sent in plaintext. Remove the credentials first.");
         }
 
+        // A stored password is only ever sent where an administrator who knows it chose to send it: moving the route to another host, port or TLS mode
+        // (a weaker one, or an address someone else controls) needs the password typed again, like a changed user name does.
+        bool destinationChanged = !string.Equals(host, current.Host, StringComparison.Ordinal) || port != current.Port || !string.Equals(tlsMode, current.TlsMode.ToLowerInvariant(), StringComparison.Ordinal);
+        if (!errors.Any && destinationChanged && userName is not null && password is { Length: > 0 } && string.IsNullOrEmpty(body.Password))
+        {
+            errors.Add("password", "Changing the host, port or TLS mode of a route with a stored login needs the password again (or removeCredentials), so a stored secret is never sent somewhere you did not choose for it.");
+        }
+
         errors.ThrowIfAny();
         var updated = new RelayRouteRecord(current.Id, name, host, port, tlsMode, userName, password, priority, body.Enabled ?? current.Enabled, domains);
         await Config.UpsertRelayRouteAsync(updated, ct).ConfigureAwait(false);
         Audit(caller, "updated", updated);
-        return ApiResults.Ok(ToResponse(updated));
+        NotifyChanged();
+        string? addressWarning = string.Equals(host, current.Host, StringComparison.Ordinal) ? null : await PrivateAddressWarningAsync(host, ct).ConfigureAwait(false);
+        return ApiResults.Ok(ToResponse(updated, await LoadAsync(ct).ConfigureAwait(false), addressWarning));
     }
 
     private async Task<IResult> DeleteRouteAsync(HttpContext context, string id)
     {
         ApiCaller caller = await auth.RequireAdminAsync(context).ConfigureAwait(false);
         CancellationToken ct = context.RequestAborted;
-        RelayRouteRecord route = await FindRouteAsync(id, ct).ConfigureAwait(false);
+        RelayRouteRecord route = FindRoute(id, await LoadAsync(ct).ConfigureAwait(false));
         await Config.DeleteRelayRouteAsync(route.Id, ct).ConfigureAwait(false);
         Audit(caller, "deleted", route);
+        NotifyChanged();
         return ApiResults.NoContent();
+    }
+
+    /// <summary>
+    /// A relay host that resolves to a loopback or reserved address is not used unless <c>Delivery:AllowPrivateMxAddresses</c> is on: the route would save and never carry mail.
+    /// Best effort (a lookup that fails says nothing), and only on create and when the host changes, so listing never queries DNS.
+    /// </summary>
+    private async Task<string?> PrivateAddressWarningAsync(string host, CancellationToken ct)
+    {
+        if (dns is null || options.AllowPrivateMxAddresses)
+        {
+            return null;
+        }
+
+        try
+        {
+            HostAddresses resolved = await new MxResolver(dns, new MxResolverOptions { ExcludeSpecialAddresses = false }).ResolveHostAsync(host, ct).ConfigureAwait(false);
+            if (resolved.Addresses.Any(MxResolver.IsSpecialAddress))
+            {
+                return $"{host} resolves to a loopback or reserved address, which is not used unless Delivery:AllowPrivateMxAddresses is true: this route will not carry mail.";
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Nothing to warn about when the lookup itself failed.
+        }
+
+        return null;
     }
 
     private byte[] Protect(string password) =>
@@ -352,14 +445,17 @@ public sealed partial class RoutingAdminApi(
     private static string ValidHost(string? value, ValidationErrors errors)
     {
         string host = value?.Trim() ?? "";
-        if (IPAddress.TryParse(host.Trim('[', ']'), out IPAddress? ip))
+        // The delivery engine looks the relay up in DNS, so an address is not a host here ("1" and "127.1" are addresses to IPAddress too).
+        string bare = host.Trim('[', ']').TrimEnd('.');
+        if (IPAddress.TryParse(bare, out _) || bare.Contains(':') || (bare.Length > 0 && bare.Split('.')[^1].All(char.IsAsciiDigit)))
         {
-            return ip.ToString();
+            errors.Add("host", "Use a host name such as smtp.relay.example, not an IP address: the address is looked up in DNS.");
+            return host;
         }
 
         if (host.Length == 0 || host.Contains('*') || !DnsName.TryNormalize(host, out string? normalized) || normalized.Length == 0 || !HostPattern().IsMatch(normalized))
         {
-            errors.Add("host", "Enter a host name such as smtp.relay.example, or an IP address.");
+            errors.Add("host", "Enter a host name such as smtp.relay.example.");
             return host;
         }
 
@@ -412,7 +508,7 @@ public sealed partial class RoutingAdminApi(
             }
             else
             {
-                errors.Add($"domains[{i}]", "Use a domain name, \"*.suffix\" for a domain and everything below it, or \"*\" for every domain.");
+                errors.Add($"domains[{i}]", "Use a domain name, \"*.suffix\" for every subdomain at any depth (not the domain itself), or \"*\" for every domain.");
             }
         }
 
@@ -489,12 +585,13 @@ public sealed partial class RoutingAdminApi(
         logger.LogInformation(
             "Relay route {RouteName} ({RouteId}) {Action} by {Actor}: host {Host}:{Port}, tlsMode {TlsMode}, user {UserName}, password {PasswordState}, priority {Priority}, enabled {Enabled}, domains {Domains}",
             r.Name, ApiJson.Id(r.Id), action, caller.Name, r.Host, r.Port, r.TlsMode, r.UserName ?? "(none)", r.PasswordProtected is { Length: > 0 } ? "set" : "none", r.Priority, r.Enabled, string.Join(',', r.Domains));
-        notifier?.Changed();
     }
+
+    private void NotifyChanged() => notifier?.Changed();
 
     // TLS policies
 
-    private static TlsPolicyResponse ToResponse(TlsPolicyRecord p)
+    private static TlsPolicyResponse ToResponse(TlsPolicyRecord p, Snapshot snapshot)
     {
         var warnings = new List<string>();
         if (p.Level == TlsLevel.None)
@@ -507,6 +604,19 @@ public sealed partial class RoutingAdminApi(
             warnings.Add(p.Level == TlsLevel.Verify
                 ? "Applies to every destination: mail to servers without STARTTLS or without a valid certificate for their MX name is deferred and eventually bounces."
                 : "Applies to every destination: mail to servers without STARTTLS is deferred and eventually bounces.");
+        }
+
+        if (p.DomainPattern.StartsWith("*.", StringComparison.Ordinal) && snapshot.Policies.All(o => o.DomainPattern != p.DomainPattern[2..]))
+        {
+            warnings.Add($"{p.DomainPattern} covers the subdomains of {p.DomainPattern[2..]} only, not {p.DomainPattern[2..]} itself, which has no policy of its own; add one for it too.");
+        }
+
+        if (p.Level is TlsLevel.Encrypt or TlsLevel.Verify)
+        {
+            foreach (RelayRouteRecord r in snapshot.Routes.Where(r => r.Enabled && r.Domains.Any(d => PatternsOverlap(d, p.DomainPattern))).Take(3))
+            {
+                warnings.Add($"The relay route {r.Name} carries mail for some of these destinations: this level applies to direct delivery only, not to the hop to the relay.");
+            }
         }
 
         return new TlsPolicyResponse(p.Id, p.DomainPattern, LevelName(p.Level), warnings);
@@ -523,23 +633,18 @@ public sealed partial class RoutingAdminApi(
     private async Task<IResult> ListPoliciesAsync(HttpContext context)
     {
         await auth.RequireAdminAsync(context).ConfigureAwait(false);
-        return ApiResults.Ok((await Config.GetTlsPoliciesAsync(context.RequestAborted).ConfigureAwait(false)).Select(ToResponse).ToList());
+        Snapshot snapshot = await LoadAsync(context.RequestAborted).ConfigureAwait(false);
+        return ApiResults.Ok(snapshot.Policies.Select(p => ToResponse(p, snapshot)).ToList());
     }
 
-    private async Task<TlsPolicyRecord> FindPolicyAsync(string id, CancellationToken ct)
-    {
-        if (ApiJson.TryParseId(id, out Guid guid) && (await Config.GetTlsPoliciesAsync(ct).ConfigureAwait(false)).FirstOrDefault(p => p.Id == guid) is { } policy)
-        {
-            return policy;
-        }
-
-        throw ApiException.NotFound("TLS policy not found.");
-    }
+    private static TlsPolicyRecord FindPolicy(string id, Snapshot snapshot) =>
+        ApiJson.TryParseId(id, out Guid guid) && snapshot.Policies.FirstOrDefault(p => p.Id == guid) is { } policy ? policy : throw ApiException.NotFound("TLS policy not found.");
 
     private async Task<IResult> GetPolicyAsync(HttpContext context, string id)
     {
         await auth.RequireAdminAsync(context).ConfigureAwait(false);
-        return ApiResults.Ok(ToResponse(await FindPolicyAsync(id, context.RequestAborted).ConfigureAwait(false)));
+        Snapshot snapshot = await LoadAsync(context.RequestAborted).ConfigureAwait(false);
+        return ApiResults.Ok(ToResponse(FindPolicy(id, snapshot), snapshot));
     }
 
     private async Task<IResult> CreatePolicyAsync(HttpContext context)
@@ -548,47 +653,56 @@ public sealed partial class RoutingAdminApi(
         CancellationToken ct = context.RequestAborted;
         CreateTlsPolicyRequest body = await ApiJson.ReadBodyAsync<CreateTlsPolicyRequest>(context, options.MaxBodyBytes).ConfigureAwait(false);
         var errors = new ValidationErrors();
-        var existing = await Config.GetTlsPoliciesAsync(ct).ConfigureAwait(false);
-        if (existing.Count >= MaxTlsPolicies)
+        Snapshot before = await LoadAsync(ct).ConfigureAwait(false);
+        if (before.Policies.Count >= MaxTlsPolicies)
         {
             errors.Add("domainPattern", $"At most {MaxTlsPolicies} TLS policies.");
         }
 
-        string pattern = ValidPolicyPattern(body.DomainPattern, existing, null, errors);
+        string pattern = ValidPolicyPattern(body.DomainPattern, before.Policies, null, errors);
         TlsLevel level = ValidLevel(body.Level, errors);
+        RequireAcknowledgement(pattern, level, body.AcknowledgeInsecure, errors);
         errors.ThrowIfAny();
 
         var policy = new TlsPolicyRecord(Ids.New(clock.UtcNow), pattern, level);
         await SavePolicyAsync(policy, ct).ConfigureAwait(false);
         Audit(caller, "created", policy);
-        return ApiResults.Created("/api/v1/admin/tls-policies/" + ApiJson.Id(policy.Id), ToResponse(policy));
+        NotifyChanged();
+        return ApiResults.Created("/api/v1/admin/tls-policies/" + ApiJson.Id(policy.Id), ToResponse(policy, await LoadAsync(ct).ConfigureAwait(false)));
     }
 
     private async Task<IResult> UpdatePolicyAsync(HttpContext context, string id)
     {
         ApiCaller caller = await auth.RequireAdminAsync(context).ConfigureAwait(false);
         CancellationToken ct = context.RequestAborted;
-        TlsPolicyRecord current = await FindPolicyAsync(id, ct).ConfigureAwait(false);
+        Snapshot before = await LoadAsync(ct).ConfigureAwait(false);
+        TlsPolicyRecord current = FindPolicy(id, before);
         UpdateTlsPolicyRequest body = await ApiJson.ReadBodyAsync<UpdateTlsPolicyRequest>(context, options.MaxBodyBytes).ConfigureAwait(false);
         var errors = new ValidationErrors();
-        var existing = await Config.GetTlsPoliciesAsync(ct).ConfigureAwait(false);
-        string pattern = body.DomainPattern is null ? current.DomainPattern : ValidPolicyPattern(body.DomainPattern, existing, current.Id, errors);
+        string pattern = body.DomainPattern is null ? current.DomainPattern : ValidPolicyPattern(body.DomainPattern, before.Policies, current.Id, errors);
         TlsLevel level = body.Level is null ? current.Level : ValidLevel(body.Level, errors);
+        if (body.DomainPattern is not null || body.Level is not null)
+        {
+            RequireAcknowledgement(pattern, level, body.AcknowledgeInsecure, errors);
+        }
+
         errors.ThrowIfAny();
 
         var updated = new TlsPolicyRecord(current.Id, pattern, level);
         await SavePolicyAsync(updated, ct).ConfigureAwait(false);
         Audit(caller, "updated", updated);
-        return ApiResults.Ok(ToResponse(updated));
+        NotifyChanged();
+        return ApiResults.Ok(ToResponse(updated, await LoadAsync(ct).ConfigureAwait(false)));
     }
 
     private async Task<IResult> DeletePolicyAsync(HttpContext context, string id)
     {
         ApiCaller caller = await auth.RequireAdminAsync(context).ConfigureAwait(false);
         CancellationToken ct = context.RequestAborted;
-        TlsPolicyRecord policy = await FindPolicyAsync(id, ct).ConfigureAwait(false);
+        TlsPolicyRecord policy = FindPolicy(id, await LoadAsync(ct).ConfigureAwait(false));
         await Config.DeleteTlsPolicyAsync(policy.Id, ct).ConfigureAwait(false);
         Audit(caller, "deleted", policy);
+        NotifyChanged();
         return ApiResults.NoContent();
     }
 
@@ -609,7 +723,7 @@ public sealed partial class RoutingAdminApi(
     {
         if (!TryNormalizePattern(value, out string pattern))
         {
-            errors.Add("domainPattern", "Use a domain name, \"*.suffix\" for a domain and everything below it, or \"*\" for every destination.");
+            errors.Add("domainPattern", "Use a domain name, \"*.suffix\" for every subdomain at any depth (not the domain itself), or \"*\" for every destination.");
             return value ?? "";
         }
 
@@ -623,20 +737,33 @@ public sealed partial class RoutingAdminApi(
 
     private static TlsLevel ValidLevel(string? value, ValidationErrors errors)
     {
-        string level = value?.Trim().ToLowerInvariant() ?? "";
-        int index = Array.IndexOf(TlsLevels, level);
-        if (index < 0)
+        switch (value?.Trim().ToLowerInvariant())
         {
-            errors.Add("level", "Must be one of: " + string.Join(", ", TlsLevels) + ".");
-            return TlsLevel.May;
+            case "none": return TlsLevel.None;
+            case "may": return TlsLevel.May;
+            case "encrypt": return TlsLevel.Encrypt;
+            case "verify": return TlsLevel.Verify;
+            default:
+                errors.Add("level", "Must be one of: " + string.Join(", ", TlsLevels) + ".");
+                return TlsLevel.May;
         }
+    }
 
-        return (TlsLevel)index;
+    /// <summary>Level none for every destination switches TLS, MTA-STS and DANE off server-wide: it is only saved when the request says it was meant.</summary>
+    private static void RequireAcknowledgement(string pattern, TlsLevel level, bool? acknowledged, ValidationErrors errors)
+    {
+        if (pattern == "*" && level == TlsLevel.None && acknowledged != true)
+        {
+            errors.Add("acknowledgeInsecure", "Level none for \"*\" turns TLS off for every destination and skips MTA-STS and DANE: set acknowledgeInsecure to true if that is meant.");
+        }
     }
 
     private void Audit(ApiCaller caller, string action, TlsPolicyRecord p)
     {
-        logger.LogInformation("TLS policy {DomainPattern} ({PolicyId}) {Action} by {Actor}: level {Level}", p.DomainPattern, ApiJson.Id(p.Id), action, caller.Name, LevelName(p.Level));
-        notifier?.Changed();
+        // Turning TLS off is logged where an operator looks for problems.
+        logger.Log(
+            p.Level == TlsLevel.None && action != "deleted" ? LogLevel.Warning : LogLevel.Information,
+            "TLS policy {DomainPattern} ({PolicyId}) {Action} by {Actor}: level {Level}",
+            p.DomainPattern, ApiJson.Id(p.Id), action, caller.Name, LevelName(p.Level));
     }
 }

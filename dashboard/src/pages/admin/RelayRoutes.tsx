@@ -62,7 +62,11 @@ function domainErrors(errs: Record<string, string>): string | undefined {
 
 function RouteForm({ route, onSaved, onCancel, submitLabel }: { route?: RelayRoute; onSaved: (r: RelayRoute) => void; onCancel?: () => void; submitLabel: string }) {
   const [f, setF] = useState<FormState>(() => initial(route));
-  const set = <K extends keyof FormState>(key: K, value: FormState[K]) => setF((prev) => ({ ...prev, [key]: value }));
+  const [local, setLocal] = useState<Record<string, string>>({});
+  const set = <K extends keyof FormState>(key: K, value: FormState[K]) => {
+    setLocal({});
+    setF((prev) => ({ ...prev, [key]: value }));
+  };
   const save = useAction(async () => {
     const domains = parseDomains(f.domains);
     const port = f.port.trim() ? Number(f.port) : undefined;
@@ -88,11 +92,25 @@ function RouteForm({ route, onSaved, onCancel, submitLabel }: { route?: RelayRou
     if (f.password) body.password = f.password;
     return api.createRelayRoute(body);
   });
-  const errs = fieldErrors(save.error);
+  const errs = { ...fieldErrors(save.error), ...local };
   const known = ['name', 'host', 'port', 'tlsMode', 'userName', 'password', 'priority', 'domains', 'removeCredentials'];
-  const unexplained = save.error !== undefined && !Object.keys(errs).some((k) => known.includes(k) || k.startsWith('domains['));
+  const unexplained = save.error !== undefined && !Object.keys(fieldErrors(save.error)).some((k) => known.includes(k) || k.startsWith('domains['));
   const mode = RELAY_TLS_MODES.find((m) => m.value === f.tlsMode);
   const hasStoredCredentials = !!route?.userName;
+  /** What the server would refuse, said before the round trip and next to the field. */
+  const checkLocally = (): Record<string, string> => {
+    const e: Record<string, string> = {};
+    const user = f.userName.trim();
+    if (route && hasStoredCredentials && !f.removeCredentials) {
+      const moved = f.host.trim().toLowerCase() !== route.host || (f.port.trim() !== '' && Number(f.port) !== route.port) || f.tlsMode !== route.tlsMode;
+      if (!user) e.userName = 'An empty field keeps the stored login. To remove it, tick "Remove the stored user name and password".';
+      else if (user !== route.userName && !f.password) e.password = 'A changed user name needs its password.';
+      else if (moved && !f.password) e.password = 'Type the password again: changing the host, port or TLS mode of a route with a stored login needs it, so the stored secret is never sent somewhere you did not choose for it.';
+    }
+    const keepsLogin = !f.removeCredentials && (!!user || !!f.password || hasStoredCredentials);
+    if (f.tlsMode === 'none' && keepsLogin) e.tlsMode = 'Not with a login: the password would be sent in plaintext. Remove the login first, or pick another mode.';
+    return e;
+  };
   const weakWithPassword = (f.password || (hasStoredCredentials && !f.removeCredentials)) && (f.tlsMode === 'required' || f.tlsMode === 'starttls');
 
   return (
@@ -101,6 +119,11 @@ function RouteForm({ route, onSaved, onCancel, submitLabel }: { route?: RelayRou
       noValidate
       onSubmit={async (e) => {
         e.preventDefault();
+        const problems = checkLocally();
+        if (Object.keys(problems).length > 0) {
+          setLocal(problems);
+          return;
+        }
         const saved = await save.run();
         if (saved) {
           onSaved(saved);
@@ -110,7 +133,7 @@ function RouteForm({ route, onSaved, onCancel, submitLabel }: { route?: RelayRou
     >
       <div class="form-grid">
         <TextField label="Name" value={f.name} onInput={(v) => set('name', v)} error={errs.name} maxLength={64} hint="Shown on each delivery that used this route." autocomplete="off" />
-        <TextField label="Host" value={f.host} onInput={(v) => set('host', v)} error={errs.host} placeholder="smtp.relay.example" autocomplete="off" spellcheck={false} />
+        <TextField label="Host" value={f.host} onInput={(v) => set('host', v)} error={errs.host} placeholder="smtp.relay.example" hint="A host name, not an IP address: the engine looks the address up in DNS." autocomplete="off" spellcheck={false} />
         <TextField label="Port" value={f.port} onInput={(v) => set('port', v)} error={errs.port} inputMode="numeric" placeholder={f.tlsMode === 'implicit' ? '465' : '587'} autocomplete="off" />
         <Field label="TLS" error={errs.tlsMode} hint={mode?.hint}>
           {({ id, describedBy, invalid }) => (
@@ -158,7 +181,7 @@ function RouteForm({ route, onSaved, onCancel, submitLabel }: { route?: RelayRou
         <Notice tone="warn">The relay certificate is not checked in this mode, so a password could be handed to an impostor. Use verify or implicit.</Notice>
       )}
 
-      <Field label="Recipient domains" error={domainErrors(errs)} hint="One per line. A route is only used for the domains it lists: a name, *.suffix for a domain and everything below it, or * for every domain.">
+      <Field label="Recipient domains" error={domainErrors(errs)} hint="One per line. A route is only used for the domains it lists: a name, *.suffix for every subdomain at any depth (list the domain itself as well to cover it), or * for every domain.">
         {({ id, describedBy, invalid }) => (
           <textarea id={id} rows={4} value={f.domains} spellcheck={false} aria-describedby={describedBy} aria-invalid={invalid || undefined} onInput={(e) => set('domains', (e.currentTarget as HTMLTextAreaElement).value)} />
         )}
@@ -188,10 +211,16 @@ export default function RelayRoutes(_props: Record<string, unknown>) {
   const [deleting, setDeleting] = useState<RelayRoute | null>(null);
   const [message, setMessage] = useState('');
 
+  const [toggling, setToggling] = useState<string | null>(null);
   const toggle = useAction(async (r: RelayRoute) => {
-    await api.updateRelayRoute(r.id, { enabled: !r.enabled });
-    setMessage(`${r.name} is now ${r.enabled ? 'disabled' : 'enabled'}.`);
-    list.reload();
+    setToggling(r.id);
+    try {
+      await api.updateRelayRoute(r.id, { enabled: !r.enabled });
+      setMessage(`${r.name} is now ${r.enabled ? 'disabled' : 'enabled'}.`);
+      list.reload();
+    } finally {
+      setToggling(null);
+    }
   });
   const del = useAction(async (r: RelayRoute) => {
     await api.deleteRelayRoute(r.id);
@@ -269,7 +298,7 @@ export default function RelayRoutes(_props: Record<string, unknown>) {
                           <Button class="btn-small" onClick={() => setEditing(r)} aria-label={`Edit ${r.name}`}>
                             Edit
                           </Button>
-                          <Button class="btn-small" onClick={() => void toggle.run(r)} busy={toggle.busy} aria-label={`${r.enabled ? 'Disable' : 'Enable'} ${r.name}`}>
+                          <Button class="btn-small" onClick={() => void toggle.run(r)} busy={toggling === r.id} aria-label={`${r.enabled ? 'Disable' : 'Enable'} ${r.name}`}>
                             {r.enabled ? 'Disable' : 'Enable'}
                           </Button>
                           <Button class="btn-small" variant="danger" onClick={() => setDeleting(r)} aria-label={`Delete ${r.name}`}>
@@ -297,7 +326,10 @@ export default function RelayRoutes(_props: Record<string, unknown>) {
       </Card>
 
       <p class="muted small">
-        Changes reach the delivery engine of this server at once and other servers within 30 seconds. They apply to the next delivery attempt, including retries of mail already queued.
+        Changes reach the delivery engine of this server at once and other servers within 30 seconds. They apply to the next delivery attempt, including retries of mail already queued. Changing the host, port or TLS mode of a route with a login needs the password again.
+      </p>
+      <p class="muted small">
+        TLS policies, MTA-STS and DANE apply to direct delivery only. Mail sent through a relay is only as protected as the connection to the relay and the relay's own onward delivery. A relay host that resolves to a loopback or reserved address is not used unless the server runs with Delivery:AllowPrivateMxAddresses.
       </p>
 
       {editing && (

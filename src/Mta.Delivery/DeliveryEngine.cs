@@ -12,6 +12,7 @@ namespace Mta.Delivery;
 public sealed class DeliveryEngine
 {
     private const string Source = "delivery";
+    private static readonly TimeSpan RequestedRetryDelay = TimeSpan.FromSeconds(5);
 
     private readonly DeliveryProcessor _processor;
     private readonly DeliveryServices _s;
@@ -116,10 +117,15 @@ public sealed class DeliveryEngine
                 var now = _s.Clock.UtcNow;
                 try
                 {
-                    if (Interlocked.Exchange(ref _refreshRequested, 0) == 1 || now - lastRefresh >= _options.ConfigRefreshInterval)
+                    bool requested = Interlocked.Exchange(ref _refreshRequested, 0) == 1;
+                    if (requested || now - lastRefresh >= _options.ConfigRefreshInterval)
                     {
                         lastRefresh = now;
-                        await RefreshConfigAsync(stopping).ConfigureAwait(false);
+                        if (!await RefreshConfigAsync(stopping).ConfigureAwait(false) && requested)
+                        {
+                            // A requested reload that failed (the store was briefly unavailable) is tried again in 5 seconds instead of after a whole interval.
+                            lastRefresh = now - (_options.ConfigRefreshInterval > RequestedRetryDelay ? _options.ConfigRefreshInterval - RequestedRetryDelay : TimeSpan.Zero);
+                        }
                     }
 
                     if (!_paused)
@@ -227,7 +233,7 @@ public sealed class DeliveryEngine
         }
     }
 
-    private async Task RefreshConfigAsync(CancellationToken ct)
+    private async Task<bool> RefreshConfigAsync(CancellationToken ct)
     {
         try
         {
@@ -236,10 +242,12 @@ public sealed class DeliveryEngine
             var policies = await _s.Storage.Config.GetTlsPoliciesAsync(ct).ConfigureAwait(false);
             _s.TlsPolicies.Update(policies);
             Interlocked.Increment(ref _configRefreshCount);
+            return true;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _s.Log.Write(MtaLogLevel.Warning, Source, "could not reload routes and TLS policies; keeping the previous ones", ex);
+            return false;
         }
     }
 }

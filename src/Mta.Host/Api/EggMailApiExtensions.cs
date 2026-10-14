@@ -91,6 +91,7 @@ public static class EggMailApiExtensions
             Webhooks = config.Webhooks,
             LockedKeys = lockedKeys,
             MetricsEnabled = config.Observability.MetricsEndpointEnabled,
+            AllowPrivateMxAddresses = config.Delivery.AllowPrivateMxAddresses,
             MaxBodyBytes = api.MaxBodyBytes,
             MaxSendBodyBytes = api.MaxSendBodyBytes,
             MaxInFlightSendBytes = api.MaxInFlightSendBytes,

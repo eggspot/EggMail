@@ -38,6 +38,36 @@ public class OutboundTlsPolicyResolverTests
     private static TlsPolicyDecision Decide(TlsSecurityLevel level, MtaStsLookupResult? sts = null, DaneLookupResult? dane = null, OutboundTlsConfiguration? config = null) =>
         OutboundTlsPolicyResolver.Decide(Domain, Mx, config ?? new OutboundTlsConfiguration { Level = level }, sts ?? NoSts(), dane ?? NoDane());
 
+    // ---- pool identity: a pooled connection is only reused under the same security requirements ----
+
+    [Fact]
+    public void Decisions_with_different_requirements_have_different_pool_identities()
+    {
+        string may = Decide(TlsSecurityLevel.May).PoolIdentity;
+        string encrypt = Decide(TlsSecurityLevel.Encrypt).PoolIdentity;
+        string verify = Decide(TlsSecurityLevel.Verify).PoolIdentity;
+        string none = Decide(TlsSecurityLevel.None).PoolIdentity;
+        string enforce = Decide(TlsSecurityLevel.May, WithSts(Sts("enforce", Mx))).PoolIdentity;
+        string testing = Decide(TlsSecurityLevel.May, WithSts(Sts("testing", Mx))).PoolIdentity;
+        string dane = Decide(TlsSecurityLevel.May, dane: UsableDane()).PoolIdentity;
+        Assert.Equal(7, new[] { may, encrypt, verify, none, enforce, testing, dane }.Distinct().Count());
+        Assert.Equal(may, Decide(TlsSecurityLevel.May).PoolIdentity);
+    }
+
+    [Fact]
+    public void The_host_name_and_the_dane_records_are_part_of_the_pool_identity()
+    {
+        string a = OutboundTlsPolicyResolver.Decide(Domain, "mx1.example.com", new OutboundTlsConfiguration { Level = TlsSecurityLevel.Verify }, NoSts(), NoDane()).PoolIdentity;
+        string b = OutboundTlsPolicyResolver.Decide(Domain, "mx2.example.com", new OutboundTlsConfiguration { Level = TlsSecurityLevel.Verify }, NoSts(), NoDane()).PoolIdentity;
+        Assert.NotEqual(a, b);
+
+        DaneLookupResult Dane(byte first) => new(DaneStatus.Usable, "_25._tcp.mail.example.com", [new TlsaRecord("_25._tcp.mail.example.com", 60, 3, 1, 1, [first, .. new byte[31]])], [], [Mx], null, []);
+        string d1 = Decide(TlsSecurityLevel.May, dane: Dane(1)).PoolIdentity;
+        string d2 = Decide(TlsSecurityLevel.May, dane: Dane(2)).PoolIdentity;
+        Assert.NotEqual(d1, d2); // rotated TLSA data: connections validated against the old record are not reused
+        Assert.Equal(d1, Decide(TlsSecurityLevel.May, dane: Dane(1)).PoolIdentity);
+    }
+
     // ---- configured level only ----
 
     [Fact]
