@@ -17,6 +17,8 @@ const PAGES = [
   ['/admin/status', 'Server status'],
   ['/admin/certificates', 'Certificates'],
   ['/admin/storage', 'Storage switch'],
+  ['/admin/relay-routes', 'Relay routes'],
+  ['/admin/tls-policies', 'TLS policies'],
 ];
 
 test.describe('strict content security policy', () => {

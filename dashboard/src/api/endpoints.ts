@@ -14,6 +14,9 @@ import type {
   MessageSummary,
   Page,
   PreflightReport,
+  RelayRoute,
+  RelayRouteCreate,
+  RelayRoutePatch,
   RecentEvent,
   ResendResponse,
   SendMessageRequest,
@@ -28,6 +31,9 @@ import type {
   SwitchStartRequest,
   SwitchStatus,
   Tenant,
+  TlsPolicy,
+  TlsPolicyCreate,
+  TlsPolicyPatch,
   Webhook,
   WebhookAttempt,
 } from './types';
@@ -124,6 +130,16 @@ export const api = {
   acmeRenewals: async () => itemsOf(await http.get<AcmeRenewal[] | Page<AcmeRenewal>>('/api/v1/admin/certificates/acme')),
   runMaintenance: () => http.post<{ status?: string } | undefined>('/api/v1/admin/maintenance/run'),
   maintenance: () => http.get<MaintenanceState>('/api/v1/admin/maintenance'),
+
+  // ---- relay routes and per-domain TLS policies (docs/api.md) ----
+  relayRoutes: async () => itemsOf(await http.get<RelayRoute[] | Page<RelayRoute>>('/api/v1/admin/relay-routes')),
+  createRelayRoute: (body: RelayRouteCreate) => http.post<RelayRoute>('/api/v1/admin/relay-routes', body),
+  updateRelayRoute: (id: string, patch: RelayRoutePatch) => http.patch<RelayRoute>(`/api/v1/admin/relay-routes/${enc(id)}`, patch),
+  deleteRelayRoute: (id: string) => http.del<void>(`/api/v1/admin/relay-routes/${enc(id)}`),
+  tlsPolicies: async () => itemsOf(await http.get<TlsPolicy[] | Page<TlsPolicy>>('/api/v1/admin/tls-policies')),
+  createTlsPolicy: (body: TlsPolicyCreate) => http.post<TlsPolicy>('/api/v1/admin/tls-policies', body),
+  updateTlsPolicy: (id: string, patch: TlsPolicyPatch) => http.patch<TlsPolicy>(`/api/v1/admin/tls-policies/${enc(id)}`, patch),
+  deleteTlsPolicy: (id: string) => http.del<void>(`/api/v1/admin/tls-policies/${enc(id)}`),
 
   // ---- storage switch (never automatic) ----
   switchPreflight: (body: SwitchRequest) => http.post<PreflightReport>('/api/v1/admin/storage/switch/preflight', body),

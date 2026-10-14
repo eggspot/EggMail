@@ -24,6 +24,8 @@ const Tenants = lazy(() => import('./pages/admin/Tenants'));
 const Status = lazy(() => import('./pages/admin/Status'));
 const Certificates = lazy(() => import('./pages/admin/Certificates'));
 const StorageSwitch = lazy(() => import('./pages/admin/StorageSwitch'));
+const RelayRoutes = lazy(() => import('./pages/admin/RelayRoutes'));
+const TlsPolicies = lazy(() => import('./pages/admin/TlsPolicies'));
 
 function NotFound() {
   return (
@@ -90,6 +92,8 @@ const TenantsPage = adminRoute(Tenants);
 const StatusPage = adminRoute(Status);
 const CertificatesPage = adminRoute(Certificates);
 const StoragePage = adminRoute(StorageSwitch);
+const RelayRoutesPage = adminRoute(RelayRoutes);
+const TlsPoliciesPage = adminRoute(TlsPolicies);
 
 function Routes() {
   const { path } = useLocation();
@@ -114,6 +118,8 @@ function Routes() {
             <Route path="/admin/status" component={StatusPage} />
             <Route path="/admin/certificates" component={CertificatesPage} />
             <Route path="/admin/storage" component={StoragePage} />
+            <Route path="/admin/relay-routes" component={RelayRoutesPage} />
+            <Route path="/admin/tls-policies" component={TlsPoliciesPage} />
             <Route default component={NotFound} />
           </Router>
       </IsoErrorBoundary>
