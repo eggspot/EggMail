@@ -218,7 +218,8 @@ public sealed class MultiReplicaStateTests : IAsyncLifetime
 
         Assert.Equal(rateBefore / 2, B.DestinationThrottle.GetSnapshot(destination)!.MessagesPerMinute);
         Assert.Equal(CircuitState.Open, B.Health.GetSnapshot(mx).State);
-        Assert.Equal(A.Health.GetSnapshot(mx).RetryAt, B.Health.GetSnapshot(mx).RetryAt);
+        // The database keeps microseconds, the circuit breaker ticks of 100 ns.
+        Assert.InRange((A.Health.GetSnapshot(mx).RetryAt!.Value - B.Health.GetSnapshot(mx).RetryAt!.Value).Duration(), TimeSpan.Zero, TimeSpan.FromMilliseconds(1));
         Assert.Equal(RouteAdmission.Rejected, B.Health.TryAdmit(mx));
     }
 
