@@ -21,6 +21,11 @@ describe('mock webhooks', () => {
     const rotated = await mock.post(`/api/v1/webhooks/${created.data.id}/rotate-secret`);
     expect(rotated.data.secret).toMatch(/^whsec_/);
     expect(rotated.data.secret).not.toBe(created.data.secret);
+    expect(rotated.data.secretRotationPending).toBe(true);
+    // The previous secret is dropped once; a second attempt is a 404.
+    expect((await mock.del(`/api/v1/webhooks/${created.data.id}/previous-secret`)).status).toBe(204);
+    expect((await mock.get(`/api/v1/webhooks/${created.data.id}`)).data.secretRotationPending).toBe(false);
+    expect((await mock.del(`/api/v1/webhooks/${created.data.id}/previous-secret`)).status).toBe(404);
   });
 
   it('rejects http and internal addresses with a url field error', async () => {

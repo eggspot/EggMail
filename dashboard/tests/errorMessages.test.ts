@@ -48,6 +48,11 @@ describe('error messages', () => {
     expect(errorFootnote(new Error('x'))).toBe('');
   });
 
+  it('adds the detail of a not_ready answer, which is also how a step is refused on this instance', () => {
+    expect(errorFootnote(err(503, 'not_ready', { detail: "Finalize with 'mta migrate-storage finalize' instead." }))).toContain('mta migrate-storage finalize');
+    expect(errorFootnote(err(404, 'not_found', { detail: 'raw detail' }))).not.toContain('raw detail'); // friendly text stands alone for the others
+  });
+
   it('isCode narrows by code', () => {
     expect(isCode(err(410, 'body_expired'), 'body_expired', 'history_not_recorded')).toBe(true);
     expect(isCode(err(404, 'not_found'), 'body_expired')).toBe(false);

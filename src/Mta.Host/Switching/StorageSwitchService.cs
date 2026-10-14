@@ -168,6 +168,9 @@ public sealed class StorageSwitchService(
         public required IStorage Target { get; init; }
         public required StorageSwitchEngine Engine { get; init; }
         public required string BundleDirectory { get; init; }
+
+        /// <summary>The deployment supplies the storage pointer (command line, environment, mounted file): activation produces a cutover patch instead of rewriting the bootstrap file. Known from the start, so the dashboard can say so before activation.</summary>
+        public bool OrchestratorManaged { get; init; }
         public required CancellationTokenSource Cancel { get; init; }
         public Task Job { get; set; } = Task.CompletedTask;
         public string Phase { get; set; } = "starting";
@@ -235,6 +238,9 @@ public sealed class StorageSwitchService(
     private string BundleDirectoryFor(Guid id) =>
         Path.Combine(_options.BundleDirectory ?? Path.Combine(storageOptions.Backend == StorageBackend.Sqlite ? storageOptions.Sqlite.DataDirectory : Path.GetTempPath(), "switch"), id.ToString("N"));
 
+    private bool IsOrchestratorManaged(ResolvedSwitchTarget resolved) =>
+        activator is SwitchActivator a && SwitchActivator.PointerFor(resolved.Storage).Any(p => a.DeploymentSupplier(p.Key) is not null);
+
     public async ValueTask<SwitchPreflightReport> PreflightAsync(SwitchRequestModel request, CancellationToken cancellationToken)
     {
         if (storage.Transfer is null)
@@ -256,7 +262,7 @@ public sealed class StorageSwitchService(
                 new PreflightCountsModel(Sum(["delivery_queue"]), Sum(history), 0, Sum(stats)),
                 new PreflightEstimateModel(null, bytes, Unverified: true),
                 report.WillNotCarryOver,
-                OrchestratorManaged: activator is SwitchActivator a && SwitchActivator.PointerFor(resolved.Storage).Any(p => a.DeploymentSupplier(p.Key) is not null));
+                OrchestratorManaged: IsOrchestratorManaged(resolved));
         }
         finally
         {
@@ -279,7 +285,7 @@ public sealed class StorageSwitchService(
                 throw NotReady("This storage backend does not support switching yet.");
             }
 
-            (IStorage target, StorageSwitchEngine engine, _) = await OpenTargetAsync(request, cancellationToken).ConfigureAwait(false);
+            (IStorage target, StorageSwitchEngine engine, ResolvedSwitchTarget resolvedTarget) = await OpenTargetAsync(request, cancellationToken).ConfigureAwait(false);
             Guid id = Ids.New(clock.UtcNow);
             string bundle = BundleDirectoryFor(id);
             SwitchRequest engineRequest = EngineRequest(request, bundle, request.ExportPassphrase);
@@ -301,6 +307,7 @@ public sealed class StorageSwitchService(
                 Target = target,
                 Engine = engine,
                 BundleDirectory = bundle,
+                OrchestratorManaged = IsOrchestratorManaged(resolvedTarget),
                 Cancel = new CancellationTokenSource(),
                 Phase = engineRequest.Mode == SwitchMode.Quiesce ? "quiescing" : "draining",
             };
@@ -382,6 +389,14 @@ public sealed class StorageSwitchService(
 
     private async Task<SwitchStateRecord?> PersistedAsync(CancellationToken ct) => storage.Transfer is null ? null : await storage.Transfer.GetStateAsync(ct).ConfigureAwait(false);
 
+    /// <summary>After a restart only the persisted record is left. The API switches between backends, so the other side is the opposite backend.</summary>
+    private SwitchDirection DirectionOf(SwitchStateRecord r)
+    {
+        string current = ApiMap.Backend(storage.Backend);
+        string other = current == "postgres" ? "sqlite" : "postgres";
+        return r.Role == SwitchRoles.Target ? new SwitchDirection(other, current) : new SwitchDirection(current, other);
+    }
+
     private SwitchStatusReport FromRecord(SwitchStateRecord r) => new(
         (r.Role, r.State) switch
         {
@@ -396,6 +411,7 @@ public sealed class StorageSwitchService(
             _ => "none",
         },
         r.SwitchId,
+        Direction: DirectionOf(r),
         UpdatedAt: r.UpdatedAt,
         OrchestratorManaged: false);
 
@@ -417,7 +433,7 @@ public sealed class StorageSwitchService(
         _ = local;
         return new SwitchStatusReport(
             state, s.Id, new SwitchDirection(ApiMap.Backend(storage.Backend), s.To), s.Mode == SwitchMode.Quiesce ? "quiesce" : "drain", s.Include, progress, verify, patch,
-            s.Activation?.Kind == ActivationKind.CutoverPatch, s.StartedAt, s.UpdatedAt, s.Error);
+            s.OrchestratorManaged || s.Activation?.Kind == ActivationKind.CutoverPatch, s.StartedAt, s.UpdatedAt, s.Error);
     }
 
     private Session RequireIdle(string step)

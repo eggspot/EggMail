@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Mta.Core;
 using Mta.Host.Api;
@@ -241,5 +242,142 @@ public class ApiStorageSwitchTests : IAsyncLifetime
         ApiClient key = await _f.KeyClientAsync(ApiFixture.TenantAId);
         Reply send = await key.PostAsync("/api/v1/messages", new { from = "news@example.com", to = new[] { "someone@example.org" }, subject = "Hi", text = "Hello" });
         send.Problem(HttpStatusCode.ServiceUnavailable, "not_ready");
+    }
+}
+
+/// <summary>
+/// With the real <see cref="SwitchActivator"/> the status says from the start whether the deployment supplies the storage pointer, so the
+/// dashboard can tell the operator a cutover patch is coming instead of promising that the bootstrap file will be rewritten.
+/// </summary>
+[Collection("api")]
+public class ApiStorageSwitchManagedTests : IAsyncLifetime
+{
+    private const string Base = "/api/v1/admin/storage/switch";
+    private readonly string _root = Directory.CreateTempSubdirectory("eggmail-api-switch-managed-").FullName;
+    private ApiFixture _f = null!;
+    private ApiClient _admin = null!;
+
+    private sealed class Resolver : ISwitchTargetResolver
+    {
+        public ResolvedSwitchTarget Resolve(SwitchRequestModel request) =>
+            new(new StorageOptions { Sqlite = new SqliteOptions { DataDirectory = request.Target!.Path!, StatsFlushInterval = TimeSpan.Zero } }, new SecretsSection());
+
+        public ResolvedSwitchTarget? ResolveFormerSource(StorageBackend formerBackend) => null;
+    }
+
+    public async Task InitializeAsync()
+    {
+        string bootstrap = Path.Combine(_root, "bootstrap.json");
+        _f = await ApiFixture.StartAsync(new ApiFixtureOptions
+        {
+            ConfigureServices = s =>
+            {
+                s.AddSingleton<ISwitchTargetResolver, Resolver>();
+                // The storage pointer is given on the command line (an orchestrator), or only by the bootstrap file (nothing above it).
+                s.AddSingleton<ISwitchActivator>(_ => new SwitchActivator(ConfigLoader.Build(["--Storage:Backend=Sqlite", "--Sqlite:DataDirectory=" + _root], _root), bootstrap));
+                s.AddSingleton<IStorageSwitchService>(sp => new StorageSwitchService(
+                    sp.GetRequiredService<IStorage>(), sp.GetRequiredService<StorageOptions>(), sp.GetRequiredService<ISecretProtector>(), sp.GetRequiredService<IClock>(),
+                    sp.GetRequiredService<ISwitchTargetResolver>(), sp.GetRequiredService<ISwitchActivator>(), null,
+                    new StorageSwitchServiceOptions { BundleDirectory = Path.Combine(_root, "bundles"), SourceKeysProtectedAtRest = false, QuiesceTimeout = TimeSpan.FromMilliseconds(100), DrainPollInterval = TimeSpan.FromMilliseconds(50) }));
+            },
+        });
+        _admin = await _f.SignedInAsync("root");
+    }
+
+    public async Task DisposeAsync()
+    {
+        await _f.DisposeAsync();
+        try { Directory.Delete(_root, recursive: true); } catch (IOException) { }
+    }
+
+    [Fact]
+    public async Task The_status_says_before_activation_that_the_pointer_comes_from_the_deployment()
+    {
+        var body = new { to = "sqlite", target = new { path = Path.Combine(_root, "target") }, include = new[] { "history" }, mode = "drain", exportPassphrase = "correct horse battery", confirmation = "switch to sqlite" };
+        Reply start = await _admin.PostAsync(Base + "/start", body);
+        Assert.Equal(HttpStatusCode.Accepted, start.Status);
+        Assert.True(start["orchestratorManaged"].GetBoolean()); // from the first report on
+
+        DateTime deadline = DateTime.UtcNow.AddSeconds(180);
+        Reply status;
+        do
+        {
+            await Task.Delay(100);
+            status = await _admin.GetAsync(Base);
+        }
+        while (status.Str("state") is not ("verified" or "failed") && DateTime.UtcNow < deadline);
+
+        Assert.Equal("verified", status.Str("state"));
+        Assert.True(status["orchestratorManaged"].GetBoolean());
+        Assert.Equal(JsonValueKind.Null, status["cutoverPatch"].ValueKind); // the patch itself is produced by the activation
+    }
+}
+
+/// <summary>Nothing in the deployment supplies the storage pointer (only the bootstrap file would): the status says so from the start.</summary>
+[Collection("api")]
+public class ApiStorageSwitchBootstrapFileTests : IAsyncLifetime
+{
+    private const string Base = "/api/v1/admin/storage/switch";
+    private readonly string _root = Directory.CreateTempSubdirectory("eggmail-api-switch-bootstrap-").FullName;
+    private ApiFixture _f = null!;
+    private ApiClient _admin = null!;
+
+    private sealed class Resolver : ISwitchTargetResolver
+    {
+        public ResolvedSwitchTarget Resolve(SwitchRequestModel request) =>
+            new(new StorageOptions { Sqlite = new SqliteOptions { DataDirectory = request.Target!.Path!, StatsFlushInterval = TimeSpan.Zero } }, new SecretsSection());
+
+        public ResolvedSwitchTarget? ResolveFormerSource(StorageBackend formerBackend) => null;
+    }
+
+    public async Task InitializeAsync()
+    {
+        string bootstrap = Path.Combine(_root, "bootstrap.json");
+        _f = await ApiFixture.StartAsync(new ApiFixtureOptions
+        {
+            ConfigureServices = s =>
+            {
+                s.AddSingleton<ISwitchTargetResolver, Resolver>();
+                s.AddSingleton<ISwitchActivator>(_ => new SwitchActivator(ConfigLoader.Build([], _root), bootstrap)); // no command line, no environment pointer
+                s.AddSingleton<IStorageSwitchService>(sp => new StorageSwitchService(
+                    sp.GetRequiredService<IStorage>(), sp.GetRequiredService<StorageOptions>(), sp.GetRequiredService<ISecretProtector>(), sp.GetRequiredService<IClock>(),
+                    sp.GetRequiredService<ISwitchTargetResolver>(), sp.GetRequiredService<ISwitchActivator>(), null,
+                    new StorageSwitchServiceOptions { BundleDirectory = Path.Combine(_root, "bundles"), SourceKeysProtectedAtRest = false, QuiesceTimeout = TimeSpan.FromMilliseconds(100), DrainPollInterval = TimeSpan.FromMilliseconds(50) }));
+            },
+        });
+        _admin = await _f.SignedInAsync("root");
+    }
+
+    public async Task DisposeAsync()
+    {
+        await _f.DisposeAsync();
+        try { Directory.Delete(_root, recursive: true); } catch (IOException) { }
+    }
+
+    [Fact]
+    public async Task The_status_says_the_bootstrap_file_will_be_written_and_activation_reports_it()
+    {
+        var body = new { to = "sqlite", target = new { path = Path.Combine(_root, "target") }, include = new[] { "history" }, mode = "drain", exportPassphrase = "correct horse battery", confirmation = "switch to sqlite" };
+        Reply start = await _admin.PostAsync(Base + "/start", body);
+        Assert.Equal(HttpStatusCode.Accepted, start.Status);
+        Assert.False(start["orchestratorManaged"].GetBoolean());
+
+        DateTime deadline = DateTime.UtcNow.AddSeconds(180);
+        Reply status;
+        do
+        {
+            await Task.Delay(100);
+            status = await _admin.GetAsync(Base);
+        }
+        while (status.Str("state") is not ("verified" or "failed") && DateTime.UtcNow < deadline);
+        Assert.Equal("verified", status.Str("state"));
+        Assert.False(status["orchestratorManaged"].GetBoolean());
+
+        Assert.Equal("confirmed", (await _admin.PostAsync(Base + "/confirm")).Str("state"));
+        Reply activated = await _admin.PostAsync(Base + "/activate");
+        Assert.Equal("active", activated.Str("state"));
+        Assert.False(activated["orchestratorManaged"].GetBoolean());
+        Assert.Equal("bootstrap", activated["cutoverPatch"].GetProperty("kind").GetString());
+        Assert.True(File.Exists(Path.Combine(_root, "bootstrap.json")));
     }
 }

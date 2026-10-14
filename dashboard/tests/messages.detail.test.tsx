@@ -111,6 +111,33 @@ describe('Message detail', () => {
     expect((screen.getByRole('button', { name: 'Resend' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it('explains content that was never recorded (Content:Mode=None) instead of showing empty tabs, and disables resend', async () => {
+    mockFetch(base({ [`GET /api/v1/messages/${MSG_ID}`]: detail({ content: { state: 'not_recorded', attachments: [] } }) }));
+    renderWithApp(<MessageDetail id={MSG_ID} />);
+    expect(await screen.findByText('The content of this message was not recorded')).toBeTruthy();
+    expect(screen.queryByRole('tablist')).toBeNull();
+    expect((screen.getByRole('button', { name: 'Resend' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole('list', { name: 'Delivery events' })).toBeTruthy();
+  });
+
+  it('says when the stored content was cut short, and how many recipients are not listed', async () => {
+    mockFetch(base({ [`GET /api/v1/messages/${MSG_ID}`]: detail({ recipients: ['a@x.test', 'b@x.test'], recipientCount: 40, content: { state: 'available', text: 'start', attachments: [], truncated: true } }) }));
+    renderWithApp(<MessageDetail id={MSG_ID} />);
+    expect(await screen.findByText('The stored content is cut short')).toBeTruthy();
+    expect(screen.getByText(/a@x.test, b@x.test and 38 more/)).toBeTruthy();
+  });
+
+  it('handles 410 content_not_recorded from /content the same way', async () => {
+    mockFetch(
+      base({
+        [`GET /api/v1/messages/${MSG_ID}`]: detail({ content: { state: 'available', attachments: [] } }),
+        [`GET /api/v1/messages/${MSG_ID}/content`]: problem(410, 'content_not_recorded'),
+      }),
+    );
+    renderWithApp(<MessageDetail id={MSG_ID} />);
+    expect(await screen.findByText('The content of this message was not recorded')).toBeTruthy();
+  });
+
   it('falls back to /content when the detail has no body, and handles 410 body_expired from it', async () => {
     const noBody = detail({ content: { state: 'available', attachments: [] } });
     const m = mockFetch(base({ [`GET /api/v1/messages/${MSG_ID}`]: noBody, [`GET /api/v1/messages/${MSG_ID}/content`]: { text: 'Fetched text', html: '<p>x</p>' } }));

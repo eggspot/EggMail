@@ -73,6 +73,7 @@ describe('StorageSwitch resumes from the server state', () => {
     ['fenced', 'Progress', /source is fenced/i],
     ['exporting', 'Progress', /exporting/i],
     ['importing', 'Progress', /importing/i],
+    ['verifying', 'Progress', /verifying/i],
     ['failed', 'Progress', /the switch failed/i],
     ['verified', 'Verify and confirm', /confirm the verified target/i],
     ['confirmed', 'Activate', /activate the target/i],
@@ -308,6 +309,40 @@ describe('explicit actions only', () => {
     await render();
     fireEvent.click(await screen.findByRole('button', { name: /confirm the verified target/i }));
     expect(await screen.findByText(/not valid|switch is not in state/i)).toBeTruthy();
+  });
+});
+
+describe('what activation produced', () => {
+  it('shows the cutover patch of an orchestrator-managed deployment on the finalize step, because the server creates it on activation', async () => {
+    setup(status('active', { orchestratorManaged: true, cutoverPatch: { kind: 'patch', text: 'Storage__Backend=Postgres\n' } }));
+    await render();
+    expect(await screen.findByRole('heading', { name: '7. Finalize' })).toBeTruthy();
+    expect((await screen.findByTestId('cutover-patch')).textContent).toContain('Storage__Backend=Postgres');
+    expect(screen.getByRole('button', { name: /copy cutover patch/i })).toBeTruthy();
+  });
+
+  it('shows the note about the rewritten bootstrap file otherwise', async () => {
+    setup(status('active', { cutoverPatch: { kind: 'bootstrap', text: 'The bootstrap file /data/bootstrap.json now points at the postgres target.' } }));
+    await render();
+    expect((await screen.findByTestId('activation-note')).textContent).toContain('bootstrap file /data/bootstrap.json');
+    expect(screen.queryByTestId('cutover-patch')).toBeNull();
+  });
+
+  it('shows nothing extra when the server (after a restart) has no activation result', async () => {
+    setup(status('active', { cutoverPatch: null }));
+    await render();
+    await screen.findByRole('heading', { name: '7. Finalize' });
+    expect(screen.queryByTestId('cutover-patch')).toBeNull();
+    expect(screen.queryByTestId('activation-note')).toBeNull();
+  });
+
+  it('explains a refused finalize with the reason the server gives (not_ready is not always an outage)', async () => {
+    setup(status('active'), {
+      [`POST ${SW}/finalize`]: () => problem(503, 'not_ready', { detail: "The former source is not described (SwitchSource:*). Finalize with 'mta migrate-storage finalize' instead." }),
+    });
+    await render();
+    fireEvent.click(await screen.findByRole('button', { name: 'Finalize the switch' }));
+    expect(await screen.findByText(/mta migrate-storage finalize/)).toBeTruthy();
   });
 });
 

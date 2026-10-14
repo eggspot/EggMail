@@ -2,8 +2,8 @@ import { useState } from 'preact/hooks';
 import { api } from '../../api/endpoints';
 import { fieldErrors } from '../../api/errorMessages';
 import { CertificateExpiry } from '../../components/CertificateExpiry';
-import { Button, Card, Chip, EmptyState, ErrorNotice, Field, Loading, Notice, PageHeader, Tabs, TextField } from '../../components/ui';
-import { formatDateTime } from '../../lib/format';
+import { Button, Card, Chip, EmptyState, ErrorNotice, Field, Loading, Notice, PageHeader, StatusChip, Tabs, TextField } from '../../components/ui';
+import { formatDateTime, formatRelative } from '../../lib/format';
 import { useAction, useApi, useDocumentTitle } from '../../lib/hooks';
 
 const PEM_CERT = /-----BEGIN CERTIFICATE-----[\s\S]+-----END CERTIFICATE-----/;
@@ -159,13 +159,60 @@ function AcmeForm({ onDone }: { onDone: (msg: string) => void }) {
   );
 }
 
+/** Renewal state of certificates requested through ACME: what the renewal service last tried and what it will do next. */
+function AcmeRenewals({ reloadKey }: { reloadKey: number }) {
+  const { data, error, loading, reload } = useApi(() => api.acmeRenewals(), [reloadKey]);
+  return (
+    <Card title="ACME renewals">
+      {loading && !data && <Loading />}
+      {error !== undefined && <ErrorNotice error={error} onRetry={reload} />}
+      {data && data.length === 0 && <p class="muted">No certificate was requested through ACME yet.</p>}
+      {data && data.length > 0 && (
+        <div class="table-wrap">
+          <table>
+            <caption class="sr-only">ACME certificate renewals</caption>
+            <thead>
+              <tr>
+                <th scope="col">Certificate</th>
+                <th scope="col">Status</th>
+                <th scope="col">Last attempt</th>
+                <th scope="col">Next attempt</th>
+                <th scope="col" class="num">
+                  Failures
+                </th>
+                <th scope="col">Last error</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.map((r) => (
+                <tr key={r.certificateName}>
+                  <th scope="row">{r.certificateName}</th>
+                  <td>
+                    <StatusChip status={r.status} />
+                  </td>
+                  <td>{r.lastAttemptAt ? `${formatDateTime(r.lastAttemptAt)} (${formatRelative(r.lastAttemptAt)})` : 'Never'}</td>
+                  <td>{r.nextAttemptAt ? formatDateTime(r.nextAttemptAt) : '-'}</td>
+                  <td class="num">{r.failures ?? 0}</td>
+                  <td class="wrap">{r.lastError ?? '-'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 export default function Certificates(_props: Record<string, unknown>) {
   useDocumentTitle('Certificates');
   const list = useApi(() => api.certificates(), []);
   const [message, setMessage] = useState('');
+  const [renewalsKey, setRenewalsKey] = useState(0);
   const done = (msg: string) => {
     setMessage(msg);
     list.reload();
+    setRenewalsKey((k) => k + 1);
   };
   const certs = list.data ?? [];
   return (
@@ -218,6 +265,7 @@ export default function Certificates(_props: Record<string, unknown>) {
           )}
         </Card>
       )}
+      <AcmeRenewals reloadKey={renewalsKey} />
       <div class="grid">
         <UploadForm onDone={done} />
         <AcmeForm onDone={done} />

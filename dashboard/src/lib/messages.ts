@@ -200,6 +200,32 @@ export interface BucketPoint {
 
 const STEP = { hour: 3_600_000, day: 86_400_000 } as const;
 
+const COUNTERS = ['accepted', 'delivered', 'deferred', 'hardBounce', 'softBounce', 'expired', 'complained', 'rejected', 'suppressed'] as const;
+
+/**
+ * The server rolls hourly rows up into daily rows only for days that are over, so a daily query never contains today (and perhaps
+ * not yesterday). This adds the days that have no daily row yet by summing the given hourly rows per UTC day, series by series.
+ */
+export function mergeUnrolledDays(daily: StatsRow[], hourly: StatsRow[]): StatsRow[] {
+  const day = STEP.day;
+  const rolled = new Set(daily.map((r) => Math.floor(Date.parse(r.period) / day)));
+  const sums = new Map<string, StatsRow>();
+  for (const h of hourly) {
+    const t = Date.parse(h.period);
+    if (Number.isNaN(t)) continue;
+    const dayIndex = Math.floor(t / day);
+    if (rolled.has(dayIndex)) continue;
+    const key = `${dayIndex}|${h.sendingDomain ?? ''}|${h.recipientDomain ?? ''}`;
+    let row = sums.get(key);
+    if (!row) {
+      row = { period: new Date(dayIndex * day).toISOString(), sendingDomain: h.sendingDomain, recipientDomain: h.recipientDomain, accepted: 0, delivered: 0, deferred: 0, hardBounce: 0, softBounce: 0, expired: 0, complained: 0, rejected: 0, suppressed: 0 };
+      sums.set(key, row);
+    }
+    for (const c of COUNTERS) row[c] += h[c];
+  }
+  return [...daily, ...sums.values()];
+}
+
 /** Sums rows per period and fills periods without traffic with zeros so the time axis is continuous. */
 export function bucketRows(rows: StatsRow[], granularity: 'hour' | 'day', fromMs: number, toMs: number): BucketPoint[] {
   const step = STEP[granularity];
