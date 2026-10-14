@@ -9,7 +9,7 @@
 #   1. anonymous pull works (the package is public)
 #   2. when READYTORUN=true is in the environment (the release workflow sets it): the application assemblies in the image really are
 #      ReadyToRun images
-#   3. `--version` prints the expected version, `--healthcheck` fails cleanly when no server runs
+#   3. `--version` prints the expected version, `--healthcheck` fails cleanly when no server runs, `self-test` (Unicode/ICU) passes
 #   4. `mta admin create` works against a fresh /data volume owned by the non-root user
 #   5. the container becomes healthy by Docker's own HEALTHCHECK, and `docker exec /app/mta --healthcheck` succeeds
 #   6. the startup warning for synchronous=OFF is logged
@@ -79,6 +79,9 @@ docker run --rm "$ref" --healthcheck
 code=$?
 set -e
 [ "$code" -eq 1 ] || { echo "::error::--healthcheck without a server exited $code, expected 1"; exit 1; }
+
+echo "-- the image ships ICU: the Unicode self-test must pass (exit 71 means invariant globalization mode: IDN and normalization would be wrong; design section 10)"
+docker run --rm "$ref" self-test
 
 echo "-- is 'mta' on PATH of the chiseled image? (a compose healthcheck of [\"CMD\", \"mta\", ...] only works if it is)"
 docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$ref" | grep '^PATH=' || true
