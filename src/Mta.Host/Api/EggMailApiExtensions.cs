@@ -64,6 +64,7 @@ public static class EggMailApiExtensions
         services.TryAddSingleton<TenantSettingsApi>();
         services.TryAddSingleton<AdminApi>();
         services.TryAddSingleton<RoutingAdminApi>();
+        services.TryAddSingleton<UsersApi>();
         return services;
     }
 
@@ -137,6 +138,7 @@ public static class EggMailApiExtensions
         sp.GetRequiredService<TenantSettingsApi>().Map(api);
         sp.GetRequiredService<AdminApi>().Map(api);
         sp.GetRequiredService<RoutingAdminApi>().Map(api);
+        sp.GetRequiredService<UsersApi>().Map(api);
         api.MapFallback("{**path}", (HttpContext context) => new ProblemResult(ApiException.NotFound($"No endpoint {context.Request.Method} {context.Request.Path.Value}.")));
 
         capabilities.MapOperational(endpoints);

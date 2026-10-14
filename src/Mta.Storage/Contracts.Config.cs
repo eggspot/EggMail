@@ -85,6 +85,22 @@ public sealed record DashboardUser(Guid Id, string UserName, string PasswordHash
 /// </summary>
 public sealed record DashboardSession(byte[] IdHash, Guid UserId, string CsrfToken, DateTimeOffset CreatedAt, DateTimeOffset LastSeenAt, DateTimeOffset ExpiresAt);
 
+/// <summary>Outcome of a guarded dashboard user write (<see cref="IConfigStore.UpdateDashboardUserGuardedAsync"/>, <see cref="IConfigStore.DeleteDashboardUserGuardedAsync"/>).</summary>
+public enum DashboardUserWriteResult : byte
+{
+    /// <summary>The change was stored.</summary>
+    Applied = 0,
+
+    /// <summary>No user has that id.</summary>
+    NotFound,
+
+    /// <summary>Nothing was changed: it would have left the installation without an enabled administrator.</summary>
+    WouldRemoveLastAdmin,
+}
+
+/// <summary>The result of <see cref="IConfigStore.UpdateDashboardUserGuardedAsync"/>: what happened and, when <see cref="DashboardUserWriteResult.Applied"/>, the stored user.</summary>
+public readonly record struct DashboardUserUpdate(DashboardUserWriteResult Result, DashboardUser? User);
+
 public sealed record SettingRecord(string Key, Guid? TenantId, string ValueJson, DateTimeOffset UpdatedAt);
 
 public enum TlsLevel : byte
@@ -226,6 +242,31 @@ public interface IConfigStore : IRuntimeStateStore
 
     /// <summary>Deletes a user and all their sessions.</summary>
     ValueTask<bool> DeleteDashboardUserAsync(Guid id, CancellationToken ct);
+
+    /// <summary>
+    /// Applies <paramref name="change"/> to the stored user <paramref name="id"/> (read, change and write are one atomic write, so a concurrent
+    /// disable cannot be overwritten by a password change made from an older copy; <paramref name="change"/> must be a pure function of its
+    /// argument, it may run more than once, and it must keep the user name and id) with the last-administrator check: when the user is currently an
+    /// enabled administrator, the changed user is not, and no other enabled administrator exists, nothing changes and
+    /// <see cref="DashboardUserWriteResult.WouldRemoveLastAdmin"/> is returned. Two concurrent calls cannot both succeed, on any backend.
+    /// With <paramref name="endSessions"/> the user's sessions are deleted in the same write, except the one whose digest is
+    /// <paramref name="keepSessionHash"/>. An unknown id is <see cref="DashboardUserWriteResult.NotFound"/> (nothing is created).
+    /// </summary>
+    ValueTask<DashboardUserUpdate> UpdateDashboardUserGuardedAsync(Guid id, Func<DashboardUser, DashboardUser> change, bool endSessions, byte[]? keepSessionHash, CancellationToken ct);
+
+    /// <summary>
+    /// Deletes a user and the user's sessions with the same last-administrator check as <see cref="UpdateDashboardUserGuardedAsync"/>
+    /// (deleting the only enabled administrator changes nothing and returns <see cref="DashboardUserWriteResult.WouldRemoveLastAdmin"/>).
+    /// </summary>
+    ValueTask<DashboardUserWriteResult> DeleteDashboardUserGuardedAsync(Guid id, CancellationToken ct);
+
+    /// <summary>
+    /// Adds <paramref name="session"/> only if the stored user still is the one a sign-in verified: it exists, is enabled and still has
+    /// <paramref name="verified"/>'s <see cref="DashboardUser.PasswordHash"/>, <see cref="DashboardUser.Role"/> and <see cref="DashboardUser.TenantId"/>
+    /// (check and insert are one write). False, and nothing added, when a password reset, a role or tenant change, a disable or a delete
+    /// happened between the verification and now, so a sign-in cannot outlive the change that was meant to end the user's access.
+    /// </summary>
+    ValueTask<bool> TryAddDashboardSessionForVerifiedUserAsync(DashboardSession session, DashboardUser verified, CancellationToken ct);
 
     ValueTask AddDashboardSessionAsync(DashboardSession session, CancellationToken ct);
     ValueTask<DashboardSession?> FindDashboardSessionAsync(byte[] idHash, CancellationToken ct);

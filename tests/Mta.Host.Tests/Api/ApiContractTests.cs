@@ -104,7 +104,7 @@ public class ApiContractTests : IAsyncLifetime
     [Fact]
     public void The_dashboard_types_were_found_and_parsed()
     {
-        foreach (string name in new[] { "Me", "Capabilities", "MessageSummary", "MessageDetail", "DeliveryEvent", "Domain", "DnsRecord", "Webhook", "WebhookAttempt", "ApiKey", "SmtpCredential", "StatsRow", "SettingItem", "Tenant", "CertificateInfo", "AdminStatus", "PreflightReport", "SwitchStatus" })
+        foreach (string name in new[] { "Me", "Capabilities", "MessageSummary", "MessageDetail", "DeliveryEvent", "Domain", "DnsRecord", "Webhook", "WebhookAttempt", "ApiKey", "SmtpCredential", "StatsRow", "SettingItem", "Tenant", "DashboardUser", "CertificateInfo", "AdminStatus", "PreflightReport", "SwitchStatus" })
         {
             Assert.True(_ts.Has(name), name + " is missing from types.ts (" + _ts + ")");
         }
@@ -190,6 +190,14 @@ public class ApiContractTests : IAsyncLifetime
         Conforms(await _admin.GetAsync("/api/v1/admin/tenants"), "Tenant[]");
         Conforms(await _admin.PostAsync("/api/v1/admin/tenants", new { name = "Initech" }), "Tenant", HttpStatusCode.Created);
         Conforms(await _admin.PatchAsync("/api/v1/admin/tenants/" + ApiFixture.TenantBId.ToString("N"), new { status = "suspended" }), "Tenant");
+        Conforms(await _admin.GetAsync("/api/v1/admin/users"), "DashboardUser[]");
+        Reply created = await _admin.PostAsync("/api/v1/admin/users", new { userName = "contract.user", role = "tenant", tenantId = ApiFixture.TenantAId.ToString("N") });
+        Conforms(created, "DashboardUser", HttpStatusCode.Created);
+        string userId = created.Str("id");
+        Conforms(await _admin.PostAsync("/api/v1/admin/users", new { userName = "contract.admin", role = "admin", password = "a long enough password" }), "DashboardUser", HttpStatusCode.Created);
+        Conforms(await _admin.PatchAsync("/api/v1/admin/users/" + userId, new { enabled = false }), "DashboardUser");
+        Conforms(await _admin.PostAsync($"/api/v1/admin/users/{userId}/reset-password", new { }), "DashboardUser");
+        Assert.Equal(HttpStatusCode.NoContent, (await _tenant.PostAsync("/api/v1/me/password", new { currentPassword = ApiFixture.Password, newPassword = "a brand new password" })).Status);
         Conforms(await _admin.GetAsync("/api/v1/admin/status"), "AdminStatus");
         Conforms(await _admin.GetAsync("/api/v1/admin/settings"), "SettingsResponse");
         Conforms(await _admin.PutAsync("/api/v1/admin/settings", new { values = new Dictionary<string, object> { ["Retention:MetadataDays"] = 20 } }), "SettingsResponse");
@@ -289,6 +297,7 @@ public class ApiContractTests : IAsyncLifetime
 
     [Theory]
     [InlineData("SendMessageRequest", typeof(SendRequest))]
+    [InlineData("CreateUserRequest", typeof(CreateUserRequest))]
     [InlineData("SwitchRequest", typeof(SwitchRequestModel))]
     [InlineData("SwitchStartRequest", typeof(SwitchStartModel))]
     [InlineData("SwitchTargetConfig", typeof(SwitchTargetModel))]

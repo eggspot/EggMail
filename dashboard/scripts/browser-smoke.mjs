@@ -42,7 +42,7 @@ await evalJs("document.querySelector('form button[type=submit], form button')?.c
 await sleep(1500);
 console.log('after login path:', await evalJs('location.pathname'), '| heading:', await evalJs("document.querySelector('h1')?.textContent"));
 await shot('02-overview');
-const routes = ['/admin/tenants', '/admin/status', '/admin/certificates', '/admin/storage', '/messages', '/domains', '/webhooks', '/suppressions', '/credentials', '/statistics', '/settings', '/send'];
+const routes = ['/admin/tenants', '/admin/users', '/account', '/admin/status', '/admin/certificates', '/admin/storage', '/messages', '/domains', '/webhooks', '/suppressions', '/credentials', '/statistics', '/settings', '/send'];
 for (const r of routes) {
   await go(r);
   const h1 = await evalJs("document.querySelector('h1')?.textContent");
