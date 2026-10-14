@@ -1,0 +1,204 @@
+name: fuzz
+
+# Coverage-guided fuzzing of the hand-written parsers (docs/security.md, "Fuzzing").
+#
+# The harness (fuzz/Mta.Fuzz.Harness) is published, the protocol assemblies in its output are instrumented with SharpFuzz, and each
+# target is fuzzed by libFuzzer through libfuzzer-dotnet for a fixed time budget. Crashes, hangs and invariant violations are uploaded
+# as artifacts and fail the run. The deterministic slice of the same fuzzers runs in every `dotnet test` (tests/Mta.Fuzz.Tests); this
+# workflow is the long, expensive search, so it is NOT a pull request check: it runs weekly and on demand.
+#
+# Billing: one job on the cheapest runner, tight timeout, weekly schedule only (about 11 targets x 5 minutes = 55 runner minutes a week
+# at the default; use the seconds_per_target input for a shorter manual run).
+
+on:
+  schedule:
+    - cron: '23 3 * * 0'
+  workflow_dispatch:
+    inputs:
+      seconds_per_target:
+        description: Fuzzing time per target in seconds
+        required: false
+        default: '300'
+      targets:
+        description: Comma separated target names, or "all" (see `Mta.Fuzz.Harness list`)
+        required: false
+        default: all
+      selftest:
+        description: Fuzz a target with a planted defect instead (crash or hang), to prove that a finding fails the run. Leave as none.
+        required: false
+        default: none
+        type: choice
+        options: [none, crash, hang]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz
+  cancel-in-progress: false
+
+env:
+  DOTNET_NOLOGO: 1
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  # Pinned tooling. SHARPFUZZ_VERSION is the version of both the SharpFuzz package (Directory.Packages.props) and the instrumenter tool.
+  SHARPFUZZ_VERSION: '2.3.0'
+  LIBFUZZER_DOTNET_TAG: v2025.05.02.0904
+  LIBFUZZER_DOTNET_SHA256: c2c2a90d94c409a4af339a0d4f244e0442c5a5d249be0f1252ba07871f285958
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    # Build and instrumentation take a few minutes; the rest is the fuzzing budget (11 targets x 300 s by default) plus replay of findings.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('Directory.Packages.props', 'global.json') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Install the SharpFuzz instrumenter and libfuzzer-dotnet (pinned, checksum verified)
+        run: |
+          dotnet tool install --global SharpFuzz.CommandLine --version "$SHARPFUZZ_VERSION"
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+          mkdir -p "$RUNNER_TEMP/tools"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/tools/libfuzzer-dotnet" \
+            "https://github.com/Metalnem/libfuzzer-dotnet/releases/download/${LIBFUZZER_DOTNET_TAG}/libfuzzer-dotnet-ubuntu"
+          echo "${LIBFUZZER_DOTNET_SHA256}  $RUNNER_TEMP/tools/libfuzzer-dotnet" | sha256sum --check
+          chmod +x "$RUNNER_TEMP/tools/libfuzzer-dotnet"
+
+      - name: Publish the harness and instrument the protocol assemblies
+        run: |
+          dotnet publish fuzz/Mta.Fuzz.Harness -c Release -o "$RUNNER_TEMP/fuzz"
+          for dll in Mta.Core Mta.Dns Mta.Mime Mta.Dkim Mta.Auth Mta.Dsn Mta.Tls Mta.Smtp.Protocol Mta.Smtp.Server; do
+            echo "instrumenting $dll"
+            sharpfuzz "$RUNNER_TEMP/fuzz/$dll.dll"
+          done
+          harness="$RUNNER_TEMP/fuzz/Mta.Fuzz.Harness.dll"
+          dotnet "$harness" list
+          dotnet "$harness" export-dict "$RUNNER_TEMP/dict"
+          # The instrumented build must still run and the checked-in corpus and regression inputs must still pass before any time is spent fuzzing.
+          for t in $(dotnet "$harness" list | awk '{print $1}'); do
+            paths="fuzz/corpus/$t"
+            if [ -d "fuzz/regressions/$t" ]; then paths="$paths fuzz/regressions/$t"; fi
+            dotnet "$harness" replay "$t" $paths
+          done
+
+      - name: Fuzz
+        id: fuzz
+        env:
+          SECONDS_PER_TARGET: ${{ github.event.inputs.seconds_per_target || '300' }}
+          TARGETS: ${{ github.event.inputs.targets || 'all' }}
+          SELFTEST: ${{ github.event.inputs.selftest || 'none' }}
+        run: |
+          set -u
+          harness="$RUNNER_TEMP/fuzz/Mta.Fuzz.Harness.dll"
+          if [ "$SELFTEST" != "none" ]; then
+            # Pipeline self-test: a target with a planted defect (see SelfTestTarget.cs). The run is expected to FAIL.
+            export EGGMAIL_FUZZ_SELFTEST="$SELFTEST"
+            TARGETS=selftest
+          fi
+          if [ "$TARGETS" = "all" ]; then
+            targets=$(dotnet "$harness" list | awk '{print $1}')
+          else
+            targets=$(echo "$TARGETS" | tr ',' ' ')
+          fi
+          mkdir -p findings corpus-out
+          : > findings/failed-targets.txt
+          {
+            echo "### Fuzzing summary"
+            echo
+            echo "| target | seconds | result | executions |"
+            echo "|---|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          for t in $targets; do
+            echo "::group::fuzz $t"
+            work="$RUNNER_TEMP/work/$t"
+            mkdir -p "$work/corpus" "findings/$t"
+            cp -r "fuzz/corpus/$t/." "$work/corpus/" 2>/dev/null || true
+            extra=""
+            if [ -d "fuzz/regressions/$t" ]; then extra="fuzz/regressions/$t"; fi
+            dict=""
+            if [ -f "$RUNNER_TEMP/dict/$t.dict" ]; then dict="-dict=$RUNNER_TEMP/dict/$t.dict"; fi
+
+            # DOTNET_GCHeapHardLimit turns runaway allocation in the fuzzed process into an OutOfMemoryException (a finding) instead of
+            # an OOM kill of the runner. EGGMAIL_FUZZ_LASTINPUT keeps the current input in a file for crashes that leave no exception.
+            # The output goes to a file, not through a pipe: after a libFuzzer timeout the fuzzed dotnet process is orphaned and keeps
+            # its inherited stdout open, which would block a `| tee` forever (seen in the first hang self-test). The orphan is killed
+            # afterwards, and an outer timeout stops a target that does not end by itself.
+            set +e
+            EGGMAIL_FUZZ_TARGET="$t" \
+            EGGMAIL_FUZZ_LASTINPUT="$PWD/findings/$t/last-input" \
+            DOTNET_GCHeapHardLimit=0x80000000 \
+              timeout --kill-after=15 $((SECONDS_PER_TARGET + 180)) \
+              "$RUNNER_TEMP/tools/libfuzzer-dotnet" \
+                -max_total_time="$SECONDS_PER_TARGET" -timeout=30 -max_len=65536 -print_final_stats=1 \
+                $dict \
+                -artifact_prefix="findings/$t/" \
+                --target_path=dotnet --target_arg="$harness" \
+                "$work/corpus" $extra > "findings/$t/libfuzzer.log" 2>&1
+            status=$?
+            pkill -f "Mta.Fuzz.Harness.dll" || true
+            set -e
+            tail -n 200 "findings/$t/libfuzzer.log"
+
+            execs=$(grep -oP 'stat::number_of_executed_units:\s*\K\d+' "findings/$t/libfuzzer.log" | tail -1 || true)
+            found=$(ls "findings/$t" | grep -cE '^(crash|timeout|oom|leak)-' || true)
+            if [ "$status" -ne 0 ] || [ "$found" -gt 0 ]; then
+              echo "$t (exit status $status, $found artifacts)" >> findings/failed-targets.txt
+              result="FINDING"
+              # Reproduce each finding once with the plain harness so the stack trace is in the log.
+              for f in findings/$t/crash-* findings/$t/timeout-* findings/$t/oom-*; do
+                [ -f "$f" ] && { echo "--- replay $f"; timeout 20 dotnet "$harness" replay "$t" "$f" || true; }
+              done
+              if [ "$found" -eq 0 ] && [ -s "findings/$t/last-input" ]; then
+                echo "no artifact was written (the fuzzed process died); the last input is findings/$t/last-input"
+                timeout 20 dotnet "$harness" replay "$t" "findings/$t/last-input" || true
+              fi
+            else
+              result="clean"
+              rm -f "findings/$t/last-input"
+            fi
+            echo "| $t | $SECONDS_PER_TARGET | $result | ${execs:-?} |" >> "$GITHUB_STEP_SUMMARY"
+            mkdir -p "corpus-out/$t"
+            cp -r "$work/corpus/." "corpus-out/$t/" 2>/dev/null || true
+            echo "::endgroup::"
+          done
+
+          if [ -s findings/failed-targets.txt ]; then
+            echo "Findings in:"; cat findings/failed-targets.txt
+            echo "has_findings=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload findings (crash, timeout and oom inputs, logs)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-findings
+          path: findings
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Upload the grown corpus (review it and add interesting inputs to fuzz/corpus)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus
+          path: corpus-out
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Fail on findings
+        if: steps.fuzz.outputs.has_findings == 'true'
+        run: |
+          echo "::error::The fuzzers found crashes, hangs or invariant violations. Download the fuzz-findings artifact, add each input to fuzz/regressions/<target>/ with a fix and a unit test."
+          exit 1

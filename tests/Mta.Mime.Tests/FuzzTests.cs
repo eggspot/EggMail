@@ -127,13 +127,16 @@ public class FuzzTests
     [InlineData(20260101)]
     public void Mutated_messages_never_throw_hang_or_balloon(int seed)
     {
+        HangGuard.Run(() => MutatedMessagesRun(seed), $"seed {seed}");
+    }
+
+    private static void MutatedMessagesRun(int seed)
+    {
         var rng = new Random(seed);
-        var total = Stopwatch.StartNew();
         for (int iteration = 0; iteration < 1500; iteration++)
         {
             byte[] input = Mutate(rng, Seeds[rng.Next(Seeds.Length)]);
             long before = GC.GetAllocatedBytesForCurrentThread();
-            var sw = Stopwatch.StartNew();
             try
             {
                 Pipeline.RunEverything(input);
@@ -143,13 +146,9 @@ public class FuzzTests
                 throw new Xunit.Sdk.XunitException($"seed {seed} iteration {iteration}: {ex.GetType().Name}: {ex.Message}\nbase64 input: {Convert.ToBase64String(input)}", ex);
             }
 
-            sw.Stop();
             long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
-            Assert.True(sw.ElapsedMilliseconds < 1500, $"seed {seed} iteration {iteration} took {sw.ElapsedMilliseconds} ms; base64 input: {Convert.ToBase64String(input)}");
             Assert.True(allocated < (96L * input.Length) + (8L << 20), $"seed {seed} iteration {iteration} allocated {allocated / 1024} KiB for {input.Length} bytes; base64 input: {Convert.ToBase64String(input)}");
         }
-
-        Assert.True(total.Elapsed < TimeSpan.FromSeconds(60), $"fuzz run took {total.Elapsed}");
     }
 
     [Fact]

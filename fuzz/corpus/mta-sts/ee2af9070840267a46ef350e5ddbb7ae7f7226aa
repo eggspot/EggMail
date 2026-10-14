@@ -1,0 +1,7 @@
+version: STSv1
+mode: enforce
+mx: *.*.example.com
+mx: 
+mx: -bad-.example
+max_age: 99999999999
+foo: bar

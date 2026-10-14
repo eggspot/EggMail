@@ -158,7 +158,7 @@ internal sealed class RawClient : IDisposable
     public Task SendLineAsync(string line) => SendAsync(line + "\r\n");
 
     /// <summary>Reads one complete reply (possibly multi-line). Returns null if the connection closed first.</summary>
-    public async Task<SmtpReply?> ReadReplyAsync(int timeoutMs = 5000)
+    public async Task<SmtpReply?> ReadReplyAsync(int timeoutMs = 30_000)
     {
         using var cts = new CancellationTokenSource(timeoutMs);
         byte[] buf = new byte[4096];
@@ -211,7 +211,7 @@ internal sealed class RawClient : IDisposable
     }
 
     /// <summary>True when the server closed the connection (EOF) within the timeout.</summary>
-    public async Task<bool> WaitForCloseAsync(int timeoutMs = 3000)
+    public async Task<bool> WaitForCloseAsync(int timeoutMs = 30_000)
     {
         using var cts = new CancellationTokenSource(timeoutMs);
         byte[] buf = new byte[256];

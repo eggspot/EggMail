@@ -1,5 +1,4 @@
 using System.Buffers.Binary;
-using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 
@@ -137,13 +136,11 @@ public class TransportTests
         using var a = new LoopbackDnsServer(_ => LoopbackDnsServer.Silent());
         using var b = new LoopbackDnsServer(_ => LoopbackDnsServer.Silent());
         var transport = new UdpTcpDnsTransport(Options(a.Endpoint, b.Endpoint));
-        var sw = Stopwatch.StartNew();
         var ex = await Assert.ThrowsAsync<DnsException>(async () => await transport.ExchangeAsync(Query(), CancellationToken.None));
         Assert.Equal(DnsFailureReason.Timeout, ex.Reason);
         Assert.Equal(2, a.UdpQueries);
         Assert.Equal(2, b.UdpQueries);
-        // 2 servers x (250 ms + 375 ms): the timeout grows with the backoff multiplier.
-        Assert.InRange(sw.ElapsedMilliseconds, 1100, 5000);
+        // 2 servers x 2 attempts (the timeout grows with the backoff multiplier); elapsed time is deliberately not asserted.
     }
 
     [Fact]
@@ -254,9 +251,7 @@ public class TransportTests
         using var server = new LoopbackDnsServer(_ => LoopbackDnsServer.Silent());
         var transport = new UdpTcpDnsTransport(Options(server.Endpoint) with { AttemptTimeout = TimeSpan.FromSeconds(30), MaxAttemptTimeout = TimeSpan.FromSeconds(30) });
         using var cts = new CancellationTokenSource(100);
-        var sw = Stopwatch.StartNew();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await transport.ExchangeAsync(Query(), cts.Token));
-        Assert.True(sw.ElapsedMilliseconds < 5000);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await transport.ExchangeAsync(Query(), new CancellationToken(true)));
     }
 

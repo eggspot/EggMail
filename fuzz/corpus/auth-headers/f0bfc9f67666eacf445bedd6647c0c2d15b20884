@@ -1,0 +1,4 @@
+ARC-Seal: i=2; a=rsa-sha256; cv=pass; d=a; s=b; b=c
+ARC-Seal: i=1; cv=none; d=a; s=b; b=c
+ARC-Seal: i=0; i=99
+
