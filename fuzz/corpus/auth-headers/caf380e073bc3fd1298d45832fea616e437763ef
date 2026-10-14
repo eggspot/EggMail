@@ -1,0 +1,1 @@
+mx.example.com 1; dkim=pass (2048-bit key) header.d=example.com header.s=sel header.b=AbCd; spf=pass smtp.mailfrom=a@example.com; dmarc=pass header.from=example.com

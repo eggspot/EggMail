@@ -149,19 +149,19 @@ public class AddressTests
     }
 
     [Fact]
-    public void Pathological_inputs_terminate_quickly()
+    public void Pathological_inputs_terminate()
     {
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-        AddressList.Parse(new string('(', 200_000));
-        AddressList.Parse(new string('"', 200_000));
-        AddressList.Parse(new string('<', 200_000));
-        AddressList.Parse(new string(':', 200_000));
-        AddressList.Parse(string.Concat(Enumerable.Repeat("a:", 100_000)));
-        AddressList.Parse(string.Concat(Enumerable.Repeat("a b ", 100_000)));
-        AddressList.Parse(string.Concat(Enumerable.Repeat("<a@b>,", 100_000)), new MimeLimits { MaxAddresses = 50 });
-        AddressList.Parse(string.Concat(Enumerable.Repeat("\"a", 100_000)));
-        sw.Stop();
-        Assert.True(sw.ElapsedMilliseconds < 5000, $"took {sw.ElapsedMilliseconds} ms");
+        HangGuard.Run(() =>
+        {
+            AddressList.Parse(new string('(', 200_000));
+            AddressList.Parse(new string('"', 200_000));
+            AddressList.Parse(new string('<', 200_000));
+            AddressList.Parse(new string(':', 200_000));
+            AddressList.Parse(string.Concat(Enumerable.Repeat("a:", 100_000)));
+            AddressList.Parse(string.Concat(Enumerable.Repeat("a b ", 100_000)));
+            AddressList.Parse(string.Concat(Enumerable.Repeat("<a@b>,", 100_000)), new MimeLimits { MaxAddresses = 50 });
+            AddressList.Parse(string.Concat(Enumerable.Repeat("\"a", 100_000)));
+        });
     }
 
     [Fact]

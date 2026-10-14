@@ -1,0 +1,2 @@
+MAIL FROM:<alice@example.com> SIZE=12345 BODY=8BITMIME SMTPUTF8 AUTH=<>
+RCPT TO:<bob@example.net> NOTIFY=SUCCESS,FAILURE ORCPT=rfc822;bob@example.net

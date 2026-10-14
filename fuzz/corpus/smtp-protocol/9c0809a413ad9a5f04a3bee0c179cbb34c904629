@@ -1,0 +1,1 @@
+MAIL FROM:<> RET=HDRS ENVID=abc+3Dxyz

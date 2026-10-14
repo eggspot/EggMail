@@ -471,9 +471,12 @@ public static class SpfDomainName
             d = d[..^1];
         }
 
-        while (d.Length > MaxLength)
+        if (d.Length > MaxLength)
         {
-            int dot = d.IndexOf('.');
+            // Drop leftmost labels until at most 253 characters remain: the first '.' at or after index (length - 254) is the cut.
+            // One search and one copy; repeatedly slicing the string made this quadratic for a long input made of many short labels
+            // (found by the fuzzer: 78 MB allocated for a 16 KB input).
+            int dot = d.IndexOf('.', d.Length - MaxLength - 1);
             if (dot < 0)
             {
                 return false;

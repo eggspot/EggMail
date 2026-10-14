@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Fuzz targets for the hand-written protocol parsers. This project REFERENCES the protocol assemblies; none of them reference it
+    (the package-free guard in Mta.ArchitectureTests also checks that no project under src/ points into fuzz/).
+    It is itself BCL-only: the coverage-guided driver (SharpFuzz, libFuzzer) lives in Mta.Fuzz.Harness, the deterministic
+    mutation regression in tests/Mta.Fuzz.Tests.
+  -->
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>Mta.Fuzz</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Mta.Core\Mta.Core.csproj" />
+    <ProjectReference Include="..\..\src\Mta.Dns\Mta.Dns.csproj" />
+    <ProjectReference Include="..\..\src\Mta.Mime\Mta.Mime.csproj" />
+    <ProjectReference Include="..\..\src\Mta.Dkim\Mta.Dkim.csproj" />
+    <ProjectReference Include="..\..\src\Mta.Auth\Mta.Auth.csproj" />
+    <ProjectReference Include="..\..\src\Mta.Dsn\Mta.Dsn.csproj" />
+    <ProjectReference Include="..\..\src\Mta.Tls\Mta.Tls.csproj" />
+    <ProjectReference Include="..\..\src\Mta.Smtp.Protocol\Mta.Smtp.Protocol.csproj" />
+    <ProjectReference Include="..\..\src\Mta.Smtp.Server\Mta.Smtp.Server.csproj" />
+  </ItemGroup>
+</Project>
