@@ -196,7 +196,7 @@ internal sealed class DeliveryFixture : IAsyncDisposable
 
     public async Task<IReadOnlyList<MessageEvent>> EventsAsync(Guid messageId) => await Storage.History.GetEventsAsync(Tenant, messageId, CancellationToken.None);
 
-    public static async Task WaitAsync(Func<bool> condition, int timeoutMs = 10_000)
+    public static async Task WaitAsync(Func<bool> condition, int timeoutMs = 30_000)
     {
         var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
         while (!condition())

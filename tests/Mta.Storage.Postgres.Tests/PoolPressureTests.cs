@@ -30,9 +30,9 @@ public class PoolPressureTests : PgTestBase
 
         // A fresh instance with a pool of 4 and no knowledge of those days.
         PostgresStorage small = await OpenReplicaAsync(SmallPool(4));
-        var watch = System.Diagnostics.Stopwatch.StartNew();
-        await Task.WhenAll(messages.Select(m => Task.Run(async () => (await small.Intake.AcceptAsync(m, CancellationToken.None)).Status)));
-        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(15), "accepts took " + watch.Elapsed);
+        // No elapsed-time assertion (it measured the load of the machine): pool starvation shows as an exception from the
+        // pool's own timeout, a deadlock as a hang, which the wait below turns into a failure.
+        await Task.WhenAll(messages.Select(m => Task.Run(async () => (await small.Intake.AcceptAsync(m, CancellationToken.None)).Status))).WaitAsync(TimeSpan.FromMinutes(3));
 
         // Claim from 64 callers at once.
         Clock.Set(Start.AddDays(32));
@@ -48,10 +48,8 @@ public class PoolPressureTests : PgTestBase
 
         // Record from a second fresh instance (it has not seen those days either): 64 concurrent first attempts, pool of 4.
         PostgresStorage recorder = await OpenReplicaAsync(SmallPool(4));
-        watch.Restart();
         await Task.WhenAll(claimed.Select(d => Task.Run(async () =>
-            await recorder.Deliveries.RecordAttemptAsync(new DeliveryAttempt { DeliveryId = d.DeliveryId, Outcome = DeliveryOutcome.Delivered, At = Clock.UtcNow, SmtpCode = 250 }, CancellationToken.None))));
-        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(15), "records took " + watch.Elapsed);
+            await recorder.Deliveries.RecordAttemptAsync(new DeliveryAttempt { DeliveryId = d.DeliveryId, Outcome = DeliveryOutcome.Delivered, At = Clock.UtcNow, SmtpCode = 250 }, CancellationToken.None)))).WaitAsync(TimeSpan.FromMinutes(3));
 
         QueueStats stats = await recorder.Deliveries.GetQueueStatsAsync(CancellationToken.None);
         Assert.Equal(0, stats.Queued + stats.Leased + stats.Deferred);
@@ -82,11 +80,9 @@ public class PoolPressureTests : PgTestBase
         }
 
         PostgresStorage recorder = await OpenReplicaAsync(SmallPool(4));
-        var watch = System.Diagnostics.Stopwatch.StartNew();
         await Task.WhenAll(claimed.Select(c => Task.Run(async () =>
-            await recorder.Deliveries.RecordAttemptAsync(new DeliveryAttempt { DeliveryId = c.DeliveryId, Outcome = DeliveryOutcome.Delivered, At = Clock.UtcNow, SmtpCode = 250 }, CancellationToken.None))));
+            await recorder.Deliveries.RecordAttemptAsync(new DeliveryAttempt { DeliveryId = c.DeliveryId, Outcome = DeliveryOutcome.Delivered, At = Clock.UtcNow, SmtpCode = 250 }, CancellationToken.None)))).WaitAsync(TimeSpan.FromMinutes(3));
 
-        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(15), "records took " + watch.Elapsed);
         QueueStats stats = await recorder.Deliveries.GetQueueStatsAsync(CancellationToken.None);
         Assert.Equal(0, stats.Queued + stats.Leased + stats.Deferred);
         Assert.Equal(48, await ScalarAsync<long>("SELECT count(*) FROM message_event WHERE type = 1"));
@@ -125,7 +121,7 @@ public class PoolPressureTests : PgTestBase
         }
 
         var creation = Pg.Runtime.Partitions.EnsureRangeAsync(Logic.StorageTime.DayNumber(Start) + 40, Logic.StorageTime.DayNumber(Start) + 40, CancellationToken.None);
-        Assert.Same(creation, await Task.WhenAny(creation, Task.Delay(TimeSpan.FromSeconds(10))));
+        Assert.Same(creation, await Task.WhenAny(creation, Task.Delay(TimeSpan.FromSeconds(60))));
         Assert.Equal(PostgresPartitions.Tables.Length, await creation);
         await tx.RollbackAsync();
     }

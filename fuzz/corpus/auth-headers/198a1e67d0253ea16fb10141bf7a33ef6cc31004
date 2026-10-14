@@ -1,0 +1,1 @@
+v=DMARC1; p=bogus; pct=999; rua=http://x; adkim=z

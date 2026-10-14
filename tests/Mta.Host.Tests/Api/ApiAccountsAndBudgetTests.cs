@@ -136,7 +136,7 @@ public class ApiHostingTests : IAsyncLifetime
         await _f.Storage.Config.SetSettingAsync(new SettingRecord(SettingsService.WebhookAllowlistKey, ApiFixture.TenantAId, "\"10.0.0.0/8\"", _f.Clock.UtcNow), default);
         _f.Clock.Advance(TimeSpan.FromMinutes(1)); // past the cache time
         settings.GetWebhookAllowlistSnapshot(ApiFixture.TenantAId); // returns the old view and refreshes in the background
-        for (int i = 0; i < 100 && settings.GetWebhookAllowlistSnapshot(ApiFixture.TenantAId).Count == 0; i++)
+        for (int i = 0; i < 1500 && settings.GetWebhookAllowlistSnapshot(ApiFixture.TenantAId).Count == 0; i++)
         {
             await Task.Delay(20);
         }

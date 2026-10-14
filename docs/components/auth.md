@@ -107,7 +107,7 @@ Values are emitted as a token, a `[local@]domain` pvalue, or a quoted string wit
 
 - `DmarcAggregateCollector` is thread safe. It counts evaluations keyed by policy domain, UTC day, source IP, disposition, alignment results, override reasons, identifiers and authentication results. Memory is bounded (`MaxRecordsPerReport` = 10 000 rows per report, `MaxPendingReports` = 100 000 policy-domain/day buckets); dropped messages are counted and noted in the report's `<error>` element. Messages whose policy has no `mailto:` report address are skipped by default. `DrainCompleted()` returns finished days as `DmarcPendingReport` (report plus the `rua` destinations).
 - `DmarcAggregateReportWriter` writes schema-ordered XML with `XmlWriter` (illegal XML characters in hostile values become `?`), gzips it, names it `receiver!policy-domain!begin!end!unique.xml.gz`, and `CreateFiles(report, maxMessageBytes)` splits a report to fit a `rua` size limit (budget: three quarters of the limit minus 4 KiB, because the attachment is base64 encoded). The caller still has to check external destinations with `DmarcReportAuthorizer`, pick the size limit (`DmarcReportUri.MaxSizeBytes`) and send the mail.
-- `DmarcAggregateReportReader` reads received reports (XML or gzip) with DTDs refused and a 64 MiB decompression cap.
+- `DmarcAggregateReportReader` reads received reports (XML or gzip) with DTDs refused, a 64 MiB decompression cap and a nesting depth cap of 32 (`MaxElementDepth`; `XmlReader` time grows with the square of the depth, found by the fuzzer).
 
 ## Tests and benchmarks
 

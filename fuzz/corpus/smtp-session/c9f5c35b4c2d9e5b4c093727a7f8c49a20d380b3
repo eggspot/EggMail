@@ -1,0 +1,6 @@
+EHLO x
+AUTH PLAIN AHVzZXIAcGFzcw==
+AUTH LOGIN
+dXNlcg==
+cGFzcw==
+AUTH CRAM-MD5

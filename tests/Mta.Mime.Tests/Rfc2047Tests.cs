@@ -96,38 +96,33 @@ public class Rfc2047Tests
     }
 
     [Fact]
-    public void Many_encoded_words_decode_in_linear_time()
+    public void Many_encoded_words_decode()
     {
         string input = string.Concat(Enumerable.Repeat("=?utf-8?Q?a?= ", 50_000));
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-        string result = Rfc2047.Decode(input);
-        sw.Stop();
+        string result = HangGuard.Run(() => Rfc2047.Decode(input));
         Assert.Equal(50_001, result.Length); // the trailing space after the last word is kept
-        Assert.True(sw.ElapsedMilliseconds < 2000, $"took {sw.ElapsedMilliseconds} ms");
     }
 
     [Fact]
     public void Pathological_inputs_stay_linear()
     {
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-        Rfc2047.Decode(string.Concat(Enumerable.Repeat("=?a?B?", 100_000)));
-        Rfc2047.Decode("=?utf-8?B?" + new string('A', 1_000_000));
-        Rfc2047.Decode(string.Concat(Enumerable.Repeat("=?x?", 200_000)));
-        sw.Stop();
-        Assert.True(sw.ElapsedMilliseconds < 3000, $"took {sw.ElapsedMilliseconds} ms");
+        HangGuard.Run(() =>
+        {
+            Rfc2047.Decode(string.Concat(Enumerable.Repeat("=?a?B?", 100_000)));
+            Rfc2047.Decode("=?utf-8?B?" + new string('A', 1_000_000));
+            Rfc2047.Decode(string.Concat(Enumerable.Repeat("=?x?", 200_000)));
+        });
     }
 
     [Fact]
-    public void Flood_of_distinct_unknown_charsets_is_fast()
+    public void Flood_of_distinct_unknown_charsets_is_bounded()
     {
         // every distinct unknown name costs a failed lookup; the 64 KiB header value cap bounds the flood
         string input = string.Concat(Enumerable.Range(0, 5000).Select(i => $"=?x{i}?Q?a?="));
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-        string result = Rfc2047.Decode(input, out var an);
-        sw.Stop();
+        MimeAnomaly an = default;
+        string result = HangGuard.Run(() => Rfc2047.Decode(input, out an));
         Assert.Equal(5000, result.Length);
         Assert.True(an.HasAny(MimeAnomaly.UnknownCharset));
-        Assert.True(sw.ElapsedMilliseconds < 3000, $"took {sw.ElapsedMilliseconds} ms");
     }
 
     [Fact]

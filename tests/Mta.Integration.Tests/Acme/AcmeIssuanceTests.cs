@@ -139,6 +139,8 @@ public abstract class AcmeIssuanceTests : IAsyncLifetime
         Assert.True(await WithTimeout(_h.CreateService(dns, [first, second], restarted).CheckOnceAsync(default)), Diagnostics);
         Assert.Equal(0, Registrations(restarted)); // no second account was registered
         Assert.Equal(1, restarted.CountPosts(_h.Endpoints.NewOrder));
+        // The first name's authorization was still valid (PEBBLE_AUTHZREUSE=100) and was not challenged again; only the new name was.
+        Assert.Equal(["_acme-challenge." + first, "_acme-challenge." + second], dns.Created.Select(c => c.Fqdn));
         var sameAccount = await _h.Storage.Config.GetAcmeAccountAsync(_h.DirectoryUrl, default);
         Assert.Equal(account.Id, sameAccount!.Id);
         Assert.Equal(account.AccountKeyProtected, sameAccount.AccountKeyProtected);
@@ -178,6 +180,8 @@ public abstract class AcmeIssuanceTests : IAsyncLifetime
         Assert.True(after.Active);
         Assert.Equal(2, _h.Http.CountPosts(_h.Endpoints.NewOrder));
         Assert.Equal(1, Registrations(_h.Http)); // same account for the renewal
+        // The CA (run with PEBBLE_AUTHZREUSE=100) handed back the still valid authorization of the first order: nothing was proven again.
+        Assert.Single(dns.Created);
         await AssertTrustedByPebbleAsync(after);
     }
 

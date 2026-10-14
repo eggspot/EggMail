@@ -120,7 +120,7 @@ public static class InboundReportParser
         for (int i = 1; i < groups.Count && recipients.Count < MaxRecipients; i++)
         {
             var g = groups[i];
-            string? action = g.GetValueOrDefault("action")?.Trim().ToLowerInvariant();
+            string? action = Clean(g.GetValueOrDefault("action"))?.ToLowerInvariant();
             if (action is null)
             {
                 continue;
@@ -268,8 +268,9 @@ public static class InboundReportParser
             return null;
         }
 
+        // Clean: the value is remote text; control characters (a lone CR survives the line splitting) and unbounded length must not travel on.
         int semi = value.IndexOf(';');
-        return semi >= 0 ? value[(semi + 1)..].Trim() : value.Trim();
+        return Clean(semi >= 0 ? value[(semi + 1)..] : value);
     }
 
     private static string? NormalizeStatus(string? value)

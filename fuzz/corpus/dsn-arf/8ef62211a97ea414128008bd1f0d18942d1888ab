@@ -1,0 +1,13 @@
+Content-Type: multipart/report; report-type=delivery-status; boundary=x
+
+--x
+Content-Type: message/delivery-status
+
+Action: delayed
+Status: 4.4.1
+Will-Retry-Until: Fri, 16 Oct 2026 12:00:00 +0000
+
+Action: failed
+Status: 5.0.0
+Final-Recipient: rfc822; a@b
+--x--
