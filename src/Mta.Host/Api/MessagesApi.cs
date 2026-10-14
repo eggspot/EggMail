@@ -51,7 +51,17 @@ public sealed record MessageEventResponse(Guid Id, string Type, DateTimeOffset A
 
 public sealed record ResendResponse(Guid Id, bool Recomposed);
 
-/// <summary>Per-message history (<c>History:Mode=Full</c>): list, detail, events, content, resend. With <c>StatsOnly</c> all of it answers 410.</summary>
+/// <summary>Optional body of <c>POST /messages/{id}/cancel</c>: omit it (or the member) to cancel every recipient still waiting for delivery.</summary>
+public sealed class CancelMessageRequest
+{
+    [JsonPropertyName("recipients")]
+    public List<string>? Recipients { get; set; }
+}
+
+/// <summary>What a cancel did, per recipient (docs/api.md). <c>Status</c> is the message status afterwards (<c>History:Mode=full</c> always applies here).</summary>
+public sealed record CancelMessageResponse(Guid Id, string Status, IReadOnlyList<string> Cancelled, IReadOnlyList<string> InFlight, IReadOnlyList<string> NotPending);
+
+/// <summary>Per-message history (<c>History:Mode=Full</c>): list, detail, events, content, resend, cancel. With <c>StatsOnly</c> all of it answers 410.</summary>
 public sealed class MessagesApi(ApiAuthenticator auth, IStorage storage, SubmissionService submission, ApiOptions options, StorageOptions storageOptions, IClock clock)
 {
     public void Map(RouteGroupBuilder api)
@@ -61,6 +71,7 @@ public sealed class MessagesApi(ApiAuthenticator auth, IStorage storage, Submiss
         api.GetRoute("/messages/{id}/events", EventsAsync);
         api.GetRoute("/messages/{id}/content", ContentAsync);
         api.PostRoute("/messages/{id}/resend", ResendAsync);
+        api.PostRoute("/messages/{id}/cancel", CancelAsync);
     }
 
     private void RequireHistory()
@@ -227,6 +238,70 @@ public sealed class MessagesApi(ApiAuthenticator auth, IStorage storage, Submiss
         }
 
         return ApiResults.Accepted(new ResendResponse(result.MessageId, recomposed));
+    }
+
+    /// <summary>The most recipients one cancel request may name (a message has at most <c>Smtp:MaxRecipients</c>, 50 by default).</summary>
+    private const int MaxCancelRecipients = 200;
+
+    private async Task<IResult> CancelAsync(HttpContext context, string id)
+    {
+        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.Send).ConfigureAwait(false);
+        RequireHistory();
+        CancellationToken ct = context.RequestAborted;
+        Guid messageId = ParseMessageId(id);
+
+        // The body is optional: no body, or no recipients member, cancels every recipient still waiting. An empty list is an error, never "all".
+        IReadOnlyList<string>? recipients = null;
+        HttpRequest request = context.Request;
+        bool hasBody = request.ContentLength is > 0 || (request.ContentLength is null && !string.IsNullOrEmpty(request.ContentType));
+        if (hasBody)
+        {
+            CancelMessageRequest body = await ApiJson.ReadBodyAsync<CancelMessageRequest>(context, options.MaxBodyBytes).ConfigureAwait(false);
+            if (body.Recipients is { } named)
+            {
+                var errors = new ValidationErrors();
+                var parsed = new List<string>(named.Count);
+                if (named.Count == 0 || named.Count > MaxCancelRecipients)
+                {
+                    errors.Add("recipients", $"Name 1 to {MaxCancelRecipients} recipients, or leave the member out to cancel every recipient that is still waiting.");
+                }
+                else
+                {
+                    for (int i = 0; i < named.Count; i++)
+                    {
+                        if (string.IsNullOrWhiteSpace(named[i]) || named[i].Length > 320 || !EmailAddress.TryParse(named[i].Trim(), allowUtf8: true, out EmailAddress address))
+                        {
+                            errors.Add($"recipients[{i}]", "Enter a valid email address.");
+                        }
+                        else
+                        {
+                            parsed.Add(address.ToString());
+                        }
+                    }
+                }
+
+                errors.ThrowIfAny();
+                recipients = parsed;
+            }
+        }
+
+        // The history lookup is what proves the message exists and is the caller's tenant's: another tenant's message is a 404 like an unknown one.
+        _ = await storage.History.GetAsync(caller.TenantId, messageId, ct).ConfigureAwait(false) ?? throw NotFound();
+        CancelResult result = await storage.Deliveries.CancelAsync(caller.TenantId, messageId, recipients, clock.UtcNow, ct).ConfigureAwait(false);
+        if (result.Cancelled.Count == 0)
+        {
+            string detail = result.InFlight.Count > 0
+                ? "Every recipient that is still waiting is being delivered right now. Try again when the attempt has ended (a recipient that is deferred can be cancelled then)."
+                : "No recipient of this message is waiting for delivery: each is delivered, failed, expired, suppressed or already cancelled.";
+            throw new ApiException(
+                StatusCodes.Status409Conflict,
+                ApiCodes.Conflict,
+                detail,
+                extensions: new Dictionary<string, object?> { ["in_flight"] = result.InFlight, ["not_pending"] = result.NotPending });
+        }
+
+        string status = (await storage.History.GetAsync(caller.TenantId, messageId, ct).ConfigureAwait(false))?.Summary.Status ?? "cancelled";
+        return ApiResults.Ok(new CancelMessageResponse(messageId, status, result.Cancelled, result.InFlight, result.NotPending));
     }
 
     /// <summary>Rebuilds an attachment-free message from its stored content (labelled <c>recomposed</c>; headers are not byte-identical).</summary>
