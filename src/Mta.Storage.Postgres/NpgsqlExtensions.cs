@@ -41,6 +41,37 @@ internal static class PostgresErrors
         return false;
     }
 
+    /// <summary>
+    /// True when the server stopped a statement because it ran past <c>statement_timeout</c> (SQLSTATE 57014, as on the read-only role). A statement the <i>caller</i> cancelled
+    /// (a cancelled token, a closed request) is also reported by the server as 57014 but surfaces as an <see cref="OperationCanceledException"/>: that is the caller's decision
+    /// and stays one, it is neither a timeout nor an outage.
+    /// </summary>
+    public static bool IsStatementTimeout(Exception exception, CancellationToken cancellationToken = default)
+    {
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return false;
+        }
+
+        for (Exception? e = exception; e is not null; e = e.InnerException)
+        {
+            if (e is OperationCanceledException)
+            {
+                return false;
+            }
+        }
+
+        for (Exception? e = exception; e is not null; e = e.InnerException)
+        {
+            if (e is PostgresException { SqlState: "57014" })
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>True when the failure shows that established connections broke (not a mere timeout).</summary>
     public static bool IsBrokenConnection(Exception exception)
     {

@@ -35,6 +35,7 @@ RFC 9457 problem details (`application/problem+json`): `{ "type", "title", "stat
 | `message_not_found` | 404 | unknown id, or older than `Retention:MetadataDays` |
 | `attachments_not_stored` | 409 | resend of a message whose attachments were not kept |
 | `not_ready` | 503 | storage (a `StorageUnavailableException` from the provider), the switch engine or ACME not available; `Retry-After: 5` |
+| `query_too_slow` | 503 | **(addition)** a message search or statistics query ran past the database's statement timeout (`Storage:Postgres:ReadOnlyStatementTimeoutSeconds` on the read-only role); no `Retry-After`: narrow the query (shorter time range, more filters) |
 | `conflict` | 409 | **(addition)** the request conflicts with the current state (rotation in progress, switch step in the wrong state, duplicate upload, ...) |
 | `tenant_disabled` | 403 | **(addition)** the tenant is suspended |
 | `content_not_recorded` | 410 | **(addition)** the content of the message was never recorded (`Content:Mode=None`) |
