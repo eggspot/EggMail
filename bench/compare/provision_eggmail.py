@@ -32,7 +32,7 @@ def main():
     dns.add_a("sink.bench.test", SINK)
 
     api = smoke.Api(API)
-    smoke.wait_for("EggMail", lambda: smoke._healthy(API), 180)
+    smoke.wait_for("EggMail", lambda: smoke.is_healthy(API), 180)
     _, _, headers = api.call("POST", "/api/v1/session", {"user": ADMIN_USER, "password": PASSWORD})
     api.cookie = next(c.split(";", 1)[0] for c in headers.get_all("Set-Cookie") if c.startswith("eggmail_session="))
     _, me, _ = api.call("GET", "/api/v1/me")

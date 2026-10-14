@@ -75,8 +75,14 @@ jobs:
       - name: Compare with the baseline
         if: steps.fresh.outputs.run == 'true'
         run: |
+          {
+            echo "Measured with .NET SDK $(dotnet --version) on $(. /etc/os-release && echo "$PRETTY_NAME"), $(nproc) logical cores (the baseline records its own)."
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
           python3 bench/compare-allocations.py --baseline bench/baseline/allocations.json --micro micro.json --pipeline pipeline.json \
-            --summary "$GITHUB_STEP_SUMMARY" --write-candidate bench-candidate.json
+            --summary gate-summary.md --write-candidate bench-candidate.json && status=0 || status=$?
+          cat gate-summary.md >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
 
       - name: Keep the measurements
         if: ${{ !cancelled() && steps.fresh.outputs.run == 'true' }}

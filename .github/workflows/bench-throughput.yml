@@ -5,8 +5,9 @@ name: bench-throughput
 #
 #   gh workflow run bench-throughput --ref <branch> [-f messages=30000 -f runs=3 -f postgres=true -f readytorun=true]
 #
-# A GitHub-hosted ubuntu-latest runner has 2 to 4 cores (the process saw 4 on 2026-10-13; the label below is the fixed wording the owner asked for), shares its host with other jobs and runs the load generator, the server, the sink and
-# PostgreSQL on the same machine. The numbers are for trends and for catching order-of-magnitude mistakes, NOT for publication or for
+# A GitHub-hosted ubuntu-latest runner has 2 to 4 cores depending on the repository (4 for this public repository on 2026-10-13), shares its
+# host with other jobs, and here also runs the load generator, the server, the sink and PostgreSQL. The summary names the core count the
+# runner really has (nproc), never an assumed one. The numbers are for trends and for catching order-of-magnitude mistakes, NOT for publication or for
 # comparing with other servers (docs/benchmarks.md, fairness rules). The summary says so in its first line.
 
 on:
@@ -37,12 +38,11 @@ permissions:
 env:
   DOTNET_NOLOGO: 1
   DOTNET_CLI_TELEMETRY_OPTOUT: 1
-  ENVIRONMENT_LABEL: GitHub-hosted ubuntu-latest 2-core runner, noisy, not publishable
 
 jobs:
   throughput:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:
@@ -125,8 +125,13 @@ jobs:
         if: inputs.readytorun
         run: |
           set -euo pipefail
+          # Restore first (with the ReadyToRun compiler package, a download), so the timed publishes below compare the build work only.
+          dotnet restore src/Mta.Host/Mta.Host.csproj -r linux-x64 -p:PublishReadyToRun=true -v q
+          dotnet build src/Mta.Host/Mta.Host.csproj -c Release -r linux-x64 --no-restore -v q   # the shared compile, so publish times the publish work
           for mode in false true; do
-            dotnet publish src/Mta.Host/Mta.Host.csproj -c Release -r linux-x64 --self-contained false -p:PublishReadyToRun=$mode -p:DebugType=none -o "publish-x64-r2r-$mode" -v q
+            started=$(date +%s%N)
+            dotnet publish src/Mta.Host/Mta.Host.csproj -c Release -r linux-x64 --no-restore --self-contained false -p:PublishReadyToRun=$mode -p:DebugType=none -o "publish-x64-r2r-$mode" -v q
+            echo "PublishReadyToRun=$mode: publish took $(( ($(date +%s%N) - started) / 1000000 )) ms" | tee -a results/publish-times.txt
           done
           python3 bench/measure-startup.py publish-x64-r2r-false --runs 7 --label "linux-x64 JIT (PublishReadyToRun=false)" | tee results/startup-jit.txt
           python3 bench/measure-startup.py publish-x64-r2r-true  --runs 7 --label "linux-x64 ReadyToRun (PublishReadyToRun=true)" | tee results/startup-r2r.txt
@@ -137,7 +142,8 @@ jobs:
       - name: Summary
         if: ${{ !cancelled() }}
         run: |
-          python3 bench/summarize-throughput.py results "$ENVIRONMENT_LABEL" > summary.md
+          label="GitHub-hosted ubuntu-latest $(nproc)-core runner, noisy, not publishable"
+          python3 bench/summarize-throughput.py results "$label" > summary.md
           if [ -f results/startup-jit.txt ]; then
             {
               echo
@@ -146,6 +152,8 @@ jobs:
               echo '```json'
               cat results/startup-jit.txt results/startup-r2r.txt
               echo '```'
+              echo "Publish step wall time on this runner (restore and compile already done): $(paste -sd ';' results/publish-times.txt)"
+              echo
               echo "linux-arm64 ReadyToRun cross-publish from this amd64 runner succeeded: $(cut -f1 results/arm64-r2r-size.txt) MiB."
             } >> summary.md
           fi

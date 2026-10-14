@@ -4,7 +4,7 @@ How to run EggMail. Everything here is about behaviour that exists in the code; 
 
 ## Deploying
 
-Tested deployment files are in `deploy/` (the release workflow runs them against every published image; [release.md](release.md)):
+Tested deployment files are in `deploy/` (the release workflow tests them against the image it builds: the PostgreSQL compose file on every build, the SQLite compose file, the Unbound sidecar and the Kubernetes manifests on tags and manual runs, not on the daily nightly; [release.md](release.md)):
 
 | Deployment | Files | Notes |
 |---|---|---|
@@ -17,7 +17,7 @@ Tested deployment files are in `deploy/` (the release workflow runs them against
 
 Things that are easy to get wrong:
 
-- **Healthcheck command.** The chiseled image has no shell and `/app` is not on `PATH`: use `["CMD", "/app/mta", "--healthcheck"]` (the `HEALTHCHECK` of the image does). `["CMD", "mta", "--healthcheck"]` fails with "executable file not found in $PATH". The release workflow checks this on every build (`deploy/smoke/image.sh`).
+- **Healthcheck command.** The chiseled image has no shell and `/app` is not on `PATH`: use `["CMD", "/app/mta", "--healthcheck"]` (the `HEALTHCHECK` of the image does). `["CMD", "mta", "--healthcheck"]` fails with "executable file not found in $PATH". The release workflow checks this on every build (`deploy/smoke/image.sh` prints the image's `PATH` and tries `mta`).
 - **First administrator.** Compose: a file secret read through `Dashboard__BootstrapAdminPasswordFile` (the file must be readable by uid 1654: Compose does not apply `uid` or `mode` to file secrets outside Swarm). Kubernetes: a Secret mounted at `/run/secrets/eggmail`. Or `mta admin create` while the SQLite server is stopped.
 - **Volume ownership.** The image prepares `/data` for uid 1654; a new Kubernetes volume is owned by root, hence `fsGroup: 1654` in the StatefulSet.
 - **Inbound port 25 for bounces** needs a public MX record and a platform that offers inbound 25 (many load balancers do not).

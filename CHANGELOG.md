@@ -5,15 +5,15 @@ All notable changes to EggMail are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+Nothing is released yet. The first release will be `0.1.0` (the version in `Directory.Build.props`); everything under `Unreleased` is what
+it will contain, and [docs/progress.md](docs/progress.md) states exactly what is verified and what is not.
+
 How it is used: every pull request that changes behaviour adds a line under `Unreleased`. Cutting a release moves the `Unreleased`
 entries to a new `## [X.Y.Z] - YYYY-MM-DD` section in the same pull request that bumps `<Version>` in `Directory.Build.props`. The release
 workflow refuses a stable tag without a non-empty section for that exact version and publishes the section as the GitHub Release notes
 (see [docs/release.md](docs/release.md)).
 
 ## [Unreleased]
-
-Nothing is released yet. The first release will be `0.1.0` (the version in `Directory.Build.props`); everything below is what that
-release will contain. [docs/progress.md](docs/progress.md) states exactly what is verified and what is not.
 
 ### Added
 

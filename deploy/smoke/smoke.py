@@ -278,6 +278,9 @@ def main():
     parser.add_argument("--expect-backend", choices=["sqlite", "postgres"], required=True)
     parser.add_argument("--domain", default="smoke-sender.test")
     parser.add_argument("--timeout", type=int, default=120, help="seconds to wait for each asynchronous condition")
+    parser.add_argument("--tenant-marker", choices=["create", "assert"],
+                        help="with --stop-after signin: create a tenant named 'persistence-marker' through the API, or assert that it exists "
+                             "(proves that state written through the API survives a restart or a pod replacement)")
     parser.add_argument("--stop-after", choices=["signin"], help="stop successfully after this step (a quick check that the bootstrap administrator works)")
     args = parser.parse_args()
 
@@ -289,7 +292,7 @@ def main():
     api = Api(args.api)
 
     step("capabilities report the %s backend" % args.expect_backend)
-    wait_for("the API", lambda: _healthy(args.api), args.timeout)
+    wait_for("the API", lambda: is_healthy(args.api), args.timeout)
     _, caps, _ = api.call("GET", "/api/v1/capabilities")
     if caps.get("backend") != args.expect_backend:
         fail("capabilities backend is %r, expected %r: %s" % (caps.get("backend"), args.expect_backend, caps))
@@ -306,6 +309,14 @@ def main():
     api.csrf = me["csrfToken"]
     if me.get("role") != "admin":
         fail("signed in as %r, expected role admin" % me.get("role"))
+    if args.tenant_marker == "create":
+        api.call("POST", "/api/v1/admin/tenants", {"name": "persistence-marker"})
+        print("   created the tenant 'persistence-marker'", flush=True)
+    elif args.tenant_marker == "assert":
+        _, tenants, _ = api.call("GET", "/api/v1/admin/tenants")
+        if not any(t.get("name") == "persistence-marker" for t in tenants):
+            fail("the tenant 'persistence-marker' created before the restart is gone: %s" % [t.get("name") for t in tenants])
+        print("   the tenant 'persistence-marker' survived", flush=True)
     if args.stop_after == "signin":
         print("SMOKE PASSED up to sign-in (%s)" % args.expect_backend, flush=True)
         return 0
@@ -401,7 +412,7 @@ def main():
     return 0
 
 
-def _healthy(base):
+def is_healthy(base):
     try:
         with urllib.request.urlopen(base.rstrip("/") + "/healthz", timeout=5) as response:
             return response.status == 200

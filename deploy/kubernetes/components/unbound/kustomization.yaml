@@ -4,7 +4,10 @@
 #   components:
 #     - ../components/unbound
 #
-# The sidecar shares the pod's network namespace, so EggMail asks it at 127.0.0.1:53 and nothing outside the pod can reach it.
+# EggMail asks the sidecar at 127.0.0.1:53 (the pod's loopback). Be precise about exposure: Unbound itself listens on all addresses of the
+# pod, so another pod that can reach this pod's IP on UDP or TCP 53 can use it as a resolver (it answers private ranges only). The base
+# NetworkPolicy allows ingress on the listed application ports only, which excludes 53, so with a CNI that enforces NetworkPolicy nothing
+# else can reach it; without enforcement it is reachable from inside the cluster. It is never exposed outside the cluster by the Services.
 # Unbound needs outbound DNS (UDP/TCP 53) to the Internet, which the base policy does not allow: the policy below adds it for the pod.
 apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
@@ -14,6 +17,6 @@ resources:
 
 patches:
   - target: { kind: StatefulSet, name: eggmail }
-    path: sidecar-statefulset.yaml
+    path: sidecar.yaml
   - target: { kind: Deployment, name: eggmail }
-    path: sidecar-deployment.yaml
+    path: sidecar.yaml

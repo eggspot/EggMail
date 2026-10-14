@@ -37,7 +37,7 @@ spec:
       containers:
         - name: eggmail
           image: ghcr.io/eggspot/eggmail
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always      # the overlay uses the moving tag "nightly"; once it is pinned to a version tag or a digest, IfNotPresent is the better choice
           envFrom:
             - configMapRef:
                 name: eggmail-config

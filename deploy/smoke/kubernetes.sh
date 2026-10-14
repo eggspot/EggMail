@@ -3,17 +3,19 @@
 #
 #   deploy/smoke/kubernetes.sh <image reference>     (needs kind, kubectl, kustomize, python3; the cluster pulls the image anonymously)
 #
-#   1. SQLite variant (StatefulSet + PVC): becomes Ready through its probes, the bootstrap administrator signs in, the pod is deleted,
-#      comes back on the same volume and the administrator still signs in (the data survived).
-#   2. PostgreSQL variant + the Unbound component, against a throw-away postgres:17 in the cluster: Ready, capabilities say postgres,
-#      the Unbound sidecar validates DNSSEC (AD flag) and the pod has Dns:TrustAuthenticatedData set.
+#   1. SQLite variant (StatefulSet + PVC): becomes Ready through its probes, the bootstrap administrator signs in and a tenant is created
+#      through the API, the pod is deleted, the replacement comes back on the same volume and the tenant is still there (state written
+#      through the API survived, which the recreated bootstrap administrator alone would not prove).
+#   2. PostgreSQL variant + the Unbound component, against a throw-away postgres in the cluster: Ready, capabilities say postgres,
+#      the Unbound sidecar validates DNSSEC (AD flag) and the running pod carries the resolver settings.
+# Linux; the throw-away cluster and its namespaces are removed at the end (the cluster is named eggmail-smoke-<pid>).
 # NetworkPolicy objects are applied (the API server validates them); kind's default CNI may not ENFORCE them, so enforcement is not tested.
 set -euo pipefail
 
 ref=${1:?usage: kubernetes.sh <image reference>}
 here=$(cd "$(dirname "$0")" && pwd)
 work=$(mktemp -d)
-cluster=eggmail-smoke
+cluster=eggmail-smoke-$$
 password=$(openssl rand -hex 12)Aa1
 db_password=$(openssl rand -hex 12)
 forward_pid=""
@@ -77,14 +79,16 @@ kubectl -n eggmail apply -f "$work/sqlite.yaml"
 kubectl -n eggmail rollout status statefulset/eggmail --timeout=240s
 kubectl -n eggmail get pvc data-eggmail-0 -o jsonpath='{.status.phase}{"\n"}' | grep -qx Bound
 forward eggmail 18080
-python3 "$here/smoke.py" --api http://127.0.0.1:18080 --admin-user admin --admin-password "$password" --expect-backend sqlite --stop-after signin
+# State is written through the API BEFORE the pod is deleted, so the check below cannot pass merely because the bootstrap
+# administrator is recreated from the Secret on an empty volume.
+python3 "$here/smoke.py" --api http://127.0.0.1:18080 --admin-user admin --admin-password "$password" --expect-backend sqlite --stop-after signin --tenant-marker create
 curl -fsS http://127.0.0.1:18080/readyz; echo
 
-echo "-- the pod is deleted: the replacement mounts the same volume and the administrator is still there"
+echo "-- the pod is deleted: the replacement mounts the same volume and the tenant created through the API before is still there"
 kubectl -n eggmail delete pod eggmail-0 --wait=true
 kubectl -n eggmail rollout status statefulset/eggmail --timeout=240s
 forward eggmail 18080
-python3 "$here/smoke.py" --api http://127.0.0.1:18080 --admin-user admin --admin-password "$password" --expect-backend sqlite --stop-after signin
+python3 "$here/smoke.py" --api http://127.0.0.1:18080 --admin-user admin --admin-password "$password" --expect-backend sqlite --stop-after signin --tenant-marker assert
 kubectl delete namespace eggmail --wait=false
 
 echo "-- 2. PostgreSQL variant with the Unbound sidecar"
@@ -98,7 +102,7 @@ metadata:
 spec:
   containers:
     - name: postgres
-      image: postgres:17
+      image: postgres:17.11
       env:
         - { name: POSTGRES_USER, value: eggmail }
         - { name: POSTGRES_PASSWORD, value: "${db_password}" }
@@ -139,5 +143,8 @@ if ! echo "$signed" | grep -qE '^;; flags:.* ad[ ;]'; then
   echo "::error::no AD flag from the sidecar"
   exit 1
 fi
-kubectl -n eggmail-pg get deploy/eggmail -o jsonpath='{.spec.template.spec.containers[?(@.name=="eggmail")].env[*].name}' | grep -q Dns__TrustAuthenticatedData
+# The pod that is running (not the manifest we applied) must carry the resolver settings of the component.
+pod_env=$(kubectl -n eggmail-pg get pod -l app.kubernetes.io/name=eggmail -o jsonpath='{range .items[0].spec.containers[?(@.name=="eggmail")].env[*]}{.name}={.value}{"\n"}{end}')
+echo "$pod_env" | grep -qx 'Dns__TrustAuthenticatedData=true' || { echo "$pod_env"; echo "::error::the running pod lacks Dns__TrustAuthenticatedData=true"; exit 1; }
+echo "$pod_env" | grep -qx 'Dns__Servers__0=127.0.0.1' || { echo "$pod_env"; echo "::error::the running pod lacks Dns__Servers__0=127.0.0.1"; exit 1; }
 echo "kubernetes smoke test passed"

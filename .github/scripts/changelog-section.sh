@@ -19,6 +19,7 @@ body=$(awk -v wanted="$version" '
     sub(/\].*$/, "", name)
     if (name == wanted) { inside = 1; next }
   }
+  inside && /^\[[^]]+\]: / { next }   # link reference definitions at the end of the file belong to no section
   inside {
     lines[++count] = $0
   }
