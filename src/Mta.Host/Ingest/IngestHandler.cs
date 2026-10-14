@@ -173,7 +173,6 @@ public sealed class IngestHandler : ISmtpServerHandler
             ReceivedHeader = message.ReceivedHeader,
             RemoteAddress = state.RemoteAddress,
             Authenticated = message.Session.AuthenticatedUser,
-            SmtpUtf8 = message.Session.SmtpUtf8,
         }, ct).ConfigureAwait(false);
 
         switch (result.Status)

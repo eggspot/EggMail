@@ -7,6 +7,16 @@ internal static class Pipeline
 {
     public static readonly string[] AddressHeaders = ["From", "To", "Cc", "Bcc", "Reply-To", "Sender"];
 
+    private static string TypeShape(MimePart part)
+    {
+        if (part.ContentType.MediaType == "message" && part.ContentType.MediaSubtype.StartsWith("global", StringComparison.Ordinal))
+        {
+            return part.ContentType.MimeType;
+        }
+
+        return part.Children.Count == 0 ? part.ContentType.MimeType : part.ContentType.MimeType + "(" + string.Join(",", part.Children.Select(TypeShape)) + ")";
+    }
+
     public static void RunEverything(byte[] data, MimeLimits? limits = null)
     {
         limits ??= MimeLimits.Default;
@@ -118,6 +128,26 @@ internal static class Pipeline
         if (headers.HasSeparator)
         {
             Assert.True(editedHeaders.Body.Span.SequenceEqual(headers.Body.Span));
+        }
+
+        // ---- 8BITMIME downgrade: either refused with a reason, untouched, or a 7-bit body of bounded size
+        var downgraded = new System.Buffers.ArrayBufferWriter<byte>();
+        var downgrade = EightBitDowngrader.Downgrade(memory, downgraded, limits);
+        switch (downgrade.Status)
+        {
+            case EightBitDowngradeStatus.NotNeeded:
+                Assert.Equal(0, downgraded.WrittenCount);
+                Assert.False(MessageInspector.HasEightBitBody(data));
+                break;
+            case EightBitDowngradeStatus.Impossible:
+                Assert.False(string.IsNullOrEmpty(downgrade.Reason));
+                break;
+            default:
+                Assert.False(MessageInspector.HasEightBitBody(downgraded.WrittenSpan));
+                Assert.True(downgraded.WrittenCount <= (4L * data.Length) + 4096);
+                // The structure survives: same entities with the same types (message/global children are encoded away, so they are left out).
+                Assert.Equal(TypeShape(MimeMessage.Parse(memory, limits).Root), TypeShape(MimeMessage.Parse(downgraded.WrittenMemory, limits).Root));
+                break;
         }
 
         // ---- line endings

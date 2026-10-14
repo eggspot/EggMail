@@ -84,6 +84,7 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | `Delivery:Throttle:InitialMessagesPerMinute` | 120 | Messages per minute allowed at first; grows the same way |
 | `Delivery:RemotePort` | 25 | Destination port for direct MX delivery; lab setups only |
 | `Delivery:AllowPrivateMxAddresses` | false | Allow MX hosts that resolve to loopback or private addresses; lab setups only |
+| `Delivery:PublicSendingIp` | none | The address receiving servers see for our connections; reported as `sending-mta-ip` in TLS-RPT reports. Set it when EggMail is behind NAT or a proxy. Without it only a public local address of the connection is reported; private, loopback and link-local addresses are left out |
 | `Dns:Servers` | system resolvers | Resolvers (IP with optional port) |
 | `Dns:RequestDnssec` | true | Ask for DNSSEC records (needed for DANE) |
 | `Dns:TrustAuthenticatedData` | false | Trust the AD bit; only behind a local validating resolver |
@@ -146,8 +147,11 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | `Api:MaxStatsRows` | 50000 | Rows one statistics query may return |
 | `Api:MetricsAllowedNetworks` | loopback and private ranges | *List.* Networks (CIDR) allowed to read `/metrics`; it carries no credentials, so keep it off the public internet |
 | `Api:SpfInclude` | none | `include:` host suggested to customers in their SPF record |
-| `Observability:MetricsEndpointEnabled` | true | Serve `/metrics` |
-| `Observability:OtlpEndpoint` | none | OTLP endpoint for metrics and traces |
+| `Observability:MetricsEndpointEnabled` | true | Serve `/metrics`. Off also removes the Prometheus exporter itself (no meter listener of ours); OTLP is unaffected |
+| `Observability:OtlpEndpoint` | none | OTLP endpoint, an `http://` or `https://` URL (for example `http://collector:4317`); `collector:4317` is refused at start. When set, metrics, traces and logs are exported there. Empty: no exporter, and no span is ever created |
+| `Observability:OtlpProtocol` | `Grpc` | `Grpc` (port 4317) or `HttpProtobuf` (port 4318; EggMail appends `/v1/metrics`, `/v1/traces`, `/v1/logs`) |
+| `Observability:TraceSampleRatio` | 0.1 | Share of messages whose trace is exported, 0 to 1. A message is traced completely or not at all |
+| `Observability:QueueSampleSeconds` | 15 | Seconds between samples of the queue for the `mta_delivery_queue_*` gauges; `0` turns them off |
 | `Webhooks:AllowHttp` | false | Allow plain `http` webhook endpoints (HTTPS only otherwise) |
 | `Webhooks:Timeout` | `00:00:15` | One delivery attempt |
 | `Webhooks:MaxConcurrency` | 32 | Concurrent webhook deliveries |
@@ -220,7 +224,96 @@ To restore: stop EggMail, copy the files of one backup directory over the data d
 
 ## Monitoring
 
-`/healthz` (liveness), `/readyz` (readiness and warnings) and `/metrics` (Prometheus text, admin network only) are served by the HTTP layer *(the API pull request provides `/readyz` and `/metrics`; `/healthz` exists already)*. Meters: `Mta.Smtp.Server`, `Mta.Smtp.Client`, `Mta.Delivery` (attempts by outcome, holds, bounces, group duration), `Mta.Webhooks`, and storage meters. Alert on queue depth and oldest due delivery, repeated `deferred` outcomes to one domain, certificate expiry, the `sqlite_sync_off` warning being unintended, and failed backups.
+`/healthz` (liveness), `/readyz` (readiness and warnings) and `/metrics` (Prometheus text, loopback and private networks only, never behind a proxy header) are served by the HTTP layer. The same instruments go to OTLP when `Observability:OtlpEndpoint` is set. Prometheus names are below; in OTLP the names are the dotted forms (`mta.delivery.queue.depth`).
+
+**Cost.** Counters and histograms are recorded where the work happens and cost a few nanoseconds; nothing queries the database when `/metrics` is scraped. The queue gauges read a sample that a background task refreshes every `Observability:QueueSampleSeconds` (each sample reads the whole queue table, so raise the interval on a very large queue); `mta_delivery_queue_sample_age_seconds` tells you when the sample is stale. Labels are small fixed sets (outcome, state, file, reason, certificate name): never a recipient, a message or a tenant, and a metric keeps at most 1000 label combinations.
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `mta_smtp_server_connections_total` | counter | none | Connections accepted |
+| `mta_smtp_server_connections_refused_total` | counter | none | Connections refused by a limit or policy |
+| `mta_smtp_server_sessions_active` | gauge | none | Open SMTP sessions |
+| `mta_smtp_server_commands_total` | counter | none | SMTP commands processed |
+| `mta_smtp_server_messages_total` | counter | none | Messages accepted (`250` after DATA) |
+| `mta_smtp_server_messages_rejected_total` | counter | none | Messages refused after DATA |
+| `mta_smtp_server_bytes_total` | counter | none | Message bytes accepted |
+| `mta_smtp_server_transaction_duration_seconds` | histogram | none | Time from the end of DATA to the final reply: what a submitting client waits for, including the queue commit |
+| `mta_smtp_server_protocol_errors_total` | counter | none | Protocol violations (bad syntax or sequence, smuggling attempts) |
+| `mta_smtp_server_auth_failures_total` | counter | none | Failed AUTH attempts |
+| `mta_smtp_server_tls_handshakes_total` | counter | none | Completed TLS handshakes on the listeners |
+| `mta_smtp_server_tls_failures_total` | counter | none | Failed TLS handshakes on the listeners |
+| `mta_smtp_client_connections_total` | counter | none | Outbound connections established |
+| `mta_smtp_client_pool_hits_total` | counter | none | Outbound connections reused from the pool |
+| `mta_smtp_client_tls_handshakes_total` | counter | none | Completed outbound TLS handshakes |
+| `mta_smtp_client_tls_failures_total` | counter | none | Failed outbound TLS handshakes |
+| `mta_delivery_claimed_total` | counter | none | Deliveries leased from the queue |
+| `mta_delivery_claim_duration_seconds` | histogram | `result` (`claimed`, `empty`) | One queue claim; `empty` is the idle poll |
+| `mta_delivery_attempts_total` | counter | `outcome` (`delivered`, `deferred`, `failed`, `expired`, `suppressed`...) | Recipients finished or rescheduled by an attempt. Alert on a growing share of `deferred` |
+| `mta_delivery_group_duration_seconds` | histogram | none | One delivery group (a message's recipients at one destination domain), claim to recorded result |
+| `mta_delivery_record_duration_seconds` | histogram | none | Storing the results of one delivery transaction (queue update, history, statistics, webhook fan-out) |
+| `mta_delivery_held_total` | counter | none | Deliveries held back by a local sending limit or destination throttle (nothing was sent) |
+| `mta_delivery_bounces_generated_total` | counter | none | Bounce messages generated |
+| `mta_delivery_queue_depth` | gauge | `state` (`queued`, `deferred`, `leased`) | Deliveries in the queue: never tried, waiting for a retry, being delivered. Sampled in the background |
+| `mta_delivery_queue_oldest_due_age_seconds` | gauge | none | How long the oldest due delivery has waited; 0 when nothing is overdue. Alert when it grows |
+| `mta_delivery_queue_spool_size_bytes` | gauge | none | Bytes of queued message bodies |
+| `mta_delivery_queue_sample_age_seconds` | gauge | none | Age of the last successful queue sample; the queue gauges are stale when this keeps growing |
+| `mta_delivery_queue_sample_failures_total` | counter | none | Queue samples that failed (storage unavailable) |
+| `mta_webhooks_claimed_total` | counter | none | Webhook outbox items picked up for delivery |
+| `mta_webhooks_deliveries_total` | counter | `outcome` (`delivered`, `retry`, `failed`) | Webhook attempts: `retry` will be tried again, `failed` is final |
+| `mta_webhooks_failures_total` | counter | `reason` (`timeout`, `connect_failed`, `ssrf_blocked`, `throttled`, `gone`, `redirect`, `http_4xx`, `http_5xx`, `endpoint_unavailable`, `secret_unreadable`, `other`) | Failed webhook attempts by cause |
+| `mta_webhooks_delivery_duration_seconds` | histogram | none | One HTTP call to a receiver |
+| `mta_webhooks_endpoints_disabled_total` | counter | none | Endpoints switched off after `410 Gone` or a continuous failure period |
+| `mta_storage_sqlite_commit_duration_seconds` | histogram | `file` (`queue.db`, `stats.db`, `config.db`, `history.db`) | COMMIT of one writer transaction (`sqlite_commit_latency` in [benchmarks.md](benchmarks.md)); with `Sqlite:SyncMode=Full` this is the fsync |
+| `mta_storage_sqlite_writer_batch_size` | histogram | `file` | Commands per committed transaction: how well the group commit batches (`sqlite_writer_batch_size`) |
+| `mta_storage_sqlite_writer_batch_failures_total` | counter | `file` | Transactions that failed as a whole and were replayed command by command |
+| `mta_storage_sqlite_writer_queue_depth` | gauge | `file` | Commands waiting for the writer right now (`sqlite_writer_queue_depth`) |
+| `mta_storage_sqlite_wal_size_bytes` | gauge | `file` | Size of the write-ahead log |
+| `mta_storage_sqlite_sync_off` | gauge | `file` | 1 for a file running with `synchronous=OFF`, else 0 (`sqlite_sync_off`) |
+| `mta_storage_sqlite_quarantined` | gauge | `file` | 1 for a file that failed its start-up integrity check and was moved aside when this process started, else 0 |
+| `mta_tls_certificate_expiry_seconds` | gauge | `name`, `source` | Seconds until each served certificate expires |
+| `mta_tls_certificates` | gauge | none | Certificates served; an expired one is no longer served, so alert on 0 as well |
+| `mta_backup_runs_total` | counter | `outcome` (`success`, `failed`) | Scheduled backup runs |
+| `mta_backup_last_success_timestamp_seconds` | gauge | none | Unix time of the newest good backup (also after a restart, from the backups on disk); absent until there is one |
+
+PostgreSQL command latency and pool state come from the Npgsql driver's own meter, exported unchanged next to the `mta_` metrics. The pool label (`db_client_connection_pool_name`) is `eggmail-runtime` or `eggmail-owner`; saturation is `used / max` of `db_client_connection_count` and `db_client_connection_max`.
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `db_client_operation_duration_seconds` | histogram | pool name, server | Duration of each command, as seen by the driver |
+| `db_client_operation_failed_total` | counter | pool name | Commands that failed |
+| `db_client_operation_npgsql_executing` | gauge | pool name | Commands executing right now |
+| `db_client_operation_npgsql_prepared_ratio` | gauge | pool name | Share of commands that ran as prepared statements; the hot paths should be near 1 |
+| `db_client_connection_count` | gauge | pool name, `db_client_connection_state` (`idle`, `used`) | Pooled connections by state |
+| `db_client_connection_max` | gauge | pool name | Pool size limit (`Storage:Postgres:MaxPoolSize`) |
+| `db_client_connection_npgsql_pending_requests` | gauge | pool name | Callers waiting for a free connection; above 0 for long means the pool is too small |
+| `db_client_connection_npgsql_timeouts_total` | counter | pool name | Connection requests that timed out |
+| `db_client_connection_npgsql_create_time_seconds` | histogram | pool name | Time to open a new connection |
+
+**What to alert on.**
+
+- Queue backlog: `mta_delivery_queue_oldest_due_age_seconds` above a few minutes for more than a few scrapes, or `mta_delivery_queue_depth{state="queued"}` growing steadily. `mta_delivery_queue_sample_age_seconds` above a minute means both are stale.
+- Repeated deferrals to one domain: the metrics carry no domain label (it is unbounded); the dashboard's per-domain statistics and the message events show which one. Alert on the `deferred` share of `mta_delivery_attempts_total`.
+- Certificates: `mta_tls_certificate_expiry_seconds` below 14 days (ACME renews with a third of the lifetime left) or `mta_tls_certificates == 0`.
+- Durability warnings: `mta_storage_sqlite_sync_off == 1` when you did not choose `Sqlite:SyncMode=Off`, and `mta_storage_sqlite_quarantined == 1` (a file was found corrupt and replaced by an empty one; the evidence is in `<data>/quarantine/`).
+- Backups: `mta_backup_runs_total{outcome="failed"}` increasing, or `time() - mta_backup_last_success_timestamp_seconds` above two backup intervals. The gauge exists from start when a backup is already on disk, and is absent on a fresh install until the first one: with backups enabled on SQLite also alert on `absent(mta_backup_last_success_timestamp_seconds)` for longer than the interval (a PostgreSQL deployment has no such series, since backups are the database's own).
+- SQLite write pressure (advisory; switching backends is manual): `mta_storage_sqlite_writer_queue_depth{file="queue.db"}` high for minutes, or the p99 of `mta_storage_sqlite_commit_duration_seconds` above about 100 ms.
+- PostgreSQL: `db_client_connection_npgsql_pending_requests > 0`, `db_client_connection_npgsql_timeouts_total` or `db_client_operation_failed_total` increasing.
+
+**Traces.** With `Observability:OtlpEndpoint` set, there is one trace per message and its trace id is the message id (the id in the `250 Queued as` reply and in the API): search your tracing backend for it. The spans are `mta.submit` (accepting the message into the queue), `mta.queue.wait` (acceptance to the first claim), `mta.delivery.attempt` (one per attempt and destination domain, with one event per recipient holding the outcome, SMTP code, enhanced code, MX host and whether TLS was used) and `mta.webhook.deliver` (one per webhook call; the message is found from the event's `message_id`). Nothing is stored for this: every span derives its trace from the message id, so a retry days later, or on another replica, joins the same trace. The spans hang under one shared parent id that is not itself exported, which tracing UIs show as a missing root. Only `Observability:TraceSampleRatio` of the messages are exported, chosen by message id, so a message is traced completely or not at all (a webhook span that is not about a message follows the ratio per span). Without an endpoint no span is created and nothing is allocated for tracing. A failed attempt's span status carries the enhanced status code (`5.1.1`) or `smtp <code>`, never the remote server's reply text, because that text echoes recipient addresses.
+
+**What leaves the box over OTLP.** Treat the collector as part of your trust boundary.
+
+- Span attributes: the message id, the tenant id (an opaque id, kept so a tenant's traces can be found when supporting them), the recipient count, message size, source (`Smtp`/`Api`), the attempt number, the **recipient domain** of each delivery attempt, the MX host name, SMTP and enhanced codes, the webhook event type and the HTTP status code. No recipient or sender address, subject, body, webhook URL or endpoint id is exported in spans. Webhook calls to your customers carry no `traceparent` or other trace header either.
+- Metrics: labels are the small fixed sets in the tables. The one label that can contain a customer's name is the certificate `name` of `mta_tls_certificate_expiry_seconds` (`selfsigned:<hostname>`, `default`, or the name given to an ACME or uploaded certificate, which may be a domain). The Prometheus exporter keeps at most 1000 label combinations per metric and counts what it refuses in `eggmail_exporter_dropped_series_total` (only rendered once above 0: it means some label is unbounded); the OpenTelemetry SDK's own per-metric limit (2000 by default) applies to the OTLP export.
+- Logs: the same records as the JSON console log, with their formatted message text (deliberately: raw templates are hard to read in a log backend). Log messages can contain recipient addresses and remote server error text, for example in delivery failures. If that must not leave the host, leave `Observability:OtlpEndpoint` empty and ship the JSON console log through your own pipeline, where you can filter it.
+
+**Logs.** With an endpoint set, the structured log (the same records as the JSON console log) is exported over OTLP as well. Records written before the logging pipeline exists (configuration errors) are console only.
+
+Alert also on the readiness warnings of `/readyz` (`sqlite_sync_off`, `sqlite_quarantined:<file>`, `queue_persistence_memory`), which carry the same facts as the gauges.
+
+## Bounces caused by the receiving server's capabilities
+
+EggMail sends 8-bit bodies with `BODY=8BITMIME` and internationalized mail with `SMTPUTF8` when the receiving server offers them, and converts or refuses when it does not. Three permanent failures name this in the bounce text (none of them suppresses the recipient): `5.6.1` the server has no 8BITMIME and the message could not be converted to 7-bit (the text says why, for example 8-bit header fields in an attached message); `5.6.9` the message has UTF-8 header fields and the server has no SMTPUTF8 (a change from earlier versions, which sent such mail as is; headers are not downgraded, RFC 6857); `5.6.7` the sender or recipient address has non-ASCII characters before the `@` and the server has no SMTPUTF8 (when only some recipients are affected the others are delivered, and the affected ones are offered to the domain's other mail hosts first). A configured `Delivery:BounceDomain` makes the envelope sender an ASCII bounce address, which avoids `5.6.7` for the sender. Bounce reports about internationalized recipients are RFC 6533 reports (`message/global-delivery-status`).
 
 ## Upgrades
 

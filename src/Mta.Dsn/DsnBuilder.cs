@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using Mta.Core;
+using Mta.Mime;
 
 namespace Mta.Dsn;
 
@@ -32,7 +33,7 @@ public sealed record DsnRecipient(
     DateTimeOffset? WillRetryUntil = null,
     string? OriginalRecipient = null);
 
-/// <summary>Everything needed to build a delivery status notification (RFC 3464).</summary>
+/// <summary>Everything needed to build a delivery status notification (RFC 3464, with the internationalization of RFC 6533).</summary>
 public sealed class DsnRequest
 {
     /// <summary>Host name of the reporting MTA (our hostname).</summary>
@@ -59,9 +60,19 @@ public sealed class DsnRequest
 
 /// <summary>
 /// Builds RFC 3464 delivery status notifications as <c>multipart/report; report-type=delivery-status</c> with a human-readable
-/// part, a <c>message/delivery-status</c> part and the returned original (headers or truncated full message). The result is
+/// part, a machine-readable status part and the returned original (headers or truncated full message). The result is
 /// marked <c>Auto-Submitted: auto-replied</c> (RFC 3834) and sent with the null return path by the caller, so it can never
 /// cause a bounce loop.
+/// <para>
+/// When anything in the report is not ASCII (an internationalized recipient address, UTF-8 diagnostic text, or a returned original
+/// with UTF-8 header fields) the report uses the internationalized forms of RFC 6533: the status part is
+/// <c>message/global-delivery-status</c> with UTF-8 field values and the <c>utf-8</c> address type for non-ASCII addresses, the returned
+/// headers are <c>message/global-headers</c> and a returned full message is <c>message/global</c>. ASCII addresses keep the
+/// <c>rfc822</c> type, so a report about plain recipients is what RFC 3464 describes. The human-readable part is base64 when it is not
+/// ASCII; the machine-readable parts are 8-bit UTF-8 (the delivery processor sends them with <c>BODY=8BITMIME</c>, or converts them for
+/// servers without it). A report whose header section holds UTF-8 (the sender's address is internationalized) must be queued as an
+/// SMTPUTF8 message by the caller.
+/// </para>
 /// </summary>
 public static class DsnBuilder
 {
@@ -72,6 +83,12 @@ public static class DsnBuilder
         string boundary = "=_dsn_" + token;
         string from = $"{r.FromLocalPart}@{Sanitize(r.ReportingMta)}";
         var (subject, intro) = Describe(r);
+        var original = r.OriginalMessage.Span;
+        bool originalUtf8Headers = !original.IsEmpty && MessageInspector.HasValidUtf8Headers(original);
+        bool global = originalUtf8Headers
+            || r.Recipients.Any(NeedsUtf8)
+            || (r.OriginalEnvelopeId is { } envelopeId && !Ascii.IsValid(envelopeId))
+            || !Ascii.IsValid(r.ReportingMta);
 
         var sb = new StringBuilder(2048);
         sb.Append("From: Mail Delivery System <").Append(from).Append(">\r\n");
@@ -86,22 +103,34 @@ public static class DsnBuilder
 
         // Part 1: human readable.
         string human = BuildHuman(r, intro);
-        bool ascii = human.All(c => c < 128);
         sb.Append("--").Append(boundary).Append("\r\n");
         sb.Append("Content-Type: text/plain; charset=utf-8\r\n");
-        if (ascii)
+        if (Ascii.IsValid(human))
         {
             sb.Append("Content-Transfer-Encoding: 7bit\r\n\r\n").Append(human);
         }
         else
         {
             sb.Append("Content-Transfer-Encoding: base64\r\n\r\n");
-            sb.Append(Convert.ToBase64String(Encoding.UTF8.GetBytes(human), Base64FormattingOptions.InsertLineBreaks).Replace("\n", "\r\n", StringComparison.Ordinal)).Append("\r\n");
+            // 76 characters per line, CRLF explicitly (Base64FormattingOptions.InsertLineBreaks uses the platform's line break, which can be a bare LF).
+            string encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes(human));
+            for (int i = 0; i < encoded.Length; i += 76)
+            {
+                sb.Append(encoded, i, Math.Min(76, encoded.Length - i)).Append("\r\n");
+            }
         }
 
         // Part 2: machine readable.
         sb.Append("\r\n--").Append(boundary).Append("\r\n");
-        sb.Append("Content-Type: message/delivery-status\r\n\r\n");
+        if (global)
+        {
+            sb.Append("Content-Type: message/global-delivery-status\r\nContent-Transfer-Encoding: 8bit\r\n\r\n");
+        }
+        else
+        {
+            sb.Append("Content-Type: message/delivery-status\r\n\r\n");
+        }
+
         sb.Append("Reporting-MTA: dns; ").Append(Sanitize(r.ReportingMta)).Append("\r\n");
         if (r.OriginalEnvelopeId is not null)
         {
@@ -114,10 +143,12 @@ public static class DsnBuilder
             sb.Append("\r\n");
             if (rcpt.OriginalRecipient is not null)
             {
-                sb.Append("Original-Recipient: rfc822; ").Append(Sanitize(rcpt.OriginalRecipient)).Append("\r\n");
+                string originalRecipient = Sanitize(rcpt.OriginalRecipient);
+                sb.Append("Original-Recipient: ").Append(AddressType(originalRecipient)).Append("; ").Append(originalRecipient).Append("\r\n");
             }
 
-            sb.Append("Final-Recipient: rfc822; ").Append(Sanitize(rcpt.Address.ToString())).Append("\r\n");
+            string finalRecipient = Sanitize(rcpt.Address.ToString());
+            sb.Append("Final-Recipient: ").Append(AddressType(finalRecipient)).Append("; ").Append(finalRecipient).Append("\r\n");
             sb.Append("Action: ").Append(r.Action.ToString().ToLowerInvariant()).Append("\r\n");
             sb.Append("Status: ").Append(Sanitize(rcpt.Status)).Append("\r\n");
             if (rcpt.RemoteMta is not null)
@@ -142,22 +173,35 @@ public static class DsnBuilder
         }
 
         // Part 3: original message or its headers.
+        bool full = r.ReturnContent == DsnReturnContent.Full;
+        byte[] returned = Truncate(original, r.MaxReturnedBytes, headersOnly: !full);
+        string returnedType = full
+            ? (originalUtf8Headers ? "message/global" : "message/rfc822")
+            : (originalUtf8Headers ? "message/global-headers" : "text/rfc822-headers");
         sb.Append("\r\n--").Append(boundary).Append("\r\n");
-        var original = r.OriginalMessage.Span;
-        if (r.ReturnContent == DsnReturnContent.Full)
+        sb.Append("Content-Type: ").Append(returnedType).Append("\r\nContent-Transfer-Encoding: 8bit\r\n\r\n");
+
+        // The report text is UTF-8 (ASCII unless it is internationalized); the returned original goes in byte for byte.
+        var output = new MemoryStream(sb.Length + returned.Length + 128);
+        output.Write(Encoding.UTF8.GetBytes(sb.ToString()));
+        output.Write(returned);
+        if (returned.Length == 0 || returned[^1] != (byte)'\n')
         {
-            sb.Append("Content-Type: message/rfc822\r\nContent-Transfer-Encoding: 8bit\r\n\r\n");
-            AppendLatin1(sb, Truncate(original, r.MaxReturnedBytes, headersOnly: false));
-        }
-        else
-        {
-            sb.Append("Content-Type: text/rfc822-headers\r\nContent-Transfer-Encoding: 8bit\r\n\r\n");
-            AppendLatin1(sb, Truncate(original, r.MaxReturnedBytes, headersOnly: true));
+            output.Write("\r\n"u8);
         }
 
-        sb.Append("\r\n--").Append(boundary).Append("--\r\n");
-        return Encoding.Latin1.GetBytes(Latin1Safe(sb.ToString()));
+        output.Write(Encoding.UTF8.GetBytes("\r\n--" + boundary + "--\r\n"));
+        return output.ToArray();
     }
+
+    private static bool NeedsUtf8(DsnRecipient rcpt) =>
+        !Ascii.IsValid(rcpt.Address.ToString())
+        || (rcpt.OriginalRecipient is { } o && !Ascii.IsValid(o))
+        || (rcpt.DiagnosticCode is { } d && !Ascii.IsValid(d))
+        || (rcpt.RemoteMta is { } m && !Ascii.IsValid(m));
+
+    /// <summary>RFC 6533 section 3.2: addresses that are not ASCII use the <c>utf-8</c> address type, the rest stay <c>rfc822</c>.</summary>
+    private static string AddressType(string address) => Ascii.IsValid(address) ? "rfc822" : "utf-8";
 
     private static (string Subject, string Intro) Describe(DsnRequest r) => r.Action switch
     {
@@ -186,18 +230,24 @@ public static class DsnBuilder
         return sb.ToString();
     }
 
-    /// <summary>Strips CR, LF and NUL so values cannot inject header fields (diagnostic text comes from remote servers).</summary>
+    /// <summary>
+    /// Replaces control characters (CR, LF, NUL, tab and the other C0/C1 controls) and the bidirectional formatting characters with a space, so
+    /// values cannot inject header fields or reorder the text a person reads (diagnostic text comes from remote servers).
+    /// </summary>
     private static string Sanitize(string value)
     {
         var sb = new StringBuilder(value.Length);
         foreach (char c in value)
         {
-            sb.Append(c is '\r' or '\n' or '\0' or '\t' ? ' ' : c);
+            sb.Append(char.IsControl(c) || IsBidiControl(c) ? ' ' : c);
         }
 
         return sb.ToString().Trim();
     }
 
+    private static bool IsBidiControl(char c) => c is '\u061C' or '\u200E' or '\u200F' || c is >= '\u202A' and <= '\u202E' || c is >= '\u2066' and <= '\u2069';
+
+    /// <summary>At most 900 characters, never ending inside a surrogate pair.</summary>
     private static string Fold(string s)
     {
         if (s.Length <= 900)
@@ -205,7 +255,7 @@ public static class DsnBuilder
             return s;
         }
 
-        return s[..900];
+        return char.IsHighSurrogate(s[899]) ? s[..899] : s[..900];
     }
 
     private static string Rfc5322Date(DateTimeOffset d) => d.UtcDateTime.ToString("ddd, dd MMM yyyy HH:mm:ss '+0000'", CultureInfo.InvariantCulture);
@@ -224,29 +274,12 @@ public static class DsnBuilder
             // Cut at a line boundary so the returned part stays well-formed.
             int cut = original[..max].LastIndexOf((byte)'\n');
             end = cut >= 0 ? cut + 1 : max;
+            while (cut < 0 && end > 0 && (original[end] & 0xC0) == 0x80)
+            {
+                end--;   // a line longer than the limit: do not cut a UTF-8 sequence in half
+            }
         }
 
         return original[..end].ToArray();
-    }
-
-    private static void AppendLatin1(StringBuilder sb, byte[] data)
-    {
-        sb.Append(Encoding.Latin1.GetString(data));
-        if (data.Length == 0 || data[^1] != (byte)'\n')
-        {
-            sb.Append("\r\n");
-        }
-    }
-
-    /// <summary>The message is assembled as text; any char above Latin-1 (from non-ASCII addresses) is replaced to keep the 8bit encoding honest.</summary>
-    private static string Latin1Safe(string s)
-    {
-        var sb = new StringBuilder(s.Length);
-        foreach (char c in s)
-        {
-            sb.Append(c > 255 ? '?' : c);
-        }
-
-        return sb.ToString();
     }
 }
