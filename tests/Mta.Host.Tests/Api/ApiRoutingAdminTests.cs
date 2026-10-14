@@ -121,6 +121,10 @@ public class ApiRoutingAdminTests : IAsyncLifetime
         change.Problem(HttpStatusCode.BadRequest, "validation_failed");
         Assert.Equal(["password"], change.ErrorFields);
         Assert.Equal("other", (await _admin.PatchAsync("/api/v1/admin/relay-routes/" + id, new { userName = "other", password = "pw" })).Str("userName"));
+        // An empty password is "no password given", never a new empty password.
+        byte[]? before = (await _f.Storage.Config.GetRelayRoutesAsync(default)).Single().PasswordProtected;
+        Assert.True((await _admin.PatchAsync("/api/v1/admin/relay-routes/" + id, new { password = "" })).Json.GetProperty("hasPassword").GetBoolean());
+        Assert.Equal(before, (await _f.Storage.Config.GetRelayRoutesAsync(default)).Single().PasswordProtected);
 
         // TLS none and credentials exclude each other, in both directions.
         Reply none = await _admin.PatchAsync("/api/v1/admin/relay-routes/" + id, new { tlsMode = "none" });

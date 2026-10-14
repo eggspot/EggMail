@@ -291,7 +291,7 @@ public sealed partial class RoutingAdminApi(
             if (!errors.Any)
             {
                 userName = newUser;
-                password = body.Password is null ? current.PasswordProtected : Protect(body.Password);
+                password = string.IsNullOrEmpty(body.Password) ? current.PasswordProtected : Protect(body.Password);
             }
         }
         else if (userName is not null && tlsMode == "none")
