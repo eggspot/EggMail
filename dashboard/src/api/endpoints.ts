@@ -3,6 +3,7 @@ import type {
   AcmeRenewal,
   AdminStatus,
   ApiKey,
+  CancelMessageResponse,
   Capabilities,
   CertificateInfo,
   DeliveryEvent,
@@ -62,6 +63,7 @@ export const api = {
   messageEvents: async (id: string) => itemsOf(await http.get<DeliveryEvent[] | Page<DeliveryEvent>>(`/api/v1/messages/${enc(id)}/events`)),
   messageContent: (id: string) => http.get<{ text?: string; html?: string }>(`/api/v1/messages/${enc(id)}/content`),
   resend: (id: string) => http.post<ResendResponse>(`/api/v1/messages/${enc(id)}/resend`),
+  cancelMessage: (id: string, recipients?: string[]) => http.post<CancelMessageResponse>(`/api/v1/messages/${enc(id)}/cancel`, recipients ? { recipients } : undefined),
   send: (body: SendMessageRequest, idempotencyKey?: string) =>
     http.post<SendMessageResponse>('/api/v1/messages', body, idempotencyKey ? { headers: { 'Idempotency-Key': idempotencyKey } } : undefined),
 

@@ -1,12 +1,14 @@
 import { useEffect, useState } from 'preact/hooks';
 import { api } from '../api/endpoints';
 import { isCode } from '../api/errorMessages';
-import type { AttachmentInfo, MessageDetail as MessageDetailData, ResendResponse } from '../api/types';
+import type { AttachmentInfo, CancelMessageResponse, MessageDetail as MessageDetailData, ResendResponse } from '../api/types';
+import { CheckboxGroup } from '../components/CheckboxGroup';
 import { EventTimeline } from '../components/EventTimeline';
 import { HistoryNotRecorded } from '../components/HistoryGate';
 import { MessageHtmlFrame } from '../components/MessageHtmlFrame';
 import { Button, Card, Chip, ConfirmDialog, EmptyState, ErrorNotice, KeyValue, Loading, Notice, PageHeader, StatusChip, Tabs } from '../components/ui';
 import { formatBytes, formatDateTime } from '../lib/format';
+import { isCancellableStatus, waitingRecipients } from '../lib/messages';
 import { useAction, useApi, useDocumentTitle } from '../lib/hooks';
 import { useApp } from '../state/app';
 
@@ -177,6 +179,87 @@ function ResendControl({ id, disabled }: { id: string; disabled: boolean }) {
   );
 }
 
+function CancelControl({ id, status, waiting, onDone }: { id: string; status: string; waiting: string[]; onDone: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [result, setResult] = useState<CancelMessageResponse | null>(null);
+  const [pickError, setPickError] = useState<unknown>(undefined);
+  const action = useAction((recipients: string[]) => api.cancelMessage(id, recipients));
+  const cancellable = isCancellableStatus(status) && waiting.length > 0;
+
+  const show = () => {
+    setResult(null);
+    setPickError(undefined);
+    action.clearError();
+    setSelected(waiting);
+    setOpen(true);
+  };
+  const confirm = async () => {
+    if (selected.length === 0) {
+      setPickError(new Error('Select at least one recipient.'));
+      return;
+    }
+    const r = await action.run(selected);
+    if (r) {
+      setResult(r);
+      setOpen(false);
+      onDone();
+    }
+  };
+  return (
+    <>
+      {cancellable && (
+        <Button onClick={show} title="Stop delivery to the recipients that have not received this message yet">
+          Cancel delivery
+        </Button>
+      )}
+      {open && (
+        <ConfirmDialog
+          title="Cancel delivery?"
+          confirmLabel={selected.length === 1 ? 'Cancel delivery to 1 recipient' : `Cancel delivery to ${selected.length} recipients`}
+          busy={action.busy}
+          error={pickError ?? action.error}
+          onConfirm={confirm}
+          onCancel={() => setOpen(false)}
+        >
+          <p>The message will not be sent to the recipients you select, now or on a later retry. This cannot be undone; to send it again use Resend.</p>
+          {waiting.length > 1 ? (
+            <CheckboxGroup
+              legend="Recipients that have not received it yet"
+              options={waiting}
+              selected={selected}
+              onChange={(next) => {
+                setPickError(undefined);
+                setSelected(next);
+              }}
+            />
+          ) : (
+            <p>
+              Recipient: <code>{waiting[0]}</code>
+            </p>
+          )}
+          <p class="muted small">
+            A recipient whose delivery attempt is running at this moment cannot be stopped; it is left alone and finishes normally. No bounce message is sent to the sender.
+          </p>
+        </ConfirmDialog>
+      )}
+      {result && (
+        <div class="resend-result" data-testid="cancel-result">
+          <Notice tone="ok" title={result.cancelled.length === 1 ? 'Delivery cancelled for 1 recipient' : `Delivery cancelled for ${result.cancelled.length} recipients`}>
+            <p>{result.cancelled.join(', ')}</p>
+            {result.inFlight.length > 0 && (
+              <p>
+                Not cancelled, because a delivery attempt is running right now: {result.inFlight.join(', ')}. It finishes normally; open this page again afterwards to see the outcome.
+              </p>
+            )}
+            {result.notPending.length > 0 && <p>Not waiting for delivery any more: {result.notPending.join(', ')}.</p>}
+          </Notice>
+        </div>
+      )}
+    </>
+  );
+}
+
 function Detail({ id }: { id: string }) {
   const detail = useApi(() => api.message(id), [id]);
   const events = useApi(() => api.messageEvents(id), [id]);
@@ -201,7 +284,20 @@ function Detail({ id }: { id: string }) {
       <PageHeader
         title={d.subject || '(no subject)'}
         subtitle={<a href="/messages">Back to messages</a>}
-        actions={<ResendControl id={d.id} disabled={d.content.state !== 'available'} />}
+        actions={
+          <>
+            <CancelControl
+              id={d.id}
+              status={d.status}
+              waiting={events.data ? waitingRecipients(d.recipients, events.data) : []}
+              onDone={() => {
+                detail.reload();
+                events.reload();
+              }}
+            />
+            <ResendControl id={d.id} disabled={d.content.state !== 'available'} />
+          </>
+        }
       />
       <Card title="Details">
         <KeyValue

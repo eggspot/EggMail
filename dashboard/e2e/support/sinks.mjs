@@ -3,7 +3,8 @@ import net from 'node:net';
 
 /**
  * A minimal plaintext SMTP receiver standing in for the recipients' mail server. A recipient whose local part starts with
- * "reject" is refused with a permanent 550 (the message ends as bounced); every other message is accepted and recorded.
+ * "reject" is refused with a permanent 550 (the message ends as bounced); one whose local part starts with "defer" is refused with a
+ * temporary 451 (the message is deferred and retried much later, so it stays cancellable); every other message is accepted and recorded.
  */
 export async function startSmtpSink() {
   const received = [];
@@ -42,6 +43,7 @@ export async function startSmtpSink() {
         } else if (verb === 'RCPT') {
           const to = /<([^>]*)>/.exec(line)?.[1] ?? '';
           if (to.toLowerCase().startsWith('reject')) reply('550 5.1.1 user unknown (e2e sink)');
+          else if (to.toLowerCase().startsWith('defer')) reply('451 4.7.1 try again later (e2e sink)');
           else {
             current.to.push(to);
             reply('250 2.1.5 ok');
