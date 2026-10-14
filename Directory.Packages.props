@@ -1,11 +1,10 @@
 <Project>
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
-    <!-- Lets the "Transitive security pins" below replace the versions that packages bring in on their own (Data Protection, MimeKit). -->
+    <!-- Transitive packages with a known advisory are pinned to the patched version below (NuGetAudit is an error). -->
     <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>
   </PropertyGroup>
-  <ItemGroup Label="Transitive security pins">
-    <!-- CVE-2026-84008 and the GHSA-7hqp/c399/r955 advisories (NuGet audit, warnings are errors): 10.0.12 is vulnerable, 10.0.13 is the fix. Drop when the packages above require it. -->
+  <ItemGroup Label="Security pins (transitive; GHSA-2fmv-rv2c-59x7, GHSA-846f-f764-76mx and the Cryptography.Xml advisories affect 10.0.12 and earlier)">
     <PackageVersion Include="System.Security.Cryptography.Pkcs" Version="10.0.13" />
     <PackageVersion Include="System.Security.Cryptography.Xml" Version="10.0.13" />
   </ItemGroup>
@@ -19,20 +18,20 @@
     <PackageVersion Include="Testcontainers.PostgreSql" Version="4.16.0" />
     <PackageVersion Include="BenchmarkDotNet" Version="0.15.8" />
     <PackageVersion Include="Microsoft.Diagnostics.Tracing.TraceEvent" Version="3.1.21" />
-    <PackageVersion Include="Microsoft.AspNetCore.TestHost" Version="10.0.12" />
+    <PackageVersion Include="Microsoft.AspNetCore.TestHost" Version="10.0.13" />
   </ItemGroup>
   <ItemGroup Label="Fuzzing (only fuzz/Mta.Fuzz.Harness; never a protocol assembly)">
     <PackageVersion Include="SharpFuzz" Version="2.3.0" />
   </ItemGroup>
   <ItemGroup Label="Storage">
-    <PackageVersion Include="Microsoft.EntityFrameworkCore" Version="10.0.12" />
-    <PackageVersion Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.12" />
-    <PackageVersion Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.12" />
-    <PackageVersion Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.12" />
-    <PackageVersion Include="Microsoft.Data.Sqlite" Version="10.0.12" />
+    <PackageVersion Include="Microsoft.EntityFrameworkCore" Version="10.0.13" />
+    <PackageVersion Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.13" />
+    <PackageVersion Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.13" />
+    <PackageVersion Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.13" />
+    <PackageVersion Include="Microsoft.Data.Sqlite" Version="10.0.13" />
     <PackageVersion Include="Npgsql" Version="10.0.3" />
     <PackageVersion Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
-    <PackageVersion Include="Microsoft.AspNetCore.DataProtection.EntityFrameworkCore" Version="10.0.12" />
+    <PackageVersion Include="Microsoft.AspNetCore.DataProtection.EntityFrameworkCore" Version="10.0.13" />
   </ItemGroup>
   <ItemGroup Label="Host">
     <PackageVersion Include="Certes" Version="4.1.0" />
