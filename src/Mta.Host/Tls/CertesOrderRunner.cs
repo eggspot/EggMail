@@ -135,8 +135,22 @@ public sealed class CertesOrderRunner : IAcmeOrderRunner
         {
             foreach (var authz in authorizations)
             {
-                var challenge = await authz.Dns().ConfigureAwait(false);
                 var resource = await authz.Resource().ConfigureAwait(false);
+                // The CA may hand back an authorization that is already valid (RFC 8555 section 7.4.1: servers may reuse valid authorizations
+                // of the account for the same identifier; Let's Encrypt does, and Pebble does at random). There is nothing left to prove and the
+                // challenge can no longer be answered: posting to it is refused ("Cannot update challenge with status valid, only status
+                // pending"). Any state other than pending or valid fails the order.
+                if (resource.Status == AuthorizationStatus.Valid)
+                {
+                    continue;
+                }
+
+                if (resource.Status != AuthorizationStatus.Pending)
+                {
+                    throw new AcmeException($"Authorization for {resource.Identifier.Value} is {resource.Status}, not pending");
+                }
+
+                var challenge = await authz.Dns().ConfigureAwait(false);
                 // A wildcard authorization names the base domain (the "*." is a flag), so "*.example.com" and "example.com" share this name
                 // with different values; providers must hold several TXT values at one name.
                 string txt = acme.AccountKey.DnsTxt(challenge.Token);
@@ -151,7 +165,11 @@ public sealed class CertesOrderRunner : IAcmeOrderRunner
 
             foreach (var (_, challenge) in challenges)
             {
-                await challenge.Validate().ConfigureAwait(false);
+                // Only a pending challenge can be answered; one that is already processing or valid is just waited for.
+                if ((await challenge.Resource().ConfigureAwait(false)).Status == ChallengeStatus.Pending)
+                {
+                    await challenge.Validate().ConfigureAwait(false);
+                }
             }
 
             foreach (var (authz, challenge) in challenges)
