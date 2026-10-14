@@ -119,22 +119,22 @@ The gate prevents regressions; it does not mean the budget is met. The design bu
 
 **Status: written, never run.** Docker is not used on the development machine and the owner runs the comparison by hand on a quiet Linux host. The EggMail path (provisioning script) was exercised against a locally running server; the Postfix configuration and the KumoMTA policy were written from the documentation of the two projects and will probably need small fixes on the first run (the KumoMTA image tag is not pinned, option names must be checked against the pinned version). Haraka, Stalwart and mox are not included (cut order).
 
-## CI trend numbers (2026-10-13)
+## CI trend numbers (2026-10-14)
 
-**GitHub-hosted ubuntu-latest 4-core runner, noisy, not publishable.** (The core count is the real one: `nproc` said 4 on this public repository, and the workflow now builds the label from `nproc` instead of assuming 2. These runs predate the allocation work of decisions 64 to 68, so the allocation column is that of the earlier code. Ubuntu 24.04, .NET 10.0.12. The load generator, the server, the counting sink and PostgreSQL 17 in a container all share that machine, and so do the other jobs of the host.) One manual run of `bench-throughput` ([run 38427180654](https://github.com/eggspot/EggMail/actions/runs/38427180654)), pipeline harness, 2 KB messages, 16 connections, TLS and AUTH on, `History:Mode=Full` unless stated, median of 3 runs (range in brackets):
+**GitHub-hosted ubuntu-latest 4-core runner, noisy, not publishable.** (The core count is the real one: `nproc` says 4 on this public repository, and the workflow builds the label from `nproc` instead of assuming 2. Ubuntu 24.04, .NET 10.0.13.) The load generator, the server, the counting sink and PostgreSQL 17 in a container all share that machine, and so do the other jobs of its host. One manual run of `bench-throughput` ([run 38511632277](https://github.com/eggspot/EggMail/actions/runs/38511632277), on the code of the PR with the allocation work of decisions 64 to 68), pipeline harness, 2 KB messages, 16 connections, TLS and AUTH on, `History:Mode=Full` unless stated, median of 3 runs (range in brackets):
 
 | Configuration | Ingest msg/s | p50 / p99 ms | Alloc B/msg | CPU ms per 1000 msg |
 |---|---:|---|---:|---:|
-| SQLite `Sqlite:SyncMode=Off` (the default, non-durable) | 7,184 (6,493-7,499) | 1.96 / 4.92 | 32,713 | 354 |
-| SQLite `Sqlite:SyncMode=Full` (its durable pair) | 2,806 (2,447-2,883) | 4.80 / 20.2 | 32,592 | 417 |
-| SQLite `Off`, `History:Mode=StatsOnly` | 9,386 (9,266-9,548) | 1.42 / 4.26 | 18,413 | 262 |
-| SQLite `Off`, application assemblies precompiled with ReadyToRun | 7,488 (7,342-7,526) | 1.89 / 4.56 | 32,490 | 341 |
-| PostgreSQL 17, default durability (WAL synced at commit) | 3,222 (3,140-3,304) | 4.13 / 14.4 | 37,828 | 430 |
-| PostgreSQL 17, `synchronous_commit=off` (its non-durable pair) | 3,426 (3,202-3,702) | 3.93 / 17.6 | 37,982 | 469 |
-| SQLite `Off`, with delivery to the counting sink (10,000 messages): ingest | 1,845 (1,834-1,915) | 7.81 / 18.2 | 101,034 | 1,800 |
-| ... the same, end to end | 1,642 recipients/s until the sink had them all | | | |
+| SQLite `Sqlite:SyncMode=Off` (the default, non-durable) | 3,999 (3,914-4,423) | 3.62 / 7.64 | 11,084 | 638 |
+| SQLite `Sqlite:SyncMode=Full` (its durable pair) | 2,337 (2,292-2,347) | 6.24 / 12.1 | 11,247 | 715 |
+| SQLite `Off`, `History:Mode=StatsOnly` | 4,957 (4,810-5,027) | 2.87 / 6.82 | 6,356 | 522 |
+| SQLite `Off`, application assemblies precompiled with ReadyToRun | 4,355 (4,354-4,386) | 3.29 / 7.35 | 11,072 | 575 |
+| PostgreSQL 17, default durability (WAL synced at commit) | 1,852 (1,773-1,874) | 7.96 / 18.4 | 28,400 | 729 |
+| PostgreSQL 17, `synchronous_commit=off` (its non-durable pair) | 1,881 (1,772-1,898) | 7.19 / 29.3 | 28,197 | 744 |
+| SQLite `Off`, with delivery to the counting sink (10,000 messages): ingest | 1,048 (1,037-1,088) | 13.9 / 32.7 | 39,600 | 3,290 |
+| ... the same, end to end | 984 recipients/s until the sink had them all | | | |
 
-How little these numbers can be trusted: the same SQLite `Off` configuration measured 4,114, 5,027 and 7,184 msg/s in the three runs of this workflow done on 2026-10-13 (different runner instances), and the same code on a 10-core laptop gave 1,400 to 6,100. Only the allocation columns are stable (within about 1 % across runs), which is why the regression gate uses them. Read the table for shape, not for values: SQLite `Off` is faster than `Full` and PostgreSQL on this runner; `StatsOnly` is about 30 % faster than `Full` history; `synchronous_commit=off` did not help PostgreSQL measurably here (the runner's disk is fast and the load generator is probably the limit); the durable SQLite row is not comparable with the PostgreSQL durable row (different fsync behaviour, different storage). Nothing here is a claim about being the fastest, and no other server was run on the same machine.
+How little these numbers can be trusted: the same SQLite `Off` configuration measured 4,114, 5,027, 7,184 and now 3,999 msg/s in four runs of this workflow on four runner instances over two days (the code also changed between them), and the same code on a 10-core laptop gave 1,400 to 6,100. Only the allocation columns are stable (within about 1 % across runs of the same code), which is why the regression gate uses them. Read the table for shape, not for values: SQLite `Off` is faster than `Full` and PostgreSQL on this runner; `StatsOnly` is about 25 % faster than `Full` history; `synchronous_commit=off` did not help PostgreSQL measurably here (the runner's disk is fast and the load generator is probably the limit); the durable SQLite row is not comparable with the PostgreSQL durable row (different fsync behaviour, different storage); the ReadyToRun row is inside the noise of the JIT row. Nothing here is a claim about being the fastest, and no other server was run on the same machine. The first run of this section (2026-10-13, before the allocation work) had 7,184 msg/s and 32.7 KB per message for the first row.
 
 ## Pipeline harness and first profile (2026-10-13)
 
