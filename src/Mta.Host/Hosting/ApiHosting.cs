@@ -33,7 +33,7 @@ public static class ApiHosting
         var options = new Mta.Host.Switching.StorageSwitchServiceOptions
         {
             BundleDirectory = config.Switch.BundleDirectory,
-            SourceKeysProtectedAtRest = config.Secrets.KeyProtection != KeyProtectionMode.None,
+            SourceKeysProtectedAtRest = runtime.KeysProtectedAtRest,
             QuiesceTimeout = TimeSpan.FromSeconds(Math.Max(1, config.Switch.QuiesceTimeoutSeconds)),
         };
         AddSwitchTargetServices(services, loaded);
