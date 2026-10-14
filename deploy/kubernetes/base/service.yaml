@@ -1,0 +1,46 @@
+# Three Services:
+#  - eggmail-headless: the governing Service of the StatefulSet (the SQLite variant); no virtual IP.
+#  - eggmail:          dashboard and API inside the cluster (HTTPS 8443, HTTP 8080). Put an Ingress or Gateway in front for outside access.
+#  - eggmail-smtp:     the submission ports for senders outside the cluster, as a LoadBalancer.
+apiVersion: v1
+kind: Service
+metadata:
+  name: eggmail-headless
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: false
+  selector:
+    app.kubernetes.io/name: eggmail
+  ports:
+    - { name: submission, port: 5587, targetPort: submission }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: eggmail
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: eggmail
+  ports:
+    - { name: https, port: 8443, targetPort: https }
+    - { name: http, port: 8080, targetPort: http }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: eggmail-smtp
+  annotations: {}      # cloud-specific load balancer annotations go here (internal vs external, reserved IP, ...)
+spec:
+  type: LoadBalancer
+  # Keep the client address: EggMail limits connections and failed logins per client IP, and a source-NAT'ed address would put
+  # every sender into one bucket.
+  externalTrafficPolicy: Local
+  selector:
+    app.kubernetes.io/name: eggmail
+  ports:
+    - { name: submission, port: 587, targetPort: submission }       # STARTTLS
+    - { name: submissions, port: 465, targetPort: submissions }     # implicit TLS
+    - { name: alternate, port: 2525, targetPort: alternate }        # STARTTLS, for networks that block 587 and 465
+    # Receiving bounces needs inbound port 25 to the bounce listener. Many clouds do not offer inbound 25 on a load balancer: check yours.
+    # - { name: bounce, port: 25, targetPort: bounce }

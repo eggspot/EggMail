@@ -2,6 +2,27 @@
 
 How to run EggMail. Everything here is about behaviour that exists in the code; items that are not built yet are marked.
 
+## Deploying
+
+Tested deployment files are in `deploy/` (the release workflow tests them against the image it builds: the PostgreSQL compose file on every build, the SQLite compose file, the Unbound sidecar and the Kubernetes manifests on tags and manual runs, not on the daily nightly; [release.md](release.md)):
+
+| Deployment | Files | Notes |
+|---|---|---|
+| Docker Compose, SQLite (default) | `deploy/compose/compose.yaml` | One container, one volume at `/data`, one replica. Read-only root filesystem, no capabilities, 60 s stop grace |
+| Docker Compose, PostgreSQL | `deploy/compose/compose.postgres.yaml` | EggMail plus `postgres:17`; one database role for both duties (use a managed PostgreSQL with an owner and a runtime role in production) |
+| DANE: local validating resolver | `deploy/compose/compose.unbound.yaml` (add with a second `-f`), `deploy/kubernetes/components/unbound` | Unbound sidecar, sets `Dns:Servers`, `Dns:RequestDnssec` and `Dns:TrustAuthenticatedData` together |
+| Kubernetes, SQLite | `deploy/kubernetes/sqlite` | StatefulSet (one replica, ReadWriteOnce claim), `fsGroup` for the volume, startup/liveness (`/healthz`) and readiness (`/readyz`) probes |
+| Kubernetes, PostgreSQL | `deploy/kubernetes/postgres` | Deployment (raise `replicas` for availability), connection strings from a Secret |
+| Both Kubernetes variants | `deploy/kubernetes/base` | Services (SMTP as a LoadBalancer with `externalTrafficPolicy: Local` so client addresses survive), NetworkPolicy of design 7.1, ConfigMap |
+
+Things that are easy to get wrong:
+
+- **Healthcheck command.** The chiseled image has no shell and `/app` is not on `PATH`: use `["CMD", "/app/mta", "--healthcheck"]` (the `HEALTHCHECK` of the image does). `["CMD", "mta", "--healthcheck"]` fails with "executable file not found in $PATH". The release workflow checks this on every build (`deploy/smoke/image.sh` prints the image's `PATH` and tries `mta`).
+- **First administrator.** Compose: a file secret read through `Dashboard__BootstrapAdminPasswordFile` (the file must be readable by uid 1654: Compose does not apply `uid` or `mode` to file secrets outside Swarm). Kubernetes: a Secret mounted at `/run/secrets/eggmail`. Or `mta admin create` while the SQLite server is stopped.
+- **Volume ownership.** The image prepares `/data` for uid 1654; a new Kubernetes volume is owned by root, hence `fsGroup: 1654` in the StatefulSet.
+- **Inbound port 25 for bounces** needs a public MX record and a platform that offers inbound 25 (many load balancers do not).
+- **Kubernetes NetworkPolicy** is enforced only by a CNI that implements it; the smoke test applies the policy on kind but does not test enforcement.
+
 ## Configuration
 
 Settings come from (highest precedence first): command line, environment variables, the bootstrap file in the data directory (`bootstrap.json`, written by a backend switch; the directory is `--Sqlite:DataDirectory` on the command line, else `Sqlite__DataDirectory`, else `/data`), `appsettings.json` next to the executable (`/app/appsettings.json` in the image; mount one there), the global settings saved through the dashboard (`/admin/settings`, stored in the database), built-in defaults. Environment variables use `__` for nesting (`Delivery__RemotePort=25`). Values supplied by the deployment cannot be edited in the dashboard. A value of the wrong type (`Smtp__MaxRecipients=many`) or out of range stops the start with a message naming the key; a saved dashboard setting that does not validate is ignored with a warning.
@@ -88,7 +109,7 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | `Delivery:PublicSendingIp` | none | The address receiving servers see for our connections; reported as `sending-mta-ip` in TLS-RPT reports. Set it when EggMail is behind NAT or a proxy. Without it only a public local address of the connection is reported; private, loopback and link-local addresses are left out |
 | `Dns:Servers` | system resolvers | Resolvers (IP with optional port) |
 | `Dns:RequestDnssec` | true | Ask for DNSSEC records (needed for DANE) |
-| `Dns:TrustAuthenticatedData` | false | Trust the AD bit; only behind a local validating resolver |
+| `Dns:TrustAuthenticatedData` | false | Trust the AD bit; only behind a local validating resolver. With the default DANE never applies. `deploy/compose/compose.unbound.yaml` (Compose) and `deploy/kubernetes/components/unbound` (Kubernetes) add an Unbound sidecar and set `Dns:Servers`, `Dns:RequestDnssec` and this key together |
 | `Sending:GlobalPerHour` | 0 | Most messages the server sends per UTC hour (0 = unlimited). Counters are in memory: a restart starts the hour at zero |
 | `Sending:GlobalPerDay` | 0 | The same per UTC day |
 | `Sending:TenantPerHour` | 0 | Default cap per tenant and hour; a tenant setting `Sending:PerHour` overrides it |
@@ -324,7 +345,7 @@ Internationalized domain names and Unicode normalization depend on ICU. In invar
 
 **Attachment storage on SMTP.** SMTP submissions now follow the tenant's `Content:StoreAttachments` setting, and the operator default when the tenant never chose (they used to ignore both), so where `Content:AllowAttachmentStorage` is on and the default or a tenant says yes, SMTP mail with attachments is kept after delivery and uses disk for `Content:RetentionDays`. Check the tenants' settings and `Content:StoreAttachments` before upgrading if that is not wanted.
 
-Take a backup, pull the new image, restart. Schema changes run at start (SQLite: automatic; PostgreSQL: `Mail:Database:Migrate`, owner role). Schema version 4 builds an index on the history index (`message_index`) of every partition on PostgreSQL, which blocks intake writes for the duration; on a large history run `mta migrate-db` in a quiet moment before the rollout. Roll back by restoring the backup and starting the old image. Backend switching (SQLite ⇄ PostgreSQL) is a separate, manual procedure (`docs/design.md` section 4.6; the engine is being built).
+Take a backup, pull the new image, restart. Schema changes run at start (SQLite: automatic; PostgreSQL: `Mail:Database:Migrate`, owner role). Schema version 4 builds an index on the history index (`message_index`) of every partition on PostgreSQL, which blocks intake writes for the duration; on a large history run `mta migrate-db` in a quiet moment before the rollout. Roll back by restoring the backup and starting the old image. Backend switching (SQLite ⇄ PostgreSQL) is a separate, manual procedure (`docs/design.md` section 4.6; engine, CLI, admin API and dashboard wizard are built, see [components/switch.md](components/switch.md)).
 
 ## State kept across restarts
 

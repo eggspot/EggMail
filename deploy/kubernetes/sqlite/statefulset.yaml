@@ -1,0 +1,97 @@
+# SQLite is a single-node backend: one writer, one replica, a local (ReadWriteOnce) volume, never network file storage.
+# A StatefulSet gives exactly that: the pod is stopped before its replacement starts (no second writer on the same files), the claim
+# follows the pod, and the claim is kept when the pod is deleted. Scaling above 1 is not supported: use the PostgreSQL variant.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: eggmail
+spec:
+  serviceName: eggmail-headless
+  replicas: 1
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: eggmail
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: eggmail
+        app.kubernetes.io/part-of: eggmail
+    spec:
+      serviceAccountName: eggmail
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 90      # SIGTERM: stop accepting, let running deliveries finish (up to 45 s), requeue the rest
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1654                      # the image's non-root user
+        runAsGroup: 1654
+        fsGroup: 1654                        # a new volume is owned by root: this makes /data writable for the application
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: eggmail
+          image: ghcr.io/eggspot/eggmail
+          imagePullPolicy: Always      # the overlay uses the moving tag "nightly"; once it is pinned to a version tag or a digest, IfNotPresent is the better choice
+          envFrom:
+            - configMapRef:
+                name: eggmail-config
+          env:
+            - { name: Storage__Backend, value: Sqlite }
+            - { name: Sqlite__DataDirectory, value: /data }
+          ports:
+            - { name: submission, containerPort: 5587 }
+            - { name: submissions, containerPort: 4465 }
+            - { name: alternate, containerPort: 2525 }
+            - { name: bounce, containerPort: 2526 }
+            - { name: http, containerPort: 8080 }
+            - { name: https, containerPort: 8443 }
+          # Liveness (/healthz) is separate from readiness (/readyz): a storage outage makes the pod unready (so no traffic) but does not
+          # restart it. The first start can take a while (migration, key generation), hence the startup probe.
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 2
+            failureThreshold: 60
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits: { memory: 1Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: tmp, mountPath: /tmp }
+            - { name: admin-password, mountPath: /run/secrets/eggmail, readOnly: true }
+      volumes:
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 64Mi }
+        - name: admin-password
+          secret:
+            secretName: eggmail-admin           # kubectl create secret generic eggmail-admin --from-literal=admin-password=...
+            defaultMode: 0440
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        # storageClassName: fast-local-ssd       # prefer a local SSD class: SQLite is bound by the latency of its disk
+        resources:
+          requests:
+            storage: 10Gi

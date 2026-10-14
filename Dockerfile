@@ -16,7 +16,8 @@ RUN npm run build
 FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 ARG TARGETARCH
 ARG VERSION=0.0.0-dev
-ARG READYTORUN=false
+# ReadyToRun precompiles the application assemblies: about 30 percent faster cold start for about 24 MiB more on disk (docs/release.md, DESIGN-DECIDED).
+ARG READYTORUN=true
 WORKDIR /src
 COPY global.json Directory.Build.props Directory.Packages.props ./
 COPY src/ src/
@@ -50,4 +51,5 @@ EXPOSE 5587 4465 2525 2526 8080 8443
 VOLUME ["/data"]
 USER $APP_UID
 ENTRYPOINT ["/app/mta"]
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD ["/app/mta", "--healthcheck"]
+# --start-interval checks every 2 s while starting, so the container reports "healthy" within seconds instead of after the first 30 s interval.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --start-interval=2s --retries=3 CMD ["/app/mta", "--healthcheck"]

@@ -1,0 +1,54 @@
+# Optional sidecar: a local DNSSEC-validating resolver (Unbound), so DANE works.
+#
+#   docker compose -f compose.yaml -f compose.unbound.yaml up -d                      # SQLite
+#   docker compose -f compose.postgres.yaml -f compose.unbound.yaml up -d             # PostgreSQL
+#
+# Why: DANE (RFC 7672) needs the AD (authenticated data) bit of DNS answers. EggMail only believes that bit when Dns__TrustAuthenticatedData
+# is true, and that is only safe when the resolver it asks is local and validates DNSSEC itself. Without a trusted validating resolver
+# EggMail does not apply DANE; it still delivers (MTA-STS and opportunistic TLS keep working). Public resolvers are not "local": do not
+# point TrustAuthenticatedData at them.
+#
+# Exposure: Unbound publishes no port to the host. It listens on all addresses of its own container and answers the private ranges (the
+# image's access-control is 127/8, 10/8, 172.16/12 and 192.168/16), so every other container on this compose network can use it as a
+# resolver; nothing outside the compose network can. Do not attach other containers you do not trust to this network.
+#
+# Image: pinned by tag AND digest (klutchell/unbound 1.26.1, multi-architecture index), so a moved tag cannot change what runs. Update both
+# together, deliberately: Unbound has security releases.
+#
+# Dns__Servers takes IP addresses, so the compose network gets a fixed subnet and Unbound a fixed address. Change 172.30.53.0/24 if it
+# overlaps a network you already use (and the two addresses below with it).
+services:
+  unbound:
+    image: klutchell/unbound:1.26.1@sha256:9a3939ca33d6d3b42b81a70391bb8e43f0a08d2bd7a3fdffb43d427493345c36
+    restart: unless-stopped
+    networks:
+      default:
+        ipv4_address: 172.30.53.53
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE, SETUID, SETGID]    # bind port 53 as root, then drop to the unbound user
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # A local-zone name: answered by Unbound itself, so the health of this container does not depend on a third-party domain or on the
+      # Internet being reachable. (Real validation is checked by the release workflow's smoke test, with retries.)
+      test: ["CMD", "drill-hc", "@127.0.0.1", "localhost"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+      start_interval: 2s
+
+  eggmail:
+    depends_on:
+      unbound:
+        condition: service_healthy
+    environment:
+      Dns__Servers__0: 172.30.53.53
+      Dns__RequestDnssec: "true"
+      Dns__TrustAuthenticatedData: "true"
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.30.53.0/24
