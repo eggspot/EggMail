@@ -3,7 +3,7 @@ import { HttpError } from '../lib.mjs';
 
 function seed() {
   return [
-    { key: 'Content:StoreAttachments', value: false, type: 'boolean', description: 'Store attachments of sent messages so they can be resent. Off by default; stored attachments increase disk use.' },
+    { key: 'Content:StoreAttachments', value: false, type: 'boolean', description: 'Keep the raw message with its attachments after delivery so the message can be resent. Until you set it, the operator default applies; stored attachments use disk space.' },
     { key: 'Content:RetentionDays', value: 7, type: 'number', description: 'Days message content is kept (6 to 30; there is no unlimited value).' },
     { key: 'Retention:MetadataDays', value: 30, type: 'number', description: 'Days delivery events are kept. 0 keeps them forever.' },
     { key: 'Webhooks:AllowedHosts', value: '', type: 'string', description: 'Comma separated internal hosts webhooks may call (SSRF allowlist).' },
