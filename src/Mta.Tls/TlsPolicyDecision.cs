@@ -169,6 +169,34 @@ public sealed record TlsPolicyDecision
     /// <summary>Pre-connection facts for TLS-RPT (fetch errors, DANE problems, MX policy mismatch in testing mode).</summary>
     public IReadOnlyList<TlsPolicyReason> Reasons { get; init; } = [];
 
+    private string? _poolIdentity;
+
+    /// <summary>
+    /// What a pooled connection must have in common with this decision to be reused for it: the rule, the validation mode and whether it is enforced, the protocols, the
+    /// expected host name, and the TLSA records and reference names a DANE decision validates against. A connection made under another identity (for example an
+    /// opportunistic one that never validated the certificate) is never handed to a decision that needs validation.
+    /// </summary>
+    public string PoolIdentity => _poolIdentity ??= BuildPoolIdentity();
+
+    private string BuildPoolIdentity()
+    {
+        string tlsa = "";
+        if (TlsaRecords.Count > 0)
+        {
+            using var hash = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
+            foreach (TlsaRecord r in TlsaRecords)
+            {
+                hash.AppendData([r.Usage, r.Selector, r.MatchingType]);
+                hash.AppendData(r.Data);
+                hash.AppendData([0xFF]);
+            }
+
+            tlsa = Convert.ToHexString(hash.GetHashAndReset(), 0, 8);
+        }
+
+        return $"{(int)Kind}.{(int)Validation}.{(EnforceValidation ? 1 : 0)}.{(RequireTls ? 1 : 0)}.{(int)AllowedProtocols}.{ExpectedHostname}.{tlsa}.{string.Join(',', DaneReferenceNames)}";
+    }
+
     /// <summary>True if the message may be sent in plaintext when TLS cannot be established.</summary>
     public bool AllowsPlaintextFallback => !RequireTls && !IsBlocked;
 

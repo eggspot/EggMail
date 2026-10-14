@@ -80,6 +80,9 @@ public sealed class ApiOptions
     /// <summary>Serve <c>GET /metrics</c>.</summary>
     public bool MetricsEnabled { get; set; } = true;
 
+    /// <summary><c>Delivery:AllowPrivateMxAddresses</c>: whether the delivery engine uses MX and relay hosts that resolve to loopback or reserved addresses. The relay route API warns when it is off and a host would be refused.</summary>
+    public bool AllowPrivateMxAddresses { get; set; }
+
     /// <summary>
     /// Networks allowed to read <c>/metrics</c> (CIDR). Default: loopback and private ranges. The endpoint carries no credentials, so it must
     /// never be reachable from the public internet.

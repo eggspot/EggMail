@@ -12,6 +12,7 @@ namespace Mta.Delivery;
 public sealed class DeliveryEngine
 {
     private const string Source = "delivery";
+    private static readonly TimeSpan RequestedRetryDelay = TimeSpan.FromSeconds(5);
 
     private readonly DeliveryProcessor _processor;
     private readonly DeliveryServices _s;
@@ -20,6 +21,8 @@ public sealed class DeliveryEngine
     private readonly SemaphoreSlim _slots;
     private volatile CancellationTokenSource _abort = new();
     private int _pendingGroups;
+    private int _refreshRequested;
+    private long _configRefreshCount;
     private volatile bool _paused;
     private readonly TaskCompletionSource _stopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -37,6 +40,19 @@ public sealed class DeliveryEngine
 
     /// <summary>True while no new work is claimed (quiesce).</summary>
     public bool Paused => _paused;
+
+    /// <summary>Completed reloads of the relay routes and TLS policies (a failed reload does not count). Tests and diagnostics use it to know a change was applied.</summary>
+    public long ConfigRefreshCount => Interlocked.Read(ref _configRefreshCount);
+
+    /// <summary>
+    /// Asks the loop to reload the relay routes and TLS policies at its next iteration instead of waiting for <see cref="DeliveryOptions.ConfigRefreshInterval"/>.
+    /// Called by the API after an administrator changed them; other replicas still pick the change up within the interval.
+    /// </summary>
+    public void RequestConfigRefresh()
+    {
+        Volatile.Write(ref _refreshRequested, 1);
+        Wake();
+    }
 
     /// <summary>Asks the loop to look for due work now.</summary>
     public void Wake()
@@ -101,10 +117,15 @@ public sealed class DeliveryEngine
                 var now = _s.Clock.UtcNow;
                 try
                 {
-                    if (now - lastRefresh >= _options.ConfigRefreshInterval)
+                    bool requested = Interlocked.Exchange(ref _refreshRequested, 0) == 1;
+                    if (requested || now - lastRefresh >= _options.ConfigRefreshInterval)
                     {
                         lastRefresh = now;
-                        await RefreshConfigAsync(stopping).ConfigureAwait(false);
+                        if (!await RefreshConfigAsync(stopping).ConfigureAwait(false) && requested)
+                        {
+                            // A requested reload that failed (the store was briefly unavailable) is tried again in 5 seconds instead of after a whole interval.
+                            lastRefresh = now - (_options.ConfigRefreshInterval > RequestedRetryDelay ? _options.ConfigRefreshInterval - RequestedRetryDelay : TimeSpan.Zero);
+                        }
                     }
 
                     if (!_paused)
@@ -212,7 +233,7 @@ public sealed class DeliveryEngine
         }
     }
 
-    private async Task RefreshConfigAsync(CancellationToken ct)
+    private async Task<bool> RefreshConfigAsync(CancellationToken ct)
     {
         try
         {
@@ -220,10 +241,13 @@ public sealed class DeliveryEngine
             _s.Routes.UpdateRoutes(routes);
             var policies = await _s.Storage.Config.GetTlsPoliciesAsync(ct).ConfigureAwait(false);
             _s.TlsPolicies.Update(policies);
+            Interlocked.Increment(ref _configRefreshCount);
+            return true;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _s.Log.Write(MtaLogLevel.Warning, Source, "could not reload routes and TLS policies; keeping the previous ones", ex);
+            return false;
         }
     }
 }

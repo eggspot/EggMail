@@ -24,6 +24,10 @@ internal sealed class RemoteServer : ISmtpServerHandler, IServerCertificateProvi
     public List<Received> Messages { get; } = [];
     public Func<string, SmtpReply?>? OnRecipient { get; set; }
     public Func<SmtpMessage, SmtpReply?>? OnMessage { get; set; }
+
+    /// <summary>Decides AUTH on the relay listener (user name, password); without it every login fails.</summary>
+    public Func<string, string, bool>? Authenticate { get; set; }
+
     public int Connections;
 
     public RemoteServer()
@@ -43,7 +47,7 @@ internal sealed class RemoteServer : ISmtpServerHandler, IServerCertificateProvi
     }
 
     public ValueTask<SmtpAuthResult> AuthenticateAsync(SmtpSessionContext session, string authorizationId, string userName, string password, CancellationToken ct) =>
-        ValueTask.FromResult(SmtpAuthResult.Failed);
+        ValueTask.FromResult(Authenticate?.Invoke(userName, password) == true ? SmtpAuthResult.Succeeded(userName) : SmtpAuthResult.Failed);
 
     public ValueTask<SmtpReply> OnMailFromAsync(SmtpSessionContext session, MailFromInfo mail, CancellationToken ct) => ValueTask.FromResult(SmtpReplies.SenderOk);
 
@@ -87,7 +91,10 @@ internal sealed class DeliveryFixture : IAsyncDisposable
     public DeliveryServices Services { get; private set; }
     public int Port { get; }
 
-    public DeliveryFixture(Func<DeliveryOptions, DeliveryOptions>? tweak = null, bool serverTls = false, bool startEngine = true, Func<DeliveryServices, IDkimSignerProvider>? dkim = null, SendingLimitsOptions? limits = null, VerpCodec? verp = null, bool eightBitMime = true, bool smtpUtf8 = true, Mta.Tls.TlsRpt.TlsRptCollector? tlsReports = null, Func<StaticDnsResolver, Mta.Tls.OutboundTlsPolicyResolver>? tlsResolver = null, IMtaLog? log = null)
+    /// <summary>The port of the listener that offers AUTH after STARTTLS (only with <c>authListener</c>), like a relay provider's submission port.</summary>
+    public int RelayPort { get; }
+
+    public DeliveryFixture(Func<DeliveryOptions, DeliveryOptions>? tweak = null, bool serverTls = false, bool startEngine = true, Func<DeliveryServices, IDkimSignerProvider>? dkim = null, SendingLimitsOptions? limits = null, VerpCodec? verp = null, bool eightBitMime = true, bool smtpUtf8 = true, Mta.Tls.TlsRpt.TlsRptCollector? tlsReports = null, Func<StaticDnsResolver, Mta.Tls.OutboundTlsPolicyResolver>? tlsResolver = null, IMtaLog? log = null, bool authListener = false, ISecretProtector? secrets = null)
     {
         var clock = SystemClock.Instance;
         Storage = new InMemoryStorage(new StorageOptions { History = new HistoryOptions { Mode = HistoryMode.Full } }, clock);
@@ -98,11 +105,18 @@ internal sealed class DeliveryFixture : IAsyncDisposable
             Hostname = "mx.dest.example",
             EightBitMime = eightBitMime,
             SmtpUtf8 = smtpUtf8,
-            Certificates = serverTls ? Remote : null,
-            Listeners = [new SmtpListenerOptions { Name = "mx", BindAddress = IPAddress.Loopback, Port = 0, Mode = serverTls ? ListenerMode.StartTls : ListenerMode.Plain, AuthRequired = false, Role = ListenerRole.Bounce }],
+            Certificates = serverTls || authListener ? Remote : null,
+            AuthFailureDelay = TimeSpan.Zero,
+            Listeners = authListener
+                ? [
+                    new SmtpListenerOptions { Name = "mx", BindAddress = IPAddress.Loopback, Port = 0, Mode = serverTls ? ListenerMode.StartTls : ListenerMode.Plain, AuthRequired = false, Role = ListenerRole.Bounce },
+                    new SmtpListenerOptions { Name = "relay", BindAddress = IPAddress.Loopback, Port = 0, Mode = ListenerMode.StartTls, AuthRequired = true, Role = ListenerRole.Submission },
+                ]
+                : [new SmtpListenerOptions { Name = "mx", BindAddress = IPAddress.Loopback, Port = 0, Mode = serverTls ? ListenerMode.StartTls : ListenerMode.Plain, AuthRequired = false, Role = ListenerRole.Bounce }],
         }, Remote);
         _server.Start();
         Port = _server.LocalEndPoints["mx"].Port;
+        RelayPort = authListener ? _server.LocalEndPoints["relay"].Port : 0;
 
         Dns.AddMx("dest.example", 10, "mx.dest.example").AddA("mx.dest.example", "127.0.0.1");
 
@@ -126,6 +140,7 @@ internal sealed class DeliveryFixture : IAsyncDisposable
             Throttle = new DestinationThrottle(clock),
             Limits = new SendingLimits(clock, null, limits),
             Retry = new RetrySchedule(),
+            Secrets = secrets,
             Log = log ?? NullMtaLog.Instance,
         };
         if (dkim is not null || verp is not null)
@@ -133,7 +148,7 @@ internal sealed class DeliveryFixture : IAsyncDisposable
             Services = new DeliveryServices
             {
                 Storage = Services.Storage, Clock = Services.Clock, Mx = Services.Mx, Tls = Services.Tls, TlsPolicies = Services.TlsPolicies, Pool = Services.Pool,
-                Routes = Services.Routes, Throttle = Services.Throttle, Limits = Services.Limits, Retry = Services.Retry, Dkim = dkim?.Invoke(Services) ?? NoDkimSignerProvider.Instance, Verp = verp, TlsReports = Services.TlsReports, Log = Services.Log,
+                Routes = Services.Routes, Throttle = Services.Throttle, Limits = Services.Limits, Retry = Services.Retry, Dkim = dkim?.Invoke(Services) ?? NoDkimSignerProvider.Instance, Verp = verp, TlsReports = Services.TlsReports, Secrets = Services.Secrets, Log = Services.Log,
             };
         }
 
