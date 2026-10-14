@@ -26,7 +26,7 @@ export function ActivateStep({ status, onActivate, onRollback, busy, error }: { 
               <p class="muted small">Secrets are referenced by name and never printed here.</p>
             </div>
           ) : (
-            <Notice tone="warn">The server has not produced a cutover patch yet. Reload in a moment.</Notice>
+            <Notice tone="info">The cutover patch is produced when you activate. It lists the storage settings to apply to your deployment; secrets are referenced by name and never printed.</Notice>
           )}
         </>
       ) : (
@@ -45,6 +45,31 @@ export function ActivateStep({ status, onActivate, onRollback, busy, error }: { 
   );
 }
 
+/** What activation produced: the patch for an orchestrator-managed deployment, or the note about the bootstrap file. Shown here because the server creates it when you activate. */
+function ActivationResult({ status }: { status: SwitchStatus }) {
+  const result = status.cutoverPatch;
+  if (!result) return null;
+  if (result.kind !== 'bootstrap') {
+    return (
+      <div>
+        <div class="row between">
+          <strong>Apply this patch to your deployment, then restart</strong>
+          <CopyButton text={result.text} what="cutover patch" />
+        </div>
+        <pre class="patch" data-testid="cutover-patch">
+          {result.text}
+        </pre>
+        <p class="muted small">Secrets are referenced by name and never printed here. On start, the application finds the confirmed switch in the target, moves it to active and only then accepts and sends mail.</p>
+      </div>
+    );
+  }
+  return (
+    <Notice tone="info" title="Restart the application">
+      <p data-testid="activation-note">{result.text}</p>
+    </Notice>
+  );
+}
+
 /** Step 7: finalize. Rollback is no longer offered; going back means running the flow in reverse. */
 export function FinalizeStep({ status, onFinalize, busy, error }: { status: SwitchStatus; onFinalize: () => void; busy: boolean; error: unknown }) {
   const toName = backendLabel(status.direction?.to ?? 'the target');
@@ -54,6 +79,7 @@ export function FinalizeStep({ status, onFinalize, busy, error }: { status: Swit
       <Notice tone="ok" title={`${toName} is live`}>
         The target now accepts and sends mail. The source ({fromName}) is fenced and read-only.
       </Notice>
+      <ActivationResult status={status} />
       <Notice tone="warn" title="Rollback is no longer available">
         After activation the target may already have delivered mail, so un-fencing the source is refused. To go back, run this same flow in reverse ({toName} to {fromName}); it fences the target and transfers
         what is still queued.

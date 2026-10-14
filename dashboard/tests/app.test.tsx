@@ -70,8 +70,19 @@ describe('app shell', () => {
     fireEvent.input(await screen.findByLabelText('User'), { target: { value: 'x' } });
     fireEvent.input(screen.getByLabelText('Password'), { target: { value: 'wrong' } });
     fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
-    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/sign in again|session/i));
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/user name or password is not correct/i));
+    expect(screen.getByRole('alert').textContent).not.toMatch(/session has expired/i);
     expect((screen.getByLabelText('Password') as HTMLInputElement).value).toBe('');
+  });
+
+  it('tells the user of a suspended tenant why the session was not accepted', async () => {
+    mockFetch({
+      'GET /api/v1/capabilities': makeCapabilities(),
+      'GET /api/v1/me': () => problem(403, 'tenant_disabled', { detail: 'This account is suspended.' }),
+    });
+    mount();
+    await screen.findByRole('button', { name: 'Sign in' });
+    expect(screen.getByRole('status').textContent).toMatch(/tenant is suspended/i);
   });
 
   it('shows the lockout wait on 429 during sign-in', async () => {

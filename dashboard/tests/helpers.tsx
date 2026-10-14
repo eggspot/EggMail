@@ -95,6 +95,7 @@ export function makeApp(over: Partial<AppContextValue> & { role?: Role; mode?: H
     me,
     capabilities: makeCapabilities({ mode }),
     offlineError: null,
+    signInNotice: null,
     tenants: [],
     tenantId: role === 'admin' ? 't_1' : null,
     setTenantId: () => {},
@@ -104,6 +105,7 @@ export function makeApp(over: Partial<AppContextValue> & { role?: Role; mode?: H
     logout: async () => {},
     retry: () => {},
     refreshCapabilities: async () => {},
+    refreshTenants: async () => {},
     ...over,
   };
 }

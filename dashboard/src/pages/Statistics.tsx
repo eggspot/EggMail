@@ -4,7 +4,7 @@ import { StackedBarChart } from '../components/charts/StackedBarChart';
 import { Card, EmptyState, ErrorNotice, Field, Loading, Notice, PageHeader, TextField } from '../components/ui';
 import { formatNumber, formatPercent } from '../lib/format';
 import { useApi, useDocumentTitle } from '../lib/hooks';
-import { bucketRows, byRecipientDomain, totalsOf } from '../lib/messages';
+import { bucketRows, byRecipientDomain, mergeUnrolledDays, totalsOf } from '../lib/messages';
 import type { DomainRow } from '../lib/messages';
 
 type Granularity = 'hour' | 'day';
@@ -76,10 +76,15 @@ export default function Statistics() {
     const to = Date.now();
     return { from: to - preset.ms, to };
   }, [presetId, effective, domain]);
-  const stats = useApi(
-    () => api.stats({ from: new Date(range.from).toISOString(), to: new Date(range.to).toISOString(), granularity: effective, domain: domain || undefined }),
-    [range, effective, domain],
-  );
+  const stats = useApi(async () => {
+    const query = { from: new Date(range.from).toISOString(), to: new Date(range.to).toISOString(), granularity: effective, domain: domain || undefined };
+    const rows = await api.stats(query);
+    if (effective !== 'day') return rows;
+    // Daily rows exist only for days that are over: add today and yesterday from the hourly rows when they have not been rolled up.
+    const recentFrom = Math.max(range.from, Math.floor(range.to / DAY) * DAY - DAY);
+    const recent = await api.stats({ ...query, from: new Date(recentFrom).toISOString(), granularity: 'hour' });
+    return mergeUnrolledDays(rows, recent);
+  }, [range, effective, domain]);
 
   const rows = stats.data ?? [];
   const totals = useMemo(() => totalsOf(rows), [rows]);

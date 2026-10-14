@@ -8,9 +8,9 @@ export const PASSPHRASE_MIN_LENGTH = 12;
 export const QUIESCE_TIMEOUT_SECONDS = 30;
 
 /** States in which the server is working and the page should poll. */
-export const RUNNING_STATES: readonly SwitchState[] = ['draining', 'quiescing', 'fenced', 'exporting', 'importing'];
+export const RUNNING_STATES: readonly SwitchState[] = ['draining', 'quiescing', 'fenced', 'exporting', 'importing', 'verifying'];
 /** States before activation in which rollback is allowed (the old store is still the source of truth). */
-export const ROLLBACK_STATES: readonly SwitchState[] = ['draining', 'quiescing', 'fenced', 'exporting', 'importing', 'verified', 'confirmed', 'failed'];
+export const ROLLBACK_STATES: readonly SwitchState[] = ['draining', 'quiescing', 'fenced', 'exporting', 'importing', 'verifying', 'verified', 'confirmed', 'failed'];
 /** States in which no switch is in flight and a new one may be started. */
 export const IDLE_STATES: readonly SwitchState[] = ['none', 'rolled_back', 'finalized'];
 
@@ -73,6 +73,7 @@ export function stepFor(state: SwitchState, local: FlowLocal): WizardStep {
     case 'fenced':
     case 'exporting':
     case 'importing':
+    case 'verifying':
     case 'failed':
       return 'progress';
     case 'verified':
@@ -81,7 +82,15 @@ export function stepFor(state: SwitchState, local: FlowLocal): WizardStep {
       return 'activate';
     case 'active':
       return 'finalize';
+    default:
+      // A state this dashboard does not know (a newer server) is treated as work in progress, never as a blank page.
+      return 'progress';
   }
+}
+
+/** The label of a state; an unknown one (a newer server) is shown as it is. */
+export function stateLabel(state: string): string {
+  return (STATE_LABEL as Record<string, string | undefined>)[state] ?? state;
 }
 
 export function stepIndex(step: WizardStep): number {
@@ -119,6 +128,7 @@ const STATE_TEXT: Record<SwitchState, string> = {
   fenced: 'The source is fenced: it no longer accepts or sends mail. It stays read-only until you finalize.',
   exporting: 'Exporting the bundle from the source.',
   importing: 'Importing the bundle into the target. The target does not send mail until it is activated.',
+  verifying: 'Verifying the target: comparing row counts and checksums with the bundle. The report appears when it is done.',
   verified: 'The target has been verified. Review the report, then confirm. Nothing has gone live yet.',
   confirmed: 'Confirmed. Activate to make the target the live store.',
   active: 'The target is live. Finalize when you are satisfied; the old data is never deleted by EggMail.',
@@ -128,7 +138,7 @@ const STATE_TEXT: Record<SwitchState, string> = {
 };
 
 export function stateText(state: SwitchState): string {
-  return STATE_TEXT[state];
+  return STATE_TEXT[state] ?? `The server reports the state "${state}".`;
 }
 
 export const STATE_LABEL: Record<SwitchState, string> = {
@@ -138,6 +148,7 @@ export const STATE_LABEL: Record<SwitchState, string> = {
   fenced: 'source fenced',
   exporting: 'exporting',
   importing: 'importing',
+  verifying: 'verifying',
   verified: 'verified',
   confirmed: 'confirmed',
   active: 'active (target live)',

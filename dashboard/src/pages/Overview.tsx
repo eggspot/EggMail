@@ -29,6 +29,8 @@ function RecentEvents() {
     setUpdated(new Date());
   }, REFRESH_MS);
   const list: RecentEvent[] = events.data ?? [];
+  // The server's recent-events ring does not record the sending domain (api.md); show the column only when events carry one.
+  const showSending = list.some((e) => e.sendingDomain);
   return (
     <Card title="Recent events">
       <p class="muted small" aria-live="polite">
@@ -46,7 +48,7 @@ function RecentEvents() {
                 <th scope="col">Time</th>
                 <th scope="col">Event</th>
                 <th scope="col">Recipient domain</th>
-                <th scope="col">Sending domain</th>
+                {showSending && <th scope="col">Sending domain</th>}
               </tr>
             </thead>
             <tbody>
@@ -61,7 +63,7 @@ function RecentEvents() {
                     <StatusChip status={e.type} />
                   </td>
                   <td>{e.recipientDomain ?? '-'}</td>
-                  <td>{e.sendingDomain ?? '-'}</td>
+                  {showSending && <td>{e.sendingDomain ?? '-'}</td>}
                 </tr>
               ))}
             </tbody>
