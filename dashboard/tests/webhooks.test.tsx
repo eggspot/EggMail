@@ -164,3 +164,46 @@ describe('Webhooks attempts log', () => {
     expect(await within(screen.getByRole('dialog')).findByRole('alert')).toBeTruthy();
   });
 });
+
+describe('Webhooks page: finishing a secret rotation', () => {
+  it('shows the pending rotation and removes the previous secret only after confirmation', async () => {
+    const pending: Webhook = { ...hook, secretRotationPending: true };
+    const m = mockFetch({ 'GET /api/v1/webhooks': [pending], 'DELETE /api/v1/webhooks/:id/previous-secret': undefined });
+    renderWithApp(<Webhooks />);
+    expect(await screen.findByText('Secret rotation in progress')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Remove previous secret' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(m.callsTo('DELETE', '/api/v1/webhooks/w1/previous-secret')).toHaveLength(0);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Remove previous secret' }));
+    await waitFor(() => expect(m.callsTo('DELETE', '/api/v1/webhooks/w1/previous-secret')).toHaveLength(1));
+  });
+
+  it('shows no rotation notice without a pending rotation, and offers the endpoint-disabled event', async () => {
+    mockFetch({ 'GET /api/v1/webhooks': [hook] });
+    renderWithApp(<Webhooks />);
+    await screen.findByRole('heading', { name: 'https://hooks.example/a' });
+    expect(screen.queryByText('Secret rotation in progress')).toBeNull();
+    expect(screen.getByLabelText('webhook.endpoint.disabled')).toBeTruthy();
+  });
+});
+
+describe('Webhooks page: attempts without an event type', () => {
+  it('leaves the Event column out when the server does not record it', async () => {
+    const bare = attempts.map(({ eventType: _drop, ...rest }) => rest as WebhookAttempt);
+    mockFetch({ 'GET /api/v1/webhooks': [hook], 'GET /api/v1/webhooks/w1/attempts': bare });
+    renderWithApp(<Webhooks />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Show attempts' }));
+    const table = await screen.findByRole('table', { name: 'Delivery attempts, newest first' });
+    expect(within(table).queryByRole('columnheader', { name: 'Event' })).toBeNull();
+    expect(within(table).getAllByRole('row')).toHaveLength(4);
+  });
+
+  it('shows it when the server sends one', async () => {
+    mockFetch({ 'GET /api/v1/webhooks': [hook], 'GET /api/v1/webhooks/w1/attempts': attempts });
+    renderWithApp(<Webhooks />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Show attempts' }));
+    const table = await screen.findByRole('table', { name: 'Delivery attempts, newest first' });
+    expect(within(table).getByRole('columnheader', { name: 'Event' })).toBeTruthy();
+  });
+});
+

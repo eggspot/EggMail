@@ -21,7 +21,7 @@ import {
 } from '../src/lib/switchFlow';
 import type { FlowLocal } from '../src/lib/switchFlow';
 
-const ALL: SwitchState[] = ['none', 'draining', 'quiescing', 'fenced', 'exporting', 'importing', 'verified', 'confirmed', 'active', 'finalized', 'rolled_back', 'failed'];
+const ALL: SwitchState[] = ['none', 'draining', 'quiescing', 'fenced', 'exporting', 'importing', 'verifying', 'verified', 'confirmed', 'active', 'finalized', 'rolled_back', 'failed'];
 
 describe('stepFor (server state to wizard step)', () => {
   const local = (step: FlowLocal['step']): FlowLocal => ({ step, preflightOk: true });
@@ -34,7 +34,9 @@ describe('stepFor (server state to wizard step)', () => {
   });
 
   it('maps every long-running state to progress', () => {
-    for (const s of ['draining', 'quiescing', 'fenced', 'exporting', 'importing', 'failed'] as const) expect(stepFor(s, local('choose'))).toBe('progress');
+    for (const s of ['draining', 'quiescing', 'fenced', 'exporting', 'importing', 'verifying', 'failed'] as const) expect(stepFor(s, local('choose'))).toBe('progress');
+    // A state this dashboard does not know (a newer server) is work in progress, never a blank page.
+    expect(stepFor('something_new' as SwitchState, local('choose'))).toBe('progress');
   });
 
   it('maps verified, confirmed, active and finalized', () => {
@@ -62,7 +64,7 @@ describe('allowedActions', () => {
   });
 
   it('allows rollback only before activation', () => {
-    const allowed = ['draining', 'quiescing', 'fenced', 'exporting', 'importing', 'verified', 'confirmed', 'failed'];
+    const allowed = ['draining', 'quiescing', 'fenced', 'exporting', 'importing', 'verifying', 'verified', 'confirmed', 'failed'];
     for (const s of ALL) expect(allowedActions(s, true).rollback).toBe(allowed.includes(s));
     expect(allowedActions('active', true).rollback).toBe(false);
     expect(allowedActions('finalized', true).rollback).toBe(false);

@@ -1,13 +1,13 @@
-import { useState } from 'preact/hooks';
+import { useEffect, useState } from 'preact/hooks';
 import { api } from '../api/endpoints';
 import { fieldErrors, isCode } from '../api/errorMessages';
 import type { Webhook, WebhookAttempt } from '../api/types';
 import { CheckboxGroup } from '../components/CheckboxGroup';
 import { Button, Card, Chip, ConfirmDialog, EmptyState, ErrorNotice, Loading, Notice, OneTimeSecret, PageHeader, TextField } from '../components/ui';
 import { formatDateTime, formatDuration } from '../lib/format';
-import { useAction, useApi, useDocumentTitle } from '../lib/hooks';
+import { useAction, useApi, useDocumentTitle, usePolling } from '../lib/hooks';
 
-export const WEBHOOK_EVENT_TYPES = ['message.delivered', 'message.deferred', 'message.bounced', 'message.complained', 'message.expired', 'message.suppressed'] as const;
+export const WEBHOOK_EVENT_TYPES = ['message.delivered', 'message.deferred', 'message.bounced', 'message.complained', 'message.expired', 'message.suppressed', 'webhook.endpoint.disabled'] as const;
 
 /* ---------- attempts log ---------- */
 
@@ -19,12 +19,28 @@ function StatusCodeChip({ status }: { status: number | null }) {
 function AttemptsLog({ webhookId, refreshKey }: { webhookId: string; refreshKey: number }) {
   const { data, error, loading, reload } = useApi(() => api.webhookAttempts(webhookId, 50), [webhookId, refreshKey]);
   const [replaying, setReplaying] = useState<WebhookAttempt | null>(null);
+  // A delivery is asynchronous: after a test event or a replay, look again every 2 seconds for up to 20 seconds so the new attempt appears.
+  const [watch, setWatch] = useState(refreshKey > 0 ? 10 : 0);
+  useEffect(() => {
+    if (refreshKey > 0) setWatch(10);
+  }, [refreshKey]);
+  usePolling(
+    () => {
+      reload();
+      setWatch((n) => n - 1);
+      return watch > 1;
+    },
+    2_000,
+    watch > 0,
+  );
   const [outcome, setOutcome] = useState<string | null>(null);
   const replay = useAction(async (outboxId: string) => {
     await api.replayWebhookEvent(outboxId);
     return true;
   });
 
+  // The server does not record the event type of an attempt (api.md); show the column only when a response carries it.
+  const showEvent = !!data?.some((a) => a.eventType);
   return (
     <div class="stack">
       {loading && !data && <Loading label="Loading attempts" />}
@@ -38,7 +54,7 @@ function AttemptsLog({ webhookId, refreshKey }: { webhookId: string; refreshKey:
             <thead>
               <tr>
                 <th scope="col">Time</th>
-                <th scope="col">Event</th>
+                {showEvent && <th scope="col">Event</th>}
                 <th scope="col">Status</th>
                 <th scope="col" class="num">
                   Duration
@@ -54,9 +70,11 @@ function AttemptsLog({ webhookId, refreshKey }: { webhookId: string; refreshKey:
               {data.map((a) => (
                 <tr key={a.id}>
                   <td>{formatDateTime(a.at)}</td>
-                  <td>
-                    <code>{a.eventType ?? '-'}</code>
-                  </td>
+                  {showEvent && (
+                    <td>
+                      <code>{a.eventType ?? '-'}</code>
+                    </td>
+                  )}
                   <td>
                     <StatusCodeChip status={a.status} />
                   </td>
@@ -89,7 +107,7 @@ function AttemptsLog({ webhookId, refreshKey }: { webhookId: string; refreshKey:
           confirmLabel="Replay delivery"
           danger={false}
           busy={replay.busy}
-          error={replay.error}
+          error={isCode(replay.error, 'not_found') ? new Error('Only finished or failed deliveries can be replayed. This one is still waiting for its next retry, or is no longer kept.') : replay.error}
           onCancel={() => {
             replay.clearError();
             setReplaying(null);
@@ -100,6 +118,7 @@ function AttemptsLog({ webhookId, refreshKey }: { webhookId: string; refreshKey:
               setReplaying(null);
               setOutcome('Delivery re-queued. The new attempt appears in the log shortly.');
               reload();
+              setWatch(10);
             }
           }}
         >
@@ -130,7 +149,7 @@ function EndpointCard({ hook, onChanged, onSecret }: { hook: Webhook; onChanged:
   const [events, setEvents] = useState<string[]>(hook.event_types);
   const [showAttempts, setShowAttempts] = useState(false);
   const [attemptsKey, setAttemptsKey] = useState(0);
-  const [confirm, setConfirm] = useState<'delete' | 'rotate' | null>(null);
+  const [confirm, setConfirm] = useState<'delete' | 'rotate' | 'previous' | null>(null);
   const [note, setNote] = useState<string | null>(null);
 
   const save = useAction(async () => {
@@ -150,6 +169,10 @@ function EndpointCard({ hook, onChanged, onSecret }: { hook: Webhook; onChanged:
     return true;
   });
   const rotate = useAction(async () => api.rotateWebhookSecret(hook.id));
+  const dropPrevious = useAction(async () => {
+    await api.removePreviousWebhookSecret(hook.id);
+    return true;
+  });
 
   const errs = fieldErrors(save.error);
 
@@ -161,6 +184,12 @@ function EndpointCard({ hook, onChanged, onSecret }: { hook: Webhook; onChanged:
           <EventChips types={hook.event_types} />
         </div>
         {!hook.enabled && hook.disabledReason && <Notice tone="warn">{hook.disabledReason}</Notice>}
+        {hook.secretRotationPending && (
+          <Notice tone="info" title="Secret rotation in progress">
+            <p>Deliveries are signed with the new secret and the previous one, so a receiver that still uses the old secret keeps working. Remove the previous secret once your receiver uses the new one.</p>
+            <Button onClick={() => setConfirm('previous')}>Remove previous secret</Button>
+          </Notice>
+        )}
         {note && <Notice tone="ok">{note}</Notice>}
         {test.error !== undefined && <ErrorNotice error={test.error} />}
         {toggle.error !== undefined && <ErrorNotice error={toggle.error} />}
@@ -258,6 +287,26 @@ function EndpointCard({ hook, onChanged, onSecret }: { hook: Webhook; onChanged:
           <p>
             Events stop being sent to <code>{hook.url}</code>. Its attempts log is deleted.
           </p>
+        </ConfirmDialog>
+      )}
+      {confirm === 'previous' && (
+        <ConfirmDialog
+          title="Remove the previous secret?"
+          confirmLabel="Remove previous secret"
+          busy={dropPrevious.busy}
+          error={dropPrevious.error}
+          onCancel={() => {
+            dropPrevious.clearError();
+            setConfirm(null);
+          }}
+          onConfirm={async () => {
+            if (await dropPrevious.run()) {
+              setConfirm(null);
+              onChanged();
+            }
+          }}
+        >
+          <p>From now on deliveries are signed with the new secret only. A receiver that still verifies with the old secret will reject them.</p>
         </ConfirmDialog>
       )}
       {confirm === 'rotate' && (

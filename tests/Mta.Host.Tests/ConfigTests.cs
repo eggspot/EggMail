@@ -145,4 +145,43 @@ public class ConfigTests
             Directory.Delete(dir, true);
         }
     }
+
+    [Theory]
+    [InlineData("--Sqlite:DataDirectory=/srv/eggmail", "/srv/eggmail")]
+    [InlineData("--sqlite:datadirectory=/srv/eggmail", "/srv/eggmail")]
+    [InlineData("/Sqlite:DataDirectory=/srv/eggmail", "/srv/eggmail")]
+    public void The_command_line_data_directory_is_found_in_the_usual_forms(string argument, string expected) =>
+        Assert.Equal(expected, ConfigLoader.DataDirectoryFromArguments(["--Dashboard:HttpPort=1", argument]));
+
+    [Fact]
+    public void The_space_separated_form_and_the_last_occurrence_win_like_the_configuration_does()
+    {
+        Assert.Equal("/b", ConfigLoader.DataDirectoryFromArguments(["--Sqlite:DataDirectory", "/b"]));
+        Assert.Equal("/b", ConfigLoader.DataDirectoryFromArguments(["--Sqlite:DataDirectory=/a", "--Sqlite:DataDirectory=/b"]));
+        Assert.Null(ConfigLoader.DataDirectoryFromArguments(["--Sqlite:DataDirectory"]));
+        Assert.Null(ConfigLoader.DataDirectoryFromArguments(["--Sqlite:DataDirectory=", "--Sqlite:SyncMode=Off"]));
+        Assert.Null(ConfigLoader.DataDirectoryFromArguments(null));
+    }
+
+    [Fact]
+    public void The_bootstrap_file_lives_in_the_data_directory_given_on_the_command_line()
+    {
+        // Regression: a server started with --Sqlite:DataDirectory=<dir> read, and a backend switch wrote, /data/bootstrap.json.
+        string dir = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            string expected = Path.Combine(dir, ConfigLoader.BootstrapFileName);
+            Assert.Equal(expected, ConfigLoader.ResolveBootstrapPath(args: ["--Sqlite:DataDirectory=" + dir]));
+            Assert.Equal(Path.Combine("/explicit", ConfigLoader.BootstrapFileName), ConfigLoader.ResolveBootstrapPath("/explicit", ["--Sqlite:DataDirectory=" + dir])); // a hint still wins
+
+            File.WriteAllText(expected, "{ \"History\": { \"Mode\": \"StatsOnly\" } }");
+            IConfigurationRoot root = ConfigLoader.Build(["--Sqlite:DataDirectory=" + dir]);
+            Assert.Equal(HistoryMode.StatsOnly, ConfigLoader.Load(root).Config.Storage.History.Mode);
+            Assert.Equal(expected, root[ConfigLoader.BootstrapPathKey]); // what the switch activator is given
+        }
+        finally
+        {
+            Directory.Delete(dir, true);
+        }
+    }
 }

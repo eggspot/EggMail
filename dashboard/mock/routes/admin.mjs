@@ -18,6 +18,8 @@ function sharedStore(state) {
       settings: initialSettings(),
       switch: null,
       maintenanceRuns: 0,
+      maintenanceFinishedAt: null,
+      acme: [{ certificateName: 'default', status: 'renewed', lastAttemptAt: daysAgo(71), nextAttemptAt: daysFromNow(2), failures: 0, lastError: null }],
     };
   }
   return s.admin;
@@ -94,13 +96,16 @@ function switchStatus(state) {
     out.progress = { phase: 'done', percent: 100, rowsDone: 205000, rowsTotal: 205000 };
     out.verifyReport = verifyReportFor(sw);
   }
-  if (st === 'confirmed' && sw.orchestratorManaged) {
+  // Like the server: the activation produces the patch (orchestrator-managed) or the bootstrap-file note, so they exist from "active" on.
+  if (st === 'active' && sw.orchestratorManaged) {
     out.cutoverPatch = {
-      kind: 'environment',
+      kind: 'patch',
       text: sw.to === 'postgres'
         ? 'Storage__Backend=Postgres\nStorage__Postgres__ConnectionString=<from secret eggmail-pg-connection>\n'
         : 'Storage__Backend=Sqlite\nStorage__Sqlite__DataDirectory=' + (sw.target?.path || '/data') + '\n',
     };
+  } else if (st === 'active') {
+    out.cutoverPatch = { kind: 'bootstrap', text: 'The bootstrap file /data/bootstrap.json now points at the ' + (sw.to === 'postgres' ? 'postgres' : 'sqlite') + ' target. Restart the application; the target becomes Active when it starts.' };
   } else {
     out.cutoverPatch = null;
   }
@@ -258,11 +263,32 @@ export function register(r, state) {
       if (!Array.isArray(domains) || !domains.length) return fail('domains', 'give at least one domain');
       for (const d of domains) if (typeof d !== 'string' || !/^([a-z0-9-]+\.)+[a-z]{2,}$/i.test(d)) fail('domains', `"${d}" is not a valid host name`);
     });
+    const acme = sharedStore(state).acme;
+    const row = acme.find((a) => a.certificateName === 'default');
+    if (row) Object.assign(row, { status: 'pending', lastAttemptAt: iso(), failures: 0, lastError: null });
     return { status: 202, body: { status: 'pending', message: `Certificate requested for ${domains.join(', ')} using DNS-01. Check back in a few minutes.` } };
   });
+  r.get('/api/v1/admin/certificates/acme', () => sharedStore(state).acme);
   r.post('/api/v1/admin/maintenance/run', () => {
-    sharedStore(state).maintenanceRuns += 1;
+    const store = sharedStore(state);
+    store.maintenanceRuns += 1;
+    store.maintenanceFinishedAt = iso();
     return { status: 202, body: { status: 'started' } };
+  });
+  r.get('/api/v1/admin/maintenance', () => {
+    const store = sharedStore(state);
+    return {
+      running: false,
+      startedAt: store.maintenanceFinishedAt,
+      finishedAt: store.maintenanceFinishedAt,
+      error: null,
+      reports: store.maintenanceFinishedAt
+        ? [
+            { job: 'retention', durationMs: 120, rowsAffected: 42, detail: 'deleted expired events' },
+            { job: 'checkpoint', durationMs: 8, rowsAffected: 0, detail: null },
+          ]
+        : [],
+    };
   });
 
   // ---- storage switch (never automatic) ----

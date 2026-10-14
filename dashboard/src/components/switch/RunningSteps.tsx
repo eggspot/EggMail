@@ -1,7 +1,7 @@
 import { useState } from 'preact/hooks';
 import type { SwitchStatus } from '../../api/types';
 import { formatNumber } from '../../lib/format';
-import { STATE_LABEL, stateText } from '../../lib/switchFlow';
+import { stateLabel, stateText } from '../../lib/switchFlow';
 import { Button, Chip, ConfirmDialog, ErrorNotice, Notice } from '../ui';
 
 /** Rollback with an explicit confirmation dialog. Only rendered by callers while rollback is allowed. */
@@ -40,7 +40,7 @@ export function ProgressStep({ status, canRollback, onRollback, busy, error }: {
   return (
     <div class="stack">
       <p>
-        <Chip tone={failed ? 'bad' : 'info'}>{STATE_LABEL[status.state]}</Chip> {stateText(status.state)}
+        <Chip tone={failed ? 'bad' : 'info'}>{stateLabel(status.state)}</Chip> {stateText(status.state)}
       </p>
       {failed && (
         <Notice tone="bad" title="The switch failed">

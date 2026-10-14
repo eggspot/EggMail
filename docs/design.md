@@ -373,9 +373,9 @@ Rationale: patching the deployment is the operator's job and cannot be done safe
 - *Effective values travel in the pointer.* They are deployment configuration, not rows, so the activation carries every effective source setting that differs from the built-in default (bootstrap file, or cutover patch), instead of writing them into the `setting` table.
 - *One process per SQLite directory.* A lock file proves the server is stopped before the offline `mta migrate-storage` commands open the files.
 - *Abort flag precision.* `SmtpClientConnection.EndOfDataStarted` tells the delivery engine whether the end-of-data terminator of the current transaction had begun to be written when a quiesce cancelled it; only then is the requeued delivery flagged `possible_duplicate` (item 4 above).
-- Not yet built: the dashboard flow (the admin API endpoints are `StorageSwitchService` over `IStorageSwitchEngine`).
+- The dashboard flow is built (`dashboard/src/pages/admin/StorageSwitch.tsx`) over the admin API (`StorageSwitchService` over `IStorageSwitchEngine`) and is exercised by the browser end-to-end tests. There is no bundle download in the dashboard: the bundle stays on the server volume.
 
-Effort: the switch engine, quiesce and fence, resumable history migration, Data Protection bundle protection, the orchestrator-aware cutover, the CLI and the dashboard flow ([plan.md](plan.md)); engine, fence, history migration, bundle protection, cutover and CLI are built, the dashboard flow is not.
+Effort: the switch engine, quiesce and fence, resumable history migration, Data Protection bundle protection, the orchestrator-aware cutover, the CLI and the dashboard flow ([plan.md](plan.md)); engine, fence, history migration, bundle protection, cutover, CLI and the dashboard flow are built.
 
 ## 5. History and content retention
 
@@ -491,7 +491,7 @@ State machine (**proposed** in earlier research; the decisions record is truncat
 - API keys are shown once and stored as SHA-256 digests (high-entropy keys); constant-time comparison via `CryptographicOperations.FixedTimeEquals`.
 - SMTP auth: PLAIN and LOGIN only, only after TLS, so passwords can be stored as hashes (CRAM-MD5 would need plaintext).
 - DKIM private keys, webhook secrets, TLS private keys and the ACME account key are protected with ASP.NET Core Data Protection; the Data Protection key ring is persisted in the config store and itself protected by a certificate or KMS (`Secrets:KeyProtection = Certificate | Kms | None`; `None` is for dev only). That certificate or KMS credential is deployment configuration outside the database and comes from the `*_FILE` secret convention. Never delete old Data Protection keys. Backend switching re-protects secrets under the target's ring through a bundle-specific Data Protection key ring (§4.6).
-  *Implemented:* `Kms` is a pluggable key-wrapping provider with a built-in file/environment key and no cloud service (decision 73).
+  *Implemented:* `Kms` is a pluggable key-wrapping provider with a built-in file/environment key and no cloud service (decision 74).
 - Dashboard passwords: PBKDF2 from the BCL (iteration count per current OWASP guidance, to be set) or an Argon2 library.
 - Encryption at rest is a storage-layer responsibility (volume or database); application-level envelope encryption is deferred behind an interface.
 

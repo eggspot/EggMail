@@ -213,7 +213,7 @@ public static class MigrateStorageCommand
 
         string command = p.Subcommand.ToLowerInvariant();
         string? bootstrapFile = p.Get("bootstrap-file");
-        string bootstrapPath = bootstrapFile ?? ConfigLoader.ResolveBootstrapPath();
+        string bootstrapPath = bootstrapFile ?? ConfigLoader.ResolveBootstrapPath(args: p.ConfigArgs);
 
         // Once the pointer was rewritten by 'activate', the configuration on disk describes the target; the commands that still
         // concern the source (rollback, finalize, status) read the pointer as it was before.
