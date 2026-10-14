@@ -18,7 +18,7 @@ namespace Mta.Delivery.Tests;
 /// <summary>A receiving MTA on loopback whose answers the tests control.</summary>
 internal sealed class RemoteServer : ISmtpServerHandler, IServerCertificateProvider
 {
-    public sealed record Received(string Sender, string[] Recipients, byte[] Body, bool Tls);
+    public sealed record Received(string Sender, string[] Recipients, byte[] Body, bool Tls, SmtpBodyType BodyType = SmtpBodyType.SevenBit, bool SmtpUtf8 = false);
 
     private readonly X509Certificate2 _certificate;
     public List<Received> Messages { get; } = [];
@@ -59,7 +59,7 @@ internal sealed class RemoteServer : ISmtpServerHandler, IServerCertificateProvi
 
         lock (Messages)
         {
-            Messages.Add(new Received(message.Sender.ToString(), message.Recipients.Select(r => r.ToString()).ToArray(), message.ToArray(), message.Session.TlsActive));
+            Messages.Add(new Received(message.Sender.ToString(), message.Recipients.Select(r => r.ToString()).ToArray(), message.ToArray(), message.Session.TlsActive, message.Parameters.BodyType, message.Parameters.SmtpUtf8));
         }
 
         return ValueTask.FromResult(SmtpReply.Create(250, "2.0.0", "Accepted"));
@@ -87,7 +87,7 @@ internal sealed class DeliveryFixture : IAsyncDisposable
     public DeliveryServices Services { get; private set; }
     public int Port { get; }
 
-    public DeliveryFixture(Func<DeliveryOptions, DeliveryOptions>? tweak = null, bool serverTls = false, bool startEngine = true, Func<DeliveryServices, IDkimSignerProvider>? dkim = null, SendingLimitsOptions? limits = null, VerpCodec? verp = null, IMtaLog? log = null)
+    public DeliveryFixture(Func<DeliveryOptions, DeliveryOptions>? tweak = null, bool serverTls = false, bool startEngine = true, Func<DeliveryServices, IDkimSignerProvider>? dkim = null, SendingLimitsOptions? limits = null, VerpCodec? verp = null, bool eightBitMime = true, bool smtpUtf8 = true, Mta.Tls.TlsRpt.TlsRptCollector? tlsReports = null, Func<StaticDnsResolver, Mta.Tls.OutboundTlsPolicyResolver>? tlsResolver = null, IMtaLog? log = null)
     {
         var clock = SystemClock.Instance;
         Storage = new InMemoryStorage(new StorageOptions { History = new HistoryOptions { Mode = HistoryMode.Full } }, clock);
@@ -96,6 +96,8 @@ internal sealed class DeliveryFixture : IAsyncDisposable
         _server = new SmtpServer(new SmtpServerOptions
         {
             Hostname = "mx.dest.example",
+            EightBitMime = eightBitMime,
+            SmtpUtf8 = smtpUtf8,
             Certificates = serverTls ? Remote : null,
             Listeners = [new SmtpListenerOptions { Name = "mx", BindAddress = IPAddress.Loopback, Port = 0, Mode = serverTls ? ListenerMode.StartTls : ListenerMode.Plain, AuthRequired = false, Role = ListenerRole.Bounce }],
         }, Remote);
@@ -116,7 +118,8 @@ internal sealed class DeliveryFixture : IAsyncDisposable
             Storage = Storage,
             Clock = clock,
             Mx = new MxResolver(Dns, new MxResolverOptions { ExcludeSpecialAddresses = false }),
-            Tls = new OutboundTlsPolicyResolver(null, null),
+            Tls = tlsResolver?.Invoke(Dns) ?? new OutboundTlsPolicyResolver(null, null),
+            TlsReports = tlsReports,
             TlsPolicies = new TlsPolicyTable(OutboundTlsConfiguration.Default),
             Pool = new SmtpConnectionPool(new SmtpClientOptions { HeloName = "egg.test", ConnectTimeout = TimeSpan.FromSeconds(5) }, clock),
             Routes = new RoutePlanner(health),
@@ -130,7 +133,7 @@ internal sealed class DeliveryFixture : IAsyncDisposable
             Services = new DeliveryServices
             {
                 Storage = Services.Storage, Clock = Services.Clock, Mx = Services.Mx, Tls = Services.Tls, TlsPolicies = Services.TlsPolicies, Pool = Services.Pool,
-                Routes = Services.Routes, Throttle = Services.Throttle, Limits = Services.Limits, Retry = Services.Retry, Dkim = dkim?.Invoke(Services) ?? NoDkimSignerProvider.Instance, Verp = verp, Log = Services.Log,
+                Routes = Services.Routes, Throttle = Services.Throttle, Limits = Services.Limits, Retry = Services.Retry, Dkim = dkim?.Invoke(Services) ?? NoDkimSignerProvider.Instance, Verp = verp, TlsReports = Services.TlsReports, Log = Services.Log,
             };
         }
 
@@ -164,6 +167,28 @@ internal sealed class DeliveryFixture : IAsyncDisposable
             ReceivedAt = now,
             ExpiresAt = now + (lifetime ?? TimeSpan.FromDays(5)),
             SendingDomain = sendingDomain,
+        }, CancellationToken.None);
+        Engine.Wake();
+        return id;
+    }
+
+    /// <summary>Queues an arbitrary raw message (CRLF lines) for the given recipients.</summary>
+    public async Task<Guid> EnqueueRawAsync(byte[] raw, string[] to, string from = "sender@example.org", bool headersUtf8 = false, string? sendingDomain = "example.org", MessageSource source = MessageSource.Smtp)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var id = Ids.New(now);
+        await Storage.Intake.AcceptAsync(new AcceptedMessage
+        {
+            MessageId = id,
+            TenantId = Tenant,
+            Source = source,
+            EnvelopeFrom = EmailAddress.Parse(from),
+            Recipients = to.Select(t => new AcceptedRecipient(Ids.New(now), EmailAddress.Parse(t))).ToList(),
+            Raw = raw,
+            ReceivedAt = now,
+            ExpiresAt = now + TimeSpan.FromDays(5),
+            SendingDomain = sendingDomain,
+            HeadersUtf8 = headersUtf8,
         }, CancellationToken.None);
         Engine.Wake();
         return id;

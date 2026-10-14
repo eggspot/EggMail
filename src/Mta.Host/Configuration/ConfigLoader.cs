@@ -350,6 +350,11 @@ public static class ConfigLoader
             }
         }
 
+        if (!string.IsNullOrWhiteSpace(c.Delivery.PublicSendingIp) && !System.Net.IPAddress.TryParse(c.Delivery.PublicSendingIp, out _))
+        {
+            errors.Add("Delivery:PublicSendingIp is not an IP address.");
+        }
+
         if (c.Delivery.Workers < 1)
         {
             errors.Add("Delivery:Workers must be at least 1.");

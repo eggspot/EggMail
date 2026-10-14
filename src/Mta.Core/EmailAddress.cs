@@ -18,6 +18,13 @@ public readonly record struct EmailAddress
     /// <summary>True when any part was non-ASCII (SMTPUTF8 required to transmit it unchanged).</summary>
     public bool IsInternational { get; }
 
+    /// <summary>
+    /// True when the address cannot be written to the wire in ASCII, i.e. its local part has non-ASCII characters: a transaction that
+    /// names it needs the SMTPUTF8 extension (RFC 6531). Narrower than <see cref="IsInternational"/>: the domain is always held in
+    /// A-label form, so an internationalized domain with an ASCII local part travels as plain ASCII.
+    /// </summary>
+    public bool RequiresSmtpUtf8 => LocalPart is not null && !System.Text.Ascii.IsValid(LocalPart);
+
     public bool IsAddressLiteral => Domain.Length > 0 && Domain[0] == '[';
 
     /// <summary>The null reverse-path (<c>&lt;&gt;</c>) used by bounces.</summary>
