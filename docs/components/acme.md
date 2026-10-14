@@ -22,7 +22,7 @@ The design supports **DNS-01 only** ([decisions.md](../decisions.md) 19, design 
 1. Lease `acme-renew:<certificate name>` (20 minutes; works on both backends). Another replica holding it makes this replica skip the order.
 2. Renewal row set to `ordering`.
 3. Account: the stored account for `Acme:DirectoryUrl` is used (its key is unprotected with purpose `AcmeAccountKey`). Without one, the runner registers a new account and the service **stores it immediately** (before the order can fail), Data Protection protected.
-4. New order, one DNS-01 TXT record per authorization (a wildcard authorization is for the base name, so `*.example.com` and `example.com` put two values at `_acme-challenge.example.com`), `Acme:PropagationDelay`, validation requests, polling of the authorizations (200 ms growing to 3 s, about two minutes at most; the CA's explanation of an invalid authorization is part of the error), finalize with a fresh ES256 key, download of the chain. TXT records are removed in every case.
+4. New order. An authorization the CA hands back already valid (RFC 8555 lets servers reuse valid authorizations of an account; Let's Encrypt and Pebble do) is skipped: no TXT record, no challenge request (posting to a valid challenge is refused). For each pending authorization one DNS-01 TXT record (a wildcard authorization is for the base name, so `*.example.com` and `example.com` put two values at `_acme-challenge.example.com`), `Acme:PropagationDelay`, validation requests, polling of the authorizations (200 ms growing to 3 s, about two minutes at most; the CA's explanation of an invalid authorization is part of the error), finalize with a fresh ES256 key, download of the chain. TXT records are removed in every case.
 5. The certificate row is **replaced** (same name, same id, new version) so the poller of every replica sees one change and no old certificate stays active next to the new one. The chain is stored as sent by the CA (leaf plus intermediates), the private key as PKCS#8 protected with Data Protection.
 6. Renewal row `issued`, failures 0.
 
@@ -61,6 +61,7 @@ Run them locally with the two Pebble binaries (no Docker needed): see [developme
 * An HTTP timeout surfaced as a cancellation, was not caught by the renewal service and ended the renewal loop silently until restart. Every failure of an attempt is now recorded with back-off.
 * `badNonce` from the CA failed the whole attempt (Certes retries it only for some requests); the order is now repeated.
 * Transport errors reached the renewal record as "One or more errors occurred"; they now say what happened.
+* An already valid authorization was challenged anyway and the CA refused ("Cannot update challenge with status valid, only status pending"); it showed up as CI flakes because Pebble reuses authorizations at random even with `PEBBLE_AUTHZREUSE=0`. The runner now checks the authorization and challenge status first, and CI pins reuse to always (`=100`) so both paths are deterministic.
 * Authorization polling checked every 3 s; it now starts at 200 ms and grows to 3 s, so a quick CA no longer costs a multiple of 3 s per order.
 
 ## Known gaps
