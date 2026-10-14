@@ -156,6 +156,7 @@ public static class ConfigLoader
         return new MtaConfig
         {
             Hostname = configuration["Hostname"] ?? config.Hostname,
+            Startup = Bind<StartupSection>(configuration, "Startup"),
             Smtp = new SmtpSection
             {
                 MaxMessageSize = smtp.MaxMessageSize, MaxRecipients = smtp.MaxRecipients, MaxConnections = smtp.MaxConnections,

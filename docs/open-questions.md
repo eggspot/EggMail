@@ -24,13 +24,13 @@ The four former "decided by default" items are **OWNER-DECIDED**, and a later ow
 | 16 | `synchronous=OFF` acknowledgement | **DESIGN-DECIDED:** no acknowledgement setting; loud warnings instead (startup log, persistent dashboard banner, metric and health detail, README). `Sqlite:SyncMode=Normal`/`Full` are the documented safer knobs |
 | 17 | Default storage backend | **OWNER-DECIDED:** SQLite (single-container quick start); `History:Mode` stays `Full` on both backends (see question 1 below for the flagged tension) |
 | 18 | Quiesce timeout | **DESIGN-DECIDED:** graceful shutdown: `Switch:QuiesceTimeoutSeconds` default 30, then requeue with the same message id and retry state and a `possible_duplicate` flag/event; no blocking `in_doubt` state |
-| 19 | Release and packaging | Single image on `ghcr.io/eggspot/eggmail`, released from GitHub Actions on version tags: planned in [release.md](release.md) |
+| 19 | Release and packaging | Single image on `ghcr.io/eggspot/eggmail`, released from GitHub Actions on version tags: built and smoke-tested, see [release.md](release.md) |
 
 Note on the license: the Unlicense / CC0 public-domain dedication is the only more-permissive alternative to MIT (weaker legal footing in some jurisdictions, and no patent grant either); say so if the owner wants it. MIT itself also has no express patent grant, unlike Apache-2.0.
 
 ## Blockers only the owner can clear
 
-- **GitHub Actions is disabled for `eggspot/EggMail` by the organization** (`gh api repos/eggspot/EggMail/actions/permissions` returns `enabled: false`; enabling it from the repository returns `409 Conflict: GitHub Actions is disabled on this repository by the organization`). Until an organization owner allows Actions: CI cannot run, so pull requests are verified by the full local `dotnet test` run instead; and the release workflow ([release.md](release.md)) cannot publish the image to `ghcr.io/eggspot/eggmail`.
+- ~~**GitHub Actions is disabled for `eggspot/EggMail` by the organization**~~ **Resolved (2026-10-13):** Actions is enabled; `ci` runs on pull requests and `main`, and the `release` workflow has published images. Pull requests are now merged on a green `ci` run.
 
 ## Questions awaiting the owner
 
@@ -40,11 +40,11 @@ Note on the license: the Unlicense / CC0 public-domain dedication is the only mo
 
 ## Owner action items
 
-- **A cloud KMS for `Secrets:KeyProtection=Kms`.** Design section 9.1 lists `Certificate | Kms | None`. What is built: `Kms` with the `LocalKey` provider (AES-256-GCM, a 32-byte key from a file or the environment held outside the database) and the `IKeyWrapProvider` extension point. What is **not** built: AWS KMS, Azure Key Vault or Google Cloud KMS providers. Each needs a cloud SDK package (allowed outside the protocol assemblies) and, to be anything more than untested code, **an account to test against**, which only the owner can provide. Say which service(s) are wanted and provide a sandbox account; until then `Secrets:KmsProvider` with any other name stops the start with a message that points here. Decision: [decisions.md](decisions.md) 76.
+- **A cloud KMS for `Secrets:KeyProtection=Kms`.** Design section 9.1 lists `Certificate | Kms | None`. What is built: `Kms` with the `LocalKey` provider (AES-256-GCM, a 32-byte key from a file or the environment held outside the database) and the `IKeyWrapProvider` extension point. What is **not** built: AWS KMS, Azure Key Vault or Google Cloud KMS providers. Each needs a cloud SDK package (allowed outside the protocol assemblies) and, to be anything more than untested code, **an account to test against**, which only the owner can provide. Say which service(s) are wanted and provide a sandbox account; until then `Secrets:KmsProvider` with any other name stops the start with a message that points here. Decision: [decisions.md](decisions.md) 79.
 - **Funding:** enable and get approved for **GitHub Sponsors for the eggspot organization**; choose a payout route (bank account in a supported region, or a fiscal host); add other platforms to `.github/FUNDING.yml` if wanted; review the policy draft. Until Sponsors is enabled, the README badge and the `FUNDING.yml` button point at a profile that does not exist yet. Steps in [funding.md](funding.md).
 - **Security reporting:** enable *Private vulnerability reporting* for the repository (Settings, Code security); [SECURITY.md](../SECURITY.md) and `/.well-known/security.txt` point reporters at it. Decide who receives the reports.
-- **Actions:** the organization disables GitHub Actions for this repository, so no CI or release workflow has ever run; allow Actions for `eggspot/EggMail` (Settings, Actions), then the written workflows can be verified.
-- **Release:** after the first image publish, set the `ghcr.io/eggspot/eggmail` package to public once, by hand ([release.md](release.md)).
+- ~~**Actions**~~ done: Actions is allowed for the repository and both workflows have run.
+- **Release:** the `ghcr.io/eggspot/eggmail` package is public (anonymous pull is checked on every release run). Still open: the first stable tag (`v0.1.0`) and the decisions listed in [release.md](release.md) (Docker Hub mirror, standalone binaries).
 
 ## Questions still open in the sources
 
@@ -92,4 +92,4 @@ Claims not confirmed against a primary source (also noted inline in the other do
 - OpenSSL TLS 1.3 ticket caching; fsync behavior on overlayfs/XFS/ext4; Native AOT feasibility
 - The partition-count cost of unlimited `Retention:MetadataDays` (PostgreSQL partitioning docs, not re-fetched)
 - All values marked "proposed" or "mine" in the source: 256 KiB stored body, 1,000-event ring, 20 KB average content size, 7-day retention default, per-endpoint concurrency 4, connection pool sizes, volume thresholds for splitting databases, and the 15–20 week Lite-first saving
-- Release plan facts not confirmed: organization settings that may block public packages, GitHub Actions billing for public repositories, attestations on multi-platform images, ReadyToRun cross-architecture compilation ([release.md](release.md))
+- Release plan facts not confirmed: organization settings that may block public packages, GitHub Actions billing for public repositories, ([release.md](release.md); attestations on multi-platform images and ReadyToRun cross-architecture compilation are now verified by the release workflow and the throughput workflow)

@@ -28,6 +28,7 @@ public sealed class MtaConfig
     public SecretsSection Secrets { get; init; } = new();
     public ObservabilitySection Observability { get; init; } = new();
     public SwitchSection Switch { get; init; } = new();
+    public StartupSection Startup { get; init; } = new();
     public TlsSection Tls { get; init; } = new();
     public AcmeSection Acme { get; init; } = new();
     public ApiSection Api { get; init; } = new();

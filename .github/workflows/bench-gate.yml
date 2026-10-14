@@ -1,0 +1,97 @@
+name: bench-gate
+
+# Allocation regression gate (docs/benchmarks.md, "Automation"): runs the pipeline harness and fails when allocation per message grows more
+# than the thresholds in bench/baseline/allocations.json. Allocation counts do not depend on how fast or loaded the machine is, which is why
+# a shared runner can gate on them (and cannot gate on throughput).
+#
+# NOT run on pull requests (billed minutes): weekly on main when something changed, and on demand. Run it by hand on a branch that touches
+# the ingest path:  gh workflow run bench-gate --ref <branch>
+# To accept a deliberate change, take bench-candidate.json from the run's artifacts and replace bench/baseline/allocations.json with it
+# in the same pull request (fill in "recordedOn").
+
+on:
+  schedule:
+    - cron: '41 4 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: bench-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: 1
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+
+jobs:
+  allocations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Did main change in the last 8 days? (scheduled runs only; a manual run always runs)
+        id: fresh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            since=$(date -u -d '8 days ago' +%Y-%m-%dT%H:%M:%SZ)
+            n=$(gh api "repos/${GITHUB_REPOSITORY}/commits?sha=${GITHUB_REF_NAME}&since=${since}&per_page=1" --jq 'length')
+            echo "run=$([ "${n:-0}" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-dotnet@v4
+        if: steps.fresh.outputs.run == 'true'
+        with:
+          dotnet-version: 10.0.x
+      - uses: actions/cache@v4
+        if: steps.fresh.outputs.run == 'true'
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('Directory.Packages.props', 'global.json') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Build the harness and the load generator
+        if: steps.fresh.outputs.run == 'true'
+        run: dotnet build bench/Mta.Bench.Pipeline -c Release
+
+      - name: Per-step allocations (exact)
+        if: steps.fresh.outputs.run == 'true'
+        run: dotnet bench/Mta.Bench.Pipeline/bin/Release/net10.0/Mta.Bench.Pipeline.dll --micro true --json micro.json
+
+      - name: Allocation per accepted message through the real runtime (SQLite, Sqlite:SyncMode=Off, History:Mode=Full)
+        if: steps.fresh.outputs.run == 'true'
+        run: >
+          dotnet bench/Mta.Bench.Pipeline/bin/Release/net10.0/Mta.Bench.Pipeline.dll
+          --sync off --history full --messages 20000 --connections 8 --size 2048 --deliver false --json pipeline.json
+
+      - name: Compare with the baseline
+        if: steps.fresh.outputs.run == 'true'
+        run: |
+          {
+            echo "Measured with .NET SDK $(dotnet --version) on $(. /etc/os-release && echo "$PRETTY_NAME"), $(nproc) logical cores (the baseline records its own)."
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          python3 bench/compare-allocations.py --baseline bench/baseline/allocations.json --micro micro.json --pipeline pipeline.json \
+            --summary gate-summary.md --write-candidate bench-candidate.json && status=0 || status=$?
+          cat gate-summary.md >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+      - name: Keep the measurements
+        if: ${{ !cancelled() && steps.fresh.outputs.run == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: allocation-gate-${{ github.run_id }}
+          path: |
+            micro.json
+            pipeline.json
+            bench-candidate.json
+          retention-days: 30
+          if-no-files-found: warn

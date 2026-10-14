@@ -1,0 +1,17 @@
+# EggMail with the SQLite backend (the default): ONE replica, one ReadWriteOnce volume at /data.
+#
+#   kubectl create namespace eggmail
+#   kubectl -n eggmail create secret generic eggmail-admin --from-literal=admin-password='a-long-admin-password'
+#   kubectl apply -n eggmail -k deploy/kubernetes/sqlite
+#
+# Pin the image and set the host name before you apply (edit here or use `kustomize edit set image` / a copy of this overlay).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../base
+  - statefulset.yaml
+
+images:
+  - name: ghcr.io/eggspot/eggmail
+    newTag: nightly          # pin a minor line (for example 1.4) or use `digest:` once releases exist

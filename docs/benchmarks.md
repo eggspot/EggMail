@@ -1,6 +1,6 @@
 # Performance measurement plan
 
-EggMail's primary goal is to be the fastest SMTP server. **Performance is a permanent first-class goal on both storage backends:** the SQLite backend is engineered for large, high-throughput workloads and is not treated as a toy. Because the backends are feature-identical (they differ only in how data is stored), both are benchmarked and optimized **separately on the identical feature set**: same protocol features, same history level, same settings, each backend with its own results, regression gate and budgets. "Lite" and "Full" below are the two backends' default deployment shapes (SQLite and PostgreSQL); they have identical behavioural defaults, including `History:Mode=Full`. This document defines what that claim means and how it will be measured. **No measurements exist yet.** All targets are proposals to be tuned after the first runs. Claim "fastest" only once an independent run reproduces it.
+EggMail's primary goal is to be the fastest SMTP server. **Performance is a permanent first-class goal on both storage backends:** the SQLite backend is engineered for large, high-throughput workloads and is not treated as a toy. Because the backends are feature-identical (they differ only in how data is stored), both are benchmarked and optimized **separately on the identical feature set**: same protocol features, same history level, same settings, each backend with its own results, regression gate and budgets. "Lite" and "Full" below are the two backends' default deployment shapes (SQLite and PostgreSQL); they have identical behavioural defaults, including `History:Mode=Full`. This document defines what that claim means and how it is measured. **No publishable measurements exist yet** (the only numbers are development-time observations and noisy CI trend numbers, both labelled as such below). All targets are proposals to be tuned after the first runs. Claim "fastest" only once an independent run reproduces it.
 
 ## Scope of the claim
 
@@ -61,7 +61,7 @@ The protocol-path rows apply to both backends and are measured separately on eac
 - **swaks:** correctness only, not load.
 - **Own load generator:** no maintained standalone tool covers TLS and pipelining, so one is written and kept in the repository (`Mta.Tools`).
 - **BenchmarkDotNet** with `[MemoryDiagnoser]` for parsers, dot-stuffing, DKIM canonicalization, the DNS codec and MIME; `dotnet-counters` and `dotnet-trace` for profiling.
-- CI regression gate on the micro-benchmarks and budgets, run for both backends (about 2.5 engineer-weeks for harness, generator, baseline compose and gate; see [plan.md](plan.md)).
+- CI regression gate on the budgets, run for both backends (about 2.5 engineer-weeks for harness, generator, baseline compose and gate; see [plan.md](plan.md)). What is built so far is the allocation gate for the SQLite backend (see "Automation" below); a gate on the BenchmarkDotNet micro-benchmarks (`bench/Mta.Benchmarks`, time-based and therefore unfit for shared runners) and an allocation gate for the PostgreSQL backend are not built.
 
 ## Workload parameters to publish and vary
 
@@ -87,6 +87,54 @@ dotnet src/Mta.Tools/bin/Release/net10.0/mta-tools.dll load --port 2525 --connec
 
 **Sample, not a claim:** the SMTP server alone against the discard `sink` on one developer machine (10-core Apple silicon, load generator and server on the same host, loopback, no TLS, no storage) accepted about 63k messages/s of 2 KB with 16 pipelined connections (p99 about 0.6 ms). This measures the protocol path only, not durable ingest through storage; numbers with storage, TLS and on dedicated hardware are published per release under the fairness rules above.
 
+
+
+## Automation (GitHub Actions)
+
+Billing comes first: nothing here runs on every pull request. Two workflows, both separate from `ci` and `release`:
+
+| Workflow | Trigger | What it does | Cost |
+|---|---|---|---|
+| `bench-gate` | weekly (Monday 04:41 UTC, skipped when `main` has no commit in the last 8 days) and manual | Builds the harness, measures **allocation per message** two ways and compares with `bench/baseline/allocations.json`; fails above the thresholds | about one billed minute (the first run took 52 s) |
+| `bench-throughput` | manual only | Runs the pipeline harness for several configurations (3 runs each), publishes the raw JSON as an artifact and a markdown summary (median and range); optionally measures JIT versus ReadyToRun start-up and size | about 10 to 15 minutes |
+
+### The allocation gate
+
+Allocation counts, unlike throughput, do not depend on how fast or how loaded the machine is, so a shared runner can gate on them. Two measurements, both from `bench/Mta.Bench.Pipeline`:
+
+- **Per step (exact).** `--micro true --json`: bytes per call of `MimeMessage.Parse`, the header editor, content extraction, address parsing, id and address parsing, and the whole `SubmissionService.SubmitAsync` (in-memory storage, `History:Mode=Full`), measured with `GC.GetAllocatedBytesForCurrentThread`. Repeatable to the byte (identical on a laptop and on the CI runner: 10,760 B for `SubmitAsync` with in-memory storage and a 2 KB message). **Threshold: +5 %.**
+- **Per accepted message through the real runtime.** 20,000 messages of 2 KB over 8 connections with the load generator, SQLite, `Sqlite:SyncMode=Off`, `History:Mode=Full`, no delivery, total process allocation divided by accepted messages. It includes background work (batched writers), so it varies by about 2 % between runs of the same code (33.0 to 33.8 KB in three laptop runs of the code at the time although throughput differed by 4x; 11.2 KB on the CI runner after the allocation work of decisions 64 to 68). **Threshold: +10 %.**
+
+A value above the baseline plus the threshold fails the workflow (the summary table names the measurement). A value more than the threshold below the baseline is reported as "improved (update the baseline)" and does not fail. To accept a deliberate change, copy `bench-candidate.json` from the run's artifacts over `bench/baseline/allocations.json` in the same pull request and fill in `recordedOn`. The comparison logic was checked by hand against a deliberately lowered baseline (65.7 % regression reported, exit code 1). Run it on a branch that touches the ingest path with `gh workflow run bench-gate --ref <branch>`.
+
+The gate prevents regressions; it does not mean the budget is met. The design budget (under 2 KB per message excluding body buffers) is **not** met (see decision 67 for what "excluding body buffers" means): about 10.8 KB in `SubmitAsync` alone and about 11.2 KB per message end to end at the time of the baseline. It also does not cover the delivery path, PostgreSQL, throughput or latency.
+
+### The throughput run
+
+`gh workflow run bench-throughput --ref <branch>` (inputs: messages per run, runs per configuration, PostgreSQL on or off, ReadyToRun measurement on or off). Configurations: SQLite non-durable (`Sqlite:SyncMode=Off`, the default) and its durable pair (`Full`), `StatsOnly` history, SQLite with delivery to the counting sink (end-to-end recipients per second), and PostgreSQL 17 in a container on the same machine, durable and with `synchronous_commit=off`. The summary starts with the label **"GitHub-hosted ubuntu-latest N-core runner, noisy, not publishable"**, where N is what `nproc` reports on the runner (4 for this repository), and prints the core count the process saw. It also records the wall time of the JIT and ReadyToRun publish steps. The load generator, the server, the sink and the database share one machine that other jobs also share, so the numbers are for trends and for catching order-of-magnitude mistakes. They break fairness rules 1, 3, 6 and 9 (no pair on identical quiet hardware, no baselines, one noisy run set, no disk published) and must not be quoted or compared with other servers.
+
+## Baseline comparison: Postfix and KumoMTA (`bench/compare`)
+
+`bench/compare/compose.yaml` is the reproducible comparison setup the fairness rules ask for (rule 7): EggMail (the released image), a Postfix built from Debian's package and KumoMTA, driven by the same load generator (`mta-tools load`) into the same sink (`mta-tools sink`, optional back-pressure) on one private network, one system at a time (Compose profiles). The header of the file has the exact commands, the durable and non-durable switch of each system (EggMail `Sqlite:SyncMode`, Postfix tmpfs queue, KumoMTA spool flush) and the caveats that must accompany any number: the two baselines take unauthenticated mail without TLS on the private network while EggMail requires STARTTLS and AUTH, so the comparison favours them slightly.
+
+**Status: written, never run.** Docker is not used on the development machine and the owner runs the comparison by hand on a quiet Linux host. The EggMail path (provisioning script) was exercised against a locally running server; the Postfix configuration and the KumoMTA policy were written from the documentation of the two projects and will probably need small fixes on the first run (the KumoMTA image tag is not pinned, option names must be checked against the pinned version). Haraka, Stalwart and mox are not included (cut order).
+
+## CI trend numbers (2026-10-14)
+
+**GitHub-hosted ubuntu-latest 4-core runner, noisy, not publishable.** (The core count is the real one: `nproc` says 4 on this public repository, and the workflow builds the label from `nproc` instead of assuming 2. Ubuntu 24.04, .NET 10.0.13.) The load generator, the server, the counting sink and PostgreSQL 17 in a container all share that machine, and so do the other jobs of its host. One manual run of `bench-throughput` ([run 38511632277](https://github.com/eggspot/EggMail/actions/runs/38511632277), on the code of the PR with the allocation work of decisions 64 to 68), pipeline harness, 2 KB messages, 16 connections, TLS and AUTH on, `History:Mode=Full` unless stated, median of 3 runs (range in brackets):
+
+| Configuration | Ingest msg/s | p50 / p99 ms | Alloc B/msg | CPU ms per 1000 msg |
+|---|---:|---|---:|---:|
+| SQLite `Sqlite:SyncMode=Off` (the default, non-durable) | 3,999 (3,914-4,423) | 3.62 / 7.64 | 11,084 | 638 |
+| SQLite `Sqlite:SyncMode=Full` (its durable pair) | 2,337 (2,292-2,347) | 6.24 / 12.1 | 11,247 | 715 |
+| SQLite `Off`, `History:Mode=StatsOnly` | 4,957 (4,810-5,027) | 2.87 / 6.82 | 6,356 | 522 |
+| SQLite `Off`, application assemblies precompiled with ReadyToRun | 4,355 (4,354-4,386) | 3.29 / 7.35 | 11,072 | 575 |
+| PostgreSQL 17, default durability (WAL synced at commit) | 1,852 (1,773-1,874) | 7.96 / 18.4 | 28,400 | 729 |
+| PostgreSQL 17, `synchronous_commit=off` (its non-durable pair) | 1,881 (1,772-1,898) | 7.19 / 29.3 | 28,197 | 744 |
+| SQLite `Off`, with delivery to the counting sink (10,000 messages): ingest | 1,048 (1,037-1,088) | 13.9 / 32.7 | 39,600 | 3,290 |
+| ... the same, end to end | 984 recipients/s until the sink had them all | | | |
+
+How little these numbers can be trusted: the same SQLite `Off` configuration measured 4,114, 5,027, 7,184 and now 3,999 msg/s in four runs of this workflow on four runner instances over two days (the code also changed between them), and the same code on a 10-core laptop gave 1,400 to 6,100. Only the allocation columns are stable (within about 1 % across runs of the same code), which is why the regression gate uses them. Read the table for shape, not for values: SQLite `Off` is faster than `Full` and PostgreSQL on this runner; `StatsOnly` is about 25 % faster than `Full` history; `synchronous_commit=off` did not help PostgreSQL measurably here (the runner's disk is fast and the load generator is probably the limit); the durable SQLite row is not comparable with the PostgreSQL durable row (different fsync behaviour, different storage); the ReadyToRun row is inside the noise of the JIT row. Nothing here is a claim about being the fastest, and no other server was run on the same machine. The first run of this section (2026-10-13, before the allocation work) had 7,184 msg/s and 32.7 KB per message for the first row.
 
 ## Pipeline harness and first profile (2026-10-13)
 

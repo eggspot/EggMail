@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "recordedOn": "GitHub-hosted ubuntu-latest runner (4 logical cores, Ubuntu 24.04, .NET 10.0.12), bench-gate run 38462613098, 2026-10-13, on main plus the deployment branch (after the allocation work of decisions 64 to 68). The pipeline value is a single run; the same code varied by about 2 percent between runs.",
+  "thresholds": {
+    "microPercent": 5,
+    "pipelinePercent": 10
+  },
+  "micro": {
+    "MimeMessage.Parse": 672,
+    "MessageHeaderEditor (Received only, ToArray)": 2256,
+    "MessageHeaderEditor (remove Bcc, 2 prepends, Received, ToArray)": 2672,
+    "MessageContentExtractor.Extract(raw) (parses itself)": 4480,
+    "MessageContentExtractor.Extract(parsed message)": 3808,
+    "AddressList.Parse(From) + GetCommonDomain (the full parser, as before)": 712,
+    "AddressList.GetCommonDomain(From header) (the simple-address shortcut)": 80,
+    "Ids.New + EmailAddress.Parse x2": 152,
+    "SubmissionService.SubmitAsync, InMemory, history Full, 2 KB": 10760,
+    "SubmissionService.SubmitAsync, InMemory, history Full, tiny": 3568
+  },
+  "pipeline": {
+    "sqlite-off-full": {
+      "bytesPerMessage": 11180,
+      "messages": 20000,
+      "connections": 8,
+      "sizeBytes": 2048,
+      "history": "Full",
+      "sqliteSync": "Off"
+    }
+  }
+}
