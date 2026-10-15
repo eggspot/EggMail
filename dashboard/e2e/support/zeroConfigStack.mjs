@@ -33,7 +33,9 @@ export const NOTICE_END = '==================== END OF THE ONE-TIME PASSWORD (it
  * a data directory in a temp folder (the image has /data), free ports (the image has fixed container ports) and loopback binding.
  */
 function cleanEnvironment() {
-  const env = { ...process.env, DOTNET_NOLOGO: '1', DOTNET_CLI_TELEMETRY_OPTOUT: '1' };
+  // Docker and Kubernetes set HOSTNAME (the container id or pod name) in every container. Configuration keys are not case sensitive, so it is the key
+  // "Hostname": the image always has it, and EGGMAIL_HOSTNAME has to beat it.
+  const env = { ...process.env, DOTNET_NOLOGO: '1', DOTNET_CLI_TELEMETRY_OPTOUT: '1', HOSTNAME: os.hostname() };
   for (const name of Object.keys(env)) {
     if (/^(EGGMAIL_(?!E2E|TEST)|CLOUDFLARE_|MTA_|Hostname$)/.test(name) || name.includes('__')) delete env[name];
   }

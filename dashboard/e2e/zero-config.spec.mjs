@@ -64,6 +64,8 @@ test.describe('a start with nothing configured', () => {
     expect(password, 'the log has no one-time password notice').toMatch(/^[A-Za-z0-9_-]{20,}$/);
     expect(stack.log().split(password)).toHaveLength(2);
     expect(stack.log()).not.toMatch(/configuration error/);
+    // Nothing names the server: the log says so and says what to set (although the container runtime has set HOSTNAME).
+    expect(stack.log()).toMatch(/No host name is configured/);
   });
 
   test('STARTTLS and implicit TLS answer with the self-signed certificate on every submission port', async () => {
@@ -176,7 +178,7 @@ test.describe('the simple environment variables', () => {
     expect(stack.log()).not.toContain('chosen-by-the-operator-1');
 
     const starttls = await submit({ port: stack.ports.submission, mode: 'starttls', send: false });
-    expect(starttls.greeting.lines[0]).toContain('mail.zero.example');           // the SMTP greeting names the configured host
+    expect(starttls.greeting.lines[0]).toContain('mail.zero.example');           // the SMTP greeting names the configured host, not the HOSTNAME the runtime set
     expect(starttls.certificate.subject).toBe('mail.zero.example');               // so does the first-run certificate
     expect(starttls.certificate.subjectAltName).toContain('DNS:mail.zero.example');
     expect(stack.log()).not.toMatch(/No host name is configured/);

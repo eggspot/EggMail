@@ -278,13 +278,13 @@ NOTICE_END = "END OF THE ONE-TIME PASSWORD"
 
 
 def generated_password(log_text):
-    """The password in the one-time notice of a server log (docker logs / docker compose logs prefixes are ignored); fails unless there is exactly one."""
+    """The password in the one-time notice of a server log (docker logs / docker compose logs prefixes are ignored); fails unless there is exactly one.
+    The scripts capture stdout with $(...), so the reason goes to stderr."""
     notices = [part.split(NOTICE_END)[0] for part in log_text.split(NOTICE_BEGIN)[1:]]
-    if len(notices) != 1:
-        fail("the log holds %d one-time password notices, expected exactly 1" % len(notices))
-    found = [line.split("password:", 1)[1].strip() for line in notices[0].splitlines() if "password:" in line]
-    if len(found) != 1 or not found[0]:
-        fail("the one-time password notice has no password line")
+    found = [line.split("password:", 1)[1].strip() for notice in notices for line in notice.splitlines() if "password:" in line]
+    if len(notices) != 1 or len(found) != 1 or not found[0]:
+        print("SMOKE FAILED: the log holds %d one-time password notices with %d password lines, expected exactly 1 and 1" % (len(notices), len(found)), file=sys.stderr, flush=True)
+        sys.exit(1)
     return found[0]
 
 

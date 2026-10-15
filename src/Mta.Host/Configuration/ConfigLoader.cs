@@ -91,8 +91,13 @@ public static class ConfigLoader
         }
 
         // The simple names are aliases: they sit below the long-form environment variables and the command line, so a key set the long way always wins.
-        builder.Add(new EggMailEnvironmentSource(EggMailEnvironment.Translate(environment ?? Environment.GetEnvironmentVariable)));
+        // The one exception is Hostname: configuration keys are case-insensitive, so the HOSTNAME variable that Docker and Kubernetes set in every container
+        // (the container id or pod name) IS the key "Hostname" and would silently outrank EGGMAIL_HOSTNAME. The host name alias therefore sits just above the
+        // environment (and still below the command line).
+        EnvironmentAliasResult aliases = EggMailEnvironment.Translate(environment ?? Environment.GetEnvironmentVariable);
+        builder.Add(new EggMailEnvironmentSource(new EnvironmentAliasResult(aliases.Values.Where(v => v.Key != "Hostname").ToList(), aliases.Errors)));
         builder.AddEnvironmentVariables();
+        builder.Add(new EggMailEnvironmentSource(new EnvironmentAliasResult(aliases.Values.Where(v => v.Key == "Hostname").ToList(), [])));
         builder.AddCommandLine(args);
         return builder.Build();
     }

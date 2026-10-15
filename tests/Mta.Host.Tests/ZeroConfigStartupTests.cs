@@ -360,13 +360,13 @@ public sealed class ZeroConfigStartupTests : IAsyncLifetime
     {
         var log = new RecordingLog();
         var unset = ConfigLoader.Load(new ConfigurationBuilder().Build());
-        StartupChecks.LogAdvice(unset.Config, unset, log);
+        StartupChecks.LogAdvice(unset.Config, log);
 
         Assert.Contains(log.Lines, l => l.Contains("EGGMAIL_HOSTNAME", StringComparison.Ordinal));
 
         var set = ConfigLoader.Load(new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Hostname"] = "mail.example.com" }).Build());
         var quiet = new RecordingLog();
-        StartupChecks.LogAdvice(set.Config, set, quiet);
+        StartupChecks.LogAdvice(set.Config, quiet);
         Assert.DoesNotContain(quiet.Lines, l => l.Contains("No host name is configured", StringComparison.Ordinal));
     }
 }

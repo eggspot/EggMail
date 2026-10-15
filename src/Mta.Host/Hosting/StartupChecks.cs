@@ -29,9 +29,13 @@ public static class StartupChecks
     }
 
     /// <summary>The advice that applies to a start with little configuration: written to the log, never fatal.</summary>
-    public static void LogAdvice(MtaConfig config, LoadedConfig loaded, IMtaLog log)
+    public static void LogAdvice(MtaConfig config, IMtaLog log)
     {
-        if (!loaded.LockedKeys.Contains("Hostname"))
+        // "Not configured" is not "the key is absent": Docker and Kubernetes set the HOSTNAME variable (the container id or pod name), which is the key "Hostname" to the
+        // case-insensitive configuration. The machine name is what the server uses when nothing names it.
+        if ((string.Equals(config.Hostname, Environment.MachineName, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(config.Hostname, Environment.GetEnvironmentVariable("HOSTNAME"), StringComparison.OrdinalIgnoreCase))
+            && Environment.GetEnvironmentVariable("EGGMAIL_HOSTNAME") is null && Environment.GetEnvironmentVariable("Hostname") is null)
         {
             log.Write(MtaLogLevel.Warning, "startup",
                 $"No host name is configured: using the machine name '{config.Hostname}' in SMTP greetings and certificates. Set EGGMAIL_HOSTNAME to the DNS name of this server (for example mail.example.com), which also has to match the reverse DNS (PTR) of its public IP address, or receiving servers will score your mail down.");

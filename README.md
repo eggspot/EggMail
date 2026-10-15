@@ -49,6 +49,8 @@ docker logs eggmail    # the dashboard administrator password, printed ONCE, bet
 
 Open `https://localhost:8443` (the certificate is self-signed until you set up a real one, and the dashboard says so), sign in as `admin` with the printed password and change it on the **Account** page. SMTP submission with AUTH works on 587 (STARTTLS), 465 (implicit TLS) and 2525. The first start creates the data directory and SQLite files, the key ring, the VERP key, the administrator and the certificate; a DKIM key is generated for every sending domain you add.
 
+Then, in the dashboard: add your sending domain (it shows the DNS records to publish; the domain is usable once its DKIM record verifies), create an **SMTP credential** or an **API key** under Credentials, and point your application at port 587 (or `POST /api/v1/messages`).
+
 **For a real server** add three or four variables (the complete list, with what each one maps to, is [The simple environment variables](docs/operations.md#the-simple-environment-variables); the long configuration keys keep working and win):
 
 ```sh

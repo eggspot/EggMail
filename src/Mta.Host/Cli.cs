@@ -244,7 +244,7 @@ internal static class Cli
             return 2;
         }
 
-        StartupChecks.LogAdvice(config, loaded, startupLog);
+        StartupChecks.LogAdvice(config, startupLog);
 
         builder.Services.AddSingleton(loaded);
         builder.Services.AddSingleton(config);

@@ -287,17 +287,27 @@ public class EggMailEnvironmentTests
     }
 
     [Fact]
-    public void The_simple_variables_sit_above_the_files_and_below_the_long_form_environment_and_the_command_line()
+    public void The_simple_variables_sit_above_the_files_and_below_the_long_form_environment_and_the_command_line_except_the_host_name()
     {
         // The long-form environment variables come from the real process environment, which a test must not change; the order of the layers is what decides.
         string directory = Path.Combine(Path.GetTempPath(), "eggmail-alias-" + Guid.NewGuid().ToString("N"));
-        IConfigurationRoot root = ConfigLoader.Build([], dataDirectoryHint: directory, appSettingsPath: Path.Combine(directory, "appsettings.json"), environment: _ => null);
+        IConfigurationRoot root = ConfigLoader.Build([], dataDirectoryHint: directory, appSettingsPath: Path.Combine(directory, "appsettings.json"),
+            environment: name => name == "EGGMAIL_HOSTNAME" ? "mail.example.com" : name == "EGGMAIL_ADMIN_USER" ? "owner" : null);
 
-        List<Type> order = root.Providers.Select(p => p.GetType()).ToList();
-        int simple = order.IndexOf(typeof(EggMailEnvironmentProvider));
-        int environment = order.IndexOf(typeof(Microsoft.Extensions.Configuration.EnvironmentVariables.EnvironmentVariablesConfigurationProvider));
-        int commandLine = order.IndexOf(typeof(Microsoft.Extensions.Configuration.CommandLine.CommandLineConfigurationProvider));
-        Assert.True(simple >= 0 && simple < environment && environment < commandLine, string.Join(", ", order.Select(t => t.Name)));
+        List<IConfigurationProvider> providers = root.Providers.ToList();
+        int below = providers.FindIndex(p => p is EggMailEnvironmentProvider);
+        int environment = providers.FindIndex(p => p is Microsoft.Extensions.Configuration.EnvironmentVariables.EnvironmentVariablesConfigurationProvider);
+        int above = providers.FindLastIndex(p => p is EggMailEnvironmentProvider);
+        int commandLine = providers.FindIndex(p => p is Microsoft.Extensions.Configuration.CommandLine.CommandLineConfigurationProvider);
+        Assert.True(below >= 0 && below < environment && environment < above && above < commandLine, string.Join(", ", providers.Select(p => p.GetType().Name)));
+
+        // Only the host name is above the environment: Docker and Kubernetes set HOSTNAME (the container id) in every container, and configuration keys are
+        // case-insensitive, so that variable would otherwise silently beat EGGMAIL_HOSTNAME.
+        Assert.True(providers[above].TryGet("Hostname", out string? hostname));
+        Assert.Equal("mail.example.com", hostname);
+        Assert.False(providers[below].TryGet("Hostname", out _));
+        Assert.True(providers[below].TryGet("Dashboard:BootstrapAdminUser", out _));
+        Assert.False(providers[above].TryGet("Dashboard:BootstrapAdminUser", out _));
     }
 
     [Fact]
