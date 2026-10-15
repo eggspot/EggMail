@@ -165,6 +165,8 @@ test.describe('domains from Domains:Bootstrap (EGGMAIL_DOMAINS) and the MTA-STS 
     expect((await getWithHost(boot, 'mta-sts.stranger.test', '/.well-known/mta-sts.txt')).status).toBe(404); // not ours
     expect((await getWithHost(boot, 'mta-sts.boot1.mail.test', '/')).status).toBe(404); // the dashboard is not offered under that name
     expect((await getWithHost(boot, 'mta-sts.boot1.mail.test', '/api/v1/domains')).status).toBe(404);
+    expect((await getWithHost(boot, 'mta-sts.boot1.mail.test', '/index.html')).status).toBe(404); // not even the static files of the dashboard
+    expect((await getWithHost(boot, 'mta.eggmail.test', '/index.html')).status).toBe(200);
     const dashboard = await getWithHost(boot, 'mta.eggmail.test', '/');
     expect(dashboard.status).toBe(200); // other names still reach the dashboard
     expect(dashboard.headers['content-type']).toContain('text/html');

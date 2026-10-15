@@ -66,6 +66,7 @@ public sealed class MtaStsPolicyMiddleware
 
         context.Response.StatusCode = StatusCodes.Status200OK;
         context.Response.ContentType = "text/plain; charset=utf-8";
+        context.Response.Headers.XContentTypeOptions = "nosniff";
         context.Response.Headers.CacheControl = "public, max-age=300";
         context.Response.ContentLength = _policy.Length;
         if (HttpMethods.IsGet(context.Request.Method))

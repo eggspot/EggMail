@@ -276,8 +276,8 @@ internal static class Cli
         builder.WebHost.ConfigureKestrel(k => KestrelHosting.Configure(k, config, runtime.Certificates));
 
         var app = builder.Build();
+        app.UseMtaStsPolicy();   // the MTA-STS policy file of the registered domains, when Domains:MtaStsMode serves it; before the dashboard's static files, which must not answer under that host name
         DashboardHosting.Map(app);
-        app.UseMtaStsPolicy();   // the MTA-STS policy file of the registered domains, when Domains:MtaStsMode serves it
         ApiHosting.Map(app, runtime);
         await app.RunAsync().ConfigureAwait(false);
         return 0;
