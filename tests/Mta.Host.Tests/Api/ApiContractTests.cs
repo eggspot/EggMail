@@ -104,7 +104,7 @@ public class ApiContractTests : IAsyncLifetime
     [Fact]
     public void The_dashboard_types_were_found_and_parsed()
     {
-        foreach (string name in new[] { "Me", "Capabilities", "MessageSummary", "MessageDetail", "DeliveryEvent", "Domain", "DnsRecord", "Webhook", "WebhookAttempt", "ApiKey", "SmtpCredential", "StatsRow", "SettingItem", "Tenant", "DashboardUser", "CertificateInfo", "AdminStatus", "PreflightReport", "SwitchStatus" })
+        foreach (string name in new[] { "Me", "Capabilities", "MessageSummary", "MessageDetail", "DeliveryEvent", "Domain", "DnsRecord", "DomainRecords", "Webhook", "WebhookAttempt", "ApiKey", "SmtpCredential", "StatsRow", "SettingItem", "Tenant", "DashboardUser", "CertificateInfo", "AdminStatus", "PreflightReport", "SwitchStatus" })
         {
             Assert.True(_ts.Has(name), name + " is missing from types.ts (" + _ts + ")");
         }
@@ -144,7 +144,9 @@ public class ApiContractTests : IAsyncLifetime
         Conforms(list, "Domain[]");
         Conforms(await _tenant.GetAsync("/api/v1/domains/" + _domainId), "Domain");
         Conforms(await _tenant.PostAsync("/api/v1/domains", new { name = "second.example" }), "Domain", HttpStatusCode.Created);
+        Conforms(await _tenant.GetAsync($"/api/v1/domains/{_domainId}/records"), "DomainRecords");
         Conforms(await _tenant.PostAsync($"/api/v1/domains/{_domainId}/verify"), "Domain");
+        Conforms(await _tenant.GetAsync($"/api/v1/domains/{_domainId}/records"), "DomainRecords");   // after a check: statuses and found values
         Conforms(await _tenant.PostAsync($"/api/v1/domains/{_domainId}/dkim/rotate"), "Domain");
     }
 

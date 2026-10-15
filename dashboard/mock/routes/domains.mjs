@@ -54,9 +54,11 @@ const quoted = (v) =>
     .map((piece) => `"${piece.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`)
     .join(' ');
 
-function zoneLine(r) {
+function zoneLine(r, zone) {
+  const inZone = r.host === zone || r.host.endsWith(`.${zone}`);
   if (r.type === 'TXT') return `${fqdn(r.host)} ${r.ttl} IN TXT ${quoted(r.value)}`;
   if (r.type === 'CNAME') return `${fqdn(r.host)} ${r.ttl} IN CNAME ${fqdn(r.value)}`;
+  if (r.type === 'MX' && !inZone) return `; MX ${r.host} -> ${r.value} (published once by whoever runs EggMail, not in this zone)`;
   if (r.type === 'MX') {
     const [preference, target] = r.value.split(' ');
     return `${fqdn(r.host)} ${r.ttl} IN MX ${preference} ${fqdn(target)}`;
@@ -66,7 +68,7 @@ function zoneLine(r) {
 
 function zoneFile(d) {
   const lines = [`; DNS records for ${d.name}`, '; Required records decide whether the domain can send; recommended ones improve delivery and give you reports.'];
-  for (const r of d.records) lines.push('', `; ${PURPOSE_LABEL[r.purpose]} (${r.required ? 'required' : 'recommended'}): ${r.note}`, zoneLine(r));
+  for (const r of d.records) lines.push('', `; ${PURPOSE_LABEL[r.purpose]} (${r.required ? 'required' : 'recommended'}): ${r.note}`, zoneLine(r, d.name));
   return `${lines.join('\n')}\n`;
 }
 

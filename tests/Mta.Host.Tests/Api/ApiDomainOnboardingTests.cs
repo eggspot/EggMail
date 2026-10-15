@@ -126,7 +126,7 @@ public class ApiDomainOnboardingTests : IAsyncLifetime
         Assert.Contains("onboard.example. 3600 IN TXT \"v=spf1 ip4:192.0.2.10 ~all\"", zone);
         Assert.Contains("_dmarc.onboard.example. 3600 IN TXT \"v=DMARC1; p=none; rua=mailto:dmarc@onboard.example\"", zone);
         Assert.Contains("bounce.onboard.example. 3600 IN CNAME bounces.egg.test.", zone);
-        Assert.Contains("bounces.egg.test. 3600 IN MX 10 mta.egg.test.", zone);
+        Assert.Contains("; MX bounces.egg.test -> 10 mta.egg.test (published once by whoever runs EggMail, not in this zone)", zone);   // the bounce domain is outside the customer's zone
         Assert.Contains("mta-sts.onboard.example. 3600 IN CNAME mta.egg.test.", zone);
         Assert.Contains("_smtp._tls.onboard.example. 3600 IN TXT \"v=TLSRPTv1; rua=mailto:tls-rpt@onboard.example\"", zone);
         Assert.Contains("; PTR 10.2.0.192.in-addr.arpa -> mta.egg.test", zone);   // reverse DNS is advice, not a zone line

@@ -150,7 +150,7 @@ public class DomainRecordCheckTests
         Assert.Contains("; SPF (recommended):", zone);
         Assert.Contains("example.com. 3600 IN TXT \"v=spf1 ip4:192.0.2.10 ~all\"\n", zone);
         Assert.Contains("bounce.example.com. 3600 IN CNAME bounces.mail.test.\n", zone);
-        Assert.Contains("bounces.mail.test. 3600 IN MX 10 mta.mail.test.\n", zone);
+        Assert.Contains("; MX bounces.mail.test -> 10 mta.mail.test (published once by whoever runs EggMail, not in this zone)\n", zone);
         Assert.Contains("mta-sts.example.com. 3600 IN CNAME mta.mail.test.\n", zone);
         Assert.Contains("; PTR 10.2.0.192.in-addr.arpa -> mta.mail.test\n", zone);
         string dkim = zone.Split('\n').Single(l => l.StartsWith("egg202610._domainkey.example.com. 3600 IN TXT ", StringComparison.Ordinal));
@@ -158,6 +158,22 @@ public class DomainRecordCheckTests
         Assert.True(strings.Length >= 2);
         Assert.All(strings, s => Assert.True(s.Trim('"').Length <= 255));
         Assert.Equal(Of(plan, DomainRecordPurpose.Dkim).Value, string.Concat(strings).Trim('"'));
+    }
+
+    [Fact]
+    public void The_bounce_mx_is_a_zone_line_only_when_the_bounce_domain_is_inside_the_domain()
+    {
+        var inside = PlanFor(new DomainRecordOptions { BounceDomain = "bounces.example.com", ServerHostname = Server });
+        string zone = ZoneFile.Render(Domain, inside);
+        Assert.Contains("bounces.example.com. 3600 IN MX 10 mta.mail.test.\n", zone);
+        Assert.DoesNotContain("; MX bounces.example.com", zone);
+
+        var outside = ZoneFile.Render(Domain, PlanFor());   // bounces.mail.test belongs to the operator, not to example.com
+        Assert.DoesNotContain("IN MX", outside);
+        Assert.Contains("; MX bounces.mail.test -> 10 mta.mail.test (published once by whoever runs EggMail, not in this zone)\n", outside);
+
+        // A lookalike suffix is not inside the zone.
+        Assert.Contains("; MX notexample.com -> 10 mta.mail.test", ZoneFile.Render(Domain, PlanFor(new DomainRecordOptions { BounceDomain = "notexample.com", ServerHostname = Server })));
     }
 
     [Fact]

@@ -17,7 +17,7 @@ public static class DomainsCommand
 {
     private const string Usage = "Usage: mta domains records DOMAIN | mta domains check DOMAIN   (the usual configuration options follow, for example --Sqlite:DataDirectory=/data)";
 
-    public static async Task<int> RunAsync(string[] args, TextWriter output, TextWriter error)
+    public static async Task<int> RunAsync(string[] args, TextWriter output, TextWriter error, Mta.Dns.IDnsResolver? dnsOverride = null)
     {
         string? verb = args.FirstOrDefault();
         string? domainArgument = args.Skip(1).FirstOrDefault(a => !a.StartsWith("--", StringComparison.Ordinal));
@@ -75,7 +75,7 @@ public static class DomainsCommand
                 return 0;
             }
 
-            var dns = EggMailRuntime.CreateDns(loaded.Config);
+            var dns = dnsOverride ?? EggMailRuntime.CreateDns(loaded.Config);
             DomainCheckResult result = await new DomainChecker(dns).CheckAsync(plan, CancellationToken.None).ConfigureAwait(false);
             foreach (DomainRecordCheck check in result.Records)
             {

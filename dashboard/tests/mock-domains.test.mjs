@@ -45,7 +45,7 @@ describe('mock domains', () => {
     expect(zone).toContain('eggmail1._domainkey.example.com. 3600 IN TXT "v=DKIM1; k=rsa; p=');
     expect(zone).toMatch(/IN TXT "[^"]{255}" "/);
     expect(zone).toContain('bounces.example.com. 3600 IN CNAME bounce.eggmail.example.net.');
-    expect(zone).toContain('bounce.eggmail.example.net. 3600 IN MX 10 mta.eggmail.example.net.');
+    expect(zone).toContain('; MX bounce.eggmail.example.net -> 10 mta.eggmail.example.net (published once by whoever runs EggMail, not in this zone)');
     expect(res.data.mtaStsPolicy.url).toBe('https://mta-sts.example.com/.well-known/mta-sts.txt');
     expect((await mock.get('/api/v1/domains/nope/records')).status).toBe(404);
   });

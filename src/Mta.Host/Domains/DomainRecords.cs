@@ -299,7 +299,11 @@ public static class ZoneFile
 {
     private const int MaxCharacterString = 255;
 
-    /// <summary>The zone-file text for <paramref name="domain"/>: one comment line and one record per entry (reverse DNS only as a comment, it cannot go in the zone).</summary>
+    /// <summary>
+    /// The zone-file text for <paramref name="domain"/>: one comment line and one record per entry. A record that does not belong in the domain's zone is
+    /// written as a comment: the reverse DNS (set where the IP address is managed) and the bounce MX when the bounce domain is not inside the domain
+    /// (the operator publishes it once for all domains).
+    /// </summary>
     public static string Render(string domain, IReadOnlyList<ExpectedDomainRecord> records)
     {
         ArgumentNullException.ThrowIfNull(records);
@@ -316,22 +320,26 @@ public static class ZoneFile
             }
 
             text.Append('\n');
-            text.Append(Line(record)).Append('\n');
+            text.Append(Line(record, domain)).Append('\n');
         }
 
         return text.ToString();
     }
 
-    /// <summary>One record as a zone-file line (a comment for reverse DNS).</summary>
-    public static string Line(ExpectedDomainRecord record)
+    /// <summary>One record as a zone-file line, or a comment line for a record that cannot be created in the zone of <paramref name="zoneDomain"/>.</summary>
+    public static string Line(ExpectedDomainRecord record, string zoneDomain)
     {
         ArgumentNullException.ThrowIfNull(record);
+        string zone = DomainRecordPlanner.Normalize(zoneDomain);
+        bool inZone = record.Host == zone || record.Host.EndsWith("." + zone, StringComparison.Ordinal);
         switch (record.Type)
         {
             case "TXT":
                 return $"{Fqdn(record.Host)} {record.Ttl} IN TXT {QuotedStrings(record.Value)}";
             case "CNAME":
                 return $"{Fqdn(record.Host)} {record.Ttl} IN CNAME {Fqdn(record.Value)}";
+            case "MX" when !inZone:
+                return $"; MX {record.Host} -> {record.Value} (published once by whoever runs EggMail, not in this zone)";
             case "MX":
             {
                 int space = record.Value.IndexOf(' ', StringComparison.Ordinal);
