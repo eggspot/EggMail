@@ -26,7 +26,6 @@ Postgres-backed tests read `EGGMAIL_TEST_POSTGRES` (a connection string to an ex
 pebble-challtestsrv -http01 "" -https01 "" -tlsalpn01 "" -doh "" -defaultIPv6 ""
 # 2. Pebble, from a checkout/tarball of the same release (it reads test/config and test/certs relative to the working directory).
 PEBBLE_VA_NOSLEEP=1 PEBBLE_WFE_NONCEREJECT=0 PEBBLE_AUTHZREUSE=100 pebble -config test/config/pebble-config.json -dnsserver 127.0.0.1:8053
-# 3. The tests.
 # 3. Optional, for the external account binding tests: a second Pebble that refuses accounts without it (same environment variables; the config
 #    is .github/pebble/pebble-config-eab.json, with its own ports 14100 and 15100).
 PEBBLE_VA_NOSLEEP=1 PEBBLE_WFE_NONCEREJECT=0 PEBBLE_AUTHZREUSE=100 pebble -config <repo>/.github/pebble/pebble-config-eab.json -dnsserver 127.0.0.1:8053

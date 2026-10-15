@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Mta.Core;
+using Mta.Host.Tls;
 using Mta.Observability;
 using Mta.Storage;
 
@@ -92,7 +93,10 @@ public sealed class CertificateHealthContributor(IStorage storage, IClock clock,
     private async ValueTask<HealthWarning?> AcmeWarningAsync(IReadOnlyList<CertificateRecord> active, DateTimeOffset now, CancellationToken ct)
     {
         var renewals = await storage.Config.GetAcmeRenewalsAsync(ct).ConfigureAwait(false);
-        var failing = renewals.Where(r => r.Status == "failed").OrderBy(r => r.CertificateName == config?.Acme.CertificateName ? 0 : 1).ThenBy(r => r.CertificateName, StringComparer.Ordinal).ToList();
+        // Only what the renewal service retries by itself is a state worth a banner; a failed record of names nobody retries is in the admin view only.
+        var retried = config is null ? null : AcmeFailureCategory.RetriedNames(config.Acme, active);
+        var failing = renewals.Where(r => r.Status == "failed" && (retried is null || retried.Contains(r.CertificateName)))
+            .OrderBy(r => r.CertificateName == config?.Acme.CertificateName ? 0 : 1).ThenBy(r => r.CertificateName, StringComparer.Ordinal).ToList();
         if (failing.Count > 0)
         {
             var row = failing[0];
@@ -104,8 +108,9 @@ public sealed class CertificateHealthContributor(IStorage storage, IClock clock,
                     : $"The previous certificate stays in use until {current.NotAfter:yyyy-MM-dd}.";
             string next = row.NextAttemptAt is { } at ? $" Next attempt: {at:yyyy-MM-dd HH:mm} UTC." : "";
             string more = failing.Count > 1 ? $" ({failing.Count - 1} more certificate{(failing.Count > 2 ? "s" : "")} failing.)" : "";
+            // The category only, never the error text: this endpoint is unauthenticated. The text is in the log and in the admin view.
             return new HealthWarning("acme_failing",
-                $"Getting the certificate '{row.CertificateName}' from the certificate authority failed {row.Failures} time{(row.Failures == 1 ? "" : "s")} in a row. Last error: {Brief(row.LastError)}.{next} {serving}{more}");
+                $"Getting a certificate from the certificate authority failed {row.Failures} time{(row.Failures == 1 ? "" : "s")} in a row: {AcmeFailureCategory.Describe(row.LastError)}.{next} {serving}{more} Details: server log and the ACME renewals in the admin certificates page.");
         }
 
         if (config is not null && config.Acme.Domains.Count > 0
@@ -113,22 +118,10 @@ public sealed class CertificateHealthContributor(IStorage storage, IClock clock,
         {
             string names = string.Join(", ", config.Acme.Domains);
             return new HealthWarning("acme_pending",
-                $"The certificate for {names} is being requested from the certificate authority ({config.Acme.EffectiveDirectoryUrl()}). {(active.All(c => c.Source == "selfsigned") ? "Until it is issued the server uses a self-signed certificate; this takes a few minutes after the first start." : "Until it is issued the server keeps using the certificate it has.")}");
+                $"The certificate for {names} is being requested from the certificate authority. {(active.All(c => c.Source == "selfsigned") ? "Until it is issued the server uses a self-signed certificate; this takes a few minutes after the first start." : "Until it is issued the server keeps using the certificate it has.")}");
         }
 
         return null;
-    }
-
-    /// <summary>A CA's or a network's error text as one short line (these endpoints are unauthenticated: no more than the first 500 characters, no control characters).</summary>
-    private static string Brief(string? error)
-    {
-        if (string.IsNullOrWhiteSpace(error))
-        {
-            return "unknown";
-        }
-
-        string line = string.Concat(error.Select(c => char.IsControl(c) ? ' ' : c)).Trim().TrimEnd('.');
-        return line.Length > 500 ? line[..500] + "..." : line;
     }
 }
 

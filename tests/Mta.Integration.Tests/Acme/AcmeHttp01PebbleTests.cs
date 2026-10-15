@@ -213,7 +213,8 @@ public abstract class AcmeHttp01PebbleTests : IAsyncLifetime
         Assert.Contains("port 80", renewal.LastError);   // and the hint what to check
         var warning = Assert.Single((await banner.CheckAsync(default)).Warnings, w => w.Code == "acme_failing");
         Assert.Contains("failed 1 time in a row", warning.Message);
-        Assert.Contains("404", warning.Message);
+        Assert.Contains("the CA could not validate the challenge", warning.Message);   // a category; the CA's own words ("404") are in the admin view
+        Assert.DoesNotContain("404", warning.Message);
         Assert.Contains("Next attempt:", warning.Message);
 
         // The proxy is fixed; after the back-off the order succeeds and the warning is gone.
@@ -243,9 +244,10 @@ public abstract class AcmeHttp01PebbleTests : IAsyncLifetime
         var renewal = Assert.Single(await H.Storage.Config.GetAcmeRenewalsAsync(default));
         Assert.Equal(("failed", 1), (renewal.Status, renewal.Failures));
         Assert.Contains("already in use", renewal.LastError);
-        Assert.Contains("Acme:HttpListenPort", renewal.LastError);
+        Assert.Contains("Acme:Http01ListenPort", renewal.LastError);
         var warning = Assert.Single((await banner.CheckAsync(default)).Warnings, w => w.Code == "acme_failing");
-        Assert.Contains("already in use", warning.Message);
+        Assert.Contains("the port for the HTTP-01 challenge could not be bound", warning.Message);
+        Assert.DoesNotContain("already in use", warning.Message);
 
         await occupant.DisposeAsync();
         Assert.Null(_rig.Listener!.TryBind());   // (the listener's own retry loop does this once a minute)
@@ -389,6 +391,20 @@ public sealed class AcmeExternalAccountBindingTests : IAsyncLifetime
     }
 
     [PebbleEabFact]
+    public async Task A_key_with_URL_safe_base64_characters_registers_an_account()
+    {
+        Assert.Contains('-', Pebble.EabHmacKeyUrlSafe);
+        Assert.Contains('_', Pebble.EabHmacKeyUrlSafe);
+        H.Eab = (Pebble.EabKeyIdUrlSafe, Pebble.EabHmacKeyUrlSafe);
+        string host = AcmeTestNames.Unique();
+
+        Assert.True(await WithTimeout(_rig!.Service(host).CheckOnceAsync(default)), string.Join('\n', H.Log.Lines));
+
+        Assert.Equal([host], Assert.Single(await H.Storage.Config.GetCertificatesAsync(default)).Subjects);
+        Assert.NotNull(await H.Storage.Config.GetAcmeAccountAsync(H.DirectoryUrl, default));
+    }
+
+    [PebbleEabFact]
     public async Task A_ca_that_requires_a_binding_is_named_when_none_is_configured()
     {
         string host = AcmeTestNames.Unique();
@@ -456,7 +472,7 @@ public sealed class AcmeHttp01RuntimeTests : IAsyncLifetime
             Acme = new AcmeSection
             {
                 Enabled = true, DirectoryUrl = Pebble.Directory, Email = "ops@acme-test.example", Domains = [_host], PropagationDelay = TimeSpan.Zero,
-                HttpListenPort = Pebble.HttpPort,   // no Cloudflare token: HTTP-01 on the built-in listener
+                Http01ListenPort = Pebble.HttpPort,   // no Cloudflare token: HTTP-01 on the built-in listener
             },
             Smtp = new SmtpSection { Listeners = new Dictionary<string, ListenerSection> { ["submission"] = new() { Port = 0, BindAddress = "127.0.0.1", Mode = Mta.Smtp.Server.ListenerMode.StartTls, AuthRequired = true } } },
         };
@@ -535,7 +551,7 @@ public sealed class AcmeHttp01RuntimeTests : IAsyncLifetime
         Assert.Contains(_log.Lines, l => l.Contains("Error acme", StringComparison.Ordinal) && l.Contains("already in use", StringComparison.Ordinal));
         var warnings = (await new CertificateHealthContributor(_runtime.Storage, _clock, _runtime.Config).CheckAsync(default)).Warnings;
         var failing = Assert.Single(warnings, w => w.Code == "acme_failing");
-        Assert.Contains("already in use", failing.Message);
+        Assert.Contains("the port for the HTTP-01 challenge could not be bound", failing.Message);
         Assert.Contains("self-signed", failing.Message);
         Assert.Contains(warnings, w => w.Code == "self_signed_certificate");
     }

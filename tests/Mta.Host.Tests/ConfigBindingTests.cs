@@ -97,16 +97,19 @@ public class ConfigBindingTests : IDisposable
     [InlineData("Acme:Enabled=true;Acme:Domains=mx.example.org;Acme:Directory=LetsEncryptish", "Acme:Directory")]
     [InlineData("Acme:Enabled=true;Acme:Domains=mx.example.org;Acme:EabKeyId=kid", "Acme:EabKeyId")]
     [InlineData("Acme:Enabled=true;Acme:Domains=mx.example.org;Acme:EabHmacKey=a2V5", "Acme:EabKeyId")]
-    [InlineData("Acme:Enabled=true;Acme:Domains=mx.example.org;Acme:HttpListenPort=0", "Acme:HttpListenPort")]
-    [InlineData("Acme:Enabled=true;Acme:Domains=mx.example.org;Acme:HttpListenPort=70000", "Acme:HttpListenPort")]
-    [InlineData("Acme:Enabled=true;Acme:Domains=mx.example.org;Acme:HttpBindAddress=localhost", "Acme:HttpBindAddress")]
-    [InlineData("Acme:Enabled=true;Acme:Domains=mx.example.org;Acme:HttpListenPort=8080", "Dashboard:HttpPort")]
-    [InlineData("Acme:Enabled=true;Acme:Domains=mx.example.org;Acme:HttpListenPort=5587", "SMTP listener")]
+    [InlineData("Acme:Enabled=true;Acme:Domains=mx.example.org;Acme:Http01ListenPort=0", "Acme:Http01ListenPort")]
+    [InlineData("Acme:Enabled=true;Acme:Domains=mx.example.org;Acme:Http01ListenPort=70000", "Acme:Http01ListenPort")]
+    [InlineData("Acme:Enabled=true;Acme:Domains=mx.example.org;Acme:Http01BindAddress=localhost", "Acme:Http01BindAddress")]
+    [InlineData("Acme:Enabled=true;Acme:Domains=mx.example.org;Acme:Http01ListenPort=8080", "Dashboard:HttpPort")]
+    [InlineData("Acme:Enabled=true;Acme:Domains=mx.example.org;Acme:Http01ListenPort=5587", "SMTP listener")]
     [InlineData("Acme:Enabled=true;Acme:Domains=*.example.org", "wildcard")]
     [InlineData("Acme:Enabled=true;Acme:Domains=*.example.org;Acme:Challenge=Http01;Acme:CloudflareApiToken=t", "wildcard")]
     [InlineData("Acme:Enabled=true;Acme:Domains=localhost", "Acme:Domains")]
     [InlineData("Acme:Enabled=true;Acme:Domains=192.0.2.1", "IP address")]
-    [InlineData("Acme:Enabled=true;Hostname=myserver", "EGGMAIL_HOSTNAME")]
+    [InlineData("Acme:Enabled=true;Hostname=myserver", "not a public host name")]
+    [InlineData("Acme:Enabled=true;Acme:Domains=mx.example.org;Acme:DirectoryUrl=https://user:secret@ca.example/dir", "must not contain credentials")]
+    [InlineData("Acme:Enabled=true;Acme:Domains=mx.example.org;Acme:Directory=https://ca.example/dir?token=abc", "must not contain credentials")]
+    [InlineData("Acme:Enabled=true;Acme:Domains=mx.example.org;Acme:Directory=https://ca.example/dir#frag", "must not contain credentials")]
     [InlineData("Acme:Enabled=true;Acme:CloudflareApiToken=t;Acme:RenewAtRemainingFraction=1.5", "Acme:RenewAtRemainingFraction")]
     [InlineData("Acme:Enabled=true;Acme:CloudflareApiToken=t;Acme:CheckInterval=00:00:00", "Acme:CheckInterval")]
     [InlineData("Tls:KeyPath=/k.pem", "Tls:KeyPath")]
@@ -129,8 +132,8 @@ public class ConfigBindingTests : IDisposable
         Assert.Equal(AcmeChallengeMode.Auto, acme.Challenge);
         Assert.False(acme.UsesDns01());
         Assert.True(acme.UsesHttp01());
-        Assert.Equal(80, acme.HttpListenPort);
-        Assert.Equal("::", acme.HttpBindAddress);
+        Assert.Equal(80, acme.Http01ListenPort);
+        Assert.Equal("::", acme.Http01BindAddress);
         Assert.Equal("https://acme-v02.api.letsencrypt.org/directory", acme.EffectiveDirectoryUrl());
         Assert.Null(acme.EabKeyId);
     }
@@ -148,7 +151,7 @@ public class ConfigBindingTests : IDisposable
     public void A_wildcard_is_valid_with_a_DNS_token_and_the_listener_settings_are_not_checked_then()
     {
         // Port 8080 is the dashboard's: that matters only while the built-in listener runs.
-        Valid(("Acme:Enabled", "true"), ("Acme:Domains", "*.example.org, example.org"), ("Acme:CloudflareApiToken", "t"), ("Acme:HttpListenPort", "8080"));
+        Valid(("Acme:Enabled", "true"), ("Acme:Domains", "*.example.org, example.org"), ("Acme:CloudflareApiToken", "t"), ("Acme:Http01ListenPort", "8080"));
     }
 
     [Theory]
@@ -175,10 +178,10 @@ public class ConfigBindingTests : IDisposable
         string file = Path.Combine(_dir, "eab.key");
         File.WriteAllText(file, "a2V5\n");
         AcmeSection acme = Valid(("Acme:Enabled", "true"), ("Hostname", "mx.example.com"), ("Acme:Directory", "ZeroSsl"), ("Acme:EabKeyId", "kid-9"), ("Acme:EabHmacKeyFile", file),
-            ("Acme:HttpListenPort", "8081"), ("Acme:HttpBindAddress", "0.0.0.0"), ("Acme:Challenge", "Http01")).Config.Acme;
+            ("Acme:Http01ListenPort", "8081"), ("Acme:Http01BindAddress", "0.0.0.0"), ("Acme:Challenge", "Http01")).Config.Acme;
 
         Assert.Equal(("kid-9", file), (acme.EabKeyId, acme.EabHmacKeyFile));
-        Assert.Equal((8081, "0.0.0.0", AcmeChallengeMode.Http01), (acme.HttpListenPort, acme.HttpBindAddress, acme.Challenge));
+        Assert.Equal((8081, "0.0.0.0", AcmeChallengeMode.Http01), (acme.Http01ListenPort, acme.Http01BindAddress, acme.Challenge));
     }
 
     [Fact]

@@ -339,7 +339,7 @@ public sealed class CertesOrderRunner : IAcmeOrderRunner
                 }
 
                 throw new AcmeException($"Authorization for {res.Identifier.Value} ended as {res.Status}" + (detail is null ? "" : $": {detail}")
-                    + (http ? $" (HTTP-01: the CA connects to port 80 of {res.Identifier.Value}; check that its DNS record points to this server and that port 80 reaches Acme:HttpListenPort)" : ""));
+                    + (http ? $" (HTTP-01: the CA connects to port 80 of {res.Identifier.Value}; check that its DNS record points to this server and that port 80 reaches Acme:Http01ListenPort)" : ""));
             }
 
             if (attempt >= MaxAuthorizationPolls)

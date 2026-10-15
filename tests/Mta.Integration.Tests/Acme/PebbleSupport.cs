@@ -40,6 +40,11 @@ internal static class Pebble
 
     public const string EabHmacKey = "zWNDZM6eQGHWpSRTPal5eIUYFTu7EajVIoguysqZ9wG44nMEtx3MUAsUDkMTQ12W";
 
+    /// <summary>A third binding whose HMAC key has both URL-safe characters of base64url (<c>-</c> and <c>_</c>), which a client decoding plain base64 would reject.</summary>
+    public const string EabKeyIdUrlSafe = "kid-3";
+
+    public const string EabHmacKeyUrlSafe = "HjudV5qnbreN-n9WyFSH-t4HXuEx_XFen45zuxY-G1h6fr74V3cUM_dVlwQZBWmc";
+
     public static int HttpPort => Environment.GetEnvironmentVariable(HttpPortVariable) is { Length: > 0 } v ? int.Parse(v, System.Globalization.CultureInfo.InvariantCulture) : 5002;
 
     public static string? EabDirectory => Environment.GetEnvironmentVariable(EabDirectoryVariable) is { Length: > 0 } v ? v : null;

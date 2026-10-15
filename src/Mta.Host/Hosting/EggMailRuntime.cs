@@ -219,7 +219,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
             {
                 http01 = new Http01Challenges(storage.Config, clock, log);
                 http01.ExpectListener();
-                acmeHttpListener = new AcmeHttpChallengeListener(http01, config.Acme.HttpBindAddress, config.Acme.HttpListenPort, http01, log);
+                acmeHttpListener = new AcmeHttpChallengeListener(http01, config.Acme.Http01BindAddress, config.Acme.Http01ListenPort, http01, log);
             }
 
             acme = new AcmeRenewalService(storage.Config, secrets, acmeRunnerOverride ?? new CertesOrderRunner(log: log), acmeDnsOverride, config.Acme, clock, log, http: http01);

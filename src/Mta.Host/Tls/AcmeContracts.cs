@@ -65,7 +65,20 @@ public sealed record AcmeOrderRequest(
     IHttpChallengePublisher? Http = null,
     string CertificateName = "default",
     string? EabKeyId = null,
-    string? EabHmacKey = null);
+    string? EabHmacKey = null)
+{
+    /// <summary>The members worth printing; never the account key or the EAB HMAC key (a record prints all its members otherwise, into any log that formats a request).</summary>
+    private bool PrintMembers(System.Text.StringBuilder builder)
+    {
+        builder.Append("DirectoryUrl = ").Append(DirectoryUrl)
+            .Append(", Domains = [").Append(string.Join(", ", Domains)).Append(']')
+            .Append(", Challenge = ").Append(Challenge)
+            .Append(", CertificateName = ").Append(CertificateName)
+            .Append(", AccountKnown = ").Append(AccountKeyPem is not null)
+            .Append(", Eab = ").Append(EabKeyId is not null);
+        return true;
+    }
+}
 
 /// <summary>What the CA answered to a renewal information (ARI, RFC 9773) request: the window in which it wants the certificate renewed, and when to ask again.</summary>
 public sealed record AcmeRenewalInfo(DateTimeOffset WindowStart, DateTimeOffset WindowEnd, TimeSpan? RetryAfter, string? ExplanationUrl);

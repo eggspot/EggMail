@@ -180,9 +180,16 @@ public class ApiBasicsTests : IAsyncLifetime
         var warning = Assert.Single(r["warnings"].EnumerateArray(), w => w.GetProperty("code").GetString() == "acme_failing");
         string message = warning.GetProperty("message").GetString()!;
         Assert.Contains("failed 3 times in a row", message);
-        Assert.Contains("Timeout during connect (likely firewall problem)", message);
+        Assert.Contains("the CA could not validate the challenge", message);   // the category, not what the CA said
+        Assert.DoesNotContain("Timeout during connect", message);
+        Assert.DoesNotContain("firewall", message);
         Assert.Contains("Next attempt:", message);
         Assert.Contains("self-signed", message);
+
+        // The full error is for administrators: the admin view of the renewals has it.
+        ApiClient admin = await _f.SignedInAsync("root");
+        Reply renewals = await admin.GetAsync("/api/v1/admin/certificates/acme");
+        Assert.Contains("Timeout during connect (likely firewall problem)", renewals.Json[0].GetProperty("lastError").GetString());
         Assert.Contains(r["warnings"].EnumerateArray(), w => w.GetProperty("code").GetString() == "self_signed_certificate");
 
         // Issued: the failure is cleared and the self-signed certificate is no longer the only one.

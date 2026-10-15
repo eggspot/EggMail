@@ -23,7 +23,7 @@ public sealed class AcmeRenewalService
     private static readonly TimeSpan ListenerRetry = TimeSpan.FromMinutes(5);
 
     /// <summary>The CA in use: <c>Acme:Directory</c> (a name or URL) or <c>Acme:DirectoryUrl</c>.</summary>
-    private string Directory => _options.EffectiveDirectoryUrl() ?? throw new AcmeException($"Acme:Directory '{_options.Directory}' is neither a known CA name (LetsEncrypt, LetsEncryptStaging, ZeroSsl) nor an http(s) URL.");
+    private string CaDirectoryUrl => _options.EffectiveDirectoryUrl() ?? throw new AcmeException($"Acme:Directory '{_options.Directory}' is neither a known CA name (LetsEncrypt, LetsEncryptStaging, ZeroSsl) nor an http(s) URL.");
 
     /// <summary>
     /// Which challenge proves the names of an order: DNS-01 when the server has DNS credentials (<c>Acme:Challenge=Auto</c>) or is told to, else HTTP-01.
@@ -155,9 +155,11 @@ public sealed class AcmeRenewalService
         try
         {
             var now = _clock.UtcNow;
+            // Only certificates that CheckOnceAsync retries count: a failed record of names nobody retries must not keep every replica polling.
+            var retried = AcmeFailureCategory.RetriedNames(_options, await _config.GetCertificatesAsync(ct).ConfigureAwait(false));
             foreach (var row in await _config.GetAcmeRenewalsAsync(ct).ConfigureAwait(false))
             {
-                if (row.Status == "failed" && row.NextAttemptAt is { } next)
+                if (row.Status == "failed" && row.NextAttemptAt is { } next && retried.Contains(row.CertificateName))
                 {
                     delay = TimeSpan.FromTicks(Math.Min(delay.Ticks, Math.Max((next - now).Ticks, MinimumRetryDelay.Ticks)));
                 }
@@ -267,7 +269,7 @@ public sealed class AcmeRenewalService
     {
         try
         {
-            var info = await _runner.GetRenewalInfoAsync(Directory, current.ChainPem, ct).ConfigureAwait(false);
+            var info = await _runner.GetRenewalInfoAsync(CaDirectoryUrl, current.ChainPem, ct).ConfigureAwait(false);
             if (info is null)
             {
                 _log.Write(MtaLogLevel.Debug, "acme", $"the CA offers no renewal information; certificate '{current.Name}' renews by its lifetime");
@@ -334,24 +336,24 @@ public sealed class AcmeRenewalService
                 throw new AcmeListenerUnavailableException(unavailable);
             }
 
-            _log.Write(MtaLogLevel.Information, "acme", $"ordering certificate '{name}' for {string.Join(", ", domains)} ({(challenge == AcmeChallengeType.Http01 ? "HTTP-01" : "DNS-01")}, {Directory})");
+            _log.Write(MtaLogLevel.Information, "acme", $"ordering certificate '{name}' for {string.Join(", ", domains)} ({(challenge == AcmeChallengeType.Http01 ? "HTTP-01" : "DNS-01")}, {CaDirectoryUrl})");
             await _config.UpsertAcmeRenewalAsync(new AcmeRenewalRecord(name, "ordering", now, null, renewal?.Failures ?? 0, renewal?.LastError, null, renewal?.AriJson), ct).ConfigureAwait(false);
 
-            var account = await _config.GetAcmeAccountAsync(Directory, ct).ConfigureAwait(false);
+            var account = await _config.GetAcmeAccountAsync(CaDirectoryUrl, ct).ConfigureAwait(false);
             string? accountKey = account is null ? null : Encoding.UTF8.GetString(_protector.Unprotect(account.AccountKeyProtected, SecretPurposes.AcmeAccountKey));
             // The account is stored the moment the CA has created it, not after the order: a failed order (a DNS record that never appears) must
             // not strand an account whose key is lost, because every retry would then register another one and CAs rate-limit registrations.
             bool accountSaved = account is not null;
             async Task SaveAccountAsync(AcmeAccountCreated created, CancellationToken token)
             {
-                await _config.UpsertAcmeAccountAsync(new AcmeAccountRecord(Ids.New(), Directory, _options.Email ?? "",
+                await _config.UpsertAcmeAccountAsync(new AcmeAccountRecord(Ids.New(), CaDirectoryUrl, _options.Email ?? "",
                     _protector.Protect(Encoding.UTF8.GetBytes(created.AccountKeyPem), SecretPurposes.AcmeAccountKey), created.AccountUrl, now), token).ConfigureAwait(false);
                 accountSaved = true;
             }
 
             // A certificate that shares a name with the order is the one this order renews: say so (ARI "replaces"); the runner does it where the CA supports it.
             string? replaces = current is not null && current.Subjects.Intersect(domains, StringComparer.OrdinalIgnoreCase).Any() ? current.ChainPem : null;
-            var request = new AcmeOrderRequest(Directory, _options.Email ?? "", domains, accountKey, _options.PropagationDelay, SaveAccountAsync, replaces,
+            var request = new AcmeOrderRequest(CaDirectoryUrl, _options.Email ?? "", domains, accountKey, _options.PropagationDelay, SaveAccountAsync, replaces,
                 challenge, _http, name, accountKey is null ? _options.EabKeyId : null, accountKey is null ? ReadEabHmacKey() : null);
             var issued = await _runner.IssueAsync(request, _dns ?? NoDnsChallengeProvider.Instance, ct).ConfigureAwait(false);
             if (!accountSaved)

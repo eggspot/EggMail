@@ -285,7 +285,7 @@ public enum AcmeChallengeMode : byte
     /// <summary>DNS-01 when a Cloudflare API token is configured, else HTTP-01.</summary>
     Auto = 0,
 
-    /// <summary>HTTP-01 on the built-in listener (<see cref="AcmeSection.HttpListenPort"/>): no DNS access needed, no wildcard names.</summary>
+    /// <summary>HTTP-01 on the built-in listener (<see cref="AcmeSection.Http01ListenPort"/>): no DNS access needed, no wildcard names.</summary>
     Http01,
 
     /// <summary>DNS-01 through the DNS provider: wildcard names, no inbound port.</summary>
@@ -347,10 +347,10 @@ public sealed class AcmeSection
     /// HTTP-01: the port of the built-in listener that answers the CA (<c>/.well-known/acme-challenge/</c> only). The CA always connects to port 80 of
     /// the name, so this is 80 unless a container or load balancer maps port 80 to it. Binding 80 as a non-root user needs a mapping or a capability (operations guide).
     /// </summary>
-    public int HttpListenPort { get; init; } = 80;
+    public int Http01ListenPort { get; init; } = 80;
 
     /// <summary>HTTP-01: the address of the built-in listener (<c>::</c>: every IPv4 and IPv6 address).</summary>
-    public string HttpBindAddress { get; init; } = "::";
+    public string Http01BindAddress { get; init; } = "::";
 
     /// <summary>External account binding (RFC 8555 section 7.3.4), needed by some CAs such as ZeroSSL: the key identifier the CA gave you. Used when the account is registered.</summary>
     public string? EabKeyId { get; init; }

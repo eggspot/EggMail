@@ -474,6 +474,13 @@ public static class ConfigLoader
             string.IsNullOrWhiteSpace(acme.Directory)
                 ? "Acme:DirectoryUrl must be an absolute http(s) URL."
                 : $"Acme:Directory '{acme.Directory}' must be LetsEncrypt, LetsEncryptStaging, ZeroSsl or the absolute http(s) URL of an ACME directory.", errors);
+        if (directoryUrl is not null && Uri.TryCreate(directoryUrl, UriKind.Absolute, out Uri? parsed))
+        {
+            // The URL is logged and shown to operators: it must not carry a password (userinfo), a token (query) or a fragment.
+            Require(parsed.UserInfo.Length == 0 && parsed.Query.Length == 0 && parsed.Fragment.Length == 0,
+                "Acme:Directory / Acme:DirectoryUrl must not contain credentials (user:password@), a query string or a fragment.", errors);
+        }
+
         Require(string.Equals(acme.DnsProvider, "Cloudflare", StringComparison.OrdinalIgnoreCase), $"Acme:DnsProvider '{acme.DnsProvider}' is not supported (only Cloudflare).", errors);
         Require(acme.Challenge != AcmeChallengeMode.Dns01 || acme.HasDnsCredentials(), "Acme:CloudflareApiToken or Acme:CloudflareApiTokenFile is required when Acme:Challenge is Dns01.", errors);
         Require(!string.IsNullOrWhiteSpace(acme.CertificateName), "Acme:CertificateName must not be empty.", errors);
@@ -488,7 +495,7 @@ public static class ConfigLoader
             if (AcmeNames.TryNormalize(name, out string? error) is null)
             {
                 errors.Add(acme.Domains.Count == 1 && string.Equals(name, c.Hostname, StringComparison.OrdinalIgnoreCase)
-                    ? $"Acme is enabled without Acme:Domains, so the certificate is for the Hostname, and '{c.Hostname}' is not a public host name: set Hostname (EGGMAIL_HOSTNAME) to the name of this server, for example mail.example.com."
+                    ? $"Acme is enabled without Acme:Domains, so the certificate is for the Hostname, and '{c.Hostname}' is not a public host name: set Hostname to the name of this server, for example mail.example.com."
                     : "Acme:Domains: " + error);
             }
         }
@@ -501,11 +508,11 @@ public static class ConfigLoader
 
         if (acme.UsesHttp01())
         {
-            Require(acme.HttpListenPort is >= 1 and <= 65535, "Acme:HttpListenPort must be between 1 and 65535.", errors);
-            Require(IPAddress.TryParse(acme.HttpBindAddress, out _), "Acme:HttpBindAddress must be an IP address (:: for all).", errors);
-            Require(acme.HttpListenPort != c.Dashboard.HttpPort && (!c.Dashboard.HttpsEnabled || acme.HttpListenPort != c.Dashboard.HttpsPort),
-                $"Acme:HttpListenPort {acme.HttpListenPort} is the port of the dashboard (Dashboard:HttpPort / Dashboard:HttpsPort); the challenge listener needs a port of its own (it answers nothing but /.well-known/acme-challenge/).", errors);
-            Require(!c.Smtp.Listeners.Values.Any(l => l.Enabled && l.Port == acme.HttpListenPort), $"Acme:HttpListenPort {acme.HttpListenPort} is also the port of an SMTP listener.", errors);
+            Require(acme.Http01ListenPort is >= 1 and <= 65535, "Acme:Http01ListenPort must be between 1 and 65535.", errors);
+            Require(IPAddress.TryParse(acme.Http01BindAddress, out _), "Acme:Http01BindAddress must be an IP address (:: for all).", errors);
+            Require(acme.Http01ListenPort != c.Dashboard.HttpPort && (!c.Dashboard.HttpsEnabled || acme.Http01ListenPort != c.Dashboard.HttpsPort),
+                $"Acme:Http01ListenPort {acme.Http01ListenPort} is the port of the dashboard (Dashboard:HttpPort / Dashboard:HttpsPort); the challenge listener needs a port of its own (it answers nothing but /.well-known/acme-challenge/).", errors);
+            Require(!c.Smtp.Listeners.Values.Any(l => l.Enabled && l.Port == acme.Http01ListenPort), $"Acme:Http01ListenPort {acme.Http01ListenPort} is also the port of an SMTP listener.", errors);
         }
     }
 

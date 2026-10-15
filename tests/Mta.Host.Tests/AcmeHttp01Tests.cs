@@ -231,7 +231,7 @@ public class AcmeHttpChallengeListenerBindTests
         Assert.NotNull(problem);
         Assert.Contains("already in use", problem);
         Assert.Contains($"port {occupant.Port}", problem);
-        Assert.Contains("Acme:HttpListenPort", problem);
+        Assert.Contains("Acme:Http01ListenPort", problem);
         Assert.Contains("DNS-01", problem);
         Assert.False(listener.IsListening);
         Assert.Equal(problem, await challenges.WaitUntilReadyAsync(TimeSpan.FromSeconds(1), default));
@@ -274,21 +274,214 @@ public class AcmeHttpChallengeListenerBindTests
     {
         await using var listener = new AcmeHttpChallengeListener(new NoToken(), "localhost", 0);
 
-        Assert.Contains("Acme:HttpBindAddress", listener.TryBind());
+        Assert.Contains("Acme:Http01BindAddress", listener.TryBind());
+    }
+
+    private sealed class OneToken : IHttpChallengeResponder
+    {
+        public const string Token = "oneToken-0123456789abcdef";
+
+        public ValueTask<string?> FindKeyAuthorizationAsync(string token, CancellationToken cancellationToken) => ValueTask.FromResult<string?>(token == Token ? "answer-" + Token : null);
+    }
+
+    private static async Task<string> GetAsync(IPAddress address, int port)
+    {
+        using var client = new TcpClient(address.AddressFamily);
+        await client.ConnectAsync(address, port);
+        var stream = client.GetStream();
+        await stream.WriteAsync(Encoding.ASCII.GetBytes($"GET {AcmeHttpChallengeListener.PathPrefix}{OneToken.Token} HTTP/1.1\r\n\r\n"));
+        using var buffer = new MemoryStream();
+        await stream.CopyToAsync(buffer).WaitAsync(TimeSpan.FromSeconds(30));
+        return Encoding.ASCII.GetString(buffer.ToArray());
     }
 
     [Fact]
-    public async Task The_default_address_listens_on_IPv4_and_IPv6_when_the_host_has_both()
+    public async Task The_default_address_answers_over_IPv4_and_over_IPv6_when_the_host_has_it()
     {
-        await using var listener = new AcmeHttpChallengeListener(new NoToken(), "::", 0);
+        await using var listener = new AcmeHttpChallengeListener(new OneToken(), "::", 0);
         Assert.Null(listener.TryBind());
-        using var v4 = new TcpClient();
-        await v4.ConnectAsync(IPAddress.Loopback, listener.Port);
+        using var stop = new CancellationTokenSource();
+        Task serving = listener.ServeAsync(stop.Token);
+
+        Assert.EndsWith("answer-" + OneToken.Token, await GetAsync(IPAddress.Loopback, listener.Port));
         if (Socket.OSSupportsIPv6)
         {
-            using var v6 = new TcpClient(AddressFamily.InterNetworkV6);
-            await v6.ConnectAsync(IPAddress.IPv6Loopback, listener.Port);
+            Assert.EndsWith("answer-" + OneToken.Token, await GetAsync(IPAddress.IPv6Loopback, listener.Port));
         }
+
+        await stop.CancelAsync();
+        await serving.WaitAsync(TimeSpan.FromSeconds(30));
+    }
+
+    [Fact]
+    public async Task A_listener_that_stops_after_binding_tells_the_store_and_a_new_bind_clears_it()
+    {
+        var challenges = new Http01Challenges(new InMemoryStorage(new StorageOptions()).Config);
+        challenges.ExpectListener();
+        await using var listener = new AcmeHttpChallengeListener(new OneToken(), "127.0.0.1", 0, challenges, retryInterval: TimeSpan.FromMilliseconds(10));
+        Assert.Null(listener.TryBind());
+        Assert.Null(await challenges.WaitUntilReadyAsync(TimeSpan.FromSeconds(1), default));
+        using var stop = new CancellationTokenSource();
+        Task serving = listener.ServeAsync(stop.Token);
+
+        listener.Close();   // the socket fails under the running listener (not a shutdown)
+        await serving.WaitAsync(TimeSpan.FromSeconds(30));
+
+        Assert.False(listener.IsListening);
+        string? reason = await challenges.WaitUntilReadyAsync(TimeSpan.FromSeconds(1), default);
+        Assert.NotNull(reason);   // orders wait instead of asking the CA to connect to a closed port
+        Assert.Contains("stopped", reason);
+
+        Task run = listener.RunAsync(stop.Token);   // the retry loop binds again
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (!listener.IsListening && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(10);
+        }
+
+        Assert.True(listener.IsListening);
+        Assert.Null(await challenges.WaitUntilReadyAsync(TimeSpan.FromSeconds(1), default));
+        await stop.CancelAsync();
+        await run.WaitAsync(TimeSpan.FromSeconds(30));
+    }
+}
+
+/// <summary>The limits of the listener: per client address, the request head timeout, a failing lookup, what a log line may contain.</summary>
+public class AcmeHttpChallengeListenerLimitTests
+{
+    private sealed class Throwing : IHttpChallengeResponder
+    {
+        public bool Throw = true;
+
+        public ValueTask<string?> FindKeyAuthorizationAsync(string token, CancellationToken cancellationToken) =>
+            Throw ? throw new InvalidOperationException("the store exploded") : ValueTask.FromResult<string?>("fine");
+    }
+
+    private static async Task<string> RequestAsync(int port, string request)
+    {
+        using var client = new TcpClient();
+        await client.ConnectAsync(IPAddress.Loopback, port);
+        var stream = client.GetStream();
+        await stream.WriteAsync(Encoding.ASCII.GetBytes(request));
+        using var buffer = new MemoryStream();
+        await stream.CopyToAsync(buffer).WaitAsync(TimeSpan.FromSeconds(30));
+        return Encoding.ASCII.GetString(buffer.ToArray());
+    }
+
+    [Fact]
+    public async Task One_client_address_cannot_hold_more_than_its_share_of_connections_and_gets_them_back()
+    {
+        await using var listener = new AcmeHttpChallengeListener(new Throwing { Throw = false }, "127.0.0.1", 0, maxConnectionsPerAddress: 2,
+            headTimeout: TimeSpan.FromMinutes(1), requestTimeout: TimeSpan.FromMinutes(2));
+        Assert.Null(listener.TryBind());
+        using var stop = new CancellationTokenSource();
+        Task serving = listener.ServeAsync(stop.Token);
+
+        using var first = new TcpClient();
+        using var second = new TcpClient();
+        await first.ConnectAsync(IPAddress.Loopback, listener.Port);
+        await second.ConnectAsync(IPAddress.Loopback, listener.Port);   // two silent connections: the allowance of this address
+
+        // The third is closed at once without an answer (the accept loop takes connections in order, so the first two are counted by now).
+        using (var third = new TcpClient())
+        {
+            await third.ConnectAsync(IPAddress.Loopback, listener.Port);
+            var stream = third.GetStream();
+            int read;
+            try
+            {
+                read = await stream.ReadAsync(new byte[16]).AsTask().WaitAsync(TimeSpan.FromSeconds(30));
+            }
+            catch (IOException)
+            {
+                read = 0;   // a reset is a closed connection too
+            }
+
+            Assert.Equal(0, read);
+        }
+
+        // Releasing one gives the allowance back: a real request is answered (polled, the release is asynchronous).
+        first.Dispose();
+        string answer = "";
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (!answer.Contains("200 OK", StringComparison.Ordinal) && DateTime.UtcNow < deadline)
+        {
+            try
+            {
+                answer = await RequestAsync(listener.Port, $"GET {AcmeHttpChallengeListener.PathPrefix}anyplausibletoken0123456789 HTTP/1.1\r\n\r\n");
+            }
+            catch (IOException)
+            {
+                answer = "";   // refused while the allowance is still taken
+            }
+
+            await Task.Delay(10);
+        }
+
+        Assert.Contains("200 OK", answer);
+        await stop.CancelAsync();
+        await serving.WaitAsync(TimeSpan.FromSeconds(30));
+    }
+
+    [Fact]
+    public async Task A_client_that_does_not_send_its_request_in_time_is_dropped_without_an_answer()
+    {
+        await using var listener = new AcmeHttpChallengeListener(new Throwing { Throw = false }, "127.0.0.1", 0, headTimeout: TimeSpan.FromMilliseconds(100));
+        Assert.Null(listener.TryBind());
+        using var stop = new CancellationTokenSource();
+        Task serving = listener.ServeAsync(stop.Token);
+
+        using var slow = new TcpClient();
+        await slow.ConnectAsync(IPAddress.Loopback, listener.Port);
+        var stream = slow.GetStream();
+        await stream.WriteAsync(Encoding.ASCII.GetBytes("GET /.well-known/acme-chall"));   // never finishes the request line
+        int read;
+        try
+        {
+            read = await stream.ReadAsync(new byte[16]).AsTask().WaitAsync(TimeSpan.FromSeconds(30));   // a generous bound, only a hang fails
+        }
+        catch (IOException)
+        {
+            read = 0;
+        }
+
+        Assert.Equal(0, read);   // closed, nothing sent
+        Assert.Contains("200 OK", await RequestAsync(listener.Port, $"GET {AcmeHttpChallengeListener.PathPrefix}anyplausibletoken0123456789 HTTP/1.1\r\n\r\n"));
+        await stop.CancelAsync();
+        await serving.WaitAsync(TimeSpan.FromSeconds(30));
+    }
+
+    [Fact]
+    public async Task A_lookup_that_fails_is_a_503_and_the_listener_keeps_serving()
+    {
+        var responder = new Throwing();
+        var log = new HttpListLog();
+        await using var listener = new AcmeHttpChallengeListener(responder, "127.0.0.1", 0, log: log);
+        Assert.Null(listener.TryBind());
+        using var stop = new CancellationTokenSource();
+        Task serving = listener.ServeAsync(stop.Token);
+
+        string failed = await RequestAsync(listener.Port, $"GET {AcmeHttpChallengeListener.PathPrefix}anyplausibletoken0123456789 HTTP/1.1\r\n\r\n");
+
+        Assert.StartsWith("HTTP/1.1 503 ", failed);
+        Assert.DoesNotContain("exploded", failed);   // nothing of the failure reaches the peer
+        Assert.Contains(log.Lines, l => l.Contains("exploded", StringComparison.Ordinal));   // but the log has it
+        responder.Throw = false;
+        Assert.StartsWith("HTTP/1.1 200 ", await RequestAsync(listener.Port, $"GET {AcmeHttpChallengeListener.PathPrefix}anyplausibletoken0123456789 HTTP/1.1\r\n\r\n"));
+        await stop.CancelAsync();
+        await serving.WaitAsync(TimeSpan.FromSeconds(30));
+    }
+
+    [Fact]
+    public void A_logged_request_target_is_printable_ASCII_and_short()
+    {
+        string printable = AcmeHttpChallengeListener.Printable("/x\r\nINFO forged line\u0000\u001b[31m\u00e9\u4e2d");
+
+        Assert.DoesNotContain('\r', printable);
+        Assert.DoesNotContain('\n', printable);
+        Assert.All(printable, c => Assert.InRange(c, ' ', '~'));
+        Assert.Equal(83, AcmeHttpChallengeListener.Printable(new string('a', 500)).Length);
+        Assert.EndsWith("...", AcmeHttpChallengeListener.Printable(new string('a', 500)));
     }
 }
 
@@ -716,7 +909,8 @@ public class AcmeRenewalHttp01ServiceTests
         var failing = (await contributor.CheckAsync(default)).Warnings;
         var warning = Assert.Single(failing, w => w.Code == "acme_failing");
         Assert.Contains("failed 1 time in a row", warning.Message);
-        Assert.Contains("Timeout during connect (likely firewall problem)", warning.Message);
+        Assert.Contains("the CA could not validate the challenge", warning.Message);
+        Assert.DoesNotContain("firewall", warning.Message);   // the error text is for the admin view and the log
         Assert.Contains("Next attempt: 2026-10-15 08:10 UTC", warning.Message);
         Assert.Contains("self-signed", warning.Message);
         Assert.DoesNotContain(failing, w => w.Code == "acme_pending");   // one banner for the state, not two
@@ -748,7 +942,8 @@ public class AcmeRenewalHttp01ServiceTests
 
         var warning = Assert.Single((await contributor.CheckAsync(default)).Warnings, w => w.Code == "acme_failing");
         Assert.Contains("The previous certificate stays in use until 2027-01-13", warning.Message);
-        Assert.Contains("rate limit", warning.Message);
+        Assert.Contains("the CA refused the request", warning.Message);
+        Assert.DoesNotContain("rate limit", warning.Message);
         Assert.Single(await _storage.Config.GetCertificatesAsync(default));   // the old certificate is untouched
     }
 
@@ -778,17 +973,91 @@ public class AcmeRenewalHttp01ServiceTests
     }
 
     [Fact]
-    public async Task The_error_text_in_the_warning_is_one_short_line()
+    public async Task The_warning_never_carries_the_error_text_the_directory_or_credentials()
     {
-        await _storage.Config.UpsertAcmeRenewalAsync(new AcmeRenewalRecord("default", "failed", T0, T0.AddHours(1), 4, "first line\r\nsecond\tline " + new string('x', 1000), null, null), default);
+        const string Error = "ACME server error: https://user:hunter2@ca.example/dir?token=abc123 said\r\nsecret line\t" + "xxxxxxxxxx";
+        await _storage.Config.UpsertAcmeRenewalAsync(new AcmeRenewalRecord("default", "failed", T0, T0.AddHours(1), 4, Error, null, null), default);
+        var config = new MtaConfig { Acme = new AcmeSection { Enabled = true, Domains = [Host], DirectoryUrl = "https://user:hunter2@ca.example/dir?token=abc123" } };
 
-        var warning = Assert.Single((await new CertificateHealthContributor(_storage, _clock).CheckAsync(default)).Warnings, w => w.Code == "acme_failing");
+        var warnings = (await new CertificateHealthContributor(_storage, _clock, config).CheckAsync(default)).Warnings;
 
-        Assert.DoesNotContain('\n', warning.Message);
-        Assert.DoesNotContain('\r', warning.Message);
-        Assert.DoesNotContain('\t', warning.Message);
-        Assert.True(warning.Message.Length < 900, warning.Message.Length.ToString());
-        Assert.Contains("failed 4 times in a row", warning.Message);
+        string message = Assert.Single(warnings, w => w.Code == "acme_failing").Message;
+        foreach (string leaked in new[] { "hunter2", "abc123", "ca.example", "secret line", "user:" })
+        {
+            Assert.DoesNotContain(leaked, message);
+        }
+
+        Assert.DoesNotContain('\n', message);
+        Assert.Contains("failed 4 times in a row", message);
+        Assert.Contains("the CA refused the request", message);
+
+        // The pending text does not name the CA's directory either.
+        await _storage.Config.UpsertAcmeRenewalAsync(new AcmeRenewalRecord("default", "ordering", T0, null, 0, null, null, null), default);
+        string pending = Assert.Single((await new CertificateHealthContributor(_storage, _clock, config).CheckAsync(default)).Warnings, w => w.Code == "acme_pending").Message;
+        Assert.DoesNotContain("hunter2", pending);
+        Assert.DoesNotContain("ca.example", pending);
+    }
+
+    [Theory]
+    [InlineData("ACME HTTP-01: :: port 80 is already in use (a web server or proxy on this host?). Stop what uses it", "the port for the HTTP-01 challenge could not be bound")]
+    [InlineData("ACME HTTP-01: this process is not allowed to listen on :: port 80. Ports below 1024", "the port for the HTTP-01 challenge could not be bound")]
+    [InlineData("ACME HTTP-01: cannot listen on :: port 80: x. Set Acme:Http01BindAddress", "the port for the HTTP-01 challenge could not be bound")]
+    [InlineData("'*.example.com' is a wildcard name, which only DNS-01 can prove", "a wildcard name needs DNS-01")]
+    [InlineData("The order includes the wildcard name *.example.com, which only DNS-01 can prove", "a wildcard name needs DNS-01")]
+    [InlineData("This CA requires external account binding: set Acme:EabKeyId", "the CA needs or refused external account binding")]
+    [InlineData("ACME server error: External account binding failed", "the CA needs or refused external account binding")]
+    [InlineData("Authorization for mx.example.com ended as Invalid: Timeout during connect", "the CA could not validate the challenge")]
+    [InlineData("The ACME server did not answer in time.", "the CA could not be reached")]
+    [InlineData("The ACME server could not be reached or answered unexpectedly: Connection refused", "the CA could not be reached")]
+    [InlineData("ACME server error: rateLimited", "the CA refused the request")]
+    [InlineData("ACME error: bad thing", "the CA refused the request")]
+    [InlineData("dns timeout", "the order failed")]
+    [InlineData(null, "the order failed")]
+    public void Failures_are_sorted_into_a_few_categories(string? error, string expected) => Assert.Equal(expected, AcmeFailureCategory.Describe(error));
+
+    [Fact]
+    public async Task A_failed_record_nobody_retries_is_neither_a_banner_nor_a_reason_to_wake_up()
+    {
+        var config = new MtaConfig { Acme = Options() };
+        var contributor = new CertificateHealthContributor(_storage, _clock, config);
+        var service = Service();
+
+        // A dashboard request for names that were never issued: failed, recorded, and not retried by CheckOnceAsync (no certificate, not the configured set).
+        Assert.True(await service.CheckOnceAsync(default));   // the configured certificate is issued first
+        _ca.FailWith = new AcmeException("ACME server error: no");
+        Assert.False(await service.RequestAsync(["orphan.http01.example"], default));
+        var orphan = Assert.Single(await _storage.Config.GetAcmeRenewalsAsync(default), r => r.CertificateName.StartsWith("acme:", StringComparison.Ordinal));
+        Assert.Equal("failed", orphan.Status);
+
+        // The configured certificate is fine, so nothing is failing that anybody retries.
+        var warnings = (await contributor.CheckAsync(default)).Warnings;
+        Assert.DoesNotContain(warnings, w => w.Code.StartsWith("acme_", StringComparison.Ordinal));
+        Assert.Equal(TimeSpan.FromHours(1), await service.NextCheckDelayAsync(default));   // the orphan's back-off does not make every replica poll
+
+        // The admin view still has the record.
+        Assert.Contains(await _storage.Config.GetAcmeRenewalsAsync(default), r => r.CertificateName == orphan.CertificateName && r.LastError == "ACME server error: no");
+
+        // A failing configured certificate does show, next to the orphan: one banner, about the configured one.
+        _ca.FailWith = new AcmeException("ACME server error: later");
+        _clock.Advance(TimeSpan.FromDays(70));
+        Assert.False(await service.CheckOnceAsync(default));
+        string message = Assert.Single((await contributor.CheckAsync(default)).Warnings, w => w.Code == "acme_failing").Message;
+        Assert.DoesNotContain("more certificate", message);
+        Assert.NotEqual(TimeSpan.FromHours(1), await service.NextCheckDelayAsync(default));
+    }
+
+    [Fact]
+    public void A_request_does_not_print_the_account_key_or_the_EAB_key()
+    {
+        var request = new AcmeOrderRequest("https://ca.example/dir", "ops@example.com", ["a.example"], "-----BEGIN PRIVATE KEY-----SECRETKEY", TimeSpan.Zero,
+            EabKeyId: "kid-1", EabHmacKey: "HMACSECRET-_abc");
+
+        string text = request.ToString();
+
+        Assert.DoesNotContain("SECRETKEY", text);
+        Assert.DoesNotContain("HMACSECRET", text);
+        Assert.DoesNotContain("ops@example.com", text);
+        Assert.Contains("a.example", text);
     }
 
     [Fact]

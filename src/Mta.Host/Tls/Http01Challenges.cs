@@ -40,6 +40,7 @@ public sealed class Http01Challenges : IHttpChallengePublisher, IHttpChallengeRe
     private readonly long _refreshTicks;
     private volatile Dictionary<string, (string KeyAuthorization, DateTimeOffset Until)> _snapshot = [];
     private long _snapshotAt;   // Stopwatch timestamp of the last read of the store; 0: never
+    private long _lastReadWarning;   // Environment.TickCount64 of the last warning about a failed read; 0: never
     private volatile string? _unavailable;
     private volatile bool _starting;
     private readonly TaskCompletionSource _decided = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -121,6 +122,14 @@ public sealed class Http01Challenges : IHttpChallengePublisher, IHttpChallengeRe
         var until = _clock.UtcNow + TokenLifetime;
         _local[token] = (keyAuthorization, until);
         await UpdateSharedAsync(certificateName, tokens => tokens[token] = (keyAuthorization, until), cancellationToken).ConfigureAwait(false);
+
+        // Another replica may have read the store a moment before this write and keeps that snapshot for one refresh interval; the CA is told to validate
+        // only after this returns, so waiting two intervals makes sure that replica's next request for the token reads the store again instead of
+        // answering 404 from a snapshot that cannot contain it.
+        if (RefreshInterval > TimeSpan.Zero)
+        {
+            await Task.Delay(RefreshInterval * 2, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     public async ValueTask RemoveAsync(string certificateName, string token, CancellationToken cancellationToken)
@@ -205,7 +214,13 @@ public sealed class Http01Challenges : IHttpChallengePublisher, IHttpChallengeRe
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             // The store is down: answer what this process knows. A failed validation is retried with a new order anyway.
-            _log.Write(MtaLogLevel.Warning, "acme", $"the HTTP-01 challenge tokens could not be read from the store ({ex.Message})", ex);
+            // Once a minute at most: every request for a token this replica does not know would otherwise log it again.
+            long tick = Environment.TickCount64;
+            long last = Interlocked.Read(ref _lastReadWarning);
+            if ((last == 0 || tick - last >= 60_000) && Interlocked.CompareExchange(ref _lastReadWarning, tick, last) == last)
+            {
+                _log.Write(MtaLogLevel.Warning, "acme", $"the HTTP-01 challenge tokens could not be read from the store ({ex.Message}); logged once a minute", ex);
+            }
         }
 
         Volatile.Write(ref _snapshotAt, Math.Max(1, Stopwatch.GetTimestamp()));
@@ -235,6 +250,11 @@ public sealed class Http01Challenges : IHttpChallengePublisher, IHttpChallengeRe
             {
                 foreach (var e in entries)
                 {
+                    if (e is null)
+                    {
+                        continue;   // "[null]" in damaged state
+                    }
+
                     var until = DateTimeOffset.FromUnixTimeMilliseconds(e.U);
                     if (e.T is { Length: > 0 } && e.K is { Length: > 0 } && until > now)
                     {
