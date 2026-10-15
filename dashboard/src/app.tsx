@@ -100,7 +100,17 @@ const TlsPoliciesPage = adminRoute(TlsPolicies);
 
 function Routes() {
   const { path } = useLocation();
-  const { tenantId } = useApp();
+  const { tenantId, me } = useApp();
+  // A temporary password (the generated one of the first administrator) allows the password change and nothing else: that is the only page.
+  if (me?.mustChangePassword) {
+    return (
+      <ErrorBoundary resetKey="password">
+        <IsoErrorBoundary>
+          <Account />
+        </IsoErrorBoundary>
+      </ErrorBoundary>
+    );
+  }
   return (
     // Remount on tenant change so every page reloads its data for the newly selected tenant.
     <ErrorBoundary resetKey={path}>

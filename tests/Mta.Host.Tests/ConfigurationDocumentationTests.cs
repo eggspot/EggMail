@@ -18,7 +18,9 @@ public partial class ConfigurationDocumentationTests
     [GeneratedRegex(@"`([A-Z][A-Za-z0-9]*(?::[A-Za-z0-9<>*-]+)*)`")]
     private static partial Regex KeySpan();
 
-    private static string DocumentationPath()
+    internal static SortedSet<string> KeysReadByCodeForTests() => KeysReadByCode();
+
+    internal static string DocumentationPath()
     {
         for (string? dir = AppContext.BaseDirectory; dir is not null; dir = Path.GetDirectoryName(dir))
         {

@@ -60,6 +60,41 @@ describe('app shell', () => {
     expect(screen.getByRole('link', { name: 'Domains' })).toBeTruthy();
   });
 
+  it('with a temporary password the only page is the password change, and the full dashboard opens after it', async () => {
+    let changed = false;
+    const calls: string[] = [];
+    mockFetch({
+      'GET /api/v1/capabilities': makeCapabilities(),
+      'GET /api/v1/me': () => {
+        calls.push('me');
+        return { ...adminMe, mustChangePassword: !changed };
+      },
+      'GET /api/v1/admin/tenants': () => {
+        calls.push('tenants');
+        return tenants;
+      },
+      'POST /api/v1/me/password': () => {
+        changed = true;
+        return undefined;
+      },
+    });
+    mount();
+
+    expect((await screen.findByRole('alert')).textContent).toMatch(/temporary password/i);
+    expect(screen.getByRole('heading', { name: 'Account' })).toBeTruthy();
+    expect(screen.queryByRole('navigation', { name: 'Main' })).toBeNull();   // nothing to navigate to
+    expect(calls).not.toContain('tenants');                                    // the admin calls would all be refused with password_change_required
+
+    fireEvent.input(screen.getByLabelText('Current password'), { target: { value: 'temporary password 1' } });
+    fireEvent.input(screen.getByLabelText('New password'), { target: { value: 'my own new password' } });
+    fireEvent.input(screen.getByLabelText('New password again'), { target: { value: 'my own new password' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Change password' }));
+
+    expect(await screen.findByRole('navigation', { name: 'Main' })).toBeTruthy();   // the temporary mark is gone: the whole dashboard
+    expect(calls).toContain('tenants');
+    expect(screen.getByRole('link', { name: 'Tenants' })).toBeTruthy();
+  });
+
   it('shows a friendly message for a failed sign-in and clears the password', async () => {
     mockFetch({
       'GET /api/v1/capabilities': makeCapabilities(),
