@@ -582,6 +582,22 @@ PostgreSQL command latency and pool state come from the Npgsql driver's own mete
 | `db_client_connection_npgsql_timeouts_total` | counter | pool name | Connection requests that timed out |
 | `db_client_connection_npgsql_create_time_seconds` | histogram | pool name | Time to open a new connection |
 
+The .NET runtime's own meter (`System.Runtime`) is exported unchanged too, so memory growth, garbage collections and thread-pool pressure can be watched without a profiler (the soak test of [soak.md](soak.md) reads them). Only the ones below are documented and pinned by a test; the runtime publishes a few more (`dotnet_jit_*`, `dotnet_assembly_count`, `dotnet_timer_count`, `dotnet_process_cpu_count`). The names and types are exactly what the runtime declares: `dotnet_thread_pool_thread_count_total` and `dotnet_thread_pool_queue_length_total` carry the **current** number although the runtime declares them as counters, so read them as gauges.
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `dotnet_gc_collections_total` | counter | `gc_heap_generation` (`gen0`, `gen1`, `gen2`) | Garbage collections since the process started. A steadily rising `gen2` rate under constant load is a sign of heap growth |
+| `dotnet_gc_heap_total_allocated_bytes_total` | counter | none | Managed bytes allocated since the process started (the allocation rate is its derivative) |
+| `dotnet_gc_pause_time_seconds_total` | counter | none | Time the process was paused by garbage collections |
+| `dotnet_gc_last_collection_heap_size_bytes` | gauge | `gc_heap_generation` (`gen0`, `gen1`, `gen2`, `loh`, `poh`) | Managed heap size by generation as of the latest collection (`loh` is the large object heap: where message bodies of 85 KB and more live) |
+| `dotnet_process_memory_working_set_bytes` | gauge | none | Physical memory mapped to the process (close to the resident set size) |
+| `dotnet_process_cpu_time_seconds_total` | counter | `cpu_mode` (`user`, `system`) | CPU time used by the process |
+| `dotnet_thread_pool_thread_count_total` | counter | none | Thread-pool threads that exist now (see the note above) |
+| `dotnet_thread_pool_queue_length_total` | counter | none | Work items waiting for a thread-pool thread now (see the note above); above zero for long means the pool is starved |
+| `dotnet_thread_pool_work_item_count_total` | counter | none | Work items the thread pool has completed |
+| `dotnet_monitor_lock_contentions_total` | counter | none | Contended monitor lock acquisitions |
+| `dotnet_exceptions_total` | counter | `error_type` | Exceptions thrown in managed code |
+
 **What to alert on.**
 
 - Queue backlog: `mta_delivery_queue_oldest_due_age_seconds` above a few minutes for more than a few scrapes, or `mta_delivery_queue_depth{state="queued"}` growing steadily. `mta_delivery_queue_sample_age_seconds` above a minute means both are stale.
@@ -694,3 +710,7 @@ Things to get right:
 ## Graceful shutdown
 
 On SIGTERM the SMTP listeners stop accepting, running deliveries are given time to finish, the rest are returned to the queue unchanged (a delivery that may already have been sent is flagged `possible_duplicate`), then the process exits. Give the container at least 60 s of termination grace.
+
+## Load, benchmark and soak tests
+
+Before trusting a configuration with real mail, measure it on your hardware. `bench/run-local-matrix.sh` runs the throughput matrix (both backends, durable and non-durable, ingest and delivery) on the machine you are on and writes a table ([benchmarks.md](benchmarks.md#the-same-matrix-on-a-laptop-or-a-server-of-your-own)). `bench/soak/run-soak.sh` runs the real `mta serve` for hours under mixed load, kills it with `kill -9` on a schedule, restores backups into a second instance, and ends with a PASS/FAIL verdict on lost messages, unflagged duplicates, memory, descriptor and thread growth, error rate and queue drain ([soak.md](soak.md)). Both run on a laptop or a server without Docker (PostgreSQL from the binaries on `PATH`); the matching GitHub Actions workflows are `bench-throughput` and `soak`, dispatched by hand because they bill by the minute.

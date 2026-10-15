@@ -15,6 +15,17 @@ internal static class ToolsMain
               Closed-loop SMTP ingest benchmark: N connections send messages as fast as the server accepts them.
               Reports accepted msgs/s, MB/s and p50/p95/p99 transaction latency (MAIL FROM to the final reply).
               Always publish durable and non-durable server configurations as a pair (docs/benchmarks.md).
+
+              Options for soak runs (docs/soak.md):
+                --persist --duration-s N   keep reconnecting through server outages (crash drills) instead of giving up
+                --rate R                   pace the load to R messages per second in total (default: as fast as the server accepts)
+                --size-mix 1024:55,8192:30 message sizes in bytes with weights (default: the single --size)
+                --from addr                envelope and header sender (default load@bench.test)
+                --rcpt-domain a.test,b.test recipient domains, used in turn (default dest.test)
+                --id-prefix soak           number every message: Message-ID <soak.000000000042@sender-domain>
+                --ack-log file             one line per message the server acknowledged with 250: sequence, bytes, reply text
+                --stats-jsonl file         counters and interval latency percentiles every --stats-interval-s (default 10)
+                --io-timeout-s N           give up on a connection that does not answer within N seconds
         """;
 
     public static async Task<int> RunAsync(string[] args)
