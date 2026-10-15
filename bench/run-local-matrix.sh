@@ -47,6 +47,7 @@ done
 if [ "$quick" = true ]; then messages=10000; runs=1; fi
 delivery_messages=$(( messages / 3 ))
 [ -n "$out" ] || out="artifacts/bench/$(date -u +%Y%m%dT%H%M%SZ)"
+if [ -d "$out" ] && [ -n "$(ls -A "$out")" ]; then echo "--out $out exists and is not empty" >&2; exit 2; fi
 mkdir -p "$out"
 out="$(cd "$out" && pwd)"
 exec > >(tee -a "$out/run.log") 2>&1
@@ -103,7 +104,7 @@ start_postgres() {
   for i in $(seq 1 60); do
     if pg_sql postgres 'select 1' >/dev/null 2>&1; then break; fi
     sleep 1
-    if [ "$i" = 60 ]; then echo "PostgreSQL did not become ready" >&2; pg_mode=skip_failed; return 1; fi
+    if [ "$i" = 60 ]; then echo "PostgreSQL did not become ready" >&2; return 1; fi
   done
   echo "PostgreSQL $(pg_sql postgres 'show server_version') on port $pg_port"
 }

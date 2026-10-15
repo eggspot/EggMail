@@ -20,6 +20,7 @@ import argparse
 import csv
 import datetime
 import json
+import math
 import os
 import platform
 import random
@@ -337,6 +338,9 @@ class Soak:
         self.unexpected_exits = 0
         self.backup_done = set()
         self.backup_count = 0
+        self.backup_paths = []          # directories the server reported as complete backups, from host.log
+        self.host_log_pos = 0
+        self.restored = None            # the quiet instance of a running backup drill, so that cleanup can stop it
         self.pending_checks = []        # (due time, bytes of ack.log at the kill) of crash drills whose recovery check has not run yet
         self.ports = {name: free_port() for name in ("submission", "submissions", "alternate", "bounce", "http", "https", "dns", "sink", "pg")}
         self.data_dir = os.path.join(self.out, "data")
@@ -580,9 +584,13 @@ class Soak:
         while not self.stopping.is_set():
             try:
                 self.sample()
-            except Exception as error:      # a failed sample is a gap in the CSV, never the end of the run
+            except Exception as error:      # a failed sample is a gap in the CSV (the "sampler kept up" criterion counts the rows), never the end of the run
                 log("sample failed: %r" % error)
-            self.watch_host()
+                self.event("sampler_error", error=repr(error)[:300])
+            try:
+                self.watch_host()
+            except Exception as error:      # the watchdog must not die silently: that would hide the very failures it exists to find
+                self.event("drill_error", where="watch_host", error=repr(error)[:300])
             next_at += interval
             self.stopping.wait(max(0.1, next_at - now()))
 
@@ -658,14 +666,18 @@ class Soak:
             self.crash_check(ack_size, at_end=everything)
 
     def new_backup_dir(self):
-        """The newest finished backup this run has not drilled yet (the server logs 'backup written to <path>' when it is complete)."""
+        """The newest finished backup this run has not drilled yet (the server logs 'backup written to <path>' when it is complete). Reads only the
+        part of host.log it has not seen yet."""
         try:
             with open(os.path.join(self.out, "host.log"), "rb") as handle:
-                text = handle.read().decode("utf-8", "replace")
+                handle.seek(self.host_log_pos)
+                data = handle.read()
         except OSError:
             return None
-        paths = re.findall(r"backup written to ([^\"\\\n]+)", text)
-        for path in reversed(paths):
+        complete = data.rfind(b"\n") + 1
+        self.host_log_pos += complete
+        self.backup_paths.extend(re.findall(r"backup written to ([^\"\\\n]+)", data[:complete].decode("utf-8", "replace")))
+        for path in reversed(self.backup_paths):
             if path not in self.backup_done and os.path.isdir(path):
                 return path
         return None
@@ -711,6 +723,7 @@ class Soak:
             log_path = os.path.join(self.out, "restore-%d.log" % number)
             with open(log_path, "wb") as log_file:
                 instance = subprocess.Popen(argv, env=env, stdout=log_file, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
+                self.restored = instance
                 base = "http://127.0.0.1:%d" % ports["http"]
                 until = now() + 180
                 while now() < until and not http_ok(base + "/readyz"):
@@ -733,6 +746,7 @@ class Soak:
         except Exception as error:
             self.event("backup_drill", ok=False, error=str(error)[:500], source=source)
         finally:
+            self.restored = None
             if instance is not None and instance.poll() is None:
                 try:
                     os.kill(instance.pid, signal.SIGTERM)
@@ -752,26 +766,28 @@ class Soak:
         backup_next = self.start_ts + a.backup_interval_min * 60 if a.backup_interval_min > 0 else None
         backup_armed = False
         while not self.stopping.is_set() and self.phase == "load":
-            t = now()
-            quiet = self.elapsed() >= self.tail_start_s
-            self.run_due_checks()
-            if not quiet and crash_next is not None and t >= crash_next:
-                self.crash_drill()
-                crash_next = now() + jitter(a.crash_interval_min * 60)
-            if not quiet and backup_next is not None and t >= backup_next:
-                backup_armed = True
-                backup_next = None
-            if backup_armed and not quiet:
-                if a.backend == "sqlite":
-                    source = self.new_backup_dir()
-                    if source:
-                        self.backup_drill(source)
+            try:
+                t = now()
+                quiet = self.elapsed() >= self.tail_start_s
+                self.run_due_checks()
+                if not quiet and crash_next is not None and t >= crash_next:
+                    crash_next = now() + jitter(a.crash_interval_min * 60)      # first: a drill that raises must not be retried in a tight loop
+                    self.crash_drill()
+                if not quiet and backup_next is not None and t >= backup_next:
+                    backup_armed = True
+                    backup_next = None
+                if backup_armed and not quiet:
+                    source = self.new_backup_dir() if a.backend == "sqlite" else None
+                    if a.backend != "sqlite" or source:
                         backup_armed = False
                         backup_next = now() + a.backup_interval_min * 60
-                else:
-                    self.backup_drill()
-                    backup_armed = False
-                    backup_next = now() + a.backup_interval_min * 60
+                        self.backup_drill(source)
+            except Exception as error:
+                # An error in the harness's own drill code is a failure of the run, not a reason to stop drilling silently (evaluate.py fails it).
+                self.event("drill_error", where="drills", error=repr(error)[:300])
+                with self.state_lock:
+                    self.drill_busy = False
+                self.stopping.wait(5.0)
             self.stopping.wait(1.0)
 
     # -- the end of the run
@@ -822,7 +838,7 @@ class Soak:
             flagged = unflagged = checked = 0
             unflagged_sample = []
             error = None
-            for sequence in duplicates[:3000]:
+            for sequence in (duplicates if len(duplicates) <= 3000 else sorted(self.rand.sample(duplicates, 3000))):
                 match = re.search(r"\b([0-9a-f]{32})\b", acked[sequence])
                 if not match:
                     error = "the 250 reply carries no message id: %r" % acked[sequence]
@@ -844,6 +860,24 @@ class Soak:
                 result["duplicates_error"] = error
         elif not duplicates:
             result.update(duplicates_checked=0, duplicates_flagged=0, duplicates_unflagged=0)
+        if self.args.history == "full":
+            # The flag must not be everywhere: look at a random sample of the messages the sink received exactly once.
+            singles = sorted(s for s in acked if self.sink.count_of(s) == 1)
+            picked = singles if len(singles) <= 1000 else sorted(self.rand.sample(singles, 1000))
+            checked = flagged_singles = 0
+            for sequence in picked:
+                match = re.search(r"\b([0-9a-f]{32})\b", acked[sequence])
+                if not match:
+                    break
+                try:
+                    _, events = self.api.call("GET", "/api/v1/messages/%s/events" % match.group(1))
+                except SoakError as problem:
+                    result["singles_error"] = str(problem)
+                    break
+                checked += 1
+                flagged_singles += 1 if any(e.get("type") == "possible_duplicate" for e in events) else 0
+            if checked:
+                result.update(singles_checked=checked, singles_flagged=flagged_singles)
         return result
 
     def scan_host_log(self):
@@ -882,7 +916,7 @@ class Soak:
             "crash_interval_min": a.crash_interval_min, "backup_interval_min": a.backup_interval_min, "duration_s": self.duration_s,
             "warmup_s": round(a.warmup_min * 60), "quiet_tail": a.quiet_tail, "sample_interval_s": a.sample_interval_s, "recovery_grace_min": a.recovery_grace_min,
             "claim_lease_min": a.claim_lease_min or 15, "version": version, "machine": label, "environment_label": label,
-            "sink_tempfail_rate": a.sink_tempfail_rate, "sink_drop_ack_rate": a.sink_drop_ack_rate, "started": iso(self.start_ts),
+            "strict": a.strict, "sink_tempfail_rate": a.sink_tempfail_rate, "sink_drop_ack_rate": a.sink_drop_ack_rate, "started": iso(self.start_ts),
         }
         with open(os.path.join(self.out, "config.json"), "w") as handle:
             json.dump(config, handle, indent=2)
@@ -950,7 +984,7 @@ class Soak:
         return 0
 
     def cleanup(self):
-        for proc in (self.loader, self.host):
+        for proc in (self.loader, self.host, self.restored):
             if proc is not None and proc.poll() is None:
                 try:
                     os.kill(proc.pid, signal.SIGKILL)
@@ -987,6 +1021,7 @@ def main():
     parser.add_argument("--recipient-domains", type=int, default=4, help="number of distinct recipient domains (all resolve to the sink)")
     parser.add_argument("--crash-interval-min", type=float, default=20.0, help="kill -9 and restart this often (0: never)")
     parser.add_argument("--backup-interval-min", type=float, default=30.0, help="backup + restore drill this often (0: never)")
+    parser.add_argument("--strict", action="store_true", help="a trend criterion that cannot be judged (a run too short) is a FAIL; automatic from --hours 1")
     parser.add_argument("--quiet-tail", type=float, default=0.25, help="no drills in the last fraction of the run: the uninterrupted stretch the trend criteria judge")
     parser.add_argument("--sample-interval-s", type=float, default=60.0)
     parser.add_argument("--warmup-min", type=float, default=None, help="process warm-up that trend criteria ignore (default: 15%% of the run, at most 10 minutes)")
@@ -1023,8 +1058,13 @@ def main():
     if args.backend == "postgres" and args.pg_mode is None:
         # Developer machines run no Docker (project rule): the binaries on PATH first; the Actions runner has none on PATH and uses the container.
         args.pg_mode = "local" if all(shutil.which(tool) for tool in ("initdb", "pg_ctl", "psql", "pg_dump", "pg_restore", "createdb")) else "docker"
-    if args.hours <= 0 or not 0 <= args.quiet_tail < 1:
-        parser.error("--hours must be positive and --quiet-tail in [0, 1)")
+    for name in ("hours", "quiet_tail", "rate", "sample_interval_s", "crash_interval_min", "backup_interval_min"):
+        if not math.isfinite(getattr(args, name)) or getattr(args, name) < 0:
+            parser.error("--%s must be a finite number, not negative" % name.replace("_", "-"))
+    if args.hours <= 0 or not 0 <= args.quiet_tail < 1 or args.sample_interval_s <= 0 or args.rate <= 0:
+        parser.error("--hours, --rate and --sample-interval-s must be positive and --quiet-tail in [0, 1)")
+    # From one hour of load a trend that cannot be judged is a failure (a long run that skipped its trend criteria proved nothing about leaks).
+    args.strict = args.strict or args.hours >= 1
 
     soak = Soak(args)
 

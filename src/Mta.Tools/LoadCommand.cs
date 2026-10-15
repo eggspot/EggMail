@@ -290,6 +290,8 @@ internal static class LoadCommand
 
     private sealed class Worker(LoadConfig cfg, int index, SharedState shared)
     {
+        private static long s_rejectionsLogged;
+
         public long Accepted;
         public long Failed;
         public long Rejected;
@@ -462,6 +464,11 @@ internal static class LoadCommand
         /// <summary>A reply with a failure code means a live server said no (counted as rejected); no reply at all means the connection broke (counted as a connection error).</summary>
         private void CountFailure()
         {
+            if (_replyCode >= 400 && Interlocked.Increment(ref s_rejectionsLogged) <= 40)
+            {
+                Console.Error.WriteLine($"{DateTime.UtcNow:HH:mm:ss} refused by the server: {_replyText}");   // what a live server said, for the first few
+            }
+
             Interlocked.Increment(ref Failed);
             Interlocked.Increment(ref _replyCode >= 400 ? ref Rejected : ref ConnectErrors);
         }

@@ -35,7 +35,15 @@ THRESHOLDS = {
     "crash_window_s": (30.0, "seconds after a restart that still count as the crash window (errors in it are expected)"),
     "min_trend_samples": (8.0, "samples needed in the tail to judge a trend; fewer -> SKIP"),
     "p99_growth_ratio": (3.0, "advisory: p99 submission latency of the last quarter over the first quarter (WARN above)"),
+    "ack_log_tolerance_pct": (0.1, "the ack log may hold this many percent fewer messages than the generator counted as accepted (at least 5 messages)"),
+    "sampler_min_fraction": (0.8, "samples.csv must hold at least this fraction of the rows the run's length and sample interval promise"),
+    "drills_min_fraction": (0.5, "at least this fraction of the drills the run's length and drill interval promise must have completed"),
+    "flagged_single_pct": (1.0, "share of the messages the sink received once (in a sample) that may carry a possible_duplicate flag: the flag must not be sprayed"),
+    "max_flagged_per_kill": (400.0, "possible_duplicate flags on once-received messages allowed per kill -9 (a killed server held at most a claim batch plus its in-flight sends)"),
 }
+
+# Trend criteria: the ones a short run cannot judge. With --strict (automatic from one hour of load) a SKIP among them is a FAIL.
+TREND_CRITERIA = ("RSS flat after warm-up", "file descriptors flat", "OS threads flat")
 
 STATUS_ORDER = {"FAIL": 0, "WARN": 1, "SKIP": 2, "PASS": 3}
 
@@ -152,18 +160,24 @@ def tail_window(samples, config, thresholds):
 
 
 def growth_criterion(name, window, key, limit_abs, limit_pct, unit, thresholds):
+    """Two views of the same tail, both must hold: the median of the last quarter against the median of the first (a shift, robust against spikes), and the
+    Theil-Sen drift (the median pairwise slope times the length of the tail: how far the line the data follows climbs over the whole tail, so it scales with
+    the length of the run). A leak shows in both, a spike in neither."""
     need = int(thresholds["min_trend_samples"])
-    values = [s.get(key) for s in window if s.get(key) is not None]
+    points = [(s["elapsed_s"], s.get(key)) for s in window if s.get(key) is not None]
+    values = [v for _, v in points]
     if len(values) < need:
         return {"name": name, "status": "SKIP", "detail": "only %d samples in the uninterrupted tail, %d needed (run longer, or sample more often)" % (len(values), need)}
     first, last = quarters(values)
     a, b = median(first), median(last)
     allowed = max(limit_abs, a * limit_pct / 100.0) if limit_pct is not None else limit_abs
-    growth = b - a
-    slope = theil_sen_per_hour([(s["elapsed_s"], s.get(key)) for s in window])
-    detail = "first quarter median %.1f %s, last quarter median %.1f %s (growth %+.1f, allowed %.1f); Theil-Sen slope %s per hour over %d samples" % (
-        a, unit, b, unit, growth, allowed, ("%+.2f %s" % (slope, unit)) if slope is not None else "n/a", len(values))
-    return {"name": name, "status": "PASS" if growth <= allowed else "FAIL", "detail": detail, "first": a, "last": b, "slope_per_hour": slope}
+    shift = b - a
+    slope = theil_sen_per_hour(points)
+    span_h = (points[-1][0] - points[0][0]) / 3600.0
+    drift = slope * span_h if slope is not None else 0.0
+    detail = "first quarter median %.1f %s, last quarter median %.1f %s (shift %+.1f); Theil-Sen slope %s per hour = %+.1f %s of drift over the %.0f minute tail; allowed %.1f for each; %d samples" % (
+        a, unit, b, unit, shift, ("%+.2f %s" % (slope, unit)) if slope is not None else "n/a", drift, unit, span_h * 60, allowed, len(values))
+    return {"name": name, "status": "PASS" if shift <= allowed and drift <= allowed else "FAIL", "detail": detail, "first": a, "last": b, "slope_per_hour": slope, "drift": drift}
 
 
 def crash_windows(events, thresholds):
@@ -211,7 +225,7 @@ def error_accounting(stats, events, thresholds):
             "failed_inside_crash_windows": rejected_in + errors_in}
 
 
-def evaluate(run_dir, thresholds):
+def evaluate(run_dir, thresholds, strict=None):
     config = load_json(os.path.join(run_dir, "config.json"), {})
     samples = load_samples(os.path.join(run_dir, "samples.csv"))
     events = load_jsonl(os.path.join(run_dir, "events.jsonl"))
@@ -246,6 +260,65 @@ def evaluate(run_dir, thresholds):
                 "%d message(s) arrived more than once; %d checked through the API, %d flagged possible_duplicate, %d NOT flagged%s" % (
                     duplicates, checked, verification.get("duplicates_flagged", 0), unflagged,
                     (" (first: %s)" % verification.get("duplicates_unflagged_sample", [])[:10]) if unflagged else ""))
+
+    if verification is not None:
+        # The sink dropped final replies on purpose: the server must have retried those and produced duplicates, or the flag path was never exercised
+        # (and "no unflagged duplicate" proved nothing).
+        dropped = verification.get("sink_dropped_acks", 0)
+        duplicates = verification.get("duplicates", 0)
+        if config.get("sink_drop_ack_rate", 0) > 0:
+            if dropped > 0 and duplicates == 0:
+                add("duplicate path exercised", "FAIL", "the sink kept %d message(s) without answering, yet none arrived twice: the server did not retry a delivery whose outcome it could not know" % dropped)
+            elif dropped == 0 and verification.get("acknowledged", 0) * config["sink_drop_ack_rate"] >= 20:
+                add("duplicate path exercised", "WARN", "the sink was set to drop %.1f%% of final replies but dropped none in %d messages: the possible_duplicate check ran on nothing" % (
+                    100 * config["sink_drop_ack_rate"], verification.get("acknowledged", 0)))
+            else:
+                add("duplicate path exercised", "PASS", "the sink dropped %d final replies; %d message(s) arrived twice or more" % (dropped, duplicates))
+        # The flag must mean something: on messages the sink received exactly once it is allowed after a kill (the server held them), not as a habit.
+        checked = verification.get("singles_checked")
+        if checked is not None:
+            flagged = verification.get("singles_flagged", 0)
+            kills = len([e for e in events if e.get("type") == "crash_kill"])
+            share = 100.0 * flagged / checked if checked else 0.0
+            # What kills can explain: at most max_flagged_per_kill messages each, as a share of everything acknowledged; never less than the flat limit.
+            limit = max(thresholds["flagged_single_pct"], 100.0 * kills * thresholds["max_flagged_per_kill"] / max(1, verification.get("acknowledged", 1)))
+            sprayed = share > limit or (kills == 0 and flagged > 0)      # without a kill nothing held a once-received message in doubt
+            add("possible_duplicate is not sprayed", "FAIL" if sprayed else "PASS",
+                "%d of %d sampled once-received messages carry the flag (%.2f%%; limit %.2f%% for %d kill(s); none allowed without a kill)" % (flagged, checked, share, limit, kills))
+        # the generator is judged too
+        code = verification.get("load_exit_code")
+        if code is not None:
+            add("load generator exit code", "PASS" if code == 0 else "FAIL", "mta-tools load exited with %s" % code)
+        # the ack log is the evidence of the whole run: it must be there and complete
+        acknowledged = verification.get("acknowledged", 0)
+        counted = max([line.get("accepted", 0) for line in stats] or [0])
+        tolerance = max(5, counted * thresholds["ack_log_tolerance_pct"] / 100.0)
+        if acknowledged == 0:
+            add("ack log complete", "FAIL", "the ack log holds no acknowledged message: nothing was proven")
+        elif acknowledged < counted - tolerance:
+            add("ack log complete", "FAIL", "the ack log holds %d messages but the generator counted %d accepted (tolerance %d)" % (acknowledged, counted, tolerance))
+        else:
+            add("ack log complete", "PASS", "%d acknowledged messages in the ack log, the generator counted %d accepted" % (acknowledged, counted))
+
+    # the harness itself: samples, drills and their errors
+    expected_rows = config.get("duration_s", 0) / config["sample_interval_s"] if config.get("sample_interval_s") else 0
+    if expected_rows:
+        rows = len([s for s in samples if s.get("phase") == "load"])
+        add("sampler kept up", "PASS" if rows >= thresholds["sampler_min_fraction"] * expected_rows else "FAIL",
+            "%d samples during the load, %.0f expected at one every %.0f s (at least %.0f%% required)" % (rows, expected_rows, config["sample_interval_s"], 100 * thresholds["sampler_min_fraction"]))
+    errors = [e for e in events if e.get("type") == "drill_error"]
+    add("harness errors", "FAIL" if errors else "PASS",
+        ("%d error(s) in the drill loop or the server watch, the first (%s): %s" % (len(errors), errors[0].get("where"), errors[0].get("error"))) if errors else "no error in the drill loop or the server watch")
+    tail = 1.0 - config.get("quiet_tail", 0.25)
+    for label, key, event in (("crash", "crash_interval_min", "crash_ready"), ("backup", "backup_interval_min", "backup_drill")):
+        interval = config.get(key, 0)
+        if interval > 0 and config.get("duration_s"):
+            expected = int(config["duration_s"] * tail / (interval * 60.0))
+            done = len([e for e in events if e.get("type") == event])      # a drill that ran and failed is judged by its own criterion
+            if expected >= 1:
+                add("%s drills ran as often as promised" % label, "PASS" if done >= thresholds["drills_min_fraction"] * expected else "FAIL",
+                    "%d %s drill(s) completed, %d expected in the drill part of the run at one every %g minutes (at least %.0f%% required)" % (
+                        done, label, expected, interval, 100 * thresholds["drills_min_fraction"]))
 
     # the run must have been what it claims to be
     if stats and config.get("duration_s"):
@@ -342,6 +415,12 @@ def evaluate(run_dir, thresholds):
             log_scan.get("critical", 0), log_scan.get("errors", 0), log_scan.get("lines", 0),
             (": " + "; ".join(log_scan.get("sample", [])[:3])[:500]) if log_scan.get("errors") or log_scan.get("critical") else ""))
 
+    strict = config.get("strict", False) if strict is None else strict
+    if strict:
+        for c in criteria:
+            if c["status"] == "SKIP" and c["name"] in TREND_CRITERIA:
+                c["status"] = "FAIL"
+                c["detail"] = "strict run (one hour of load or more, or --strict): a trend that cannot be judged is a failure. " + c["detail"]
     failed = [c for c in criteria if c["status"] == "FAIL"]
     skipped = [c for c in criteria if c["status"] == "SKIP"]
     verdict = "FAIL" if failed else "PASS"
@@ -431,24 +510,35 @@ def summary_markdown(run_dir, result):
 
 # --------------------------------------------------------------------------- self-test
 
-def synthetic_run(directory, rss_slope=0.0, fd_slope=0.0, lost=0, unflagged=0, depth=0, errors=0, history="full", minutes=120):
-    """A fake run directory: one sample a minute, a process restart at minute 40, load stats every 10 s."""
+def synthetic_run(directory, rss_slope=0.0, fd_slope=0.0, lost=0, unflagged=0, depth=0, errors=0, history="full", minutes=120, strict=False,
+                  crash_stalled=0, crash_failed=False, no_crash_drill=False, backup_ok=True, unexpected_exits=0, shutdown_code=0, no_verification=False,
+                  dup_error=None, acknowledged=1000, singles_flagged=0, dropped=3, duplicates=3, drill_error=False, load_exit_code=0, row_every=1):
+    """A fake run directory: one sample a minute, a process restart at minute 40, load stats every 10 s, drills at 40 minutes."""
     os.makedirs(directory, exist_ok=True)
     start = 1_800_000_000.0
-    config = {"backend": "sqlite", "duration_s": minutes * 60, "warmup_s": 300, "crash_interval_min": 40, "backup_interval_min": 0, "history": history, "environment_label": "synthetic"}
+    config = {"backend": "sqlite", "duration_s": minutes * 60, "warmup_s": 300, "crash_interval_min": 40, "backup_interval_min": 40, "history": history,
+              "environment_label": "synthetic", "strict": strict, "sample_interval_s": 60, "quiet_tail": 0.25, "sink_drop_ack_rate": 0.005}
     with open(os.path.join(directory, "config.json"), "w") as handle:
         json.dump(config, handle)
     with open(os.path.join(directory, "samples.csv"), "w", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(["iso", "ts", "elapsed_s", "generation", "uptime_s", "phase", "up", "rss_mb", "fds", "threads", "lat_p99_ms", "queue_depth"])
-        for minute in range(minutes):
+        for minute in range(0, minutes, row_every):
             generation = 1 if minute < 40 else 2
             uptime = (minute if minute < 40 else minute - 40) * 60
             noise = ((minute * 7919) % 13) / 13.0
             writer.writerow(["", start + minute * 60, minute * 60, generation, uptime, "load", 1, 200 + noise * 4 + rss_slope * minute, 80 + fd_slope * minute, 30 + (minute % 3), 5 + noise, 3])
     with open(os.path.join(directory, "events.jsonl"), "w") as handle:
-        handle.write(json.dumps({"type": "crash_kill", "ts": start + 40 * 60, "elapsed_s": 40 * 60}) + "\n")
-        handle.write(json.dumps({"type": "crash_ready", "ts": start + 40 * 60 + 8, "elapsed_s": 40 * 60 + 8, "ready_after_s": 8.0, "limit_s": 120}) + "\n")
+        if not no_crash_drill:
+            handle.write(json.dumps({"type": "crash_kill", "ts": start + 40 * 60, "elapsed_s": 40 * 60}) + "\n")
+            if crash_failed:
+                handle.write(json.dumps({"type": "crash_failed", "ts": start + 40 * 60 + 130, "elapsed_s": 40 * 60 + 130, "error": "not ready"}) + "\n")
+            else:
+                handle.write(json.dumps({"type": "crash_ready", "ts": start + 40 * 60 + 8, "elapsed_s": 40 * 60 + 8, "ready_after_s": 8.0, "limit_s": 120}) + "\n")
+            handle.write(json.dumps({"type": "crash_check", "ts": start + 70 * 60, "elapsed_s": 70 * 60, "checked": 500, "missing": crash_stalled}) + "\n")
+        handle.write(json.dumps({"type": "backup_drill", "ts": start + 41 * 60, "elapsed_s": 41 * 60, "ok": backup_ok, "error": None if backup_ok else "integrity_check says malformed", "detail": "ok"}) + "\n")
+        if drill_error:
+            handle.write(json.dumps({"type": "drill_error", "ts": start + 50 * 60, "elapsed_s": 50 * 60, "error": "OSError('boom')"}) + "\n")
     with open(os.path.join(directory, "load-stats.jsonl"), "w") as handle:
         accepted = rejected = connect_errors = 0
         for tick in range(minutes * 6):
@@ -461,53 +551,87 @@ def synthetic_run(directory, rss_slope=0.0, fd_slope=0.0, lost=0, unflagged=0, d
                 rejected += errors
             stamp = datetime.datetime.fromtimestamp(now, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f") + "0Z"
             handle.write(json.dumps({"t": stamp, "elapsed_s": tick * 10, "accepted": accepted, "rejected": rejected, "connect_errors": connect_errors}) + "\n")
+    if no_verification:
+        return
+    # the generator counted 300 per tick; the ack log holds `acknowledged` (1000 by default is far fewer: the tolerance check needs them to agree)
+    counted = minutes * 6 * 300
     verification = {
-        "acknowledged": 1000, "delivered_unique_of_acknowledged": 1000 - lost, "lost_count": lost, "lost_sample": list(range(lost)),
-        "duplicates": 3, "duplicates_checked": 3, "duplicates_flagged": 3 - unflagged, "duplicates_unflagged": unflagged, "duplicates_unflagged_sample": list(range(unflagged)),
-        "duplicates_verifiable": history != "statsonly",
+        "acknowledged": counted if acknowledged == 1000 else acknowledged, "delivered_unique_of_acknowledged": (counted if acknowledged == 1000 else acknowledged) - lost,
+        "lost_count": lost, "lost_sample": list(range(lost)),
+        "duplicates": duplicates, "duplicates_checked": duplicates, "duplicates_flagged": duplicates - unflagged, "duplicates_unflagged": unflagged,
+        "duplicates_unflagged_sample": list(range(unflagged)), "duplicates_verifiable": history != "statsonly",
+        "sink_dropped_acks": dropped, "singles_checked": 1000, "singles_flagged": singles_flagged, "load_exit_code": load_exit_code,
         "drain": {"drained": depth == 0, "depth": depth, "deferred": 0, "seconds": 12, "limit_seconds": 900},
-        "shutdown": {"exit_code": 0, "seconds": 3.0}, "host_log": {"critical": 0, "errors": 0, "lines": 100},
+        "shutdown": {"exit_code": shutdown_code, "seconds": 3.0}, "host_log": {"critical": 0, "errors": 0, "lines": 100}, "unexpected_exits": unexpected_exits,
     }
+    if dup_error:
+        verification["duplicates_unflagged"] = None
+        verification["duplicates_error"] = dup_error
     with open(os.path.join(directory, "verification.json"), "w") as handle:
         json.dump(verification, handle)
 
 
 def self_test():
     thresholds = {k: v[0] for k, v in THRESHOLDS.items()}
+    # (title, synthetic run arguments, expected verdict, a criterion that must be among the FAILs or None, a criterion that must have this status)
     cases = [
-        ("a clean run passes", {}, "PASS", None),
-        ("a lost message fails", {"lost": 2}, "FAIL", "no acknowledged message lost"),
-        ("an unflagged duplicate fails", {"unflagged": 1}, "FAIL", "no unflagged duplicate"),
-        ("a queue that does not drain fails", {"depth": 40}, "FAIL", "queue drains to zero after load stops"),
-        ("a leaking process (RSS +2 MB/min) fails", {"rss_slope": 2.0},"FAIL", "RSS flat after warm-up"),
-        ("a file descriptor leak fails", {"fd_slope": 0.5}, "FAIL", "file descriptors flat"),
-        ("errors outside crash windows fail", {"errors": 40}, "FAIL", "error rate"),
-        ("StatsOnly skips the duplicate flag check", {"history": "statsonly"}, "PASS", None),
+        ("a clean run passes", {}, "PASS", None, None),
+        ("a lost message fails", {"lost": 2}, "FAIL", "no acknowledged message lost", None),
+        ("an unflagged duplicate fails", {"unflagged": 1}, "FAIL", "no unflagged duplicate", None),
+        ("a duplicate lookup that errored fails", {"dup_error": "HTTP 500"}, "FAIL", "no unflagged duplicate", None),
+        ("a queue that does not drain fails", {"depth": 40}, "FAIL", "queue drains to zero after load stops", None),
+        ("a leaking process (RSS +2 MB/min) fails", {"rss_slope": 2.0}, "FAIL", "RSS flat after warm-up", None),
+        ("a file descriptor leak fails", {"fd_slope": 0.5}, "FAIL", "file descriptors flat", None),
+        ("errors outside crash windows fail", {"errors": 40}, "FAIL", "error rate", None),
+        ("StatsOnly skips the duplicate flag check", {"history": "statsonly"}, "PASS", None, ("no unflagged duplicate", "SKIP")),
+        ("acknowledged crash checks that stayed undelivered fail", {"crash_stalled": 3}, "FAIL", "crash drills recover", None),
+        ("a server that did not come back fails", {"crash_failed": True}, "FAIL", "crash drills recover", None),
+        ("a failed backup drill fails", {"backup_ok": False}, "FAIL", "backup and restore drills", None),
+        ("a server exit that no drill caused fails", {"unexpected_exits": 1}, "FAIL", "server stayed up between drills", None),
+        ("a non-zero exit after SIGTERM fails", {"shutdown_code": 137}, "FAIL", "graceful shutdown", None),
+        ("a missing verification.json fails", {"no_verification": True}, "FAIL", "no acknowledged message lost", None),
+        ("an empty ack log fails", {"acknowledged": 0}, "FAIL", "ack log complete", None),
+        ("an ack log far shorter than the generator's count fails", {"acknowledged": 5000}, "FAIL", "ack log complete", None),
+        ("a harness error in a drill loop fails", {"drill_error": True}, "FAIL", "harness errors", None),
+        ("a crash drill that never ran fails", {"no_crash_drill": True}, "FAIL", "crash drills ran as often as promised", None),
+        ("a sampler that wrote a third of its rows fails", {"row_every": 3}, "FAIL", "sampler kept up", None),
+        ("dropped replies without any duplicate fail", {"duplicates": 0, "dropped": 4}, "FAIL", "duplicate path exercised", None),
+        ("once-received messages flagged on a large scale fail", {"singles_flagged": 200}, "FAIL", "possible_duplicate is not sprayed", None),
+        ("a few flagged once-received messages after one kill pass", {"singles_flagged": 3}, "PASS", None, ("possible_duplicate is not sprayed", "PASS")),
+        ("a non-zero generator exit fails", {"load_exit_code": 1}, "FAIL", "load generator exit code", None),
     ]
     failures = 0
-    for title, kwargs, expected, culprit in cases:
+    for title, kwargs, expected, culprit, wanted in cases:
         with tempfile.TemporaryDirectory() as directory:
             synthetic_run(directory, **kwargs)
             result = evaluate(directory, dict(thresholds))
             names = [c["name"] for c in result["criteria"] if c["status"] == "FAIL"]
             ok = result["verdict"] == expected and (culprit is None or culprit in names)
-            if title.startswith("StatsOnly"):
-                ok = ok and any(c["name"] == "no unflagged duplicate" and c["status"] == "SKIP" for c in result["criteria"])
+            if wanted:
+                ok = ok and any(c["name"] == wanted[0] and c["status"] == wanted[1] for c in result["criteria"])
             if title.startswith("a clean"):
-                ok = ok and not names and all(c["status"] == "PASS" for c in result["criteria"] if "crash" in c["name"] or "RSS" in c["name"])
+                ok = ok and not names and all(c["status"] == "PASS" for c in result["criteria"] if c["name"] != "RSS growth in every process generation" or True)
             summary_markdown(directory, result)      # must not raise
             print("%-4s %s (verdict %s%s)" % ("ok" if ok else "FAIL", title, result["verdict"], ", failed: " + ", ".join(names) if names else ""))
             failures += 0 if ok else 1
-    short = tempfile.mkdtemp()
-    synthetic_run(short, minutes=12)
-    result = evaluate(short, dict(thresholds))
-    skipped = [c["name"] for c in result["criteria"] if c["status"] == "SKIP"]
-    ok = result["verdict"] == "PASS" and "RSS flat after warm-up" in skipped
-    print("%-4s a 12 minute run reports its trend criteria as SKIP, not PASS (%s)" % ("ok" if ok else "FAIL", ", ".join(skipped)))
-    failures += 0 if ok else 1
-    for name in os.listdir(short):
-        os.remove(os.path.join(short, name))
-    os.rmdir(short)
+    # a run too short for a trend: SKIP normally, FAIL when strict
+    for strict, expected in ((False, "PASS"), (True, "FAIL")):
+        short = tempfile.mkdtemp()
+        synthetic_run(short, minutes=12, strict=strict, no_crash_drill=True)
+        os.remove(os.path.join(short, "events.jsonl"))       # no drills expected in 12 minutes at 40 minute intervals: drop the fixture's drill events
+        with open(os.path.join(short, "config.json")) as handle:
+            config = json.load(handle)
+        config["crash_interval_min"] = config["backup_interval_min"] = 0
+        with open(os.path.join(short, "config.json"), "w") as handle:
+            json.dump(config, handle)
+        result = evaluate(short, dict(thresholds))
+        trend = {c["name"]: c["status"] for c in result["criteria"] if c["name"] in TREND_CRITERIA}
+        ok = result["verdict"] == expected and set(trend.values()) == {"SKIP" if not strict else "FAIL"}
+        print("%-4s a 12 minute run reports its trend criteria as %s when strict=%s (verdict %s)" % ("ok" if ok else "FAIL", "FAIL" if strict else "SKIP", strict, result["verdict"]))
+        failures += 0 if ok else 1
+        for name in os.listdir(short):
+            os.remove(os.path.join(short, name))
+        os.rmdir(short)
     return 1 if failures else 0
 
 
@@ -515,6 +639,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("run_dir", nargs="?")
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--strict", action="store_true", help="a trend that cannot be judged (a run too short) is a FAIL; automatic in soak.py from one hour of load")
     for name, (default, meaning) in THRESHOLDS.items():
         parser.add_argument("--" + name.replace("_", "-"), type=float, default=default, help="%s (default %s)" % (meaning, default))
     args = parser.parse_args()
@@ -523,7 +648,7 @@ def main():
     if not args.run_dir:
         parser.error("a run directory is required")
     thresholds = {name: getattr(args, name) for name in THRESHOLDS}
-    result = evaluate(args.run_dir, thresholds)
+    result = evaluate(args.run_dir, thresholds, strict=True if args.strict else None)
     with open(os.path.join(args.run_dir, "verdict.json"), "w", encoding="utf-8") as handle:
         json.dump(result, handle, indent=2)
     summary = summary_markdown(args.run_dir, result)

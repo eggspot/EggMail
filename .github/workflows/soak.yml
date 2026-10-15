@@ -60,7 +60,9 @@ on:
       claim_lease_min:
         description: Delivery:ClaimLease in minutes (0 keeps the product default of 15); a short value lets a short proof run see crash recovery
         default: '0'
-  # Rare and off by default: needs the repository variable EGGMAIL_SOAK_SCHEDULE=true (see BILLING above). Monthly, 2 hours of SQLite.
+  # Rare and off by default: needs the repository variable EGGMAIL_SOAK_SCHEDULE=true (see BILLING above). When on, it runs once a month with exactly
+  # the input defaults: 2 hours of load on SQLite, history full, Sqlite:SyncMode=Off, 30 messages a second, a kill -9 every 20 minutes, a backup and
+  # restore drill every 30, a sample a minute (docs/soak.md, "Schedule").
   schedule:
     - cron: '23 3 1 * *'
 
@@ -84,6 +86,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
+          persist-credentials: false
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
@@ -101,14 +104,14 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import os, sys
+          import math, os, sys
           hours = float(os.environ["HOURS"])
           backend = os.environ["BACKEND"]
           runs = 2 if backend == "both" else 1
           # 8 minutes of checkout, publish and start-up, 3 minutes of shutdown and reporting per run, and a drain of at least 5 minutes per run
           minutes = 8 + runs * (hours * 60 + 3 + 5)
           print("load per backend: %.2f h, runs: %d, planned job time without a long drain: %.0f min (limit 358)" % (hours, runs, minutes))
-          if hours <= 0 or minutes > 340:
+          if not math.isfinite(hours) or hours <= 0 or minutes > 340:
               sys.exit("This does not fit in one hosted job (6 h limit). Lower hours, run the backends in separate dispatches, or use a self-hosted runner (docs/soak.md).")
           with open(os.environ["GITHUB_OUTPUT"], "a") as handle:
               handle.write("runs=%d\n" % runs)
@@ -141,17 +144,22 @@ jobs:
           backends=("$BACKEND"); [ "$BACKEND" != both ] || backends=(sqlite postgres)
           mkdir -p soak-results
           status=0
+          this_load=$(python3 -c "import math, os; v = float(os.environ['HOURS']); assert math.isfinite(v) and v > 0; print(int(v * 60))") || exit 2
+          index=0
           for b in "${backends[@]}"; do
-            # The drain after the load may take up to 30 minutes in the worst case; never more than the job has left (345 minute step limit).
+            # The drain after the load may take up to 30 minutes in the worst case. Never more than the step has left (345 minute limit) after
+            # reserving what the backends still to run need: their load, 8 minutes of start-up and shutdown, and a 6 minute drain.
             used=$(( ($(date +%s) - started) / 60 ))
-            this_load=$(python3 -c "print(int(float('$HOURS') * 60))")
-            drain=$(( 340 - used - this_load - 6 )); [ "$drain" -le 30 ] || drain=30; [ "$drain" -ge 5 ] || drain=5
+            later=$(( ${#backends[@]} - 1 - index ))
+            drain=$(( 335 - used - this_load - 8 - later * (this_load + 14) ))
+            [ "$drain" -le 30 ] || drain=30; [ "$drain" -ge 5 ] || drain=5
             echo "::group::soak $b ($HOURS h, drain limit $drain min)"
-            bench/soak/run-soak.sh --skip-build --hours "$HOURS" --backend "$b" --history "$HISTORY" --sync "$SYNC" --rate "$RATE" --size-mix "$SIZE_MIX" \
+            bench/soak/run-soak.sh --skip-build --strict --hours "$HOURS" --backend "$b" --history "$HISTORY" --sync "$SYNC" --rate "$RATE" --size-mix "$SIZE_MIX" \
               --connections "$CONNECTIONS" --crash-interval-min "$CRASH_INTERVAL_MIN" --backup-interval-min "$BACKUP_INTERVAL_MIN" --quiet-tail "$QUIET_TAIL" \
               --sample-interval-s "$SAMPLE_INTERVAL_S" --claim-lease-min "$CLAIM_LEASE_MIN" --drain-timeout-min "$drain" --pg-mode docker --out "soak-results/$b" \
               || status=1
             echo "::endgroup::"
+            index=$(( index + 1 ))
           done
           exit $status
 
@@ -177,6 +185,8 @@ jobs:
             soak-results
             !soak-results/*/data/**
             !soak-results/*/restore-*/**
+            !soak-results/*/restore-*.dump
+            !soak-results/*/pgdata/**
             !soak-results/*/admin-password.txt
           retention-days: 14
           if-no-files-found: warn
