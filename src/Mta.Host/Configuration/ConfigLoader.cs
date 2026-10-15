@@ -65,10 +65,11 @@ public static class ConfigLoader
 
     /// <summary>
     /// Builds the layered configuration for the process: appsettings (<paramref name="appSettingsPath"/>, default <see cref="DefaultAppSettingsPath"/>, if present), the bootstrap file in the data directory
-    /// (storage pointer written by the backend switch), environment variables, then the command line (highest precedence).
+    /// (storage pointer written by the backend switch), the simple <c>EGGMAIL_*</c> variables (<see cref="EnvironmentAliases"/>; read through <paramref name="environment"/>,
+    /// the process environment by default), the long-form environment variables, then the command line (highest precedence).
     /// <paramref name="storedSettings"/> (the global settings kept in the config store) form the lowest layer, above the built-in defaults.
     /// </summary>
-    public static IConfigurationRoot Build(string[] args, string? dataDirectoryHint = null, string? appSettingsPath = null, IEnumerable<KeyValuePair<string, string?>>? storedSettings = null, string? bootstrapFileOverride = null)
+    public static IConfigurationRoot Build(string[] args, string? dataDirectoryHint = null, string? appSettingsPath = null, IEnumerable<KeyValuePair<string, string?>>? storedSettings = null, string? bootstrapFileOverride = null, Func<string, string?>? environment = null)
     {
         var builder = new ConfigurationBuilder();
         string bootstrapPath = ResolveBootstrapPath(dataDirectoryHint, args);
@@ -91,7 +92,14 @@ public static class ConfigLoader
             builder.AddJsonFile(bootstrap, optional: true, reloadOnChange: false);
         }
 
+        // The simple names are aliases: they sit below the long-form environment variables and the command line, so a key set the long way always wins.
+        // The one exception is Hostname: configuration keys are case-insensitive, so the HOSTNAME variable that Docker and Kubernetes set in every container
+        // (the container id or pod name) IS the key "Hostname" and would silently outrank EGGMAIL_HOSTNAME. The host name alias therefore sits just above the
+        // environment (and still below the command line).
+        EnvironmentAliasResult aliases = EnvironmentAliases.Translate(environment ?? Environment.GetEnvironmentVariable);
+        builder.Add(new EnvironmentAliasesSource(new EnvironmentAliasResult(aliases.Values.Where(v => v.Key != "Hostname").ToList(), aliases.Errors)));
         builder.AddEnvironmentVariables();
+        builder.Add(new EnvironmentAliasesSource(new EnvironmentAliasResult(aliases.Values.Where(v => v.Key == "Hostname").ToList(), [])));
         builder.AddCommandLine(args);
         return builder.Build();
     }
@@ -110,6 +118,18 @@ public static class ConfigLoader
             // The binder reports a value of the wrong type ("12x" for a number, "soon" for a TimeSpan) by throwing; that is a configuration error, not a crash.
             cfg = new MtaConfig();
             errors.Add(ex.InnerException?.Message is { Length: > 0 } inner ? $"{ex.Message} ({inner})" : ex.Message);
+        }
+
+        if (configuration is IConfigurationRoot root)
+        {
+            errors.AddRange(root.Providers.OfType<EnvironmentAliasesProvider>().SelectMany(p => p.Errors));
+
+            // EGGMAIL_ACME_STAGING / EGGMAIL_ACME_DIRECTORY only choose the CA. They are an error only when nothing, by whatever layer, turns ACME on:
+            // Acme__Enabled=true in the environment or a mounted file is as good as EGGMAIL_ACME_EMAIL.
+            if (!cfg.Acme.Enabled && root.Providers.OfType<EnvironmentAliasesProvider>().Any(p => p.TryGet("Acme:Directory", out _)))
+            {
+                errors.Add("EGGMAIL_ACME_STAGING / EGGMAIL_ACME_DIRECTORY only choose the CA; ACME stays off until both EGGMAIL_HOSTNAME and EGGMAIL_ACME_EMAIL are set (or Acme:Enabled is true). Set them, or remove the CA variable.");
+            }
         }
 
         var locked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -153,15 +173,15 @@ public static class ConfigLoader
         var acme = Bind<AcmeSection>(configuration, "Acme");
         var api = Bind<ApiSection>(configuration, "Api");
         var domains = Bind<DomainsSection>(configuration, "Domains");
-        SplitEntries(domains.Bootstrap, configuration["Domains:Bootstrap"]);
-        SplitEntries(domains.MtaStsMx, configuration["Domains:MtaStsMx"]);
-        SplitEntries(acme.Domains, configuration["Acme:Domains"]);
+        ApplyList(configuration, "Domains:Bootstrap", domains.Bootstrap);
+        ApplyList(configuration, "Domains:MtaStsMx", domains.MtaStsMx);
+        ApplyList(configuration, "Acme:Domains", acme.Domains);
         if (acme.Enabled && acme.Domains.Count == 0)
         {
             acme.Domains.Add(configuration["Hostname"] ?? config.Hostname);   // "set just the host name and an email": the certificate is for the server's own name
         }
 
-        SplitEntries(api.MetricsAllowedNetworks, configuration["Api:MetricsAllowedNetworks"]);
+        ApplyList(configuration, "Api:MetricsAllowedNetworks", api.MetricsAllowedNetworks);
 
         return new MtaConfig
         {
@@ -188,6 +208,46 @@ public static class ConfigLoader
             Api = api,
             Domains = domains,
         };
+    }
+
+    /// <summary>
+    /// A list setting is owned by the highest layer that mentions it: configuration layers merge lists by index (<c>:0</c>, <c>:1</c>), which would leave the
+    /// stale entries of a lower layer behind a shorter list from a higher one (<c>appsettings.json</c> with two domains, <c>EGGMAIL_HOSTNAME</c> with one: two
+    /// domains, one of them stale). The list is the one entry set of the highest layer that has any, indexed or as one separated value.
+    /// </summary>
+    internal static void ApplyList(IConfiguration configuration, string key, List<string> list)
+    {
+        if (configuration is IConfigurationRoot root)
+        {
+            foreach (IConfigurationProvider provider in root.Providers.Reverse())
+            {
+                var indexes = provider.GetChildKeys([], key).Where(k => int.TryParse(k, out _)).Select(int.Parse).Order().ToList();
+                bool scalar = provider.TryGet(key, out string? value) && !string.IsNullOrWhiteSpace(value);
+                if (indexes.Count == 0 && !scalar)
+                {
+                    continue;
+                }
+
+                list.Clear();
+                if (scalar)
+                {
+                    list.Add(value!);
+                }
+
+                foreach (int index in indexes)
+                {
+                    if (provider.TryGet($"{key}:{index}", out string? entry) && !string.IsNullOrWhiteSpace(entry))
+                    {
+                        list.Add(entry);
+                    }
+                }
+
+                SplitEntries(list, null);
+                return;
+            }
+        }
+
+        SplitEntries(list, configuration[key]);
     }
 
     /// <summary>
@@ -447,6 +507,7 @@ public static class ConfigLoader
         }
 
         ValidateStorageTuning(c.Storage, errors);
+        ValidateRelay(c, errors);
         ValidateTlsAndAcme(c, errors);
         ValidateApi(c.Api, errors);
         ValidateDomains(c, errors);
@@ -528,6 +589,31 @@ public static class ConfigLoader
         Require(s.Sqlite.RetentionDeleteBatchSize >= 1, "Sqlite:RetentionDeleteBatchSize must be at least 1.", errors);
         Require(s.Sqlite.StatsFlushInterval >= TimeSpan.Zero, "Sqlite:StatsFlushInterval must not be negative.", errors);
         Require(s.Sqlite.RetentionDeletePause >= TimeSpan.Zero, "Sqlite:RetentionDeletePause must not be negative.", errors);
+    }
+
+    /// <summary>The relay from configuration: a combination that cannot work stops the start with a message that says what to set. (The first administrator's name and password are checked when the account is created, see <see cref="Mta.Host.Hosting.FirstAdministrator"/>.)</summary>
+    private static void ValidateRelay(MtaConfig c, List<string> errors)
+    {
+        RelaySection relay = c.Delivery.Relay;
+        if (string.IsNullOrWhiteSpace(relay.Address))
+        {
+            Require(string.IsNullOrWhiteSpace(relay.User) && string.IsNullOrEmpty(relay.Password) && string.IsNullOrWhiteSpace(relay.PasswordFile),
+                "Delivery:Relay:User / Password / PasswordFile are set without Delivery:Relay:Address (host:port).", errors);
+            return;
+        }
+
+        if (EnvironmentAliases.RelayProblem(relay.Address.Trim()) is { } relayProblem)
+        {
+            errors.Add("Delivery:Relay:Address: " + relayProblem);
+        }
+
+        Require(string.IsNullOrEmpty(relay.Password) || string.IsNullOrWhiteSpace(relay.PasswordFile), "Delivery:Relay:Password and Delivery:Relay:PasswordFile are both set. Set only one.", errors);
+        bool hasPassword = !string.IsNullOrEmpty(relay.Password) || !string.IsNullOrWhiteSpace(relay.PasswordFile);
+        Require(string.IsNullOrWhiteSpace(relay.User) == !hasPassword, "Delivery:Relay:User and a password (Delivery:Relay:Password or PasswordFile) go together: set both or neither.", errors);
+        string[] modes = ["none", "starttls", "required", "verify", "implicit"];
+        Require(string.IsNullOrWhiteSpace(relay.TlsMode) || modes.Contains(relay.TlsMode.Trim().ToLowerInvariant()), $"Delivery:Relay:TlsMode must be one of: {string.Join(", ", modes)}.", errors);
+        Require(string.IsNullOrWhiteSpace(relay.User) || !string.Equals(relay.TlsMode?.Trim(), "none", StringComparison.OrdinalIgnoreCase),
+            "Delivery:Relay:TlsMode none cannot be combined with a login: the password would travel in clear text.", errors);
     }
 
     private static void ValidateTlsAndAcme(MtaConfig c, List<string> errors)

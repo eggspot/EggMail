@@ -112,7 +112,7 @@ public static class CertificateMaterial
         try
         {
             return new CertificateRecord(
-                Ids.New(), $"selfsigned:{hostname}", [hostname.ToLowerInvariant(), "localhost"], cert.NotBefore.ToUniversalTime(), cert.NotAfter.ToUniversalTime(),
+                Ids.New(), $"selfsigned:{hostname}:{cert.Thumbprint[..8].ToLowerInvariant()}", [hostname.ToLowerInvariant(), "localhost"], cert.NotBefore.ToUniversalTime(), cert.NotAfter.ToUniversalTime(),
                 cert.ExportCertificatePem(), protector.Protect(pkcs8, SecretPurposes.TlsPrivateKey), "selfsigned", cert.Thumbprint, Active: true,
                 Version: now.ToUnixTimeMilliseconds(), CreatedAt: now);
         }

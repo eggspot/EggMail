@@ -10,12 +10,14 @@ import { MIN_PASSWORD, passwordProblem } from '../lib/passwords';
 /** The signed-in user's own account: who they are and a password change. */
 export default function Account(_props: Record<string, unknown>) {
   useDocumentTitle('Account');
-  const { me } = useApp();
+  const { me, refreshMe } = useApp();
+  const forced = me?.mustChangePassword === true;
   const [current, setCurrent] = useState('');
   const [next, setNext] = useState('');
   const [again, setAgain] = useState('');
   const [clientErrors, setClientErrors] = useState<Record<string, string>>({});
   const [done, setDone] = useState(false);
+  const [reloadNeeded, setReloadNeeded] = useState(false);
 
   const change = useAction(async () => {
     await api.changePassword(current, next);
@@ -23,6 +25,14 @@ export default function Account(_props: Record<string, unknown>) {
     setNext('');
     setAgain('');
     setDone(true);
+    if (forced) {
+      // The temporary mark is gone: the full dashboard opens. The password HAS changed, so failing to load what the dashboard needs next is not a failed change.
+      try {
+        await refreshMe();
+      } catch {
+        setReloadNeeded(true);
+      }
+    }
   });
   const serverErrors = fieldErrors(change.error);
   const errs = { ...serverErrors, ...clientErrors };
@@ -44,6 +54,13 @@ export default function Account(_props: Record<string, unknown>) {
   return (
     <>
       <PageHeader title="Account" subtitle="Your own sign-in." />
+      {forced && (
+        <Notice tone="warn">
+          <span role="alert">
+            You signed in with a temporary password (the one the server printed once in its log). Choose your own now: the rest of the dashboard opens after that.
+          </span>
+        </Notice>
+      )}
       <Card title="Signed in as">
         <KeyValue
           items={[
@@ -72,6 +89,16 @@ export default function Account(_props: Record<string, unknown>) {
           </div>
         </form>
         {change.error !== undefined && !serverErrors.currentPassword && !serverErrors.newPassword && <ErrorNotice error={change.error} />}
+        {reloadNeeded && (
+          <Notice tone="warn">
+            <span role="status">
+              Your password was changed, but the dashboard could not load what it needs next.{' '}
+              <button type="button" class="btn btn-small" onClick={() => window.location.reload()}>
+                Reload the dashboard
+              </button>
+            </span>
+          </Notice>
+        )}
         {done && (
           <Notice tone="ok">
             <span role="status">Password changed. Your other sessions were signed out.</span>
