@@ -41,13 +41,19 @@ public class ApiDomainsTests : IAsyncLifetime
                 continue;
             }
 
-            if (rec.GetProperty("type").GetString() == "CNAME")
+            string host = rec.GetProperty("host").GetString()!;
+            string value = rec.GetProperty("value").GetString()!;
+            switch (rec.GetProperty("type").GetString())
             {
-                _f.Dns.AddCname(rec.GetProperty("host").GetString()!, rec.GetProperty("value").GetString()!);
-            }
-            else
-            {
-                _f.Dns.AddTxt(rec.GetProperty("host").GetString()!, rec.GetProperty("value").GetString()!);
+                case "CNAME":
+                    _f.Dns.AddCname(host, value);
+                    break;
+                case "MX":
+                    _f.Dns.AddMx(host, ushort.Parse(value.Split(' ')[0]), value.Split(' ')[1]);
+                    break;
+                default:
+                    _f.Dns.AddTxt(host, value);
+                    break;
             }
         }
     }
@@ -80,6 +86,8 @@ public class ApiDomainsTests : IAsyncLifetime
 
         JsonElement[] records = r["records"].EnumerateArray().ToArray();
         Assert.Equal(["dkim", "return_path", "spf", "dmarc"], records.Select(x => x.GetProperty("purpose").GetString()!));
+        Assert.False(r["readyToSend"].GetBoolean());   // pending: sending is blocked until the required records are found
+        Assert.All(records, rec => Assert.False(string.IsNullOrWhiteSpace(rec.GetProperty("note").GetString())));
         JsonElement dkim = records[0];
         Assert.Equal("TXT", dkim.GetProperty("type").GetString());
         Assert.Equal("egg202610._domainkey.mail.example.com", dkim.GetProperty("host").GetString());
@@ -90,7 +98,7 @@ public class ApiDomainsTests : IAsyncLifetime
         Assert.Equal(JsonValueKind.Null, dkim.GetProperty("found").ValueKind);
         Assert.True(dkim.GetProperty("required").GetBoolean());
         Assert.Equal(("CNAME", "bounce.mail.example.com", "bounces.egg.test"), (records[1].GetProperty("type").GetString()!, records[1].GetProperty("host").GetString()!, records[1].GetProperty("value").GetString()!));
-        Assert.Equal("v=spf1 ~all", records[2].GetProperty("value").GetString());
+        Assert.Equal("v=spf1 include:spf.egg.test ~all", records[2].GetProperty("value").GetString());
         Assert.Equal("_dmarc.mail.example.com", records[3].GetProperty("host").GetString());
         Assert.False(records[2].GetProperty("required").GetBoolean());
         Assert.False(records[3].GetProperty("required").GetBoolean());
@@ -246,7 +254,7 @@ public class ApiDomainsTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task A_wrong_dkim_value_is_invalid_with_what_was_found()
+    public async Task A_dkim_value_that_is_not_a_key_is_invalid_with_what_was_found()
     {
         JsonElement d = await CreateAsync();
         string host = d.GetProperty("records")[0].GetProperty("host").GetString()!;

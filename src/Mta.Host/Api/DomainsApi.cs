@@ -1,4 +1,3 @@
-using System.Net;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -17,7 +16,13 @@ public sealed class CreateDomainRequest
     public string? Name { get; set; }
 }
 
-public sealed record DnsRecordResponse(string Type, string Host, string Value, int Ttl, string Purpose, string Status, string? Found, string Expected, bool Required);
+public sealed record DnsRecordResponse(string Type, string Host, string Value, int Ttl, string Purpose, string Status, string? Found, string Expected, bool Required, string? Note, bool Publishable);
+
+/// <summary>The MTA-STS policy file EggMail serves for a domain (<see cref="Url"/> is where receivers fetch it, <see cref="Content"/> is what they get).</summary>
+public sealed record MtaStsPolicyResponse(string Url, string Host, string Content);
+
+/// <summary>Everything to publish for a domain: the records with their last check result, the same as zone-file text, and the MTA-STS policy file when it is served.</summary>
+public sealed record DomainRecordsResponse(Guid Id, string Name, bool ReadyToSend, DateTimeOffset? CheckedAt, IReadOnlyList<DnsRecordResponse> Records, string ZoneFile, MtaStsPolicyResponse? MtaStsPolicy);
 
 public sealed record DkimKeyResponse(string Selector, string PublicKey, bool Active, DateTimeOffset CreatedAt, DateTimeOffset? RetiredAt);
 
@@ -31,6 +36,7 @@ public sealed record DomainResponse(
     DateTimeOffset? NextCheckAt,
     string? LastError,
     bool ReturnPathVerified,
+    bool ReadyToSend,
     IReadOnlyList<DnsRecordResponse> Records,
     DkimKeyResponse Dkim,
     IReadOnlyList<DkimKeyResponse> DkimKeys);
@@ -44,6 +50,7 @@ public sealed class DomainsApi(ApiAuthenticator auth, IStorage storage, ISecretP
         api.PostRoute("/domains", CreateAsync);
         api.GetRoute("/domains/{id}", GetAsync);
         api.DeleteRoute("/domains/{id}", DeleteAsync);
+        api.GetRoute("/domains/{id}/records", RecordsAsync);
         api.PostRoute("/domains/{id}/verify", VerifyAsync);
         api.PostRoute("/domains/{id}/dkim/rotate", RotateAsync);
         api.DeleteRoute("/domains/{id}/dkim/rotate", CancelRotationAsync);
@@ -78,6 +85,32 @@ public sealed class DomainsApi(ApiAuthenticator auth, IStorage storage, ISecretP
         return ApiResults.Ok(await ToResponseAsync(domain, context.RequestAborted).ConfigureAwait(false));
     }
 
+    /// <summary>
+    /// What to publish for the domain, as records with their last check result and as zone-file text; <c>?format=zone</c> answers only the zone file as
+    /// <c>text/plain</c>. Nothing is looked up in DNS (use <c>POST /verify</c> for that).
+    /// </summary>
+    private async Task<IResult> RecordsAsync(HttpContext context, string id)
+    {
+        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.Domains).ConfigureAwait(false);
+        CancellationToken ct = context.RequestAborted;
+        DomainRecord domain = await FindOwnAsync(caller, id, ct).ConfigureAwait(false);
+        var keys = await Config.GetDkimKeysAsync(domain.Id, ct).ConfigureAwait(false);
+        var plan = verification.PlanRecords(domain, keys, clock.UtcNow);
+        string zone = ZoneFile.Render(domain.Name, plan);
+        if (string.Equals(context.Request.Query["format"], "zone", StringComparison.OrdinalIgnoreCase))
+        {
+            return Results.Text(zone, "text/plain; charset=utf-8");
+        }
+
+        DomainCheckSnapshot? snapshot = await verification.GetSnapshotAsync(domain.Id, ct).ConfigureAwait(false);
+        DomainRecordOptions recordOptions = verification.RecordOptions;
+        MtaStsPolicyResponse? policy = recordOptions.MtaStsEnabled
+            ? new MtaStsPolicyResponse(MtaStsPolicyDocument.UrlFor(domain.Name), MtaStsPolicyDocument.HostFor(domain.Name), MtaStsPolicyDocument.Render(recordOptions))
+            : null;
+        return ApiResults.Ok(new DomainRecordsResponse(
+            domain.Id, domain.Name, IsReadyToSend(domain), snapshot?.CheckedAt, plan.Select(r => ToRecordResponse(domain, r, snapshot)).ToList(), zone, policy));
+    }
+
     private async Task<IResult> CreateAsync(HttpContext context)
     {
         ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.Domains).ConfigureAwait(false);
@@ -95,38 +128,17 @@ public sealed class DomainsApi(ApiAuthenticator auth, IStorage storage, ISecretP
             throw ApiException.Validation("name", "This domain is already registered.");
         }
 
-        DateTimeOffset now = clock.UtcNow;
-        var domain = new DomainRecord(
-            Ids.New(now),
-            caller.TenantId,
-            name,
-            DomainStatus.Pending,
-            string.IsNullOrWhiteSpace(verification.RecordOptions.BounceDomain) ? null : DomainRecordPlanner.ReturnPathHost(name, verification.RecordOptions),
-            ReturnPathVerified: false,
-            now,
-            LastCheckedAt: null,
-            NextCheckAt: verification.Schedule.FirstCheckAt(now),
-            ConsecutiveFailures: 0,
-            TemporaryFailureSince: null,
-            SendingPaused: false,
-            LastError: null);
-        StoredDkimKey key = await DomainVerificationService.CreateKeyAsync(domain.Id, DomainVerificationService.NextSelector([], now), protector, now, active: true).ConfigureAwait(false);
-
-        // The key goes in first: a domain without a key would verify without DKIM if the process died in between. An orphan key is harmless.
-        await Config.AddDkimKeyAsync(key, ct).ConfigureAwait(false);
+        RegisteredDomain registered;
         try
         {
-            await Config.UpsertDomainAsync(domain, ct).ConfigureAwait(false);
-            Mta.Host.Submission.DomainChangeSignal.Bump();
+            registered = await DomainRegistration.RegisterAsync(Config, protector, verification.Schedule, verification.RecordOptions, caller.TenantId, name, clock.UtcNow, ct).ConfigureAwait(false);
         }
         catch (StorageConflictException)
         {
-            await Config.DeleteDomainAsync(domain.Id, CancellationToken.None).ConfigureAwait(false); // removes the orphan key
-            Mta.Host.Submission.DomainChangeSignal.Bump();
             throw ApiException.Validation("name", "This domain is already registered.");
         }
 
-        return ApiResults.Created("/api/v1/domains/" + ApiJson.Id(domain.Id), await ToResponseAsync(domain, ct).ConfigureAwait(false));
+        return ApiResults.Created("/api/v1/domains/" + ApiJson.Id(registered.Domain.Id), await ToResponseAsync(registered.Domain, ct).ConfigureAwait(false));
     }
 
     private async Task<IResult> DeleteAsync(HttpContext context, string id)
@@ -239,7 +251,7 @@ public sealed class DomainsApi(ApiAuthenticator auth, IStorage storage, ISecretP
             : KeyOf(newest);
         return new DomainResponse(
             domain.Id, domain.Name, ApiMap.DomainStatus(domain.Status), domain.SendingPaused, domain.CreatedAt, domain.LastCheckedAt, domain.NextCheckAt, domain.LastError,
-            domain.ReturnPathVerified, records, dkim, ordered.Select(KeyOf).ToList());
+            domain.ReturnPathVerified, IsReadyToSend(domain), records, dkim, ordered.Select(KeyOf).ToList());
     }
 
     private static DkimKeyResponse KeyOf(StoredDkimKey k) => new(k.Selector, k.PublicKeyBase64, k.Active, k.CreatedAt, k.RetiredAt);
@@ -259,15 +271,11 @@ public sealed class DomainsApi(ApiAuthenticator auth, IStorage storage, ISecretP
             status = record.Required && domain.Status == DomainStatus.Verified ? "ok" : "pending";
         }
 
-        string purpose = record.Purpose switch
-        {
-            DomainRecordPurpose.Dkim => "dkim",
-            DomainRecordPurpose.ReturnPath => "return_path",
-            DomainRecordPurpose.Spf => "spf",
-            _ => "dmarc",
-        };
-        return new DnsRecordResponse(record.Type, record.Host, record.Value, record.Ttl, purpose, status, found, record.Value, record.Required);
+        return new DnsRecordResponse(record.Type, record.Host, record.Value, record.Ttl, DomainRecordPurposes.ApiWord(record.Purpose), status, found, record.Value, record.Required, record.Note, ZoneFile.BelongsInZone(record, domain.Name));
     }
+
+    /// <summary>Whether mail can be sent from the domain now: verified, or in the grace period of a temporary failure, and not paused (design §8).</summary>
+    public static bool IsReadyToSend(DomainRecord domain) => domain.Status is DomainStatus.Verified or DomainStatus.TemporaryFailure && !domain.SendingPaused;
 
     /// <summary>Lower-cases and validates a domain name; returns the A-label form.</summary>
     public static string NormalizeName(string? input)
@@ -277,13 +285,6 @@ public sealed class DomainsApi(ApiAuthenticator auth, IStorage storage, ISecretP
             throw ApiException.Validation("name", "A domain name is required.");
         }
 
-        string trimmed = input.Trim().TrimEnd('.');
-        if (trimmed.Length > 253 || !EmailAddress.TryParse("postmaster@" + trimmed, allowUtf8: true, out EmailAddress parsed)
-            || parsed.IsAddressLiteral || !parsed.Domain.Contains('.') || parsed.Domain.Contains('_') || IPAddress.TryParse(parsed.Domain, out _))
-        {
-            throw ApiException.Validation("name", "Enter a valid domain name such as mail.example.com.");
-        }
-
-        return parsed.Domain;
+        return DomainNames.TryNormalize(input, out string name) ? name : throw ApiException.Validation("name", "Enter a valid domain name such as mail.example.com.");
     }
 }

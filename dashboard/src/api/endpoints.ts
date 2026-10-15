@@ -10,6 +10,7 @@ import type {
   DashboardUser,
   DeliveryEvent,
   Domain,
+  DomainRecords,
   MaintenanceState,
   Me,
   MessageDetail,
@@ -79,6 +80,7 @@ export const api = {
   // ---- domains ----
   domains: async () => itemsOf(await http.get<Domain[] | Page<Domain>>('/api/v1/domains')),
   domain: (id: string) => http.get<Domain>(`/api/v1/domains/${enc(id)}`),
+  domainRecords: (id: string) => http.get<DomainRecords>(`/api/v1/domains/${enc(id)}/records`),
   createDomain: (name: string) => http.post<Domain>('/api/v1/domains', { name }),
   deleteDomain: (id: string) => http.del<void>(`/api/v1/domains/${enc(id)}`),
   verifyDomain: (id: string) => http.post<Domain>(`/api/v1/domains/${enc(id)}/verify`),

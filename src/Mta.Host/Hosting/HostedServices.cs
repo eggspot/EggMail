@@ -86,6 +86,11 @@ internal sealed class CertificateService(EggMailRuntime runtime) : BackgroundSer
             tasks.Add(acme.RunAsync(stoppingToken));
         }
 
+        if (runtime.AcmeHttpListener is { } listener)
+        {
+            tasks.Add(listener.RunAsync(stoppingToken));   // on every replica: the CA connects to whichever one the load balancer picks
+        }
+
         return Task.WhenAll(tasks);
     }
 }
