@@ -29,6 +29,21 @@ internal static class Pebble
     /// <summary>PEM file of the CA that signed Pebble's own HTTPS certificate (<c>test/certs/pebble.minica.pem</c> in the Pebble image). Default: system trust.</summary>
     public const string TlsCaFileVariable = "EGGMAIL_TEST_ACME_CA_FILE";
 
+    /// <summary>The port Pebble's validation authority connects to for HTTP-01 (<c>httpPort</c> of its config, 5002 in the test config); our listener binds it.</summary>
+    public const string HttpPortVariable = "EGGMAIL_TEST_ACME_HTTP_PORT";
+
+    /// <summary>The directory of a second Pebble that requires external account binding (<c>externalAccountBindingRequired</c>), for example <c>https://localhost:14100/dir</c>. Unset: the EAB tests are skipped.</summary>
+    public const string EabDirectoryVariable = "EGGMAIL_TEST_ACME_EAB_DIRECTORY";
+
+    /// <summary>An EAB key id and its HMAC key (base64url) known to the second Pebble (<c>externalAccountMACKeys</c>; the same as Pebble's own EAB test config).</summary>
+    public const string EabKeyId = "kid-1";
+
+    public const string EabHmacKey = "zWNDZM6eQGHWpSRTPal5eIUYFTu7EajVIoguysqZ9wG44nMEtx3MUAsUDkMTQ12W";
+
+    public static int HttpPort => Environment.GetEnvironmentVariable(HttpPortVariable) is { Length: > 0 } v ? int.Parse(v, System.Globalization.CultureInfo.InvariantCulture) : 5002;
+
+    public static string? EabDirectory => Environment.GetEnvironmentVariable(EabDirectoryVariable) is { Length: > 0 } v ? v : null;
+
     public static string? UnavailableReason =>
         string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(DirectoryVariable))
             ? $"{DirectoryVariable} is not set: start Pebble and pebble-challtestsrv (docs/development.md, 'ACME tests') to run the ACME integration tests"
@@ -110,6 +125,16 @@ public sealed class PebbleFactAttribute : FactAttribute
     public override string Skip
     {
         get => base.Skip ?? Pebble.UnavailableReason ?? (RequiresPostgres ? Mta.Storage.Postgres.Tests.PostgresTestServer.UnavailableReason : null)!;
+        set => base.Skip = value;
+    }
+}
+
+/// <summary>A <c>[Fact]</c> that needs the Pebble that requires external account binding; skipped without <c>EGGMAIL_TEST_ACME_EAB_DIRECTORY</c>.</summary>
+public sealed class PebbleEabFactAttribute : FactAttribute
+{
+    public override string Skip
+    {
+        get => base.Skip ?? Pebble.UnavailableReason ?? (Pebble.EabDirectory is null ? $"{Pebble.EabDirectoryVariable} is not set: start a second Pebble with externalAccountBindingRequired (docs/development.md)" : null)!;
         set => base.Skip = value;
     }
 }

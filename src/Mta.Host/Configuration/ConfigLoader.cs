@@ -1,4 +1,6 @@
+using System.Net;
 using Microsoft.Extensions.Configuration;
+using Mta.Host.Tls;
 using Mta.Storage;
 
 namespace Mta.Host.Configuration;
@@ -151,6 +153,11 @@ public static class ConfigLoader
         var acme = Bind<AcmeSection>(configuration, "Acme");
         var api = Bind<ApiSection>(configuration, "Api");
         SplitEntries(acme.Domains, configuration["Acme:Domains"]);
+        if (acme.Enabled && acme.Domains.Count == 0)
+        {
+            acme.Domains.Add(configuration["Hostname"] ?? config.Hostname);   // "set just the host name and an email": the certificate is for the server's own name
+        }
+
         SplitEntries(api.MetricsAllowedNetworks, configuration["Api:MetricsAllowedNetworks"]);
 
         return new MtaConfig
@@ -462,13 +469,44 @@ public static class ConfigLoader
             return;
         }
 
-        Require(Uri.TryCreate(acme.DirectoryUrl, UriKind.Absolute, out Uri? directory) && directory.Scheme is "https" or "http", "Acme:DirectoryUrl must be an absolute http(s) URL.", errors);
+        string? directoryUrl = acme.EffectiveDirectoryUrl();
+        Require(directoryUrl is not null && Uri.TryCreate(directoryUrl, UriKind.Absolute, out Uri? directory) && directory.Scheme is "https" or "http",
+            string.IsNullOrWhiteSpace(acme.Directory)
+                ? "Acme:DirectoryUrl must be an absolute http(s) URL."
+                : $"Acme:Directory '{acme.Directory}' must be LetsEncrypt, LetsEncryptStaging, ZeroSsl or the absolute http(s) URL of an ACME directory.", errors);
         Require(string.Equals(acme.DnsProvider, "Cloudflare", StringComparison.OrdinalIgnoreCase), $"Acme:DnsProvider '{acme.DnsProvider}' is not supported (only Cloudflare).", errors);
-        Require(!string.IsNullOrWhiteSpace(acme.CloudflareApiToken) || !string.IsNullOrWhiteSpace(acme.CloudflareApiTokenFile), "Acme:CloudflareApiToken or Acme:CloudflareApiTokenFile is required when Acme:Enabled is true.", errors);
+        Require(acme.Challenge != AcmeChallengeMode.Dns01 || acme.HasDnsCredentials(), "Acme:CloudflareApiToken or Acme:CloudflareApiTokenFile is required when Acme:Challenge is Dns01.", errors);
         Require(!string.IsNullOrWhiteSpace(acme.CertificateName), "Acme:CertificateName must not be empty.", errors);
         Require(acme.RenewAtRemainingFraction is > 0 and < 1, "Acme:RenewAtRemainingFraction must be between 0 and 1 (exclusive).", errors);
         Require(acme.CheckInterval > TimeSpan.Zero, "Acme:CheckInterval must be positive.", errors);
         Require(acme.PropagationDelay >= TimeSpan.Zero, "Acme:PropagationDelay must not be negative.", errors);
+        Require(string.IsNullOrWhiteSpace(acme.EabKeyId) == (string.IsNullOrWhiteSpace(acme.EabHmacKey) && string.IsNullOrWhiteSpace(acme.EabHmacKeyFile)),
+            "Acme:EabKeyId and Acme:EabHmacKey (or Acme:EabHmacKeyFile) must be set together (external account binding).", errors);
+
+        foreach (string name in acme.Domains)
+        {
+            if (AcmeNames.TryNormalize(name, out string? error) is null)
+            {
+                errors.Add(acme.Domains.Count == 1 && string.Equals(name, c.Hostname, StringComparison.OrdinalIgnoreCase)
+                    ? $"Acme is enabled without Acme:Domains, so the certificate is for the Hostname, and '{c.Hostname}' is not a public host name: set Hostname (EGGMAIL_HOSTNAME) to the name of this server, for example mail.example.com."
+                    : "Acme:Domains: " + error);
+            }
+        }
+
+        bool wildcards = acme.Domains.Any(AcmeNames.IsWildcard);
+        if (wildcards && !acme.UsesDns01())
+        {
+            errors.Add("Acme:Domains has a wildcard name, which only DNS-01 can prove: set Acme:CloudflareApiToken (or Acme:CloudflareApiTokenFile) and, if Acme:Challenge is Http01, set it to Auto or Dns01.");
+        }
+
+        if (acme.UsesHttp01())
+        {
+            Require(acme.HttpListenPort is >= 1 and <= 65535, "Acme:HttpListenPort must be between 1 and 65535.", errors);
+            Require(IPAddress.TryParse(acme.HttpBindAddress, out _), "Acme:HttpBindAddress must be an IP address (:: for all).", errors);
+            Require(acme.HttpListenPort != c.Dashboard.HttpPort && (!c.Dashboard.HttpsEnabled || acme.HttpListenPort != c.Dashboard.HttpsPort),
+                $"Acme:HttpListenPort {acme.HttpListenPort} is the port of the dashboard (Dashboard:HttpPort / Dashboard:HttpsPort); the challenge listener needs a port of its own (it answers nothing but /.well-known/acme-challenge/).", errors);
+            Require(!c.Smtp.Listeners.Values.Any(l => l.Enabled && l.Port == acme.HttpListenPort), $"Acme:HttpListenPort {acme.HttpListenPort} is also the port of an SMTP listener.", errors);
+        }
     }
 
     private static void ValidateApi(ApiSection api, List<string> errors)

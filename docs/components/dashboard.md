@@ -68,7 +68,7 @@ Sign in to the mock as `admin` / `eggmail` (role `admin`, acts on a tenant chose
 |---|---|---|
 | `MOCK_HISTORY` | `full` (default), `statsonly` | `capabilities.history.mode`; in `statsonly` every per-message endpoint answers `410 history_not_recorded` |
 | `MOCK_BACKEND` | `sqlite` (default), `postgres` | `capabilities.backend` (informational only in the UI) |
-| `MOCK_WARNINGS` | comma list, default `sqlite_sync_off` on sqlite | `capabilities.warnings` (others: `certificate_expiring`, `self_signed_certificate`) |
+| `MOCK_WARNINGS` | comma list, default `sqlite_sync_off` on sqlite | `capabilities.warnings` (others: `certificate_expiring`, `self_signed_certificate`, `acme_pending`, `acme_failing`) |
 | `MOCK_NOT_READY` | `1` | every API call answers `503 not_ready` |
 | `MOCK_LATENCY_MS` | number | artificial latency |
 | `MOCK_ORCHESTRATED` | `1` | the storage switch reports an orchestrator-managed deployment (cutover patch) |

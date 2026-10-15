@@ -47,7 +47,10 @@ ENV Storage__Backend=Sqlite \
     DOTNET_gcServer=0 \
     DOTNET_TieredPGO=1
 # Container ports (high, mapped outward): 5587 submission STARTTLS, 4465 submissions, 2525 alt STARTTLS, 2526 bounce, 8080 HTTP (probes), 8443 HTTPS.
-EXPOSE 5587 4465 2525 2526 8080 8443
+# Port 80 is the ACME HTTP-01 challenge listener (Acme__Enabled=true without a DNS token): publish it as 80 so the certificate authority reaches it
+# (docker run -p 80:80). It answers /.well-known/acme-challenge/<token> and nothing else, and listens only while ACME is enabled with HTTP-01.
+# If the runtime refuses a non-root process on port 80, set Acme__HttpListenPort=8081 and publish -p 80:8081.
+EXPOSE 5587 4465 2525 2526 8080 8443 80
 VOLUME ["/data"]
 USER $APP_UID
 ENTRYPOINT ["/app/mta"]

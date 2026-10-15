@@ -29,6 +29,8 @@ public static class WarningTexts
         "self_signed_certificate" => "The server is using a self-signed certificate. Upload a certificate or request one through ACME.",
         "certificate_expiring" => "A TLS certificate expires within 14 days.",
         "certificate_expired" => "A TLS certificate has expired.",
+        "acme_pending" => "A certificate is being requested from the certificate authority (ACME). Until it is issued the server uses a self-signed certificate.",
+        "acme_failing" => "Requesting or renewing a certificate through ACME is failing; see the server log.",
         _ => "Warning: " + code,
     };
 }
@@ -45,8 +47,12 @@ public sealed class StorageHealthContributor(IStorage storage) : IHealthContribu
     }
 }
 
-/// <summary>Certificate warnings: only a self-signed certificate in use, and certificates close to or past expiry.</summary>
-public sealed class CertificateHealthContributor(IStorage storage, IClock clock) : IHealthContributor
+/// <summary>
+/// Certificate warnings: only a self-signed certificate in use, certificates close to or past expiry, and the state of ACME: <c>acme_pending</c> while
+/// the first certificate is awaited and <c>acme_failing</c> while an order or a renewal fails (with the last error and the next attempt, from the
+/// renewal state in the config store, so every replica says the same). The self-signed certificate keeps serving meanwhile.
+/// </summary>
+public sealed class CertificateHealthContributor(IStorage storage, IClock clock, Mta.Host.Configuration.MtaConfig? config = null) : IHealthContributor
 {
     public static readonly TimeSpan ExpiryWarning = TimeSpan.FromDays(14);
 
@@ -71,7 +77,58 @@ public sealed class CertificateHealthContributor(IStorage storage, IClock clock)
             warnings.Add(new HealthWarning("certificate_expiring", WarningTexts.For("certificate_expiring")));
         }
 
+        if (config is null || config.Acme.Enabled)
+        {
+            var acmeWarning = await AcmeWarningAsync(certificates, now, cancellationToken).ConfigureAwait(false);
+            if (acmeWarning is not null)
+            {
+                warnings.Add(acmeWarning);
+            }
+        }
+
         return new HealthReport(true, warnings, new Dictionary<string, string>());
+    }
+
+    private async ValueTask<HealthWarning?> AcmeWarningAsync(IReadOnlyList<CertificateRecord> active, DateTimeOffset now, CancellationToken ct)
+    {
+        var renewals = await storage.Config.GetAcmeRenewalsAsync(ct).ConfigureAwait(false);
+        var failing = renewals.Where(r => r.Status == "failed").OrderBy(r => r.CertificateName == config?.Acme.CertificateName ? 0 : 1).ThenBy(r => r.CertificateName, StringComparer.Ordinal).ToList();
+        if (failing.Count > 0)
+        {
+            var row = failing[0];
+            var current = active.Where(c => c.Source == "acme" && c.Name == row.CertificateName).OrderByDescending(c => c.NotAfter).FirstOrDefault();
+            string serving = current is null
+                ? (active.All(c => c.Source == "selfsigned") ? "Until one is issued the server uses a self-signed certificate." : "The server keeps using the certificate it has.")
+                : current.NotAfter <= now
+                    ? $"The previous certificate expired on {current.NotAfter:yyyy-MM-dd}."
+                    : $"The previous certificate stays in use until {current.NotAfter:yyyy-MM-dd}.";
+            string next = row.NextAttemptAt is { } at ? $" Next attempt: {at:yyyy-MM-dd HH:mm} UTC." : "";
+            string more = failing.Count > 1 ? $" ({failing.Count - 1} more certificate{(failing.Count > 2 ? "s" : "")} failing.)" : "";
+            return new HealthWarning("acme_failing",
+                $"Getting the certificate '{row.CertificateName}' from the certificate authority failed {row.Failures} time{(row.Failures == 1 ? "" : "s")} in a row. Last error: {Brief(row.LastError)}.{next} {serving}{more}");
+        }
+
+        if (config is not null && config.Acme.Domains.Count > 0
+            && !active.Any(c => c.Source == "acme" && c.Name == config.Acme.CertificateName && c.NotAfter > now))
+        {
+            string names = string.Join(", ", config.Acme.Domains);
+            return new HealthWarning("acme_pending",
+                $"The certificate for {names} is being requested from the certificate authority ({config.Acme.EffectiveDirectoryUrl()}). {(active.All(c => c.Source == "selfsigned") ? "Until it is issued the server uses a self-signed certificate; this takes a few minutes after the first start." : "Until it is issued the server keeps using the certificate it has.")}");
+        }
+
+        return null;
+    }
+
+    /// <summary>A CA's or a network's error text as one short line (these endpoints are unauthenticated: no more than the first 500 characters, no control characters).</summary>
+    private static string Brief(string? error)
+    {
+        if (string.IsNullOrWhiteSpace(error))
+        {
+            return "unknown";
+        }
+
+        string line = string.Concat(error.Select(c => char.IsControl(c) ? ' ' : c)).Trim().TrimEnd('.');
+        return line.Length > 500 ? line[..500] + "..." : line;
     }
 }
 
