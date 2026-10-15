@@ -13,8 +13,6 @@ name: bench-throughput
 # comparing with other servers (docs/benchmarks.md, fairness rules). The summary says so in its first line.
 
 on:
-  push:   # TEMPORARY: proof run from the feature branch; removed again before merge
-    branches: [feat/soak-bench-workflows]
   workflow_dispatch:
     inputs:
       messages:
@@ -69,16 +67,16 @@ jobs:
           mount | grep -E ' / ' || true
 
       - name: Publish the harness with ReadyToRun (for the JIT versus ReadyToRun throughput comparison)
-        if: inputs.readytorun || github.event_name == 'push'
+        if: inputs.readytorun
         run: dotnet publish bench/Mta.Bench.Pipeline -c Release -r linux-x64 --self-contained false -p:PublishReadyToRun=true -o publish-bench-r2r -v q
 
       # bench/run-local-matrix.sh is the one definition of the matrix (the same script runs on a laptop): SQLite Sync=Off, Normal and Full, PostgreSQL 17
       # (container) with synchronous_commit=off and the durable default, history Full and StatsOnly, ingest and end-to-end delivery. Runs are interleaved.
       - name: Matrix, both backends, each durable and non-durable
         env:
-          MESSAGES: ${{ inputs.messages || '30000' }}
-          RUNS: ${{ inputs.runs || '3' }}
-          POSTGRES: ${{ inputs.postgres || 'true' }}
+          MESSAGES: ${{ inputs.messages }}
+          RUNS: ${{ inputs.runs }}
+          POSTGRES: ${{ inputs.postgres }}
           BENCH_LABEL: GitHub-hosted ubuntu-latest runner, noisy, not publishable
         run: |
           set -euo pipefail
@@ -86,10 +84,10 @@ jobs:
           bench/run-local-matrix.sh --messages "$MESSAGES" --runs "$RUNS" --postgres "$pg" --out results
 
       - name: JIT versus ReadyToRun ingest (the sqlite-off-full-ingest configuration with precompiled application assemblies)
-        if: inputs.readytorun || github.event_name == 'push'
+        if: inputs.readytorun
         env:
-          MESSAGES: ${{ inputs.messages || '30000' }}
-          RUNS: ${{ inputs.runs || '3' }}
+          MESSAGES: ${{ inputs.messages }}
+          RUNS: ${{ inputs.runs }}
         run: |
           set -euo pipefail
           for n in $(seq 1 "$RUNS"); do
@@ -100,7 +98,7 @@ jobs:
           done
 
       - name: Start-up time and size, JIT versus ReadyToRun (linux-x64), and the linux-arm64 cross-publish
-        if: inputs.readytorun || github.event_name == 'push'
+        if: inputs.readytorun
         run: |
           set -euo pipefail
           # Restore first (with the ReadyToRun compiler package, a download), so the timed publishes below compare the build work only.
