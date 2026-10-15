@@ -2,6 +2,14 @@ using Mta.Core;
 
 namespace Mta.Storage.Logic;
 
+/// <summary>What <see cref="InboundRules.Effective"/> returns: the limits the receive path and the retention job apply to one domain.</summary>
+/// <param name="MaxMessageBytes">Largest message.</param>
+/// <param name="MaxMessagesPerMinute">Messages per minute for the domain.</param>
+/// <param name="MaxMessagesPerMinutePerRemote">Messages per minute per client address.</param>
+/// <param name="MaxStoredBytes">Stored body bytes for the domain; 0 unlimited.</param>
+/// <param name="RetentionDays">Days kept; 0 forever.</param>
+public readonly record struct InboundEffectiveLimits(long MaxMessageBytes, int MaxMessagesPerMinute, int MaxMessagesPerMinutePerRemote, long MaxStoredBytes, int RetentionDays);
+
 /// <summary>One problem found by the inbound validators: the request member (<c>forwardTo[1]</c>, <c>localPart</c>) and a sentence for the caller.</summary>
 public readonly record struct InboundValidationError(string Field, string Message);
 
@@ -140,6 +148,20 @@ public static class InboundRules
         return p == pattern.Length;
     }
 
+    /// <summary>
+    /// The limits a domain really has: its own value, else the operator's, and never above the operator's ceiling (a tenant can only lower a limit; the operator may have lowered a ceiling
+    /// after the domain stored its value). A stored-bytes limit of 0 is unlimited, so "the lower of two" never takes the 0 while the other side is finite.
+    /// </summary>
+    public static InboundEffectiveLimits Effective(InboundDomainSettings settings, InboundCeilings ceilings, int serverRetentionDays) => new(
+        Math.Min(settings.MaxMessageBytes ?? ceilings.MaxMessageBytes, ceilings.MaxMessageBytes),
+        Math.Min(settings.MaxMessagesPerMinute ?? ceilings.MaxMessagesPerMinute, ceilings.MaxMessagesPerMinute),
+        Math.Min(settings.MaxMessagesPerMinutePerRemote ?? ceilings.MaxMessagesPerMinutePerRemote, ceilings.MaxMessagesPerMinutePerRemote),
+        settings.MaxStoredBytes is not { } stored ? ceilings.MaxStoredBytesPerDomain
+            : ceilings.MaxStoredBytesPerDomain == 0 ? stored
+            : stored == 0 ? ceilings.MaxStoredBytesPerDomain
+            : Math.Min(stored, ceilings.MaxStoredBytesPerDomain),
+        ResolveRetentionDays(settings.RetentionDays, serverRetentionDays, ceilings.MaxRetentionDays));
+
     /// <summary>Whether a query narrows the tenant's mail at all (a bulk erasure refuses a query that does not). The paging members do not count.</summary>
     public static bool HasFilter(InboundMessageQuery query) =>
         query.DomainId is not null || !string.IsNullOrWhiteSpace(query.Recipient) || !string.IsNullOrWhiteSpace(query.Sender) || !string.IsNullOrEmpty(query.SubjectContains)
@@ -174,8 +196,10 @@ public static class InboundRules
     /// limit is refused (a tenant can only lower a limit): a size or rate above the ceiling, a stored-bytes limit above the ceiling or "unlimited" under a finite ceiling, a retention above
     /// the retention ceiling or "forever" under it.
     /// </summary>
-    public static IReadOnlyList<InboundValidationError> ValidateSettings(InboundDomainSettings settings, InboundCeilings? ceilings = null)
+    public static IReadOnlyList<InboundValidationError> ValidateSettings(InboundDomainSettings settings, InboundCeilings? ceilings = null, IReadOnlyCollection<string>? ceilingFields = null)
     {
+        // A caller that changes some members passes their names: a member it does not touch is not checked against the ceilings (the operator may have lowered one since it was stored).
+        bool Checks(string field) => ceilingFields is null || ceilingFields.Contains(field);
         var errors = new List<InboundValidationError>();
         if (!Enum.IsDefined(settings.DmarcAction))
         {
@@ -209,27 +233,27 @@ public static class InboundRules
 
         if (ceilings is not null && errors.Count == 0)
         {
-            if (settings.MaxMessageBytes > ceilings.MaxMessageBytes)
+            if (Checks("maxMessageBytes") && settings.MaxMessageBytes > ceilings.MaxMessageBytes)
             {
                 errors.Add(new("maxMessageBytes", $"At most {ceilings.MaxMessageBytes} bytes on this server (Inbound:MaxMessageSize)."));
             }
 
-            if (settings.MaxMessagesPerMinute > ceilings.MaxMessagesPerMinute)
+            if (Checks("maxMessagesPerMinute") && settings.MaxMessagesPerMinute > ceilings.MaxMessagesPerMinute)
             {
                 errors.Add(new("maxMessagesPerMinute", $"At most {ceilings.MaxMessagesPerMinute} on this server (Inbound:MaxMessagesPerMinute)."));
             }
 
-            if (settings.MaxMessagesPerMinutePerRemote > ceilings.MaxMessagesPerMinutePerRemote)
+            if (Checks("maxMessagesPerMinutePerRemote") && settings.MaxMessagesPerMinutePerRemote > ceilings.MaxMessagesPerMinutePerRemote)
             {
                 errors.Add(new("maxMessagesPerMinutePerRemote", $"At most {ceilings.MaxMessagesPerMinutePerRemote} on this server (Inbound:MaxMessagesPerMinutePerRemote)."));
             }
 
-            if (settings.MaxStoredBytes is { } storedLimit && ceilings.MaxStoredBytesPerDomain > 0 && (storedLimit == 0 || storedLimit > ceilings.MaxStoredBytesPerDomain))
+            if (Checks("maxStoredBytes") && settings.MaxStoredBytes is { } storedLimit && ceilings.MaxStoredBytesPerDomain > 0 && (storedLimit == 0 || storedLimit > ceilings.MaxStoredBytesPerDomain))
             {
                 errors.Add(new("maxStoredBytes", $"At most {ceilings.MaxStoredBytesPerDomain} bytes on this server (Inbound:MaxStoredBytesPerDomain), and not unlimited."));
             }
 
-            if (settings.RetentionDays is { } keepDays && ceilings.MaxRetentionDays > 0 && (keepDays == 0 || keepDays > ceilings.MaxRetentionDays))
+            if (Checks("retentionDays") && settings.RetentionDays is { } keepDays && ceilings.MaxRetentionDays > 0 && (keepDays == 0 || keepDays > ceilings.MaxRetentionDays))
             {
                 errors.Add(new("retentionDays", $"At most {ceilings.MaxRetentionDays} days on this server (Inbound:MaxRetentionDays), and not forever."));
             }
@@ -376,6 +400,7 @@ public static class InboundRules
                     break;
                 }
 
+                string? ownDomain = domainName is null ? null : ALabel(domainName);
                 var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 for (int i = 0; i < route.ForwardTo.Count; i++)
                 {
@@ -384,11 +409,11 @@ public static class InboundRules
                     {
                         errors.Add(new(field, "Not a valid address."));
                     }
-                    else if (!seen.Add(address.LocalPart + "@" + address.Domain))
+                    else if (!seen.Add(address.LocalPart + "@" + ALabel(address.Domain)))
                     {
                         errors.Add(new(field, "Listed twice."));
                     }
-                    else if (domainName is not null && string.Equals(address.Domain, domainName, StringComparison.OrdinalIgnoreCase))
+                    else if (ownDomain is not null && string.Equals(ALabel(address.Domain), ownDomain, StringComparison.OrdinalIgnoreCase))
                     {
                         errors.Add(new(field, "A route cannot forward to its own domain: the forward would come straight back."));
                     }
@@ -408,6 +433,22 @@ public static class InboundRules
                 }
 
                 break;
+        }
+    }
+
+    // Domains are compared in A-label form, so "bücher.example" and "xn--bcher-kva.example" are the same domain (a name that cannot be converted compares as itself).
+    private static readonly System.Globalization.IdnMapping Idn = new() { UseStd3AsciiRules = false, AllowUnassigned = false };
+
+    private static string ALabel(string domain)
+    {
+        string trimmed = domain.TrimEnd('.');
+        try
+        {
+            return Idn.GetAscii(trimmed).ToLowerInvariant();
+        }
+        catch (ArgumentException)
+        {
+            return trimmed.ToLowerInvariant();
         }
     }
 

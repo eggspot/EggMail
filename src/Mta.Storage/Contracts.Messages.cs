@@ -10,7 +10,11 @@ public enum MessageSource : byte
     Bounce,
     System,
 
-    /// <summary>A copy of received mail forwarded by an inbound route (decision 95). Like <see cref="Api"/> mail it never gets a bounce message, only events and webhooks.</summary>
+    /// <summary>
+    /// A copy of received mail forwarded by an inbound route (decision 95). Unlike <see cref="Api"/> mail it never gets a bounce message of any kind, not even a delay notice, whatever
+    /// <c>Delivery:GenerateDsnFor*</c> says: a failure is visible to the tenant only, as events and webhooks of the outbound message. The body is delivered byte for byte, and the message is
+    /// DKIM-signed only with the key of the SRS envelope domain, never with the original From domain (design section 11.7).
+    /// </summary>
     Forward,
 }
 
