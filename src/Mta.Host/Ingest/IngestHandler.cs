@@ -172,7 +172,33 @@ public sealed class IngestHandler : ISmtpServerHandler
             SubmissionResult result;
             try
             {
-                result = await _submission.SubmitAsync(request, ct).ConfigureAwait(false);
+                // The steps of SubmitAsync, written out here: the checks and the repair run without waiting, so the only suspended frames while storage works
+                // are this one and the storage's own. (A message that needs a setting loaded first, once in a few seconds, takes the ordinary path.)
+                var loaded = new LoadedSettings();
+                PreparedSubmission prepared = _submission.Prepare(request, ref loaded, out SubmissionLoad load, out SubmissionResult refused);
+                if (load != SubmissionLoad.None)
+                {
+                    result = await _submission.SubmitAsync(request, ct).ConfigureAwait(false);
+                }
+                else if (prepared.IsFinal)
+                {
+                    result = refused;
+                }
+                else
+                {
+                    IntakeResult intake;
+                    try
+                    {
+                        intake = await _submission.StoreAsync(prepared, ct).ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        _submission.Abandon(ref prepared);
+                        throw;
+                    }
+
+                    result = _submission.Complete(ref prepared, intake);
+                }
             }
             finally
             {

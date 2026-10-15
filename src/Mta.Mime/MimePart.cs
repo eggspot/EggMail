@@ -257,18 +257,30 @@ public sealed class MimeMessage
     public IEnumerable<MimePart> EnumerateParts() => Root.EnumerateParts();
 
     /// <summary>Parses a message (or any RFC 5322 entity).</summary>
-    public static MimeMessage Parse(ReadOnlyMemory<byte> raw, MimeLimits? limits = null)
+    public static MimeMessage Parse(ReadOnlyMemory<byte> raw, MimeLimits? limits = null) => Parse(raw, limits, null);
+
+    /// <summary>
+    /// Parses like <see cref="Parse(ReadOnlyMemory{byte}, MimeLimits?)"/> with working memory lent by the caller: the message is valid only until
+    /// <paramref name="buffers"/> is used again or released (see <see cref="MimeParseBuffers"/>). The result is identical to the other overload.
+    /// </summary>
+    public static MimeMessage Parse(ReadOnlyMemory<byte> raw, MimeLimits? limits, MimeParseBuffers? buffers)
     {
-        var builder = new TreeBuilder(limits ?? MimeLimits.Default);
+        var builder = new TreeBuilder(limits ?? MimeLimits.Default, buffers);
         var root = builder.ParsePart(raw, null, 0, ContentType.Default);
         return new MimeMessage(root, builder.PartCount, builder.Anomalies);
     }
 
-    private sealed class TreeBuilder
+    // A struct: it lives on the stack of Parse for the whole recursion (the methods mutate it in place through this reference).
+    private struct TreeBuilder
     {
         private readonly MimeLimits _limits;
+        private readonly MimeParseBuffers? _buffers;
 
-        public TreeBuilder(MimeLimits limits) => _limits = limits;
+        public TreeBuilder(MimeLimits limits, MimeParseBuffers? buffers)
+        {
+            _limits = limits;
+            _buffers = buffers;
+        }
 
         public int PartCount { get; private set; }
 
@@ -277,7 +289,7 @@ public sealed class MimeMessage
         public MimePart ParsePart(ReadOnlyMemory<byte> region, MimePart? parent, int depth, ContentType defaultType)
         {
             PartCount++;
-            var headers = HeaderList.Parse(region, _limits);
+            var headers = HeaderList.Parse(region, _limits, depth == 0 ? _buffers : null);
             var an = headers.Anomalies;
 
             var contentType = defaultType;

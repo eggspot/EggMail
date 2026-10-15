@@ -271,4 +271,63 @@ public class SubmissionServiceTests : IAsyncLifetime
             Assert.Equal([rcpt], detail.Recipients);
         }
     }
+
+    [Fact]
+    public async Task Prepare_asks_for_the_domain_list_when_it_has_none_and_finishes_once_it_is_given()
+    {
+        var request = Request(Crlf(Plain), "rcpt@dest.example");
+        var loaded = new LoadedSettings();
+        var first = _service.Prepare(request, ref loaded, out SubmissionLoad load, out _);
+        Assert.Equal(SubmissionLoad.Domains, load);
+        Assert.True(first.IsFinal);   // nothing prepared yet, nothing to store
+
+        loaded.Domains = await _service.GetDomainsAsync(TenantId, default);
+        var prepared = _service.Prepare(request, ref loaded, out load, out _);
+        Assert.Equal(SubmissionLoad.None, load);
+        Assert.False(prepared.IsFinal);
+        var intake = await _service.StoreAsync(prepared, default);
+        var result = _service.Complete(ref prepared, intake);
+        Assert.Equal(SubmissionStatus.Accepted, result.Status);
+        Assert.Contains("Subject: Hello", Encoding.UTF8.GetString((await _storage.Deliveries.GetRawAsync(result.MessageId, default))!));
+    }
+
+    [Fact]
+    public async Task A_refusal_comes_back_from_prepare_without_loading_or_storing_anything_else()
+    {
+        var request = Request(Crlf("To: rcpt@dest.example\nSubject: no sender\n\nbody\n"), "rcpt@dest.example");
+        var loaded = new LoadedSettings();
+        var prepared = _service.Prepare(request, ref loaded, out SubmissionLoad load, out SubmissionResult refused);
+        Assert.Equal(SubmissionLoad.None, load);
+        Assert.True(prepared.IsFinal);
+        Assert.Equal(SubmissionStatus.Invalid, refused.Status);
+        Assert.Equal("message has no From header", refused.Detail);
+        Assert.Equal(0, (await _storage.Deliveries.GetQueueStatsAsync(default)).Queued);
+    }
+
+    [Fact]
+    public async Task A_failed_storage_call_gives_the_pooled_objects_back_and_later_submissions_still_work()
+    {
+        var request = Request(Crlf(Plain), "rcpt@dest.example");
+        var loaded = new LoadedSettings { Domains = await _service.GetDomainsAsync(TenantId, default) };
+        var prepared = _service.Prepare(request, ref loaded, out _, out _);
+        Assert.False(prepared.IsFinal);
+        _service.Abandon(ref prepared);   // as the handler does when the storage call throws or is cancelled
+        Assert.True(prepared.IsFinal);
+
+        var result = await _service.SubmitAsync(Request(Crlf(Plain.Replace("Hello", "After")), "rcpt@dest.example"), default);
+        Assert.Equal(SubmissionStatus.Accepted, result.Status);
+        Assert.Contains("Subject: After", Encoding.UTF8.GetString((await _storage.Deliveries.GetRawAsync(result.MessageId, default))!));
+        Assert.Equal(1, (await _storage.Deliveries.GetQueueStatsAsync(default)).Queued);
+    }
+
+    [Fact]
+    public async Task Without_any_caching_of_the_domain_list_every_submission_still_completes()
+    {
+        var uncached = new SubmissionService(_storage, SystemClock.Instance, new SenderPolicy(), new StorageOptions(), new SubmissionOptions { MessageIdDomain = "egg.test", DomainCacheTtl = TimeSpan.Zero });
+        for (int i = 0; i < 5; i++)
+        {
+            var result = await uncached.SubmitAsync(Request(Crlf(Plain.Replace("Hello", "Round " + i)), "rcpt@dest.example"), default);
+            Assert.Equal(SubmissionStatus.Accepted, result.Status);
+        }
+    }
 }

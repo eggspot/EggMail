@@ -50,6 +50,113 @@ public class ParseOnceTests
         Assert.Equal(viaBytes.Anomalies, viaParsed.Anomalies);
     }
 
+    private static string Describe(MimeMessage message)
+    {
+        var sb = new StringBuilder();
+        sb.Append(message.Anomalies).Append(' ').Append(message.PartCount).Append(' ').Append(message.Headers.Count).Append(' ').Append(message.Headers.BodyOffset).Append('\n');
+        foreach (MimeHeader h in message.Headers)
+        {
+            sb.Append(h.Id).Append('|').Append(h.Name).Append('|').Append(h.Offset).Append('|').Append(h.Value).Append('\n');
+        }
+
+        foreach (MimePart part in message.EnumerateParts())
+        {
+            sb.Append(part.Depth).Append(' ').Append(part.ContentType.MimeType).Append(' ').Append(part.ContentType.Charset).Append(' ').Append(part.ContentType.Boundary)
+                .Append(' ').Append(part.TransferEncoding).Append(' ').Append(part.Anomalies).Append(' ').Append(part.Body.Length).Append('\n');
+        }
+
+        return sb.ToString();
+    }
+
+    [Fact]
+    public void A_parse_with_lent_buffers_equals_a_plain_parse_and_the_buffers_can_be_reused()
+    {
+        var buffers = new MimeParseBuffers();
+        var samples = Samples().ToList();
+
+        // Header blocks of different sizes in a row (the lent array is reused, grown, forgotten when oversized), including hostile ones that outgrow the initial capacity.
+        var manyFields = new StringBuilder();
+        for (int i = 0; i < 300; i++)
+        {
+            manyFields.Append("X-Field-").Append(i).Append(": value ").Append(i).Append('\n');
+        }
+
+        samples.Add(T.Crlf(manyFields + "\nbody\n"));
+        var hostile = new StringBuilder();
+        for (int i = 0; i < 2500; i++)
+        {
+            hostile.Append("X-").Append(i).Append(": v\n");
+        }
+
+        samples.Add(T.Crlf(hostile + "\nbody\n"));
+        samples.Add(T.Crlf("Subject: small\n\nx\n"));
+        samples.Add([]);
+
+        for (int round = 0; round < 3; round++)
+        {
+            foreach (byte[] raw in samples)
+            {
+                string expected = Describe(MimeMessage.Parse(raw));
+                string actual = Describe(MimeMessage.Parse(raw, null, buffers));
+                Assert.Equal(expected, actual);
+                buffers.Release();
+            }
+        }
+    }
+
+    [Fact]
+    public void Releasing_the_buffers_drops_what_the_records_pointed_at()
+    {
+        // The lent array must not keep the last message (which may sit in a pooled buffer) reachable through its header records.
+        var buffers = new MimeParseBuffers();
+        WeakReference weak = ParseIntoBuffers(buffers);
+        buffers.Release();
+        for (int i = 0; i < 4 && weak.IsAlive; i++)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+        }
+
+        Assert.False(weak.IsAlive);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static WeakReference ParseIntoBuffers(MimeParseBuffers buffers)
+    {
+        byte[] raw = T.Crlf(T.SimpleMessage);
+        _ = MimeMessage.Parse(raw, null, buffers);
+        return new WeakReference(raw);
+    }
+
+    [Fact]
+    public void Content_types_that_repeat_are_shared_and_give_what_a_plain_parse_gives()
+    {
+        string[] values =
+        [
+            "text/plain; charset=utf-8", "text/plain; charset=UTF-8", "text/plain;charset=\"iso-8859-1\"", "text/html; charset=utf-8", "text/plain; format=flowed; delsp=yes; charset=us-ascii",
+            "text/plain", "application/octet-stream", "not a content type", "text/", "/plain", "multipart/mixed; boundary=\"abc\"", "image/png; name=\"a.png\"", "text/plain; charset=utf-8; x-extra=1",
+        ];
+        foreach (string value in values)
+        {
+            byte[] raw = T.Crlf($"From: a@example.com\nContent-Type: {value}\n\nbody\n");
+            var first = MimeMessage.Parse(raw).Root.ContentType;
+            var second = MimeMessage.Parse(raw).Root.ContentType;
+            var plain = ContentType.Parse(value);
+            Assert.Equal(plain.MimeType, first.MimeType);
+            Assert.Equal(plain.Charset, first.Charset);
+            Assert.Equal(plain.Anomalies, first.Anomalies);
+            Assert.Equal(plain.Parameters.Select(p => (p.Name, p.Value)), first.Parameters.Select(p => (p.Name, p.Value)));
+            bool shareable = !value.Contains("boundary", StringComparison.Ordinal) && !value.Contains("name=", StringComparison.Ordinal) && !value.Contains("x-extra", StringComparison.Ordinal);
+            Assert.Equal(shareable, ReferenceEquals(first, second));
+        }
+
+        // Other limits give a result of their own (the limits shape the parse), never the shared object.
+        byte[] message = T.Crlf("From: a@example.com\nContent-Type: text/plain; charset=utf-8; format=flowed\n\nbody\n");
+        var limited = MimeMessage.Parse(message, new MimeLimits { MaxParameters = 1 }).Root.ContentType;
+        Assert.Single(limited.Parameters);
+        Assert.Equal(2, MimeMessage.Parse(message).Root.ContentType.Parameters.Count);
+    }
+
     private static MimeHeader FromHeader(string value)
     {
         var headers = HeaderList.Parse(Encoding.UTF8.GetBytes("From: " + value + "\r\n\r\n"));

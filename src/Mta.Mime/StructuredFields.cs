@@ -138,10 +138,51 @@ public sealed class ContentType
         if (HeaderText.TryGetAsciiValue(header.RawValue.Span, value, out int length) && header.RawValue.Length <= limits.MaxHeaderValueBytes)
         {
             value = value[..length];
-            return value.IsWhiteSpace() ? Default : Parse(value, limits);
+            if (value.IsWhiteSpace())
+            {
+                return Default;
+            }
+
+            // The same few values come back message after message ("text/plain; charset=utf-8"): the parsed object is immutable, so one is shared.
+            // Only with the default limits (the result depends on them) and only for values that carry nothing specific to one message.
+            bool shareable = ReferenceEquals(limits, MimeLimits.Default) && length <= MaxSharedValueLength;
+            if (shareable && SharedContentTypes.TryGetValue(value, out ContentType? known))
+            {
+                return known;
+            }
+
+            ContentType parsed = Parse(value, limits);
+            if (shareable && Volatile.Read(ref _sharedCount) < MaxSharedContentTypes && IsShareable(parsed) && SharedContentTypes.TryAdd(value.ToString(), parsed))
+            {
+                Interlocked.Increment(ref _sharedCount);
+            }
+
+            return parsed;
         }
 
         return Parse(header.GetValue(limits.MaxHeaderValueBytes), limits);
+    }
+
+    private const int MaxSharedValueLength = 100;
+    private const int MaxSharedContentTypes = 256;
+    private static int _sharedCount;
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, ContentType> SharedContentTypesTable = new(StringComparer.Ordinal);
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, ContentType>.AlternateLookup<ReadOnlySpan<char>> SharedContentTypes =
+        SharedContentTypesTable.GetAlternateLookup<ReadOnlySpan<char>>();
+
+    /// <summary>True when every parameter is one that does not differ between the messages of a sender: charset, format, delsp. A boundary or a file name is unique to a message.</summary>
+    private static bool IsShareable(ContentType contentType)
+    {
+        foreach (MimeParameter p in contentType.Parameters)
+        {
+            if (!(p.Name.Equals("charset", StringComparison.OrdinalIgnoreCase) || p.Name.Equals("format", StringComparison.OrdinalIgnoreCase)
+                || p.Name.Equals("delsp", StringComparison.OrdinalIgnoreCase)))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>Parses a Content-Type value.</summary>
