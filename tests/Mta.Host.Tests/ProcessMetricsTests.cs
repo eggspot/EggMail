@@ -1,37 +1,76 @@
+using System.Globalization;
 using Mta.Host.Hosting;
 
 namespace Mta.Host.Tests;
 
 public class ProcessMetricsTests
 {
+    private static void Touch() => System.Runtime.CompilerServices.RuntimeHelpers.RunClassConstructor(typeof(ProcessMetrics).TypeHandle);   // the instruments exist once the class has been touched
+
     [Fact]
-    public void The_process_gauges_report_plausible_values_for_this_process()
+    public void The_thread_gauge_counts_the_threads_of_this_process_and_follows_new_ones()
     {
-        System.Runtime.CompilerServices.RuntimeHelpers.RunClassConstructor(typeof(ProcessMetrics).TypeHandle);   // the instruments exist once the class has been touched
+        Touch();
         using var capture = new MeterCapture("Mta.Process");
-
         capture.Pull();
+        double before = Assert.Single(capture.Of("mta.process.threads")).Value;
+        Assert.True(before >= 2, "a test host has at least a main thread and the runtime's");
 
-        Assert.True(Assert.Single(capture.Of("mta.process.threads")).Value >= 1);
-        if (OperatingSystem.IsLinux())
+        using var release = new ManualResetEventSlim();
+        var threads = Enumerable.Range(0, 20).Select(_ => new Thread(() => release.Wait()) { IsBackground = true }).ToList();
+        threads.ForEach(t => t.Start());
+        try
         {
-            Assert.True(Assert.Single(capture.Of("mta.process.open_fds")).Value >= 3, "stdin, stdout and stderr are open");
+            using var again = new MeterCapture("Mta.Process");
+            again.Pull();
+            // Other tests start and stop threads at the same time: only the 20 this test holds are certain.
+            Assert.True(Assert.Single(again.Of("mta.process.threads")).Value >= 20, "twenty live threads of this test alone");
+        }
+        finally
+        {
+            release.Set();
+            threads.ForEach(t => t.Join());
         }
     }
 
     [Fact]
-    public void The_prometheus_exporter_renders_the_documented_process_series()
+    public void The_descriptor_gauge_reports_stdin_stdout_and_stderr_at_least_on_linux_and_nothing_elsewhere()
     {
-        System.Runtime.CompilerServices.RuntimeHelpers.RunClassConstructor(typeof(ProcessMetrics).TypeHandle);
+        Touch();
+        using var capture = new MeterCapture("Mta.Process");
+
+        capture.Pull();
+
+        if (OperatingSystem.IsLinux())
+        {
+            Assert.True(Assert.Single(capture.Of("mta.process.open_fds")).Value >= 3);
+        }
+        else
+        {
+            Assert.Empty(capture.Of("mta.process.open_fds"));   // no series rather than an invented number
+        }
+    }
+
+    [Fact]
+    public void The_prometheus_exporter_renders_the_documented_series_with_numeric_values()
+    {
+        Touch();
         using var exporter = new Mta.Observability.PrometheusTextExporter(meter => meter.Name == "Mta.Process");
 
         string text = exporter.Render();
 
-        Assert.Contains("\nmta_process_threads ", "\n" + text);
+        AssertSeries(text, "mta_process_threads");
         if (OperatingSystem.IsLinux())
         {
-            Assert.Contains("\nmta_process_open_fds ", "\n" + text);
+            AssertSeries(text, "mta_process_open_fds");
         }
+    }
+
+    private static void AssertSeries(string text, string name)
+    {
+        string line = text.Split('\n').Single(l => l.StartsWith(name + " ", StringComparison.Ordinal));
+        Assert.True(double.TryParse(line[(name.Length + 1)..], NumberStyles.Float, CultureInfo.InvariantCulture, out double value) && value >= 1, line);
+        Assert.Contains("# TYPE " + name + " gauge", text);
     }
 
     [Fact]
