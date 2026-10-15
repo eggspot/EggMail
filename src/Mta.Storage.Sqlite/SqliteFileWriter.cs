@@ -21,6 +21,9 @@ internal sealed class WriterContext(SqliteConnection connection)
 
     public SqliteConnection Connection { get; } = connection;
 
+    /// <summary>True while a transaction is open on the connection (SQLite's own answer: the connection is not in autocommit mode).</summary>
+    public bool InTransaction => SQLitePCL.raw.sqlite3_get_autocommit(Connection.Handle) == 0;
+
     /// <summary>The open batch transaction, or null for an exclusive (non-transactional) command.</summary>
     public SqliteTransaction? Transaction { get; set; }
 
@@ -117,10 +120,26 @@ public sealed class WriterMetrics
     internal void RecordIndividual() => Interlocked.Increment(ref _commands);
 }
 
+/// <summary>The statements that open and end a batch, run through the native API like the commands themselves (no driver transaction object per batch).</summary>
+internal static class BatchSql
+{
+    public static readonly Stmt Begin = new("BEGIN IMMEDIATE");
+
+    public static readonly Stmt Commit = new("COMMIT");
+
+    public static readonly Stmt Rollback = new("ROLLBACK");
+}
+
 internal abstract class WriterCommand
 {
     /// <summary>Runs alone, outside any transaction (checkpoint, incremental_vacuum).</summary>
     internal bool Exclusive;
+
+    /// <summary>
+    /// The command hands <see cref="WriterContext.Transaction"/> to a library (Entity Framework) and so needs the batch to run in a driver
+    /// transaction. Every other command only uses the native statements, which take part in whatever transaction is open on the connection.
+    /// </summary>
+    internal bool NeedsDriverTransaction;
 
     internal abstract void Execute(WriterContext context);
 
@@ -129,26 +148,98 @@ internal abstract class WriterCommand
     internal abstract void Fail(Exception exception);
 }
 
-/// <summary>One unit of work for the writer. It doubles as the awaitable so a submission costs one allocation.</summary>
-internal sealed class WriterCommand<TState, TResult>(TState state, Func<WriterContext, TState, TResult> work) : WriterCommand, IValueTaskSource<TResult>
+/// <summary>
+/// One unit of work for the writer. It doubles as the awaitable, and it is reused: after the caller has taken the result (or the exception) with
+/// <c>GetResult</c>, the object goes back to a small pool of its closed generic type, so a submission allocates nothing in the steady state.
+/// <para>
+/// Like every <see cref="ValueTask{TResult}"/> over an <see cref="IValueTaskSource{TResult}"/>, the task of a command must be awaited (or
+/// <c>AsTask</c>ed) exactly once and not touched afterwards; a second <c>GetResult</c> with the old token is refused by the version check and does not
+/// recycle anything. Nothing here is used by the writer after it has called <see cref="Succeed"/> or <see cref="Fail"/>, which is when the caller may
+/// take the object back, and the state and result are cleared when it is recycled so a pooled command keeps no message alive.
+/// </para>
+/// </summary>
+internal sealed class WriterCommand<TState, TResult> : WriterCommand, IValueTaskSource<TResult>
 {
+    private const int MaxPooled = 1024;
+
+    private static readonly System.Collections.Concurrent.ConcurrentQueue<WriterCommand<TState, TResult>> Pool = new();
+    private static int _pooled;
+
     private ManualResetValueTaskSourceCore<TResult> _core = new() { RunContinuationsAsynchronously = true };
+    private TState _state = default!;
+    private Func<WriterContext, TState, TResult> _work = null!;
     private TResult _result = default!;
+
+    private WriterCommand()
+    {
+    }
+
+    /// <summary>A command for <paramref name="work"/> over <paramref name="state"/>, from the pool when it has one.</summary>
+    internal static WriterCommand<TState, TResult> Rent(TState state, Func<WriterContext, TState, TResult> work, bool exclusive, bool needsDriverTransaction)
+    {
+        if (!Pool.TryDequeue(out WriterCommand<TState, TResult>? command))
+        {
+            command = new WriterCommand<TState, TResult>();
+        }
+        else
+        {
+            Interlocked.Decrement(ref _pooled);
+        }
+
+        command._state = state;
+        command._work = work;
+        command.Exclusive = exclusive;
+        command.NeedsDriverTransaction = needsDriverTransaction;
+        return command;
+    }
 
     internal short Version => _core.Version;
 
-    internal override void Execute(WriterContext context) => _result = work(context, state);
+    internal override void Execute(WriterContext context) => _result = _work(context, _state);
 
     internal override void Succeed() => _core.SetResult(_result);
 
     internal override void Fail(Exception exception) => _core.SetException(exception);
 
-    TResult IValueTaskSource<TResult>.GetResult(short token) => _core.GetResult(token);
+    TResult IValueTaskSource<TResult>.GetResult(short token)
+    {
+        if (token != _core.Version)
+        {
+            return _core.GetResult(token);   // throws: a stale or repeated await must not recycle the command that now belongs to someone else
+        }
+
+        try
+        {
+            return _core.GetResult(token);
+        }
+        finally
+        {
+            Recycle();
+        }
+    }
 
     ValueTaskSourceStatus IValueTaskSource<TResult>.GetStatus(short token) => _core.GetStatus(token);
 
     void IValueTaskSource<TResult>.OnCompleted(Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags) =>
         _core.OnCompleted(continuation, state, token, flags);
+
+    private void Recycle()
+    {
+        _core.Reset();
+        _state = default!;
+        _work = null!;
+        _result = default!;
+        Exclusive = false;
+        NeedsDriverTransaction = false;
+        if (Interlocked.Increment(ref _pooled) <= MaxPooled)
+        {
+            Pool.Enqueue(this);
+        }
+        else
+        {
+            Interlocked.Decrement(ref _pooled);
+        }
+    }
 }
 
 /// <summary>
@@ -211,9 +302,9 @@ internal sealed class SqliteFileWriter : IAsyncDisposable
     /// Queues <paramref name="work"/> and returns when its batch has committed. The token only cancels the wait for queue
     /// space (back-pressure); a command already queued is always executed.
     /// </summary>
-    public ValueTask<TResult> SubmitAsync<TState, TResult>(TState state, Func<WriterContext, TState, TResult> work, CancellationToken cancellationToken = default, bool exclusive = false)
+    public ValueTask<TResult> SubmitAsync<TState, TResult>(TState state, Func<WriterContext, TState, TResult> work, CancellationToken cancellationToken = default, bool exclusive = false, bool needsDriverTransaction = false)
     {
-        var command = new WriterCommand<TState, TResult>(state, work) { Exclusive = exclusive };
+        var command = WriterCommand<TState, TResult>.Rent(state, work, exclusive, needsDriverTransaction);
         ValueTask<TResult> awaitable = new(command, command.Version);
         if (_channel.Writer.TryWrite(command))
         {
@@ -333,13 +424,22 @@ internal sealed class SqliteFileWriter : IAsyncDisposable
 
     private void ExecuteBatch(WriterContext context, List<WriterCommand> batch)
     {
-        SqliteConnection connection = context.Connection;
+        bool driverTransaction = false;
+        for (int i = 0; i < batch.Count; i++)
+        {
+            if (batch[i].NeedsDriverTransaction)
+            {
+                driverTransaction = true;
+                break;
+            }
+        }
+
         bool failed = false;
         long commitStart = 0;
         long commitTicks = 0;
         try
         {
-            using SqliteTransaction tx = connection.BeginTransaction(deferred: false);
+            using SqliteTransaction? tx = Begin(context, driverTransaction);
             context.Transaction = tx;
             try
             {
@@ -349,13 +449,13 @@ internal sealed class SqliteFileWriter : IAsyncDisposable
                 }
 
                 commitStart = Stopwatch.GetTimestamp();
-                tx.Commit();
+                Commit(context, tx);
                 commitTicks = Stopwatch.GetTimestamp() - commitStart;
             }
             catch
             {
                 failed = true;
-                TryRollback(tx);
+                TryRollback(context, tx);
             }
             finally
             {
@@ -386,22 +486,55 @@ internal sealed class SqliteFileWriter : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Opens the batch transaction (<c>BEGIN IMMEDIATE</c>). A batch of native commands uses the prepared statements <see cref="BatchSql"/> and allocates
+    /// nothing; only a batch that holds a command for a library that wants a transaction object (<see cref="WriterCommand.NeedsDriverTransaction"/>)
+    /// goes through the driver's <c>BeginTransaction</c>, which builds a command, a reader and a rollback hook for it.
+    /// </summary>
+    private static SqliteTransaction? Begin(WriterContext context, bool driverTransaction)
+    {
+        if (driverTransaction)
+        {
+            return context.Connection.BeginTransaction(deferred: false);
+        }
+
+        if (context.InTransaction)
+        {
+            // A transaction left open by a rollback that did not take (it must not be, but a BEGIN inside it would fail every batch from here on): end it first.
+            TryRollback(context, null);
+        }
+
+        context.Command(BatchSql.Begin).ExecuteNonQuery();
+        return null;
+    }
+
+    private static void Commit(WriterContext context, SqliteTransaction? tx)
+    {
+        if (tx is not null)
+        {
+            tx.Commit();
+            return;
+        }
+
+        context.Command(BatchSql.Commit).ExecuteNonQuery();
+    }
+
     private void RunIndividually(WriterContext context, WriterCommand command)
     {
         try
         {
-            using SqliteTransaction tx = context.Connection.BeginTransaction(deferred: false);
+            using SqliteTransaction? tx = Begin(context, command.NeedsDriverTransaction);
             context.Transaction = tx;
             try
             {
                 command.Execute(context);
                 long start = Stopwatch.GetTimestamp();
-                tx.Commit();
+                Commit(context, tx);
                 Metrics.RecordBatch(1, Stopwatch.GetTimestamp() - start);
             }
             catch
             {
-                TryRollback(tx);
+                TryRollback(context, tx);
                 throw;
             }
             finally
@@ -438,15 +571,35 @@ internal sealed class SqliteFileWriter : IAsyncDisposable
         command.Succeed();
     }
 
-    private static void TryRollback(SqliteTransaction tx)
+    private static void TryRollback(WriterContext context, SqliteTransaction? tx)
     {
         try
         {
-            tx.Rollback();
+            if (tx is not null)
+            {
+                tx.Rollback();
+            }
+            else
+            {
+                context.Command(BatchSql.Rollback).ExecuteNonQuery();
+            }
         }
         catch (Exception)
         {
             // The connection may already have rolled back (for example after SQLITE_FULL); the batch is replayed anyway.
+        }
+
+        if (tx is null && context.InTransaction)
+        {
+            // A native ROLLBACK that failed while the transaction is still open (a statement of the batch had not finished, say): once more, so no batch ever starts inside it.
+            try
+            {
+                context.Command(BatchSql.Rollback).ExecuteNonQuery();
+            }
+            catch (Exception)
+            {
+                // Nothing more can be done here; the next Begin tries again before it opens a transaction.
+            }
         }
     }
 

@@ -18,14 +18,52 @@ using var log = new TraceLog(etlx);
 var byKey = new Dictionary<string, long>();
 long total = 0;
 var interesting = new Regex(@"^(Mta\.|Microsoft\.EntityFrameworkCore|Microsoft\.Data\.Sqlite|SQLitePCL|System\.Net\.Security|System\.Net\.Sockets|System\.Threading\.Channels|System\.IO\.Pipelines|System\.Text\.Json)");
+var typeNames = new Dictionary<ulong, string>();
+if (Environment.GetEnvironmentVariable("ALLOCSTACKS_DEBUG") == "1")
+{
+    foreach (var g in log.Events.GroupBy(x => x.ProviderName + "/" + x.EventName).OrderByDescending(g => g.Count()).Take(60))
+    {
+        Console.WriteLine($"{g.Count(),9}  {g.Key}");
+    }
+}
+
 foreach (var e in log.Events)
 {
-    if (e is not GCAllocationTickTraceData t)
+    if (e is TypeLoadStopTraceData loaded)
+    {
+        typeNames[(ulong)loaded.TypeID] = loaded.TypeName;
+    }
+    else if (e is GCBulkTypeTraceData bulk)
+    {
+        for (int i = 0; i < bulk.Count; i++)
+        {
+            var v = bulk.Values(i);
+            typeNames[v.TypeID] = v.TypeName;
+        }
+    }
+}
+
+foreach (var e in log.Events)
+{
+    // GCAllocationTick (about one event per 100 KB, keyword 0x1) or, when the trace was recorded with the keyword 0x200000
+    // (GCSampledObjectAllocationHigh), one event per object with its size: exact per-type and per-caller bytes.
+    string typeName;
+    long amount;
+    if (e is GCAllocationTickTraceData t)
+    {
+        typeName = t.TypeName;
+        amount = t.AllocationAmount64;
+    }
+    else if (e is GCSampledObjectAllocationTraceData sampled)
+    {
+        typeName = typeNames.GetValueOrDefault(sampled.TypeID, "?");
+        amount = sampled.TotalSizeForTypeSample;
+    }
+    else
     {
         continue;
     }
 
-    long amount = t.AllocationAmount64;
     total += amount;
     var names = new List<string>();
     for (var s = e.CallStack(); s != null; s = s.Caller)
@@ -40,7 +78,7 @@ foreach (var e in log.Events)
     string key;
     if (mode == "stack")
     {
-        key = t.TypeName + "  <-  " + string.Join(" <- ", names.Take(frames).Select(n => n.Length > 110 ? n[..110] : n));
+        key = typeName + "  <-  " + string.Join(" <- ", names.Take(frames).Select(n => n.Length > 110 ? n[..110] : n));
     }
     else
     {
@@ -48,7 +86,7 @@ foreach (var e in log.Events)
             ?? names.FirstOrDefault(n => interesting.IsMatch(n));
         if (first is null)
         {
-            key = t.TypeName + "  <-  (no known frame)";
+            key = typeName + "  <-  (no known frame)";
         }
         else
         {
@@ -66,7 +104,7 @@ foreach (var e in log.Events)
             }
             else
             {
-                key = method + "  [" + t.TypeName + "]";
+                key = method + "  [" + typeName + "]";
             }
         }
     }

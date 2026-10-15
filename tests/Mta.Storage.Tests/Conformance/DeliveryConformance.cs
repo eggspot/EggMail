@@ -22,6 +22,40 @@ public abstract partial class DeliveryConformance : StorageTestBase
     }
 
     [Fact]
+    public async Task A_claimed_batch_gives_every_row_its_own_sender_domains_and_recipient_although_neighbours_repeat()
+    {
+        // Rows next to each other often share their sender and domains (the claim reads such text once); rows that differ must still come back as they were stored.
+        (string From, string To, string? Sending)[] rows =
+        [
+            ("a@one.example", "r0@dest.example", "one.example"),
+            ("a@one.example", "r1@dest.example", "one.example"),
+            ("a@one.example", "r2@other.example", "one.example"),
+            ("b@two.example", "r3@other.example", "two.example"),
+            ("", "r4@other.example", null),
+            ("", "r5@dest.example", null),
+            ("a@one.example", "r6@dest.example", "one.example"),
+            ("b@two.example", "r7@third.example", null),
+            ("b@two.example", "r8@third.example", "two.example"),
+        ];
+        var accepted = new List<AcceptedMessage>();
+        for (int i = 0; i < rows.Length; i++)
+        {
+            accepted.Add(await AcceptAsync(Msg(received: Start.AddMilliseconds(i), from: rows[i].From, to: [rows[i].To], sendingDomain: rows[i].Sending)));
+        }
+
+        var claimed = await ClaimAsync(now: Start.AddMinutes(1));
+        Assert.Equal(rows.Length, claimed.Count);
+        for (int i = 0; i < rows.Length; i++)
+        {
+            var c = claimed.Single(x => x.MessageId == accepted[i].MessageId);
+            Assert.Equal(rows[i].From, c.EnvelopeFrom.IsNull ? "" : c.EnvelopeFrom.ToString());
+            Assert.Equal(rows[i].To, c.Recipient.ToString());
+            Assert.Equal(rows[i].To[(rows[i].To.IndexOf('@') + 1)..], c.RecipientDomain);
+            Assert.Equal(rows[i].Sending, c.SendingDomain);
+        }
+    }
+
+    [Fact]
     public async Task Deliveries_due_at_the_same_instant_are_claimed_in_id_order_and_max_takes_the_first_ones()
     {
         // One recipient per message, all received at the same millisecond: the order is the order of the ids' text.

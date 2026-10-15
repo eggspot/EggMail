@@ -65,6 +65,24 @@ public class SignerTests
     }
 
     [Fact]
+    public void The_prepended_overload_is_the_signature_field_followed_by_the_message()
+    {
+        var signer = Msg.Signer();
+        byte[] message = Msg.Bytes(Msg.Simple());
+        byte[] rented = signer.SignPrepended(message, out int length);
+        try
+        {
+            byte[] expected = [.. signer.SignToBytes(message).ToArray(), .. message];
+            Assert.Equal(expected.Length, length);
+            Assert.Equal(expected, rented.AsSpan(0, length).ToArray());
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+
+    [Fact]
     public void Writer_overload_matches_string_overload()
     {
         var signer = Msg.Signer();

@@ -235,4 +235,156 @@ public class SubmissionServiceTests : IAsyncLifetime
         Assert.Contains("Subject: Hello", rawFirst);
         Assert.Contains("Subject: Second", rawSecond);
     }
+
+    [Fact]
+    public async Task Concurrent_submissions_through_the_reused_message_objects_keep_every_message_apart()
+    {
+        // The stored-message object and, for SMTP, the request object are reused: many callers at once, several rounds, and every message must come
+        // back with its own subject, body, recipients and Message-ID, and the history with its own content.
+        const int rounds = 6;
+        const int perRound = 64;
+        var submitted = new List<(SubmissionResult Result, string Subject, string Rcpt)>();
+        for (int round = 0; round < rounds; round++)
+        {
+            var batch = await Task.WhenAll(Enumerable.Range(0, perRound).Select(async i =>
+            {
+                string tag = $"r{round}-m{i}";
+                string text = $"From: news@example.org\nTo: {tag}@dest.example\nSubject: Subject {tag}\nMessage-ID: <{tag}@example.org>\n\nbody of {tag}\n";
+                var result = await _service.SubmitAsync(Request(Crlf(text), $"{tag}@dest.example"), default);
+                return (result, $"Subject {tag}", $"{tag}@dest.example");
+            }));
+            submitted.AddRange(batch);
+        }
+
+        Assert.Equal(rounds * perRound, submitted.Count);
+        Assert.Equal(submitted.Count, submitted.Select(x => x.Result.MessageId).Distinct().Count());
+        foreach (var (result, subject, rcpt) in submitted)
+        {
+            Assert.Equal(SubmissionStatus.Accepted, result.Status);
+            string raw = Encoding.UTF8.GetString((await _storage.Deliveries.GetRawAsync(result.MessageId, default))!);
+            Assert.Contains("Subject: " + subject + "\r\n", raw);
+            string tag = rcpt[..rcpt.IndexOf('@')];
+            Assert.Contains("body of " + tag + "\r\n", raw);
+            var detail = await _storage.History.GetAsync(TenantId, result.MessageId, default);
+            Assert.Equal(subject, detail!.Content!.Subject);
+            Assert.Contains("body of " + tag, detail.Content.Text);
+            Assert.Equal([rcpt], detail.Recipients);
+        }
+    }
+
+    [Fact]
+    public async Task Prepare_asks_for_the_domain_list_when_it_has_none_and_finishes_once_it_is_given()
+    {
+        var request = Request(Crlf(Plain), "rcpt@dest.example");
+        var loaded = new LoadedSettings();
+        var first = _service.Prepare(request, ref loaded, out SubmissionLoad load, out _);
+        Assert.Equal(SubmissionLoad.Domains, load);
+        Assert.True(first.IsFinal);   // nothing prepared yet, nothing to store
+
+        loaded.Domains = await _service.GetDomainsAsync(TenantId, default);
+        var prepared = _service.Prepare(request, ref loaded, out load, out _);
+        Assert.Equal(SubmissionLoad.None, load);
+        Assert.False(prepared.IsFinal);
+        var intake = await _service.StoreAsync(prepared, default);
+        var result = _service.Complete(ref prepared, intake);
+        Assert.Equal(SubmissionStatus.Accepted, result.Status);
+        Assert.Contains("Subject: Hello", Encoding.UTF8.GetString((await _storage.Deliveries.GetRawAsync(result.MessageId, default))!));
+    }
+
+    [Fact]
+    public async Task A_refusal_comes_back_from_prepare_without_loading_or_storing_anything_else()
+    {
+        var request = Request(Crlf("To: rcpt@dest.example\nSubject: no sender\n\nbody\n"), "rcpt@dest.example");
+        var loaded = new LoadedSettings();
+        var prepared = _service.Prepare(request, ref loaded, out SubmissionLoad load, out SubmissionResult refused);
+        Assert.Equal(SubmissionLoad.None, load);
+        Assert.True(prepared.IsFinal);
+        Assert.Equal(SubmissionStatus.Invalid, refused.Status);
+        Assert.Equal("message has no From header", refused.Detail);
+        Assert.Equal(0, (await _storage.Deliveries.GetQueueStatsAsync(default)).Queued);
+    }
+
+    [Fact]
+    public async Task A_failed_storage_call_gives_the_pooled_objects_back_and_later_submissions_still_work()
+    {
+        var request = Request(Crlf(Plain), "rcpt@dest.example");
+        var loaded = new LoadedSettings { Domains = await _service.GetDomainsAsync(TenantId, default) };
+        var prepared = _service.Prepare(request, ref loaded, out _, out _);
+        Assert.False(prepared.IsFinal);
+        _service.Abandon(ref prepared);   // as the handler does when the storage call throws or is cancelled
+        Assert.True(prepared.IsFinal);
+
+        var result = await _service.SubmitAsync(Request(Crlf(Plain.Replace("Hello", "After")), "rcpt@dest.example"), default);
+        Assert.Equal(SubmissionStatus.Accepted, result.Status);
+        Assert.Contains("Subject: After", Encoding.UTF8.GetString((await _storage.Deliveries.GetRawAsync(result.MessageId, default))!));
+        Assert.Equal(1, (await _storage.Deliveries.GetQueueStatsAsync(default)).Queued);
+    }
+
+    [Fact]
+    public async Task Without_any_caching_of_the_domain_list_every_submission_still_completes()
+    {
+        var uncached = new SubmissionService(_storage, SystemClock.Instance, new SenderPolicy(), new StorageOptions(), new SubmissionOptions { MessageIdDomain = "egg.test", DomainCacheTtl = TimeSpan.Zero });
+        for (int i = 0; i < 5; i++)
+        {
+            var result = await uncached.SubmitAsync(Request(Crlf(Plain.Replace("Hello", "Round " + i)), "rcpt@dest.example"), default);
+            Assert.Equal(SubmissionStatus.Accepted, result.Status);
+        }
+    }
+
+    [Fact]
+    public async Task Utf8_bodies_reach_history_unchanged_whichever_way_they_are_held()
+    {
+        // A body that is valid UTF-8 in the message is kept as bytes of the stored copy; the history must show exactly the text the plain extraction gives for the same
+        // bytes: LF-only input (the stored copy differs from the original in the body), accents, an 8bit multipart, a latin-1 body (recoded), a base64 body (decoded).
+        string[] messages =
+        [
+            "From: news@example.org\nSubject: s\nContent-Type: text/plain; charset=utf-8\n\nCaf\u00e9 \u20ac \ud83d\ude00\n",
+            "From: news@example.org\nSubject: s\n\nplain, no content type\nsecond line\n",
+            "From: news@example.org\nSubject: s\nContent-Type: text/plain; charset=utf-8\nContent-Transfer-Encoding: base64\n\nQ2Fmw6kK\n",
+            "From: news@example.org\nSubject: s\nMIME-Version: 1.0\nContent-Type: multipart/alternative; boundary=\"b\"\n\n--b\nContent-Type: text/plain; charset=utf-8\nContent-Transfer-Encoding: 8bit\n\nt\u00e9xt\n--b\nContent-Type: text/html; charset=utf-8\n\n<p>h\u00e9llo</p>\n--b--\n",
+            "From: news@example.org\nSubject: s\nContent-Type: text/plain; charset=utf-8\n\n\n",
+        ];
+        var inputs = new List<byte[]>();
+        foreach (string message in messages)
+        {
+            inputs.Add(Encoding.UTF8.GetBytes(message));
+            inputs.Add(Crlf(message));
+        }
+
+        inputs.Add([.. Encoding.ASCII.GetBytes("From: news@example.org\r\nSubject: s\r\nContent-Type: text/plain; charset=iso-8859-1\r\nContent-Transfer-Encoding: 8bit\r\n\r\n"), 0x63, 0x61, 0x66, 0xE9, 0x0D, 0x0A]);
+
+        foreach (byte[] bytes in inputs)
+        {
+            var result = await _service.SubmitAsync(Request(bytes, "rcpt@dest.example"), default);
+            Assert.Equal(SubmissionStatus.Accepted, result.Status);
+            var content = (await _storage.History.GetAsync(TenantId, result.MessageId, default))!.Content!;
+            var expected = MessageContentExtractor.Extract(bytes, 262144);
+            Assert.Equal(expected.TextBody, content.Text);
+            Assert.Equal(expected.HtmlBody, content.Html);
+        }
+
+        var accents = (await _storage.History.GetAsync(TenantId, (await _service.SubmitAsync(Request(Crlf(messages[0]), "rcpt@dest.example"), default)).MessageId, default))!.Content!;
+        Assert.Equal("Caf\u00e9 \u20ac \ud83d\ude00\r\n", accents.Text);
+    }
+
+    [Fact]
+    public void The_text_is_found_in_the_stored_copy_only_where_the_bytes_really_are()
+    {
+        byte[] original = Encoding.UTF8.GetBytes("From: a@example.org\r\nSubject: s\r\n\r\nCaf\u00e9 body\r\n");
+        int bodyStart = Encoding.UTF8.GetByteCount("From: a@example.org\r\nSubject: s\r\n\r\n");
+        ReadOnlyMemory<byte> body = original.AsMemory(bodyStart);
+        byte[] stored = [.. Encoding.ASCII.GetBytes("Received: x\r\nMessage-ID: <m@x>\r\n"), .. original];
+
+        Assert.True(SubmissionService.TryFindInStoredCopy(body, original, stored, out var found));
+        Assert.Equal(body.ToArray(), found!.Value.ToArray());
+        Assert.Same(stored, System.Runtime.InteropServices.MemoryMarshal.TryGetArray(found.Value, out var segment) ? segment.Array : null);
+
+        // The stored copy was changed in the body (line endings repaired): not the same bytes, so not found.
+        byte[] changed = [.. Encoding.ASCII.GetBytes("Received: x\r\n"), .. Encoding.UTF8.GetBytes("From: a@example.org\r\nSubject: s\r\n\r\nCaf\u00e9 BODY\r\n")];
+        Assert.False(SubmissionService.TryFindInStoredCopy(body, original, changed, out _));
+
+        // Memory that is not a slice of the original message.
+        Assert.False(SubmissionService.TryFindInStoredCopy(body.ToArray(), original, stored, out _));
+        Assert.False(SubmissionService.TryFindInStoredCopy(body, original, [], out _));
+    }
 }

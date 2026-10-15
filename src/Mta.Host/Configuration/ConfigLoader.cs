@@ -436,6 +436,11 @@ public static class ConfigLoader
             errors.Add("Delivery:Workers must be at least 1.");
         }
 
+        if (c.Delivery.MaxIdleConnectionsPerTarget is < 0 or > 256)
+        {
+            errors.Add("Delivery:MaxIdleConnectionsPerTarget must be between 0 and 256.");
+        }
+
         if (c.Switch.QuiesceTimeoutSeconds < 1)
         {
             errors.Add("Switch:QuiesceTimeoutSeconds must be at least 1.");
