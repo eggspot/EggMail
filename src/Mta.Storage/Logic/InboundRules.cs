@@ -23,6 +23,20 @@ public static class InboundRules
     public const int MaxRetentionDays = 36_500;
     public const long MaxConfiguredMessageBytes = 1L << 30;
 
+    /// <summary>A forwarded message that has been forwarded this many times by this server is not forwarded again (the signed hop marker, design section 11.7).</summary>
+    public const int MaxForwardHops = 3;
+
+    /// <summary>How long the idempotency key of a forward is remembered: longer than the retry ladder and any manual retry (decision 95).</summary>
+    public static readonly TimeSpan ForwardKeyLifetime = TimeSpan.FromDays(366);
+
+    /// <summary>The idempotency key of the forward of one inbound message (independent of how often the action is retried).</summary>
+    public static string ForwardKey(Guid inboundMessageId) => "inbound:" + inboundMessageId.ToString("N");
+
+    /// <summary>
+    /// Whether <paramref name="localPart"/> is <c>postmaster</c> (any case): RFC 5321 section 4.5.1 requires a domain that receives mail to accept it, so the receive path accepts and
+    /// stores it as an implicit delivery when no route matches (an explicit route for it wins).
+    /// </summary>
+    public static bool IsPostmaster(string localPart) => string.Equals(localPart, "postmaster", StringComparison.OrdinalIgnoreCase);
     private const string LocalPartSpecials = "!#$%&'+-/=?^_`{|}~.";
 
     /// <summary>
@@ -135,17 +149,26 @@ public static class InboundRules
 
     /// <summary>
     /// The retention in days a domain gets: its own value, else the server default; 0 means keep forever. A negative server default (a configuration
-    /// the validator refuses) is treated as the built-in 7 days rather than as unlimited.
+    /// the validator refuses) is treated as the built-in 7 days rather than as unlimited. <paramref name="ceilingDays"/> is <c>Inbound:MaxRetentionDays</c> (0: none).
     /// </summary>
-    public static int ResolveRetentionDays(int? domainRetentionDays, int serverDefaultDays) =>
-        domainRetentionDays ?? (serverDefaultDays < 0 ? 7 : serverDefaultDays);
+    public static int ResolveRetentionDays(int? domainRetentionDays, int serverDefaultDays, int ceilingDays = 0)
+    {
+        int days = domainRetentionDays ?? (serverDefaultDays < 0 ? 7 : serverDefaultDays);
+
+        // The operator's ceiling: a longer value is cut to it and "forever" becomes it (a ceiling of 0 means there is none).
+        return ceilingDays > 0 && (days == 0 || days > ceilingDays) ? ceilingDays : days;
+    }
 
     /// <summary>The oldest receive time a message may have to be kept, or null when the retention is unlimited.</summary>
     public static DateTimeOffset? RetentionCutoff(DateTimeOffset now, int retentionDays) =>
         retentionDays <= 0 ? null : now.AddDays(-retentionDays);
 
-    /// <summary>Validates the settings a caller wants to store. The domain being verified is the caller's check (it needs the domain).</summary>
-    public static IReadOnlyList<InboundValidationError> ValidateSettings(InboundDomainSettings settings)
+    /// <summary>
+    /// Validates the settings a caller wants to store. The domain being verified is the caller's check (it needs the domain). With <paramref name="ceilings"/> a value above the operator's
+    /// limit is refused (a tenant can only lower a limit): a size or rate above the ceiling, a stored-bytes limit above the ceiling or "unlimited" under a finite ceiling, a retention above
+    /// the retention ceiling or "forever" under it.
+    /// </summary>
+    public static IReadOnlyList<InboundValidationError> ValidateSettings(InboundDomainSettings settings, InboundCeilings? ceilings = null)
     {
         var errors = new List<InboundValidationError>();
         if (!Enum.IsDefined(settings.DmarcAction))
@@ -178,6 +201,34 @@ public static class InboundRules
             errors.Add(new("retentionDays", $"Must be between 0 (keep forever) and {MaxRetentionDays}."));
         }
 
+        if (ceilings is not null && errors.Count == 0)
+        {
+            if (settings.MaxMessageBytes > ceilings.MaxMessageBytes)
+            {
+                errors.Add(new("maxMessageBytes", $"At most {ceilings.MaxMessageBytes} bytes on this server (Inbound:MaxMessageSize)."));
+            }
+
+            if (settings.MaxMessagesPerMinute > ceilings.MaxMessagesPerMinute)
+            {
+                errors.Add(new("maxMessagesPerMinute", $"At most {ceilings.MaxMessagesPerMinute} on this server (Inbound:MaxMessagesPerMinute)."));
+            }
+
+            if (settings.MaxMessagesPerMinutePerRemote > ceilings.MaxMessagesPerMinutePerRemote)
+            {
+                errors.Add(new("maxMessagesPerMinutePerRemote", $"At most {ceilings.MaxMessagesPerMinutePerRemote} on this server (Inbound:MaxMessagesPerMinutePerRemote)."));
+            }
+
+            if (settings.MaxStoredBytes is { } storedLimit && ceilings.MaxStoredBytesPerDomain > 0 && (storedLimit == 0 || storedLimit > ceilings.MaxStoredBytesPerDomain))
+            {
+                errors.Add(new("maxStoredBytes", $"At most {ceilings.MaxStoredBytesPerDomain} bytes on this server (Inbound:MaxStoredBytesPerDomain), and not unlimited."));
+            }
+
+            if (settings.RetentionDays is { } keepDays && ceilings.MaxRetentionDays > 0 && (keepDays == 0 || keepDays > ceilings.MaxRetentionDays))
+            {
+                errors.Add(new("retentionDays", $"At most {ceilings.MaxRetentionDays} days on this server (Inbound:MaxRetentionDays), and not forever."));
+            }
+        }
+
         return errors;
     }
 
@@ -186,7 +237,7 @@ public static class InboundRules
     /// with 1 to <see cref="MaxWildcards"/> stars and something besides stars), the action (a webhook names an endpoint, a forward has 1 to
     /// <see cref="MaxForwardTargets"/> distinct valid addresses, store and discard carry no target). That the webhook endpoint exists and is the tenant's is the caller's check.
     /// </summary>
-    public static IReadOnlyList<InboundValidationError> ValidateRoute(InboundRouteRecord route)
+    public static IReadOnlyList<InboundValidationError> ValidateRoute(InboundRouteRecord route, string? domainName = null)
     {
         var errors = new List<InboundValidationError>();
         if (route.Name.Length > MaxRouteNameLength || ContainsControl(route.Name))
@@ -209,7 +260,7 @@ public static class InboundRules
         }
         else
         {
-            ValidateAction(route, errors);
+            ValidateAction(route, errors, domainName);
         }
 
         return errors;
@@ -285,7 +336,7 @@ public static class InboundRules
         }
     }
 
-    private static void ValidateAction(InboundRouteRecord route, List<InboundValidationError> errors)
+    private static void ValidateAction(InboundRouteRecord route, List<InboundValidationError> errors, string? domainName)
     {
         switch (route.ActionKind)
         {
@@ -330,6 +381,10 @@ public static class InboundRules
                     else if (!seen.Add(address.LocalPart + "@" + address.Domain))
                     {
                         errors.Add(new(field, "Listed twice."));
+                    }
+                    else if (domainName is not null && string.Equals(address.Domain, domainName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        errors.Add(new(field, "A route cannot forward to its own domain: the forward would come straight back."));
                     }
                 }
 
@@ -399,7 +454,7 @@ public static class InboundNames
 
     public static string Of(InboundDmarcAction action) => action switch
     {
-        InboundDmarcAction.QuarantineFlag => "quarantine_flag",
+        InboundDmarcAction.Flag => "flag",
         InboundDmarcAction.Reject => "reject",
         _ => "record_only",
     };
@@ -409,7 +464,7 @@ public static class InboundNames
         action = text switch
         {
             "record_only" => InboundDmarcAction.RecordOnly,
-            "quarantine_flag" => InboundDmarcAction.QuarantineFlag,
+            "flag" => InboundDmarcAction.Flag,
             "reject" => InboundDmarcAction.Reject,
             _ => (InboundDmarcAction)255,
         };

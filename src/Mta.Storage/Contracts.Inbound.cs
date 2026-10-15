@@ -1,22 +1,22 @@
 namespace Mta.Storage;
 
-// Contracts of inbound mail (design section 11, decision 92). Three kinds of data, one interface:
+// Contracts of inbound mail (design section 11, decision 95). Three kinds of data, one interface:
 //   - per-domain inbound settings and the routes of a domain: configuration (the config part), read at RCPT time through a cache;
 //   - inbound messages: the received mail with its verification results and the state of the route action (the queue part, so a
 //     forward can join the outbound queue in the same file and the switch holds them like deliveries);
 //   - retention: the "inbound_retention" job of IStorageMaintenance.RunAsync.
 // Every method behaves identically on every backend (decision E).
 
-/// <summary>What the receiver does when DMARC evaluation says the message fails and the sender's policy asks for quarantine or rejection.</summary>
+/// <summary>What the receiver does when DMARC evaluation says the message fails and the sender's policy asks for quarantine or rejection. Nothing is ever quarantined (moved aside): a failing message is accepted and flagged, or refused.</summary>
 public enum InboundDmarcAction : byte
 {
     /// <summary>Accept and record the DMARC verdict; never act on the sender's policy (the default).</summary>
     RecordOnly = 0,
 
-    /// <summary>Accept; when the sender's policy is quarantine or reject and the message fails DMARC, flag the stored message (<see cref="InboundDmarcDisposition.QuarantineFlagged"/>) and add <c>X-EggMail-Quarantine: dmarc</c>.</summary>
-    QuarantineFlag = 1,
+    /// <summary>Accept; when the sender's policy is quarantine or reject and the message fails DMARC, flag the stored message (<see cref="InboundDmarcDisposition.Flagged"/>) and add <c>X-EggMail-Dmarc: flagged</c>.</summary>
+    Flag = 1,
 
-    /// <summary>Honor the sender's policy: a message that fails DMARC under <c>p=reject</c> is refused at the end of DATA with <c>550 5.7.1</c>; a <c>p=quarantine</c> failure is flagged as with <see cref="QuarantineFlag"/>.</summary>
+    /// <summary>Honor the sender's policy: a message that fails DMARC under <c>p=reject</c> is refused at the end of DATA with <c>550 5.7.1</c>; a <c>p=quarantine</c> failure is flagged as with <see cref="Flag"/>. A transaction with several recipients is refused only when <b>every</b> accepted recipient's domain asks for rejection (design section 11.5); otherwise it is accepted and the rejecting domains' copies are flagged.</summary>
     Reject = 2,
 }
 
@@ -24,7 +24,7 @@ public enum InboundDmarcAction : byte
 public enum InboundDmarcDisposition : byte
 {
     None = 0,
-    QuarantineFlagged = 1,
+    Flagged = 1,
 }
 
 /// <summary>Result of one verification mechanism. Wire names (API, headers) are the lower-case names; <see cref="SoftFail"/> is <c>softfail</c>.</summary>
@@ -40,9 +40,10 @@ public enum InboundVerdict : byte
     Policy = 7,
 }
 
-/// <summary>The verification results of one received message: SPF (on MAIL FROM, HELO when the reverse-path is null), DKIM (the best signature: pass when any passes), DMARC and ARC.</summary>
+/// <summary>The verification results of one received message: SPF (on MAIL FROM, or on HELO when the reverse-path is null; HELO is evaluated and recorded too), DKIM (the best signature: pass when any passes), DMARC and ARC.</summary>
 /// <param name="Spf">SPF verdict.</param>
-/// <param name="SpfDomain">The domain SPF was evaluated for.</param>
+/// <param name="SpfDomain">The domain the SPF verdict is for: the MAIL FROM domain, or the HELO name when the reverse-path is null.</param>
+/// <param name="SpfHelo">SPF verdict for the HELO/EHLO name (RFC 7208 section 2.3), evaluated even when MAIL FROM is present; <see cref="InboundVerdict.None"/> when the name is not a domain.</param>
 /// <param name="Dkim">DKIM verdict: <see cref="InboundVerdict.Pass"/> when any signature passed, else the strongest failure, <see cref="InboundVerdict.None"/> without signatures.</param>
 /// <param name="DkimDomain">The <c>d=</c> of the signature that decided <paramref name="Dkim"/>.</param>
 /// <param name="Dmarc">DMARC verdict for the RFC 5322 From domain.</param>
@@ -51,13 +52,14 @@ public enum InboundVerdict : byte
 public sealed record InboundAuthResults(
     InboundVerdict Spf,
     string? SpfDomain,
+    InboundVerdict SpfHelo,
     InboundVerdict Dkim,
     string? DkimDomain,
     InboundVerdict Dmarc,
     string? DmarcPolicy,
     InboundVerdict Arc)
 {
-    public static InboundAuthResults NotChecked { get; } = new(InboundVerdict.None, null, InboundVerdict.None, null, InboundVerdict.None, null, InboundVerdict.None);
+    public static InboundAuthResults NotChecked { get; } = new(InboundVerdict.None, null, InboundVerdict.None, InboundVerdict.None, null, InboundVerdict.None, null, InboundVerdict.None);
 }
 
 /// <summary>What a route does with a matching message. Stored as a byte: the numbers never change.</summary>
@@ -214,6 +216,7 @@ public sealed record InboundDomainConfiguration(
 /// <param name="ActionLastError">The last failure, a short sentence without secrets.</param>
 /// <param name="ForwardMessageId">For a forward, the id of the outbound message that carries it.</param>
 /// <param name="HasRaw">The body is stored (false for discard, after a completed forward, or when it was deleted).</param>
+/// <param name="RetryGeneration">How often the action was put back with <see cref="IInboundMessageStore.RetryActionAsync"/>; part of the webhook id, so a manual retry is a new event for the receiver.</param>
 public sealed record InboundMessage(
     Guid Id,
     Guid TenantId,
@@ -237,7 +240,8 @@ public sealed record InboundMessage(
     DateTimeOffset? ActionFinishedAt,
     string? ActionLastError,
     Guid? ForwardMessageId,
-    bool HasRaw);
+    bool HasRaw,
+    int RetryGeneration = 0);
 
 /// <summary>
 /// A message to store, built by the receive path after verification and route matching. The state is derived, not given: webhook and forward
@@ -259,15 +263,20 @@ public sealed class InboundMessageDraft
     public string? Subject { get; set; }
     public required InboundAuthResults Auth { get; set; }
     public InboundDmarcDisposition Disposition { get; set; }
-    public required Guid RouteId { get; set; }
+    /// <summary>The route that matched; null for the implicit <c>postmaster</c> delivery (RFC 5321 section 4.5.1, design section 11.4), which is stored.</summary>
+    public Guid? RouteId { get; set; }
     public required InboundActionKind ActionKind { get; set; }
 
     /// <summary>The stored message: the received bytes with the headers the server added (Received, Authentication-Results, ...), CRLF lines.</summary>
     public required ReadOnlyMemory<byte> Raw { get; set; }
 }
 
+/// <summary>
+/// A search of one tenant's received mail. The tenant is required: there is no all-tenants search in the contract (an administrator acts as a tenant, with <c>X-Tenant-Id</c>),
+/// so a missing filter can never leak another tenant's mail.
+/// </summary>
 public sealed record InboundMessageQuery(
-    Guid? TenantId = null,
+    Guid TenantId,
     Guid? DomainId = null,
     string? Recipient = null,
     string? Sender = null,
@@ -276,7 +285,7 @@ public sealed record InboundMessageQuery(
     InboundActionKind? ActionKind = null,
     InboundActionState? ActionState = null,
     InboundVerdict? Dmarc = null,
-    bool? Quarantined = null,
+    bool? DmarcFlagged = null,
     DateTimeOffset? From = null,
     DateTimeOffset? To = null,
     int Limit = 50,
@@ -314,6 +323,19 @@ public enum InboundRetryResult : byte
 /// <summary>What an inbound-enabled domain (or a tenant, or the server) holds. <see cref="Pending"/> and <see cref="Failed"/> count actions.</summary>
 public sealed record InboundUsage(long Messages, long BodyBytes, long Pending, long Failed, DateTimeOffset? OldestPendingAt);
 
+/// <summary>
+/// The operator's server-wide limits (<c>Inbound:*</c>, design section 11.6): what a domain's own settings may be at most. A tenant can only lower a limit, never raise it, and a domain
+/// that sets nothing gets the ceiling itself (rates, sizes) or the default (retention, see <c>StorageOptions.Inbound</c>). <c>0</c> is unlimited for the stored-bytes limits and means
+/// "no ceiling" for <see cref="MaxRetentionDays"/>.
+/// </summary>
+/// <param name="MaxMessageBytes">Largest inbound message.</param>
+/// <param name="MaxMessagesPerMinute">Messages per minute for one domain.</param>
+/// <param name="MaxMessagesPerMinutePerRemote">Messages per minute from one client address (an IPv6 /64) for one domain.</param>
+/// <param name="MaxStoredBytesPerDomain">Body bytes kept for one domain; 0 unlimited.</param>
+/// <param name="MaxStoredBytesPerTenant">Body bytes kept for all domains of one tenant together; 0 unlimited. Enforced by the receive path.</param>
+/// <param name="MaxRetentionDays">The longest retention a domain may choose; 0: none (a domain may keep forever).</param>
+public sealed record InboundCeilings(long MaxMessageBytes, int MaxMessagesPerMinute, int MaxMessagesPerMinutePerRemote, long MaxStoredBytesPerDomain, long MaxStoredBytesPerTenant, int MaxRetentionDays);
+
 /// <summary>Per-domain inbound settings and routes (the config part).</summary>
 public interface IInboundConfigStore
 {
@@ -329,7 +351,7 @@ public interface IInboundConfigStore
     /// <summary>One route of the tenant; null when unknown or another tenant's.</summary>
     ValueTask<InboundRouteRecord?> GetRouteAsync(Guid tenantId, Guid routeId, CancellationToken cancellationToken);
 
-    /// <summary>Inserts or replaces a route. The domain must exist and belong to the route's tenant (<see cref="StorageConflictException"/> otherwise).</summary>
+    /// <summary>Inserts or replaces a route (validated by <see cref="Logic.InboundRules.ValidateRoute"/> before the call). The domain must exist and belong to the route's tenant (<see cref="StorageConflictException"/> otherwise).</summary>
     ValueTask UpsertRouteAsync(InboundRouteRecord route, CancellationToken cancellationToken);
 
     /// <summary>Deletes a route of the tenant; false when there is none. Messages that referenced it keep their row (their action then fails with <c>route_deleted</c> if still pending).</summary>
@@ -363,7 +385,14 @@ public interface IInboundMessageStore
     /// <summary>Deletes the message and its body, whatever its action state; false when there is none for the tenant. An attempt in flight finishes harmlessly (its completion returns false).</summary>
     ValueTask<bool> DeleteAsync(Guid tenantId, Guid messageId, CancellationToken cancellationToken);
 
-    /// <summary>Puts a <see cref="InboundActionState.Failed"/> or <see cref="InboundActionState.Done"/> webhook or forward action back to pending (due at <paramref name="now"/>, attempts reset). A forward whose body was freed is <see cref="InboundRetryResult.NotRetryable"/>.</summary>
+    /// <summary>
+    /// Deletes every message (and body) of <paramref name="query"/>'s tenant that matches its filters, whatever its action state (erasure of one sender's or recipient's mail, a
+    /// domain's mail). At least one filter besides the tenant is required (<see cref="ArgumentException"/> otherwise), so it can never empty a tenant by accident; the
+    /// paging members are ignored. Returns the number of messages deleted. Done in batches; an attempt in flight finishes harmlessly.
+    /// </summary>
+    ValueTask<long> DeleteMatchingAsync(InboundMessageQuery query, CancellationToken cancellationToken);
+
+    /// <summary>Puts a <see cref="InboundActionState.Failed"/> or <see cref="InboundActionState.Done"/> webhook or forward action back to pending (due at <paramref name="now"/>, attempts reset, <see cref="InboundMessage.RetryGeneration"/> + 1). A forward whose body was freed is <see cref="InboundRetryResult.NotRetryable"/>.</summary>
     ValueTask<InboundRetryResult> RetryActionAsync(Guid tenantId, Guid messageId, DateTimeOffset now, CancellationToken cancellationToken);
 
     /// <summary>

@@ -68,6 +68,12 @@ public sealed class InboundStorageOptions
     /// retention knob (design section 5.1); negative is invalid.
     /// </summary>
     public int RetentionDays { get; init; } = 7;
+
+    /// <summary>
+    /// The longest retention any domain gets (<c>Inbound:MaxRetentionDays</c>): a domain's own value (and the default) is cut to it, and "forever" (0) becomes it. <c>0</c>: no ceiling.
+    /// The operator's guard against a tenant keeping other people's mail without limit.
+    /// </summary>
+    public int MaxRetentionDays { get; init; }
 }
 
 public sealed class ContentOptions
