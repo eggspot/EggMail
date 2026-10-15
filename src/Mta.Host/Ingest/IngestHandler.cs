@@ -136,10 +136,21 @@ public sealed class IngestHandler : ISmtpServerHandler
         return ValueTask.FromResult(SmtpReplies.RecipientOk);
     }
 
-    private async ValueTask<SmtpReply> IsBounceRecipientReplyAsync(EmailAddress recipient, CancellationToken ct) =>
-        await IsBounceRecipientAsync(recipient, ct).ConfigureAwait(false)
-            ? SmtpReplies.RecipientOk
-            : SmtpReply.Create(550, "5.1.1", "No such user here");
+    private async ValueTask<SmtpReply> IsBounceRecipientReplyAsync(EmailAddress recipient, CancellationToken ct)
+    {
+        try
+        {
+            return await IsBounceRecipientAsync(recipient, ct).ConfigureAwait(false)
+                ? SmtpReplies.RecipientOk
+                : SmtpReply.Create(550, "5.1.1", "No such user here");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Only a token at a sending domain's return-path host needs the storage; a remote server that gets 451 tries again later.
+            _log.Write(MtaLogLevel.Warning, "ingest", "bounce recipient could not be checked", ex);
+            return StorageProblem;
+        }
+    }
 
     [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<SmtpReply> OnMessageAsync(SmtpMessage message, CancellationToken ct)
