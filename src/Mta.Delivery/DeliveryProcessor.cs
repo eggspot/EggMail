@@ -281,7 +281,7 @@ public sealed class DeliveryProcessor
         // the first is a domain the customer controls, which is what lets SPF align with the From domain.
         (Guid domainId, string host) = await FindReturnPathAsync(d.SendingDomain, ct).ConfigureAwait(false);
         // The token is also bound to the destination domain (all recipients of a delivery group share it), so a report that names an address in
-        // another domain cannot get that address suppressed (docs/decisions.md 88).
+        // another domain cannot get that address suppressed (docs/decisions.md 89).
         string address = _s.Verp.CreateAddress(d.TenantId, domainId, host, now, d.RecipientDomain);
         // allowUtf8: a bounce domain configured as a U-label is accepted and put on the wire in its A-label form (the local part is ASCII).
         return EmailAddress.TryParse(address, allowUtf8: true, out var parsed) ? parsed : d.EnvelopeFrom;

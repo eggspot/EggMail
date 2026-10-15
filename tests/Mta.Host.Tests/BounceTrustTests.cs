@@ -11,7 +11,7 @@ namespace Mta.Host.Tests;
 /// <summary>
 /// The bounce listener is open to the internet and a bounce address is in the Return-Path of every message, so anyone who received one message
 /// holds a valid token. What a report that arrives under a token may do must therefore be limited by what the token was issued for: the
-/// destination domain of the message. Otherwise a stranger could get any address suppressed for a tenant (docs/decisions.md 88).
+/// destination domain of the message. Otherwise a stranger could get any address suppressed for a tenant (docs/decisions.md 89).
 /// </summary>
 public class BounceTrustTests : IAsyncLifetime
 {
