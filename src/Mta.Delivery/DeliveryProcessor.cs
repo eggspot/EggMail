@@ -232,7 +232,7 @@ public sealed class DeliveryProcessor
             }
 
             // What goes on the wire (and so what DKIM signs) is decided per server, after its EHLO: see OutboundTransaction.
-            transaction = new OutboundTransaction(raw, signer, first.HeadersUtf8, await ChooseEnvelopeFromAsync(first, now, ct).ConfigureAwait(false), pending.Select(d => d.Recipient).ToArray());
+            transaction = new OutboundTransaction(raw, signer, first.HeadersUtf8, await ChooseEnvelopeFromAsync(first, now, ct).ConfigureAwait(false), RecipientsOf(pending));
             var attempt = await RunRoutesAsync(first, transaction, ct).ConfigureAwait(false);
             Interpret(pending, attempt, results);
 
@@ -265,6 +265,17 @@ public sealed class DeliveryProcessor
         }
     }
 
+    private static EmailAddress[] RecipientsOf(List<ClaimedDelivery> deliveries)
+    {
+        var recipients = new EmailAddress[deliveries.Count];
+        for (int i = 0; i < recipients.Length; i++)
+        {
+            recipients[i] = deliveries[i].Recipient;
+        }
+
+        return recipients;
+    }
+
     // ---------------------------------------------------------------- envelope
 
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (Guid Id, long ExpiresAt)> _domainIds = new(StringComparer.OrdinalIgnoreCase);
@@ -278,10 +289,19 @@ public sealed class DeliveryProcessor
 
         // The token carries the sending domain's id so a bounce can be attributed without a lookup of the message.
         Guid domainId = await FindDomainIdAsync(d.SendingDomain, ct).ConfigureAwait(false);
-        string address = _s.Verp.CreateAddress(d.TenantId, domainId, _options.BounceDomain!, now);
-        // allowUtf8: a bounce domain configured as a U-label is accepted and put on the wire in its A-label form (the local part is ASCII).
-        return EmailAddress.TryParse(address, allowUtf8: true, out var parsed) ? parsed : d.EnvelopeFrom;
+
+        // The token only changes with the key, the tenant, the sending domain and the hour: see BounceAddressCache.
+        var verp = _s.Verp;
+        EmailAddress? bounce = _bounceAddresses.GetOrCreate(verp.ActiveKeyId, d.TenantId, domainId, Mta.Dsn.VerpCodec.HourStamp(now), (verp, d.TenantId, domainId, _options.BounceDomain!, now), static s =>
+        {
+            string address = s.verp.CreateAddress(s.TenantId, s.domainId, s.Item4, s.now);
+            // allowUtf8: a bounce domain configured as a U-label is accepted and put on the wire in its A-label form (the local part is ASCII).
+            return EmailAddress.TryParse(address, allowUtf8: true, out var parsed) ? parsed : null;
+        });
+        return bounce ?? d.EnvelopeFrom;
     }
+
+    private readonly BounceAddressCache _bounceAddresses = new();
 
     private async ValueTask<Guid> FindDomainIdAsync(string? sendingDomain, CancellationToken ct)
     {

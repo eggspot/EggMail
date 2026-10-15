@@ -1,3 +1,5 @@
+using Certes;
+using Certes.Acme;
 using Mta.Core;
 using Mta.Host.Tls;
 using Mta.Storage;
@@ -35,7 +37,39 @@ public abstract class AcmeRenewalInfoPebbleTests : IAsyncLifetime
         var dns = new ChallengeServerDns();
         var service = _h.CreateService(dns, [host], random: () => 0);
         Assert.True(await WithTimeout(service.CheckOnceAsync(default)), Diagnostics);
-        return (service, host, Assert.Single(await _h.Storage.Config.GetCertificatesAsync(default)));
+        var cert = Assert.Single(await _h.Storage.Config.GetCertificatesAsync(default));
+        await WaitUntilThePebbleCanReplaceAsync(host, cert);
+        return (service, host, cert);
+    }
+
+    /// <summary>
+    /// Pebble 2.10 marks an order valid (and lets the client download the certificate) before it records which order issued the certificate, in a goroutine of its own:
+    /// an order that names the certificate in <c>replaces</c> in that moment gets a 500 ("could not find order resulting in the given certificate serial number").
+    /// The tests that follow the renewal order must not depend on that race, so this asks for such an order (through a transport that is not recorded, with the account of the
+    /// service; the order is never finalized, so it replaces nothing) until Pebble answers it. The service itself falls back to a plain order on such a 500 (unit-tested).
+    /// </summary>
+    private async Task WaitUntilThePebbleCanReplaceAsync(string host, CertificateRecord cert)
+    {
+        var account = await _h.Storage.Config.GetAcmeAccountAsync(_h.DirectoryUrl, default);
+        string accountKey = System.Text.Encoding.UTF8.GetString(_h.Secrets.Unprotect(account!.AccountKeyProtected, SecretPurposes.AcmeAccountKey));
+        using var transport = Pebble.CreateTransport();
+        using var http = Pebble.NewClient(transport);
+        var directory = new Uri(_h.DirectoryUrl);
+        var acme = new AcmeContext(directory, KeyFactory.FromPem(accountKey), new AcmeHttpClient(directory, http));
+        string certificateId = new CertificateChain(cert.ChainPem).GetRenewalInfoCertificateId();
+        var deadline = DateTime.UtcNow.AddSeconds(30);   // a generous bound for a goroutine; polling asserts nothing about time
+        while (true)
+        {
+            try
+            {
+                await acme.NewReplacementOrder([host], certificateId);
+                return;
+            }
+            catch (AcmeRequestException ex) when (DateTime.UtcNow < deadline && (int)(ex.Error?.Status ?? 0) == 500)
+            {
+                await Task.Delay(20);
+            }
+        }
     }
 
     private async Task<AcmeRenewalAdvice?> AdviceAsync(CertificateRecord cert) =>

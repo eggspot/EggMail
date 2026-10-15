@@ -6,5 +6,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Mta.Core\Mta.Core.csproj" />
+    <InternalsVisibleTo Include="Mta.Mime.Tests" />
   </ItemGroup>
 </Project>

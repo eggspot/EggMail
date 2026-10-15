@@ -83,7 +83,7 @@ internal sealed class OutboundTransaction : IDisposable
 
         var sendable = Recipients;
         Dictionary<EmailAddress, SmtpReply>? refusals = null;
-        if (!caps.SmtpUtf8 && Recipients.Any(r => r.RequiresSmtpUtf8))
+        if (!caps.SmtpUtf8 && AnyRequiresSmtpUtf8(Recipients))
         {
             refusals = [];
             var keep = new List<EmailAddress>(Recipients.Count);
@@ -107,7 +107,7 @@ internal sealed class OutboundTransaction : IDisposable
             sendable = keep;
         }
 
-        bool smtpUtf8 = HeadersUtf8 || From.RequiresSmtpUtf8 || sendable.Any(r => r.RequiresSmtpUtf8);
+        bool smtpUtf8 = HeadersUtf8 || From.RequiresSmtpUtf8 || AnyRequiresSmtpUtf8(sendable);
         bool eightBit = _bodyEightBit && caps.EightBitMime;
         ReadOnlyMemory<byte> message;
         if (_bodyEightBit && !caps.EightBitMime)
@@ -126,6 +126,19 @@ internal sealed class OutboundTransaction : IDisposable
         }
 
         return new Transmission(new SmtpEnvelope(From, sendable, smtpUtf8, eightBit), message, null, refusals);
+    }
+
+    private static bool AnyRequiresSmtpUtf8(IReadOnlyList<EmailAddress> addresses)
+    {
+        for (int i = 0; i < addresses.Count; i++)   // by index: no enumerator, no closure
+        {
+            if (addresses[i].RequiresSmtpUtf8)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static Transmission Refused(SmtpReply reply) => new(null, default, reply, null);
@@ -165,12 +178,9 @@ internal sealed class OutboundTransaction : IDisposable
             return body;
         }
 
-        var signature = _signer.SignToBytes(body.Span);
-        byte[] buffer = ArrayPool<byte>.Shared.Rent(signature.Length + body.Length);
+        byte[] buffer = _signer.SignPrepended(body.Span, out int length);
         _rented.Add(buffer);
-        signature.Span.CopyTo(buffer);
-        body.Span.CopyTo(buffer.AsSpan(signature.Length));
-        return buffer.AsMemory(0, signature.Length + body.Length);
+        return buffer.AsMemory(0, length);
     }
 
     public void Dispose()
