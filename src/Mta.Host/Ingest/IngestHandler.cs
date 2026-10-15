@@ -27,6 +27,9 @@ public sealed class IngestHandler : ISmtpServerHandler
         public Tenant Tenant { get; init; } = null!;
         public string RemoteAddress { get; init; } = "";   // the same for every message of the session: formatted once
         public int Recipients;
+
+        /// <summary>The request object of the session, filled again for each message (the session handles one message at a time and waits for the submission to finish).</summary>
+        public SubmissionRequest Request { get; init; } = null!;
     }
 
     private static readonly SmtpReply AuthUnavailable = SmtpReply.Constant(454, "4.7.0", "Too many failed attempts, try again later");
@@ -93,7 +96,12 @@ public sealed class IngestHandler : ISmtpServerHandler
         }
 
         await _throttle.RecordSuccessAsync(check, ip, userKey).ConfigureAwait(false);
-        session.HandlerState = new State { Tenant = tenant, RemoteAddress = ip };
+        session.HandlerState = new State
+        {
+            Tenant = tenant,
+            RemoteAddress = ip,
+            Request = new SubmissionRequest { Tenant = tenant, Source = MessageSource.Smtp, EnvelopeFrom = default, Recipients = [], Message = default, RemoteAddress = ip },
+        };
         return SmtpAuthResult.Succeeded(credential!.UserName);
     }
 
@@ -154,18 +162,26 @@ public sealed class IngestHandler : ISmtpServerHandler
                 return SmtpReply.Create(530, "5.7.0", "Authentication required");
             }
 
-            var result = await _submission.SubmitAsync(new SubmissionRequest
+            var request = state.Request;
+            request.EnvelopeFrom = message.Sender;
+            request.Recipients = message.Recipients;
+            // The message memory is valid for the duration of this call, which is all the submission needs (it makes its own copy of the stored message).
+            request.Message = message.Body.IsSingleSegment ? message.Body.First : message.ToArray();
+            request.ReceivedHeader = message.ReceivedHeader;
+            request.Authenticated = message.Session.AuthenticatedUser;
+            SubmissionResult result;
+            try
             {
-                Tenant = state.Tenant,
-                Source = MessageSource.Smtp,
-                EnvelopeFrom = message.Sender,
-                Recipients = message.Recipients,
-                // The message memory is valid for the duration of this call, which is all the submission needs (it makes its own copy of the stored message).
-                Message = message.Body.IsSingleSegment ? message.Body.First : message.ToArray(),
-                ReceivedHeader = message.ReceivedHeader,
-                RemoteAddress = state.RemoteAddress,
-                Authenticated = message.Session.AuthenticatedUser,
-            }, ct).ConfigureAwait(false);
+                result = await _submission.SubmitAsync(request, ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                // Nothing of the message may stay reachable through the reused request once the call is over (the memory goes back to its pool).
+                request.EnvelopeFrom = default;
+                request.Recipients = [];
+                request.Message = default;
+                request.ReceivedHeader = default;
+            }
 
             if (result.Status is SubmissionStatus.Accepted or SubmissionStatus.Duplicate)
             {

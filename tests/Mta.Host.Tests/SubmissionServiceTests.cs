@@ -235,4 +235,40 @@ public class SubmissionServiceTests : IAsyncLifetime
         Assert.Contains("Subject: Hello", rawFirst);
         Assert.Contains("Subject: Second", rawSecond);
     }
+
+    [Fact]
+    public async Task Concurrent_submissions_through_the_reused_message_objects_keep_every_message_apart()
+    {
+        // The stored-message object and, for SMTP, the request object are reused: many callers at once, several rounds, and every message must come
+        // back with its own subject, body, recipients and Message-ID, and the history with its own content.
+        const int rounds = 6;
+        const int perRound = 64;
+        var submitted = new List<(SubmissionResult Result, string Subject, string Rcpt)>();
+        for (int round = 0; round < rounds; round++)
+        {
+            var batch = await Task.WhenAll(Enumerable.Range(0, perRound).Select(async i =>
+            {
+                string tag = $"r{round}-m{i}";
+                string text = $"From: news@example.org\nTo: {tag}@dest.example\nSubject: Subject {tag}\nMessage-ID: <{tag}@example.org>\n\nbody of {tag}\n";
+                var result = await _service.SubmitAsync(Request(Crlf(text), $"{tag}@dest.example"), default);
+                return (result, $"Subject {tag}", $"{tag}@dest.example");
+            }));
+            submitted.AddRange(batch);
+        }
+
+        Assert.Equal(rounds * perRound, submitted.Count);
+        Assert.Equal(submitted.Count, submitted.Select(x => x.Result.MessageId).Distinct().Count());
+        foreach (var (result, subject, rcpt) in submitted)
+        {
+            Assert.Equal(SubmissionStatus.Accepted, result.Status);
+            string raw = Encoding.UTF8.GetString((await _storage.Deliveries.GetRawAsync(result.MessageId, default))!);
+            Assert.Contains("Subject: " + subject + "\r\n", raw);
+            string tag = rcpt[..rcpt.IndexOf('@')];
+            Assert.Contains("body of " + tag + "\r\n", raw);
+            var detail = await _storage.History.GetAsync(TenantId, result.MessageId, default);
+            Assert.Equal(subject, detail!.Content!.Subject);
+            Assert.Contains("body of " + tag, detail.Content.Text);
+            Assert.Equal([rcpt], detail.Recipients);
+        }
+    }
 }

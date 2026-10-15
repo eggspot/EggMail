@@ -145,26 +145,98 @@ internal abstract class WriterCommand
     internal abstract void Fail(Exception exception);
 }
 
-/// <summary>One unit of work for the writer. It doubles as the awaitable so a submission costs one allocation.</summary>
-internal sealed class WriterCommand<TState, TResult>(TState state, Func<WriterContext, TState, TResult> work) : WriterCommand, IValueTaskSource<TResult>
+/// <summary>
+/// One unit of work for the writer. It doubles as the awaitable, and it is reused: after the caller has taken the result (or the exception) with
+/// <c>GetResult</c>, the object goes back to a small pool of its closed generic type, so a submission allocates nothing in the steady state.
+/// <para>
+/// Like every <see cref="ValueTask{TResult}"/> over an <see cref="IValueTaskSource{TResult}"/>, the task of a command must be awaited (or
+/// <c>AsTask</c>ed) exactly once and not touched afterwards; a second <c>GetResult</c> with the old token is refused by the version check and does not
+/// recycle anything. Nothing here is used by the writer after it has called <see cref="Succeed"/> or <see cref="Fail"/>, which is when the caller may
+/// take the object back, and the state and result are cleared when it is recycled so a pooled command keeps no message alive.
+/// </para>
+/// </summary>
+internal sealed class WriterCommand<TState, TResult> : WriterCommand, IValueTaskSource<TResult>
 {
+    private const int MaxPooled = 1024;
+
+    private static readonly System.Collections.Concurrent.ConcurrentQueue<WriterCommand<TState, TResult>> Pool = new();
+    private static int _pooled;
+
     private ManualResetValueTaskSourceCore<TResult> _core = new() { RunContinuationsAsynchronously = true };
+    private TState _state = default!;
+    private Func<WriterContext, TState, TResult> _work = null!;
     private TResult _result = default!;
+
+    private WriterCommand()
+    {
+    }
+
+    /// <summary>A command for <paramref name="work"/> over <paramref name="state"/>, from the pool when it has one.</summary>
+    internal static WriterCommand<TState, TResult> Rent(TState state, Func<WriterContext, TState, TResult> work, bool exclusive, bool needsDriverTransaction)
+    {
+        if (!Pool.TryDequeue(out WriterCommand<TState, TResult>? command))
+        {
+            command = new WriterCommand<TState, TResult>();
+        }
+        else
+        {
+            Interlocked.Decrement(ref _pooled);
+        }
+
+        command._state = state;
+        command._work = work;
+        command.Exclusive = exclusive;
+        command.NeedsDriverTransaction = needsDriverTransaction;
+        return command;
+    }
 
     internal short Version => _core.Version;
 
-    internal override void Execute(WriterContext context) => _result = work(context, state);
+    internal override void Execute(WriterContext context) => _result = _work(context, _state);
 
     internal override void Succeed() => _core.SetResult(_result);
 
     internal override void Fail(Exception exception) => _core.SetException(exception);
 
-    TResult IValueTaskSource<TResult>.GetResult(short token) => _core.GetResult(token);
+    TResult IValueTaskSource<TResult>.GetResult(short token)
+    {
+        if (token != _core.Version)
+        {
+            return _core.GetResult(token);   // throws: a stale or repeated await must not recycle the command that now belongs to someone else
+        }
+
+        try
+        {
+            return _core.GetResult(token);
+        }
+        finally
+        {
+            Recycle();
+        }
+    }
 
     ValueTaskSourceStatus IValueTaskSource<TResult>.GetStatus(short token) => _core.GetStatus(token);
 
     void IValueTaskSource<TResult>.OnCompleted(Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags) =>
         _core.OnCompleted(continuation, state, token, flags);
+
+    private void Recycle()
+    {
+        _core.Reset();
+        _state = default!;
+        _work = null!;
+        _result = default!;
+        Exclusive = false;
+        NeedsDriverTransaction = false;
+        if (Interlocked.Increment(ref _pooled) <= MaxPooled)
+        {
+            Pool.Enqueue(this);
+        }
+        else
+        {
+            Interlocked.Decrement(ref _pooled);
+        }
+    }
 }
 
 /// <summary>
@@ -229,7 +301,7 @@ internal sealed class SqliteFileWriter : IAsyncDisposable
     /// </summary>
     public ValueTask<TResult> SubmitAsync<TState, TResult>(TState state, Func<WriterContext, TState, TResult> work, CancellationToken cancellationToken = default, bool exclusive = false, bool needsDriverTransaction = false)
     {
-        var command = new WriterCommand<TState, TResult>(state, work) { Exclusive = exclusive, NeedsDriverTransaction = needsDriverTransaction };
+        var command = WriterCommand<TState, TResult>.Rent(state, work, exclusive, needsDriverTransaction);
         ValueTask<TResult> awaitable = new(command, command.Version);
         if (_channel.Writer.TryWrite(command))
         {

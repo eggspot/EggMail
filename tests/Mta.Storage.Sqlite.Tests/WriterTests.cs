@@ -122,6 +122,68 @@ public class WriterTests : SqliteTestBase
     }
 
     [Fact]
+    public async Task Reused_commands_give_every_caller_its_own_result_and_its_own_failure()
+    {
+        // The writer recycles its command objects once the caller has taken the result: many rounds of many concurrent callers must never mix them up.
+        for (int round = 0; round < 8; round++)
+        {
+            var tasks = Enumerable.Range(0, 150).Select(i => i % 10 == 7
+                ? Sql.Runtime.QueueWriter.SubmitAsync<int, int>(i, static (_, v) => throw new InvalidOperationException("fail " + v)).AsTask()
+                : Sql.Runtime.QueueWriter.SubmitAsync(i, static (_, v) => v * 2).AsTask()).ToList();
+            for (int i = 0; i < tasks.Count; i++)
+            {
+                if (i % 10 == 7)
+                {
+                    var ex = await Assert.ThrowsAsync<InvalidOperationException>(async () => await tasks[i]);
+                    Assert.Equal("fail " + i, ex.Message);
+                }
+                else
+                {
+                    Assert.Equal(i * 2, await tasks[i]);
+                }
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Taking_a_result_twice_is_refused_and_does_not_disturb_the_command_that_now_belongs_to_another_caller()
+    {
+        var first = Sql.Runtime.QueueWriter.SubmitAsync(1, static (_, v) => v + 100);
+        Assert.Equal(101, await first);
+
+        // The command behind "first" is back in the pool and the next submission takes it; the old task must not be able to complete or recycle it.
+        var (blocked, release) = BlockQueueWriter();
+        var second = Sql.Runtime.QueueWriter.SubmitAsync(2, static (_, v) => v + 100).AsTask();
+        Assert.Throws<InvalidOperationException>(() => first.GetAwaiter().GetResult());
+        release.Set();
+        await blocked;
+        Assert.Equal(102, await second);
+        Assert.Equal(103, await Sql.Runtime.QueueWriter.SubmitAsync(3, static (_, v) => v + 100));
+    }
+
+    [Fact]
+    public async Task A_finished_command_does_not_keep_its_state_reachable()
+    {
+        WeakReference weak = await SubmitWithStateAsync();
+        for (int i = 0; i < 4 && weak.IsAlive; i++)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+        }
+
+        Assert.False(weak.IsAlive, "a pooled writer command must drop its state and result when it is recycled");
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private async Task<WeakReference> SubmitWithStateAsync()
+    {
+        var state = new object();
+        object result = await Sql.Runtime.QueueWriter.SubmitAsync(state, static (_, s) => s);
+        Assert.Same(state, result);
+        return new WeakReference(state);
+    }
+
+    [Fact]
     public async Task A_constraint_violation_inside_a_batch_only_fails_its_own_caller()
     {
         var dup = Msg();

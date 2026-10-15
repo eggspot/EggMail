@@ -23,38 +23,41 @@ public enum SubmissionStatus
     TooLarge,
 }
 
-/// <summary>One message handed in by SMTP submission or the HTTP API.</summary>
+/// <summary>
+/// One message handed in by SMTP submission or the HTTP API. The properties can be set again so that one instance can serve the messages of an SMTP
+/// session in turn (the submission service reads the request only until <see cref="SubmissionService.SubmitAsync"/> has returned, and keeps no reference to it).
+/// </summary>
 public sealed class SubmissionRequest
 {
-    public required Tenant Tenant { get; init; }
-    public required MessageSource Source { get; init; }
-    public required EmailAddress EnvelopeFrom { get; init; }
-    public required IReadOnlyList<EmailAddress> Recipients { get; init; }
+    public required Tenant Tenant { get; set; }
+    public required MessageSource Source { get; set; }
+    public required EmailAddress EnvelopeFrom { get; set; }
+    public required IReadOnlyList<EmailAddress> Recipients { get; set; }
 
     /// <summary>The RFC 5322 message as submitted, CRLF line endings.</summary>
-    public required ReadOnlyMemory<byte> Message { get; init; }
+    public required ReadOnlyMemory<byte> Message { get; set; }
 
     /// <summary>The <c>Received</c> field to put in front of an SMTP-submitted message; empty for API messages.</summary>
-    public ReadOnlyMemory<byte> ReceivedHeader { get; init; }
+    public ReadOnlyMemory<byte> ReceivedHeader { get; set; }
 
-    public string? RemoteAddress { get; init; }
-    public string? Authenticated { get; init; }
-    public string? IdempotencyKey { get; init; }
+    public string? RemoteAddress { get; set; }
+    public string? Authenticated { get; set; }
+    public string? IdempotencyKey { get; set; }
 
     /// <summary>Digest of the request that carries <see cref="IdempotencyKey"/>; storage returns the stored one on a duplicate so the caller can detect key reuse with another body.</summary>
-    public string? IdempotencyFingerprint { get; init; }
+    public string? IdempotencyFingerprint { get; set; }
 
     /// <summary>
     /// The per-send request to keep (true) or not keep (false) the raw message with its attachments after delivery; null when the submitter has no such flag (SMTP, or an API
     /// request that did not set one), in which case the tenant's setting and then the global default decide (<see cref="AttachmentStoragePolicy"/>). Needs the master switch either way.
     /// </summary>
-    public bool? StoreAttachments { get; init; }
+    public bool? StoreAttachments { get; set; }
 
     /// <summary>Tags the API caller gave the message; stored with the message's history (<c>History:Mode=Full</c>) and returned by the messages API.</summary>
-    public IReadOnlyList<string>? Tags { get; init; }
+    public IReadOnlyList<string>? Tags { get; set; }
 }
 
-public sealed record SubmissionResult(SubmissionStatus Status, Guid MessageId, SenderRejection? Rejection = null, string? Detail = null, string? IdempotencyFingerprint = null)
+public readonly record struct SubmissionResult(SubmissionStatus Status, Guid MessageId, SenderRejection? Rejection = null, string? Detail = null, string? IdempotencyFingerprint = null)
 {
     public bool IsAccepted => Status is SubmissionStatus.Accepted or SubmissionStatus.Duplicate;
 }
@@ -169,30 +172,28 @@ public sealed class SubmissionService
         bool retainRaw = _storageOptions.Content.AllowAttachmentStorage && content is { Attachments.Count: > 0 }
             && (request.StoreAttachments ?? AttachmentStoragePolicy.Combine(request.Tenant, await GetAttachmentRowAsync(request.Tenant.Id, ct).ConfigureAwait(false)) ?? _storageOptions.Content.StoreAttachments);
         var messageId = Ids.New(now);
-        var accepted = new AcceptedMessage
-        {
-            MessageId = messageId,
-            TenantId = request.Tenant.Id,
-            Source = request.Source,
-            EnvelopeFrom = request.EnvelopeFrom,
-            Recipients = ToAcceptedRecipients(recipients, now),
-            Raw = raw,
-            ReceivedAt = now,
-            ExpiresAt = now + _storageOptions.Queue.MaxLifetime,
-            IdempotencyKey = request.IdempotencyKey,
-            IdempotencyFingerprint = request.IdempotencyFingerprint,
-            RemoteAddress = request.RemoteAddress,
-            Authenticated = request.Authenticated,
-            // What the message itself needs (UTF-8 in its header fields), decided from its bytes rather than from the submitter's MAIL FROM
-            // parameter: a client that declares SMTPUTF8 only for an internationalized address must not make every transaction of this
-            // message demand SMTPUTF8, and one that sends UTF-8 headers without declaring it still gets them delivered as such.
-            HeadersUtf8 = MessageInspector.HasValidUtf8Headers(raw),
-            Content = content,
-            RetainRaw = retainRaw,
-            SendingDomain = decision.SendingDomain?.Name ?? fromDomain,
-            MessageIdHeader = messageIdHeader,
-            Tags = request.Tags is { Count: > 0 } tags ? tags.Distinct(StringComparer.Ordinal).ToList() : null,
-        };
+        var accepted = RentMessage();
+        accepted.MessageId = messageId;
+        accepted.TenantId = request.Tenant.Id;
+        accepted.Source = request.Source;
+        accepted.EnvelopeFrom = request.EnvelopeFrom;
+        accepted.Recipients = ToAcceptedRecipients(recipients, now);
+        accepted.Raw = raw;
+        accepted.ReceivedAt = now;
+        accepted.ExpiresAt = now + _storageOptions.Queue.MaxLifetime;
+        accepted.IdempotencyKey = request.IdempotencyKey;
+        accepted.IdempotencyFingerprint = request.IdempotencyFingerprint;
+        accepted.RemoteAddress = request.RemoteAddress;
+        accepted.Authenticated = request.Authenticated;
+        // What the message itself needs (UTF-8 in its header fields), decided from its bytes rather than from the submitter's MAIL FROM
+        // parameter: a client that declares SMTPUTF8 only for an internationalized address must not make every transaction of this
+        // message demand SMTPUTF8, and one that sends UTF-8 headers without declaring it still gets them delivered as such.
+        accepted.HeadersUtf8 = MessageInspector.HasValidUtf8Headers(raw);
+        accepted.Content = content;
+        accepted.RetainRaw = retainRaw;
+        accepted.SendingDomain = decision.SendingDomain?.Name ?? fromDomain;
+        accepted.MessageIdHeader = messageIdHeader;
+        accepted.Tags = request.Tags is { Count: > 0 } tags ? tags.Distinct(StringComparer.Ordinal).ToList() : null;
 
         using Activity? span = MessageTrace.Start(MessageTrace.SubmitSpan, messageId);
         if (span is not null)
@@ -203,7 +204,16 @@ public sealed class SubmissionService
             span.SetTag("mta.message.size", raw.Length);
         }
 
-        var result = await _storage.Intake.AcceptAsync(accepted, ct).ConfigureAwait(false);
+        IntakeResult result;
+        try
+        {
+            result = await _storage.Intake.AcceptAsync(accepted, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            ReturnMessage(accepted);
+        }
+
         if (span is not null)
         {
             span.SetTag("mta.submit.outcome", result.Status == IntakeStatus.Accepted ? "accepted" : "duplicate");
@@ -214,6 +224,46 @@ public sealed class SubmissionService
         }
 
         return new SubmissionResult(result.Status == IntakeStatus.Accepted ? SubmissionStatus.Accepted : SubmissionStatus.Duplicate, result.MessageId, IdempotencyFingerprint: result.IdempotencyFingerprint);
+    }
+
+    // The stored-message objects are reused: one is filled per submission and handed back as soon as storage has finished with it
+    // (IMessageIntake.AcceptAsync completes only then and does not keep the object).
+    private readonly System.Collections.Concurrent.ConcurrentQueue<AcceptedMessage> _messagePool = new();
+    private int _pooledMessages;
+
+    private AcceptedMessage RentMessage()
+    {
+        if (_messagePool.TryDequeue(out AcceptedMessage? message))
+        {
+            Interlocked.Decrement(ref _pooledMessages);
+            return message;
+        }
+
+        return new AcceptedMessage { MessageId = default, TenantId = default, Source = default, EnvelopeFrom = default, Recipients = [], Raw = default, ReceivedAt = default, ExpiresAt = default };
+    }
+
+    private void ReturnMessage(AcceptedMessage message)
+    {
+        // Every reference is dropped: a pooled object must not keep the message, its recipients or its extracted content alive.
+        message.EnvelopeFrom = default;
+        message.Recipients = [];
+        message.Raw = default;
+        message.IdempotencyKey = null;
+        message.IdempotencyFingerprint = null;
+        message.RemoteAddress = null;
+        message.Authenticated = null;
+        message.Content = null;
+        message.SendingDomain = null;
+        message.MessageIdHeader = null;
+        message.Tags = null;
+        if (Interlocked.Increment(ref _pooledMessages) <= 256)
+        {
+            _messagePool.Enqueue(message);
+        }
+        else
+        {
+            Interlocked.Decrement(ref _pooledMessages);
+        }
     }
 
     /// <summary>The recipients without duplicates, in first-seen order. Returns the caller's list itself when it has none (the usual case).</summary>
