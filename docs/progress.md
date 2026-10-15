@@ -39,7 +39,8 @@ Running status of the implementation, updated in every pull request. **Productio
 | DMARC aggregate report sending | not applicable: EggMail is an outbound sender and receives no mail to report on (the report writer exists in `Mta.Auth`) | |
 | Backend switch engine (export/import, drain/quiesce, fence, marks, activation gate, bootstrap/cutover-patch activation, rollback, resumable history migration, secrets re-protection) for in-memory, SQLite and PostgreSQL; startup gate; `mta migrate-storage` | merged | transfer conformance on all backends, end-to-end switches InMemory/SQLite/PostgreSQL in both directions and both history modes, quiesce with a real delivery engine, tamper and resume tests, CLI flow, process-control tests; throughput measured ([components/switch.md](components/switch.md)); admin API endpoints (`/admin/storage/switch/*`) over the engine; **no dashboard flow yet; not applied to a real orchestrator** |
 | 14-minute soak, DoS probes, crash and restore drills, independent-client interop (see the section below) | done once on one laptop | manual runs, results below |
-| 7-day soak, real-internet delivery, Gmail DKIM check, ACME against a real CA, external security audit, publishable benchmarks | **not done** (owner or external systems) | see "Not verified" |
+| 7-day soak, real-internet delivery, Gmail DKIM check, ACME against a real CA, external security audit, publishable benchmarks | **not done** (owner or external systems) | see "Not verified"; the steps are in [go-live-checklist.md](go-live-checklist.md) |
+| Plan coverage audit (every plan component, delta, gate and cut item against code and tests) | done 2026-10-15 | see [Plan coverage](#plan-coverage): found libraries not wired into the runtime, a forged-bounce suppression hole and four smaller gaps; fixed in PRs 89, 90, 91 |
 
 ## Not verified / known gaps
 
@@ -79,3 +80,140 @@ A fresh clone of `main` builds with 0 warnings and all 21 test projects pass (in
 - GitHub Actions is enabled and green on `main`. Root causes found and fixed from the first failing runs: a test proxy that parsed a host name as an IP, a race between a bounce and its recorded suppression, PostgreSQL `max_connections` exhausted by parallel test projects, two test assemblies dropping each other's template database, heap-size and back-pressure tests that raced, switch tests too slow for a loaded runner, a flaky Dkim performance test (wall-clock assertion), and a real ACME bug (a valid authorization reused by the CA was challenged again and refused).
 - The first release dispatch failed on an invalid build version (`nightly-<sha>`); fixed, and a branch dispatch published `ghcr.io/eggspot/eggmail:nightly-<sha>`. The package is public (anonymous pull works).
 - Every large pull request was reviewed by an independent reviewer in two passes; findings fixed before merge included a MIME boundary forgery in the 8-bit downgrade, recipient addresses leaking into exported spans, a KMS-key mismatch surfacing only at first use, user cancellation reported as database outage, and a tag run able to publish `latest` from a dispatch.
+
+## Plan coverage
+
+An audit of [plan.md](plan.md) against the **code and the tests** (2026-10-15), not against the claims above. Method: for every component, delta and quality gate of the plan, find the code that implements it, check that the runtime actually calls it (a library with unit tests that nothing in `Mta.Host` or `Mta.Delivery` uses is "library only"), and name what verifies it. Nothing here was assumed from earlier progress notes; where the audit disagreed with them, the audit wins. *Verified by* names a test project (all run in the `ci` job `build-test` unless noted), a workflow, or says "manual" or "not verified". PR numbers are the fixes made as part of this audit; they are open pull requests until merged, and decisions 87 to 89 record them.
+
+**Result in one paragraph.** The delivery pipeline, both storage backends, the switch engine, the API and the dashboard are implemented and exercised end to end by tests. Three families of gaps were found: (1) code that exists and is tested but is **not wired into the runtime** (SPF, DMARC, ARC, Authentication-Results, DMARC reports and the MIME validator are libraries only; the per-domain return path was dead until PR 90; the storage-pressure indicator has no production source); (2) **behaviour the plan promised that was missing or wrong** (a forged bounce could suppress any address, BDAT bypassed the smuggling rule, disk-full was `451` not `452`, process-level metrics for the soak were absent); (3) **verification that cannot happen in CI** (real internet, real CA, real Cloudflare, power loss, the 7-day soak, the audit). The first two were fixed where they could be from a Mac and Actions; the third is the owner's list in [go-live-checklist.md](go-live-checklist.md).
+
+Legend: **yes** implemented and wired; **partial** implemented with the gap named; **library only** has no caller in the runtime; **no** not built.
+
+### Components
+
+| Plan item | Implemented? | Verified by | Gap |
+|---|---|---|---|
+| SMTP server: STARTTLS, implicit TLS, injection guard | yes | `Mta.Smtp.Server.Tests` (`TlsAndAuthTests`, `StarttlsRaceTests`), MailKit interop in `Mta.Host.Tests`, fuzz `smtp-session`; manual: `openssl`, Python `smtplib` | Real-network behaviour manual only |
+| SMTP server: AUTH, SIZE, 8BITMIME, SMTPUTF8, PIPELINING | yes | `Mta.Smtp.Server.Tests`, `Mta.Smtp.Protocol.Tests` | AUTH is PLAIN and LOGIN only. PIPELINING is advertised and tolerated, not a setting. BINARYMIME is refused. `AllowInsecureAuth` untested |
+| SMTP server: CHUNKING/BDAT | yes | `ServerProtocolTests` | **BDAT bodies skipped the bare CR/LF/NUL rule that DATA has: fixed in PR 91** (`LineEndingValidator`). No `Chunking=false` test, no BDAT oversize or timeout test |
+| SMTP smuggling and STARTTLS-injection defence | yes | `DataScannerTests`, `ServerProtocolTests` (four smuggling shapes, injection), fuzz `smtp-protocol` | The plan's EAST and smtpsmug attack tools were never run against a deployed instance |
+| SMTP server limits and timeouts | partial | `Overlong_line…`, `Command_timeout…`, `Data_timeout…`, per-IP and recipient limits | No test for `MaxDataDuration`, `TlsHandshakeTimeout`, `MaxInFlightBytes`, `MaxMessagesPerSession` or the global cap. Limits are shared across listeners (bounce traffic can use up the submission budget). The per-address limit keys on the exact address (no IPv6 /64). Several `SmtpServerOptions` have no configuration key |
+| Bounce listener on port 25 | yes | `IngestTests`, `BounceTrustTests` | Default container port is 2526 (publish as 25). **A forged DSN or complaint could get any address suppressed for a tenant: fixed in PR 90** (token bound to the destination domain). Residual: per domain, not per address (decision 88) |
+| Submission service, sender policy | yes | `SubmissionServiceTests`, `IngestTests`, `ApiMessagesTests` | None |
+| SMTP client: STARTTLS policy, downgrade detection, AUTH, pipelining, BDAT, pool | yes | `Mta.Smtp.Client.Tests` (against our own server), `Mta.Integration.Tests` | Never run against Postfix, Exim or Haraka in CI (manual Python `smtpd` once). No REQUIRETLS, no RFC 6857 header downgrade (a UTF-8 header to a non-SMTPUTF8 server is refused `5.6.9`). `SmtpRemoteTarget.LocalAddress` is never set, so no multi-IP sending |
+| MIME: parse, build, edit, extract | yes | `Mta.Mime.Tests` (26 files; MimeKit differential on 15 messages plus random structures), fuzz `mime` | `MessageValidator` is library only (used by tests and the fuzz target) |
+| DKIM: RSA-2048 signing at delivery, rotation | yes | `Mta.Dkim.Tests` (incl. MimeKit interop), `DeliveryDkimAndLimitsTests`, `ApiDomainsTests` | A key that cannot be read sends the message **unsigned** with a warning. Retired signers are not purged from the cache. Bounce and TLS-RPT mail is unsigned. "Verifies at Gmail" is manual (go-live step 3) |
+| DKIM verify, `l=` handling | library only | `VerifierTests`, fuzz `dkim` | No inbound mail to verify |
+| DKIM Ed25519 (cut item 1) | no | none | RSA only, by decision |
+| SPF | library only | `SpfEvaluatorTests` (hand-written cases in the style of openspf), fuzz `spf` | No runtime caller. No reference-implementation corpus (the phase 3 gate) |
+| DMARC evaluate, public suffix list | library only | `DmarcEvaluatorTests`, `PublicSuffixListTests` | No runtime caller; static suffix list without refresh |
+| DMARC aggregate reports (cut item 3) | library only | `Mta.Auth.Tests/Reports`, fuzz `dmarc-aggregate` | Nothing feeds the collector or sends a report. EggMail receives no mail for a customer's domain, so the data does not exist; the dashboard's DMARC `rua` advice sends reports to a mailbox the customer reads |
+| ARC (cut item 1) | library only | `ArcRoundTripTests`, `ArcTamperTests`, MimeKit cross-check | Not called at ingest or delivery |
+| Authentication-Results builder and parser | library only | tests, fuzz `auth-headers` | No runtime caller |
+| DSN generation | partial | `DsnBuilderTests`, `DeliveryEndToEndTests` | Failure DSNs only (no delayed DSN). NOTIFY, RET, ORCPT, ENVID are parsed and ignored |
+| DSN/ARF parse, suppression on bounce or complaint, VERP | yes | `InboundReportParserTests`, `IngestTests`, `AsyncReportHistoryTests`, `VerpTests`, fuzz `dsn-arf` | VERP key has no rotation and is stored as plain JSON in settings. No fuzz target for `VerpCodec.TryDecode`. "Bounces correlate end to end" has no single test through a real remote's DSN |
+| Per-domain return path (`bounce.<domain>`) | **yes since PR 90** | `DeliveryDkimAndLimitsTests`, `IngestTests` | Was required and verified but ignored on the wire (`SelectReturnPath` had no caller), so SPF could never align with the From domain. Real MX resolution through the CNAME is manual |
+| List-Unsubscribe, RFC 8058 one-click | no | none | Not in the plan. Gmail and Yahoo require it from bulk senders: set the headers per message through the API (go-live step 3) |
+| DNS client: codec, resolver, EDNS, TCP fallback, cache, MX | yes | `Mta.Dns.Tests` (203), fuzz `dns-message` | Packets are hand-built; "round-trips real packets" (phase 1 gate) is not met. A live-DNS test is skipped unless `EGGMAIL_TEST_LIVE_DNS=1`, which CI never sets. Three different `IdnMapping` settings in three assemblies |
+| DNSSEC AD bit, Unbound sidecar (cut item 8) | partial | `DnsClientTests`; `release.yml` smoke (AD flag for a signed name, SERVFAIL for a broken one) | Off by default (`Dns:TrustAuthenticatedData=false`); no end-to-end DANE delivery test |
+| IDN, UTS#46 tables (cut item 10) | no own tables | `UnicodeSelfTestTests` | ICU only; no IdnaTest corpus |
+| MTA-STS (consume) | yes | `Mta.Tls.Tests`, fuzz `mta-sts` | Cache is in memory. No delivery test that an `enforce` policy defers mail. Fetch tests use a fake HTTP handler: "tested against real policies" is manual. EggMail does not host policies for your domains (outbound only; go-live 2.5) |
+| TLS-RPT (record, collect, journal, daily send, cut item 2) | yes | `TlsRptTests` (29), `TlsReportSenderTests`, `MultiReplicaTlsReportTests` | **Not verified against a real reporting endpoint** (go-live step 5). Report mail is unsigned |
+| DANE (cut item 8) | yes, behind a flag | `DaneTlsaLookupTests`, `DaneVerifierTests` | Not verified against real TLSA records |
+| Delivery scheduler: claim, lease, retry, classify, `possible_duplicate`, quiesce | yes | `DeliveryEndToEndTests`, `ChaosPipelineTests`, `MultiReplicaTests`, `RetryScheduleTests` | `ReplyClassifier.Default` only |
+| Destination throttle | partial | `DestinationThrottleTests`, `MultiReplicaTests` | `MaxMessagesPerConnection` is read but never enforced (documented as reserved in PR 91). One token per message group rather than per message. No engine-level throttle-hold test |
+| Circuit breakers, route planner, relay routes | yes | `RoutePlannerTests`, `RouteHealthTests`, `RoutingConfigDeliveryTests` | No engine-level breaker test; breaker and throttle state are not exposed |
+| Warm-up | partial | `SendingLimitsTests`, `SendingConfiguratorTests` | Default schedule only; old domains graduate at once; usage not visible |
+| Operator hold, release, retry-now | no | none | Only cancel exists |
+| Webhooks: outbox, dispatcher, signing, endpoint disabling | yes | `WebhookConformance` on all three backends, `Mta.Webhooks.Tests`, PW `webhooks.spec` | The 5-day `DisableAfter` branch is untested; retry delays are checked by binding only |
+| Webhook SSRF guard | yes | `SsrfGuardTests`, `UrlValidatorTests` | **A proxy in the environment would have bypassed it: fixed in PR 91.** A real connect to a blocked address ending as `ssrf_blocked` is untested. `AllowHttp` is enforced at registration only |
+| Webhook replay: API and UI (cut item 5) | yes | `ApiSuppressionsAndWebhooksTests`, PW | The attempts API returns `eventType` null, so that column never shows against a real server |
+| HTTP API | yes | `Mta.Host.Tests/Api` (20 classes incl. TypeScript contract), PW | No test compares `docs/api.md` with the mapped routes. No per-key request throttle. No forwarded-header handling behind a TLS-terminating proxy |
+| Domain verification | yes | `DomainVerificationTests`, `ApiDomainsTests` | SPF and DMARC are advice checked by prefix only |
+| Security: hashing, throttle, secrets, headers, CSP | yes | `SecurityTests`, `SecretsTests`, `KeyWrappingTests`, `DashboardHostingTests`, CI `check-csp`, PW `csp-pages.spec` | Only a local-key KMS provider. No Permissions-Policy header |
+| OWASP ASVS L2 checklist (phase 4 gate) | no | not verified | No checklist and no mapped tests: part of the external audit scope (go-live step 6) |
+| Observability: meters, Prometheus, OTLP, health | yes | `PrometheusTests`, `ApiMetricsScrapeTests`, `MetricsDocumentationTests` | **No process-level metrics for the soak: added in PR 89.** No API request metrics; no webhook outbox depth gauge; `soft_bounce` and `rejected` statistics are never incremented but are returned as zero columns |
+| Storage-pressure indicator | UI only | stub in `ApiAdminTests` | `IStoragePressureSource` has no production implementation, so `/admin/status` never carries `pressure` and the dashboard shows nothing. Open, size S-M |
+| `synchronous=OFF` warning (log, banner, metric, health) | yes | `Mta.Storage.Sqlite.Tests`, `warningBanner.test.tsx`, PW `auth.spec` | None |
+| Dashboard | yes | 35 vitest files, 13 Playwright specs in CI | Domain states `temporary_failure` and `failed` unit-tested only; Chromium only; the guided switch flow (cut item 4) and polish (11) were not cut |
+| Storage: content split, spool, `history.db`, retention, `0` = unlimited | yes | conformance suites on three backends, `LogicTests`, `MaintenanceConformance` | Writer tuning keys are not bound to configuration |
+| `IStatsStore`, rollups, caps, tenant views | partial | `StatsConformance` on three backends | `soft_bounce`/`rejected` never counted; the all-tenants query is never called |
+| `History:Mode` gating, `410 history_not_recorded` | yes | `ApiMessagesTests`, `EquivalenceTests` | None |
+| Corruption detection, quarantine, `VACUUM INTO` backups | yes | `QuarantineTests`, `MaintenanceAndBackupTests`, `BackupSchedulerTests` | Corruption is simulated by garbling files; **OS-crash and power-loss fault injection does not exist** (only SIGKILL). No restore command, only the documented copy |
+| Writer and crash tests | partial | `WriterTests` (800 concurrent accepts), `CrashRecoveryTests` (SIGKILL in Off, Normal, Full) | Modest scale; nothing kills a process during delivery |
+| Disk-full behaviour (risk 14) | yes since PR 91 | `StorageFullTests`, `IngestDiskFullTests` | Was `451`; now `452 4.3.1`. A real full disk and a free-space metric are not built |
+| PostgreSQL provider | yes | `Mta.Storage.Postgres.Tests` (266, PostgreSQL 17 in CI), `MultiReplicaTests` | Postgres tests skip when no server is found; **CI now fails instead (PR 89)** |
+| Switch engine, CLI, admin API, history migration, quiesce, secrets, cutover | yes | `Mta.Storage.Portability.Tests`, `SwitchActivatorTests`, `ApiStorageSwitchTests`, PW `storage-switch.spec` | Postgres round trip, CLI on Postgres and the Postgres-to-SQLite UI path are not covered. **The image pinned the storage pointer through `ENV`, so the quick start could only print a cutover patch: fixed in PR 89** |
+| Guided dashboard switch (cut item 4) | yes | vitest, PW (SQLite to PostgreSQL, drain) | Not cut. No quiesce or Postgres-to-SQLite through the UI |
+| Certificates and ACME in the database, hot reload, ARI | yes | `Mta.Integration.Tests.Acme` against Pebble in CI, `AcmeHotSwapTests`, `TlsMaterialTests` | Cloudflare provider is tested with a fake HTTP handler. **No real CA, no real Cloudflare** (go-live step 4). Renewal is tested by advancing the clock, not by real expiry |
+| Packaging: Dockerfile, Compose, Kubernetes | yes | CI static checks (`compose config`, `kustomize`, `kubeconform`), `release.yml` smoke tests | Runtime smoke tests run in `release.yml`, not on pull requests |
+| Release automation | yes | `release.yml` manual run published `nightly-<sha>` | **No tag has ever been pushed**: GitHub Release creation, `latest` and the scheduled nightly have never run |
+| Glue: configuration loader, layers, CLI | yes | `ConfigTests`, `ConfigurationDocumentationTests`, `CliTests` | Some options are fixed at defaults (DSN switches, `DefaultTls`, many SMTP server options, SQLite writer tuning) |
+| Test infrastructure | yes | 22 test projects, `Mta.ArchitectureTests` (package-free guard over 10 projects) | `Mta.Policy` and `Mta.Delivery` are outside the guard (they are allowed packages) |
+| Performance: harness, load generator, allocation gate | partial | `bench-gate.yml` (weekly), `bench-throughput.yml` (manual) | The 2 KB allocation budget is **not met** (about 10 KB measured). Gate covers SQLite ingest only. Postfix and KumoMTA comparison was never run |
+| Docs and runbooks | partial | `MetricsDocumentationTests`, `ConfigurationDocumentationTests` | Runbooks were single paragraphs; [go-live-checklist.md](go-live-checklist.md) now holds deploy, restore, rollback and release procedures. No ASVS document |
+
+### Phase quality gates
+
+| Phase | Gate | Status |
+|---|---|---|
+| 0 | Smuggling and STARTTLS-injection suites pass | Met for DATA; BDAT met by PR 91 |
+| 0 | Benchmark baseline recorded | Allocations only (no throughput or competitor baseline) |
+| 0 | CI guard on package references | Met |
+| 1 | Fuzzers clean for a time budget | Workflow exists (weekly); no recorded clean run; the client assembly is not instrumented; no target for `VerpCodec`, `DaneVerifier`, `EightBitDowngrader`, `MessageBuilder` |
+| 1 | DNS codec round-trips real packets | Not met (hand-built packets) |
+| 1 | Interop with Postfix, Exim, Haraka | Not verified |
+| 2 | Allocation and throughput budgets | Not met |
+| 2 | Interop matrix; DKIM verifies at Gmail | Not verified (owner: go-live step 3) |
+| 3 | SPF, DMARC, DKIM match a reference implementation | DKIM and ARC against MimeKit; SPF and DMARC have no reference |
+| 3 | MTA-STS and DANE against real policies | Not verified |
+| 3 | Bounces correlate end to end | Partial |
+| 4 | ASVS L2 checklist | Not done |
+| 4 | Strict CSP verified | Met |
+| 4 | ACME renewal through a forced expiry | Partial (clock advanced, Pebble) |
+| 5 | Upgrade, restore, rollback drills | Rollback met (`SwitchSafetyTests`); SQLite restore tested; upgrade drill not automated; Postgres restore documented only; manual drill in go-live step 10 |
+| 5 | Fresh single-container start | `release.yml` smoke only |
+| 5 | Backend-switch drills both directions | Partial (see switch row) |
+| 6 | No open critical or high findings | Not verified: no external audit |
+| 6 | 7-day soak | Not done (one 14-minute run) |
+| 6 | DoS suite within memory and CPU ceilings | Not verified: per-limit tests only |
+| 6 | Runbooks reviewed | Written in the go-live checklist, not yet reviewed by anyone but the author |
+
+### Cut order
+
+| # | Item | State |
+|---|---|---|
+| 1 | ARC and Ed25519 | ARC library only; Ed25519 not built |
+| 2 | TLS-RPT sending | Built and wired |
+| 3 | DMARC aggregate reports | Library only |
+| 4 | Guided dashboard switch | Built |
+| 5 | Webhook replay UI | Built |
+| 6 | Benchmark baselines beyond Postfix and KumoMTA | Not built; Postfix and KumoMTA compose files never run |
+| 7 | Per-send attachment flag | Built |
+| 8 | DANE and Unbound | Built, off by default |
+| 9 | Message view and resend | Built |
+| 10 | UTS#46 tables | Not built (ICU) |
+| 11 | Dashboard polish | Built |
+| 12 | BDAT/CHUNKING | Built, on by default |
+
+### What this audit fixed
+
+| Gap | Fix | PR |
+|---|---|---|
+| A required `build-test` check would wait forever on a documentation-only pull request | `ci` always starts; documentation-only changes skip the work inside the job (decision 87) | 89 |
+| PostgreSQL or Pebble missing in CI turned their tests into silent skips | `EGGMAIL_REQUIRE_EXTERNAL_TESTS=1` makes `ExternalDependenciesTests` fail | 89 |
+| No process-level metrics for the 7-day soak | `Mta.Process` meter on `/metrics` and OTLP | 89 |
+| Image `ENV` pinned the storage pointer; the quick start could never switch automatically | `ENV` removed (defaults identical), pinned by `DockerfileTests` | 89 |
+| Flaky dashboard end-to-end stack: two listeners could get the same port | all ports allocated together (seen failing PR 89's first run) | 89, 90, 91 |
+| Forged DSN or complaint suppressed any address for a tenant | VERP v2 bound to the destination domain (decision 88) | 90 |
+| Per-domain return path required but unused on the wire | `SelectReturnPath` used by delivery; bounce listener accepts the verified host | 90 |
+| BDAT bypassed the bare CR/LF/NUL rule | `LineEndingValidator` | 91 |
+| Disk full answered `451` | `452 4.3.1` through `StorageFullException` | 91 |
+| Webhook SSRF guard bypassable through a proxy environment | `UseProxy = false` | 91 |
+| `MaxMessagesPerConnection` documented as working | documented as reserved | 91 |
+
+### What remains
+
+Fixable from a Mac and Actions, **not yet done** (each is an entry in [open-questions.md](open-questions.md#plan-gaps-found-by-the-audit-open)): production storage-pressure source (S-M); configuration keys for the fixed-at-default options (M); engine-level tests for throttle hold, breaker skip, warm-up hold and MTA-STS enforce (M); Postgres switch coverage (M); fuzz targets for `VerpCodec`, `DaneVerifier`, `EightBitDowngrader`, `MessageBuilder` and the client assembly (S-M); VERP key rotation and protection (S-M); history-based confirmation of the recipient of a report (S-M, closes the residual of decision 88 for `History:Mode=Full`); the webhook attempts `eventType` (S); ASVS L2 checklist with mapped tests (M-L); power-loss simulation (M-L); Ed25519 (M, cut item); List-Unsubscribe generation and one-click endpoint (M); delayed DSN and NOTIFY (M); the allocation budget (L); runtime use of SPF, DMARC, ARC and Authentication-Results, or an owner decision that they stay libraries (L, **owner decision**).
+
+Owner or external system only: everything in [go-live-checklist.md](go-live-checklist.md) (real-internet delivery and Gmail/Outlook/Yahoo results, PTR and port 25, ACME against a real CA and Cloudflare, TLS-RPT against a real endpoint, interop with real Postfix/Exim/Haraka, the independent security audit, the 7-day soak, the first tag and release, GitHub settings, cloud KMS, publishable benchmarks on a quiet host).

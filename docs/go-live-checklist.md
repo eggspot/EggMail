@@ -258,13 +258,13 @@ $ dig +short TXT $SEL._domainkey.$DOMAIN @1.1.1.1 | tr -d '" \n' | sed 's/.*p=//
 
 ### 2.2 Return-path CNAME and the bounce domain
 
-Two records, because the envelope sender (the address bounces go to) is on the bounce domain:
+Three records. The envelope sender (the address bounces go to) is `b+<token>@bounce.example.com` once the CNAME is verified (and `@bounces.example.com` before): receivers check SPF against that name and deliver bounces to its MX, and both resolve through the CNAME to your bounce domain:
 
 | Type | Name | Value | Why |
 |---|---|---|---|
 | CNAME | `bounce.example.com` (the exact host shown as `return_path`) | `bounces.example.com` | Required record; marks the domain as using your bounce path |
 | MX | `bounces.example.com` | `10 mail.example.com.` | Remote servers deliver bounces here (to the listener on port 25) |
-| TXT | `bounces.example.com` | `v=spf1 ip4:203.0.113.10 ~all` | **SPF for the envelope sender**: the receiver checks SPF against the domain in `MAIL FROM`, which is the bounce domain |
+| TXT | `bounces.example.com` | `v=spf1 ip4:203.0.113.10 ~all` | **SPF for the envelope sender**: the receiver checks SPF against the domain in `MAIL FROM`; `bounce.example.com` has no TXT of its own, so the lookup follows the CNAME to this record |
 
 ```sh
 $ dig +short CNAME bounce.$DOMAIN
@@ -290,7 +290,7 @@ $ swaks --to postmaster@$BOUNCE --from you@gmail.com --server $HOST --port 25 -t
 - **Works if**: `RCPT TO:<postmaster@bounces.example.com>` is accepted and `RCPT TO:<anyone@example.org>` is refused (`550`/`554`: the listener is not an open relay). The dashboard/API `returnPathVerified` is `true` once the CNAME is found.
 - **If not**: a connection that hangs or times out means port 25 inbound is blocked (provider or the `25:2526` mapping missing). A refused `postmaster@` means `Delivery:BounceDomain` is not set to the domain in the RCPT.
 
-> **Known limitation** (see [progress.md](progress.md), "Plan coverage"): at the time of writing the envelope sender is always on the shared bounce domain (`b+token@bounces.example.com`), not on the per-domain `bounce.example.com` host the dashboard asks for, so **SPF is evaluated at `bounces.example.com` and does not align with the `From` domain**. DMARC then passes through DKIM alignment, which is enough for Gmail, Microsoft and Yahoo. Do not expect `dmarc=pass` to come from SPF.
+> **Which build.** The envelope sender is on the sending domain's own `bounce.example.com` host (so SPF aligns with the `From` domain) only in builds that contain decision 88 ([progress.md](progress.md#plan-coverage), PR 90). Older builds, including every `nightly` before it, always used the shared bounce domain (`b+token@bounces.example.com`): SPF then passes for `bounces.example.com` but does not align with the `From` domain, and `dmarc=pass` comes from DKIM alone. Check which one you run: the `Authentication-Results` of step 3 shows `smtp.mailfrom=b+...@bounce.example.com` (new) or `@bounces.example.com` (old). The records are the same for both.
 
 ### 2.3 SPF for the sending domain (advice) and the DMARC record
 
@@ -444,15 +444,15 @@ Send the same two messages to an Outlook.com/Microsoft 365 mailbox and a Yahoo m
 ```text
 Authentication-Results: mx.google.com;
        dkim=pass header.i=@example.com header.s=egg202610 header.b=Ab12Cd34;
-       spf=pass (google.com: domain of b+AAAA...@bounces.example.com designates 203.0.113.10 as permitted sender) smtp.mailfrom="b+AAAA...@bounces.example.com";
+       spf=pass (google.com: domain of b+AAAA...@bounce.example.com designates 203.0.113.10 as permitted sender) smtp.mailfrom="b+AAAA...@bounce.example.com";
        dmarc=pass (p=NONE sp=NONE dis=NONE) header.from=example.com
 Received: from mail.example.com (mail.example.com. [203.0.113.10])
         by mx.google.com with ESMTPS id ... (version=TLS1_3 cipher=TLS_AES_256_GCM_SHA384 bits=256/256);
 ```
 
-**Outlook.com / Microsoft 365**: the three dots, **View**, **View message source** (or in Outlook desktop, File, Properties, "Internet headers"). Look for `Authentication-Results: spf=pass (sender IP is 203.0.113.10) smtp.mailfrom=bounces.example.com; dkim=pass (signature was verified) header.d=example.com; dmarc=pass action=none header.from=example.com; compauth=pass reason=100`.
+**Outlook.com / Microsoft 365**: the three dots, **View**, **View message source** (or in Outlook desktop, File, Properties, "Internet headers"). Look for `Authentication-Results: spf=pass (sender IP is 203.0.113.10) smtp.mailfrom=bounce.example.com; dkim=pass (signature was verified) header.d=example.com; dmarc=pass action=none header.from=example.com; compauth=pass reason=100`.
 
-**Yahoo**: the three dots, **View raw message**: `Authentication-Results: mta1002.mail.yahoo.com; dkim=pass header.i=@example.com header.s=egg202610; spf=pass smtp.mailfrom=bounces.example.com; dmarc=pass(p=NONE sp=NONE dis=NONE) header.from=example.com`.
+**Yahoo**: the three dots, **View raw message**: `Authentication-Results: mta1002.mail.yahoo.com; dkim=pass header.i=@example.com header.s=egg202610; spf=pass smtp.mailfrom=bounce.example.com; dmarc=pass(p=NONE sp=NONE dis=NONE) header.from=example.com`.
 
 **How to read the result**:
 
@@ -461,7 +461,7 @@ Received: from mail.example.com (mail.example.com. [203.0.113.10])
 | `dkim=pass header.i=@example.com` | The signature verified and its domain is yours | Good. `header.i`/`header.d` must be your sending domain, not the host name, for DMARC alignment |
 | `dkim=fail (body hash did not verify)` or `(signature did not verify)` | Something changed the message after signing (a rewriting relay or a mailing list), or a wrong key | A rare path with direct delivery; if reproducible with a plain message, report a bug with the raw message |
 | `dkim=neutral (no key for signature)` / `dkim=temperror` / `dkim=none` | The receiver could not find or parse the TXT record | Re-run 2.1; check the selector in `header.s` equals the one in DNS; check for a split value |
-| `spf=pass ... smtp.mailfrom=b+...@bounces.example.com` | Envelope sender authorized by the bounce domain's SPF | Good (this is not the `From` domain: see the known limitation in 2.2) |
+| `spf=pass ... smtp.mailfrom=b+...@bounce.example.com` | Envelope sender authorized by the SPF record of the bounce domain (reached through the CNAME) | Good. With an older build the host is `@bounces.example.com`: SPF passes but is not aligned, and DMARC passes through DKIM (see the note in 2.2) |
 | `spf=none` | The bounce domain has no SPF record | Add the TXT record of 2.2 |
 | `spf=softfail` / `spf=fail` | The IP is not in the SPF record | The IP in your record differs from the connecting IP (NAT, a second address, IPv6): look at `[203.0.113.10]` in `Received` |
 | `spf=temperror` / `permerror` | DNS problem / two SPF records / too many lookups | Fix the record |
@@ -717,7 +717,7 @@ while true; do
 done >> soak-process.csv       # columns: time, RSS kB, open FDs, threads, data bytes
 ```
 
-(The server exports no process-level metrics yet; this reads them from `/proc`.)
+(Builds with decision 87 also export the same figures on `/metrics`: `mta_process_resident_memory_bytes`, `mta_process_open_fds`, `mta_process_threads`; this reads them from `/proc` so it works with any build and cross-checks the metric.)
 
 ### 7.2 PASS/FAIL criteria
 
@@ -845,7 +845,7 @@ JSON
 ```
 
    - **Works if**: a test pull request cannot be merged until `build-test` is green, and a direct push to `main` is refused.
-   - **Pitfall (read before enabling)**: `ci` has `paths-ignore: docs/**, **.md` on `pull_request`. A pull request that changes only documentation never starts the workflow, so the required check stays "Expected: waiting for status" forever and the pull request can never be merged. Either make the workflow always run and skip the work inside it (the fix described in [progress.md](progress.md#plan-coverage)), or do not mark the check required. Check `.github/workflows/ci.yml` for the current state before turning the rule on.
+   - **Pitfall (read before enabling)**: `ci` has `paths-ignore: docs/**, **.md` on `pull_request`. A pull request that changes only documentation never starts the workflow, so the required check stays "Expected: waiting for status" forever and the pull request can never be merged. Builds of the repository that contain decision 87 (PR 89) start the workflow on every pull request and skip the work inside the job for documentation-only changes, which a required check can live with. Before that, either merge that change first or do not mark the check required: look at `.github/workflows/ci.yml` (`paths-ignore` under `pull_request` means the old behaviour).
 
 5. Also worth a minute: Settings, **Actions**, General: "Workflow permissions: read repository contents" (the workflows declare their own), "Require approval for first-time contributors"; **Code security**: enable Dependabot alerts and secret scanning with push protection (free for public repositories).
 
