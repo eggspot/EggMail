@@ -3,7 +3,7 @@ import dgram from 'node:dgram';
 // A tiny authoritative DNS server for the end-to-end tests (UDP only; the server under test is pointed at it with Dns:Servers).
 // A name that was never published answers NXDOMAIN; a published name answers the asked type, or NODATA. Records are added and
 // removed while the tests run, so a test can publish exactly the records a domain asks for, or a wrong value.
-const TYPES = { A: 1, CNAME: 5, MX: 15, TXT: 16 };
+const TYPES = { A: 1, CNAME: 5, PTR: 12, MX: 15, TXT: 16 };
 
 function readName(buf, offset) {
   const labels = [];
@@ -48,11 +48,11 @@ function txtRdata(text) {
 const key = (name) => name.toLowerCase().replace(/\.$/, '');
 
 export async function startFakeDns() {
-  /** @type {Map<string, { txt: string[]; cname?: string; mx: { preference: number; host: string }[]; a: string[] }>} */
+  /** @type {Map<string, { txt: string[]; cname?: string; mx: { preference: number; host: string }[]; a: string[]; ptr: string[] }>} */
   const zone = new Map();
   const entry = (name) => {
     const k = key(name);
-    if (!zone.has(k)) zone.set(k, { txt: [], mx: [], a: [] });
+    if (!zone.has(k)) zone.set(k, { txt: [], mx: [], a: [], ptr: [] });
     return zone.get(k);
   };
   const queries = [];
@@ -81,6 +81,8 @@ export async function startFakeDns() {
       }
     } else if (qtype === TYPES.A) {
       for (const ip of node.a) answers.push(rr(TYPES.A, Buffer.from(ip.split('.').map(Number))));
+    } else if (qtype === TYPES.PTR) {
+      for (const target of node.ptr) answers.push(rr(TYPES.PTR, encodeName(target)));
     }
 
     // The query's additional section may carry an EDNS0 OPT record; answer with an empty one so the client sees EDNS support.
@@ -105,6 +107,7 @@ export async function startFakeDns() {
     setCname: (name, target) => { entry(name).cname = target; },
     setMx: (name, host, preference = 10) => { entry(name).mx = [{ preference, host }]; },
     setA: (name, ip) => { entry(name).a = [ip]; },
+    setPtr: (name, target) => { entry(name).ptr = [target]; },
     remove: (name) => { zone.delete(key(name)); },
     close: () => new Promise((resolve) => socket.close(resolve)),
   };
