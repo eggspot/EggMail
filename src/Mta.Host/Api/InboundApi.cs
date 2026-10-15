@@ -881,6 +881,8 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
             response.ContentLength = bytes.Length;
             response.Headers.CacheControl = "no-store";
             response.Headers["X-Content-Type-Options"] = "nosniff";
+            // Should a browser render it anyway (a saved link opened by hand), nothing in it may run, load or reach out.
+            response.Headers["Content-Security-Policy"] = "default-src 'none'; sandbox";
             response.Headers.ContentDisposition = $"attachment; filename=\"{fileName}\"";
             if (originalContentType is not null)
             {

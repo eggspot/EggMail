@@ -433,6 +433,7 @@ public class ApiInboundTests : IAsyncLifetime
         Assert.Equal(raw, await rawResponse.Content.ReadAsByteArrayAsync());
         Assert.Equal($"attachment; filename=\"{draft.Id:N}.eml\"", rawResponse.Content.Headers.ContentDisposition!.ToString());
         Assert.Equal("nosniff", rawResponse.Headers.GetValues("X-Content-Type-Options").Single());
+        Assert.Equal("default-src 'none'; sandbox", rawResponse.Headers.GetValues("Content-Security-Policy").Single());
         Assert.Equal("no-store", rawResponse.Headers.CacheControl!.ToString());
 
         using HttpResponseMessage part = await GetWithHeadersAsync(_a, baseUrl + "/attachments/0");
@@ -445,6 +446,7 @@ public class ApiInboundTests : IAsyncLifetime
         Assert.DoesNotContain("..", disposition, StringComparison.Ordinal);
         Assert.DoesNotContain("/", disposition, StringComparison.Ordinal);
         Assert.Equal("nosniff", part.Headers.GetValues("X-Content-Type-Options").Single());
+        Assert.Equal("default-src 'none'; sandbox", part.Headers.GetValues("Content-Security-Policy").Single());
 
         (await _a.GetAsync(baseUrl + "/attachments/1")).Problem(HttpStatusCode.NotFound, "not_found");
         (await _a.GetAsync(baseUrl + "/attachments/x")).Problem(HttpStatusCode.NotFound, "not_found");
