@@ -166,6 +166,41 @@ public class ApiBasicsTests : IAsyncLifetime
         Assert.DoesNotContain(r["warnings"].EnumerateArray(), w => w.GetProperty("code").GetString() == "self_signed_certificate");
     }
 
+    [Fact]
+    public async Task A_failing_acme_order_is_a_warning_with_the_last_error_and_the_next_attempt_until_it_is_issued()
+    {
+        DateTimeOffset now = _f.Clock.UtcNow;
+        var selfSigned = new CertificateRecord(Guid.NewGuid(), "selfsigned:mx.test", ["mx.test"], now.AddDays(-1), now.AddDays(300), "", [1], "selfsigned", "AA", true, 0, now);
+        await _f.Storage.Config.UpsertCertificateAsync(selfSigned, default);
+        await _f.Storage.Config.UpsertAcmeRenewalAsync(new AcmeRenewalRecord("default", "failed", now, now.AddMinutes(40), 3, "Authorization for mx.test ended as Invalid: Timeout during connect (likely firewall problem)", null, null), default);
+        _f.Clock.Advance(TimeSpan.FromSeconds(10)); // past the capabilities cache
+
+        Reply r = await _f.NewClient().GetAsync("/api/v1/capabilities");   // unauthenticated, like the dashboard's banner
+
+        var warning = Assert.Single(r["warnings"].EnumerateArray(), w => w.GetProperty("code").GetString() == "acme_failing");
+        string message = warning.GetProperty("message").GetString()!;
+        Assert.Contains("failed 3 times in a row", message);
+        Assert.Contains("the CA could not validate the challenge", message);   // the category, not what the CA said
+        Assert.DoesNotContain("Timeout during connect", message);
+        Assert.DoesNotContain("firewall", message);
+        Assert.Contains("Next attempt:", message);
+        Assert.Contains("self-signed", message);
+
+        // The full error is for administrators: the admin view of the renewals has it.
+        ApiClient admin = await _f.SignedInAsync("root");
+        Reply renewals = await admin.GetAsync("/api/v1/admin/certificates/acme");
+        Assert.Contains("Timeout during connect (likely firewall problem)", renewals.Json[0].GetProperty("lastError").GetString());
+        Assert.Contains(r["warnings"].EnumerateArray(), w => w.GetProperty("code").GetString() == "self_signed_certificate");
+
+        // Issued: the failure is cleared and the self-signed certificate is no longer the only one.
+        await _f.Storage.Config.UpsertAcmeRenewalAsync(new AcmeRenewalRecord("default", "issued", now, null, 0, null, null, null), default);
+        await _f.Storage.Config.UpsertCertificateAsync(selfSigned with { Id = Guid.NewGuid(), Name = "default", Source = "acme", NotAfter = now.AddDays(80) }, default);
+        _f.Clock.Advance(TimeSpan.FromSeconds(10));
+        r = await _f.NewClient().GetAsync("/api/v1/capabilities");
+        Assert.DoesNotContain(r["warnings"].EnumerateArray(), w => w.GetProperty("code").GetString()!.StartsWith("acme_", StringComparison.Ordinal));
+        Assert.DoesNotContain(r["warnings"].EnumerateArray(), w => w.GetProperty("code").GetString() == "self_signed_certificate");
+    }
+
     // Operational endpoints
 
     [Fact]
