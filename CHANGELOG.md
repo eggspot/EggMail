@@ -72,9 +72,20 @@ workflow refuses a stable tag without a non-empty section for that exact version
 
 - The envelope sender (and so SPF) uses the sending domain's own `bounce.<domain>` host once its return-path CNAME is verified; before, the record was required and verified but never used, and the bounce listener now accepts bounces addressed to it.
 
+### Fixed
+
+- `BDAT` bodies are held to the same line-ending rule as `DATA` (bare LF, bare CR and NUL are refused with `500 5.5.2` and the connection is closed) instead of being acknowledged and bounced at delivery.
+- A full disk on the SQLite backend is answered `452 4.3.1` instead of `451 4.3.0`.
+
+### Changed
+
+- `Delivery:Throttle:MaxMessagesPerConnection` is documented as reserved: it is read and validated but the delivery engine never enforces it.
+- Webhook deliveries need direct network access to the receivers: a proxy configured through `HTTP_PROXY`/`HTTPS_PROXY` is ignored (see Security).
+
 ### Security
 
 - A forged bounce or complaint report could get any address suppressed for a tenant: every message carries a valid bounce address in its Return-Path and the report body decided which address was suppressed. Bounce addresses are now bound to the destination domain of the message and reports naming addresses elsewhere are ignored (decision 92). Bounce addresses issued before the change keep their old behaviour until they expire (14 days). Residual risk: the binding is to the destination domain, not the address, so someone who received one message to `gmail.com` can still get another `gmail.com` address suppressed for that tenant. Upgrading: replicas of an older build refuse the new bounce addresses (`550`), so run mixed versions only during a rollout; new builds accept old ones for 14 days.
+- Webhook deliveries never go through a proxy, so `HTTP_PROXY`/`HTTPS_PROXY` in the environment cannot bypass the SSRF guard (the guard checks the address it connects to, which through a proxy is the proxy). Deployments that could only reach receivers through a proxy must allow direct egress for the webhook port range instead.
 - No known vulnerabilities; no independent security audit has been done yet. Report problems as described in [SECURITY.md](SECURITY.md).
 
 [Unreleased]: https://github.com/eggspot/EggMail/commits/main

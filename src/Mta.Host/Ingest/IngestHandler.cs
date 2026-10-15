@@ -37,6 +37,7 @@ public sealed class IngestHandler : ISmtpServerHandler
 
     private static readonly SmtpReply AuthUnavailable = SmtpReply.Constant(454, "4.7.0", "Too many failed attempts, try again later");
     private static readonly SmtpReply StorageProblem = SmtpReply.Constant(451, "4.3.0", "Temporary problem accepting the message, try again later");
+    private static readonly SmtpReply StorageFull = SmtpReply.Constant(452, "4.3.1", "Insufficient system storage, try again later");
 
     // Answers of the return-path host lookup, for a minute: the RCPT of a bounce and its DATA both ask, and a remote server may send many bounces.
     private static readonly long HostCacheTicks = 60 * System.Diagnostics.Stopwatch.Frequency;
@@ -241,6 +242,11 @@ public sealed class IngestHandler : ISmtpServerHandler
         catch (OperationCanceledException)
         {
             throw;
+        }
+        catch (StorageFullException ex)
+        {
+            _log.Write(MtaLogLevel.Error, "ingest", "message could not be accepted: the disk is full", ex);
+            return StorageFull;
         }
         catch (Exception ex)
         {
