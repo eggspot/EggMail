@@ -39,7 +39,7 @@ describe('DomainDetail: records', () => {
     expect(screen.getByText(/leading-underscore label/)).toBeTruthy();
     expect(screen.getByText('<selector>._domainkey.<domain>')).toBeTruthy();
     expect(screen.getByText(/more than 255 characters/)).toBeTruthy();
-    expect(screen.getByText(/DMARC is informational/)).toBeTruthy();
+    expect(screen.getByText(/DMARC, TLS-RPT and MTA-STS are recommended/)).toBeTruthy();
   });
 
   it('copy buttons write the host and the value to the clipboard', async () => {
@@ -52,6 +52,124 @@ describe('DomainDetail: records', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Copy DKIM value' }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(`v=DKIM1; k=rsa; p=${LONG_KEY}`));
     expect(await screen.findAllByText('Copied')).not.toHaveLength(0);
+  });
+});
+
+const ZONE = '; DNS records for mail.example.com\n\nmail.example.com. 3600 IN TXT "v=spf1 ~all"\n';
+
+function extraRecords() {
+  return [
+    ...records(),
+    { type: 'TXT', host: '_smtp._tls.mail.example.com', value: 'v=TLSRPTv1; rua=mailto:tls-rpt@mail.example.com', ttl: 3600, purpose: 'tls_rpt' as const, required: false, publishable: true, status: 'mismatch' as const, found: 'v=TLSRPTv1; rua=mailto:other@x.test', expected: 'v=TLSRPTv1; rua=mailto:tls-rpt@mail.example.com', note: 'Asks receivers to send daily TLS reports.' },
+    { type: 'MX', host: 'bounces.example.net', value: '10 mta.example.net', ttl: 3600, purpose: 'bounce_mx' as const, required: false, publishable: false, status: 'missing' as const, found: null, expected: '10 mta.example.net', note: 'Published once by the operator.' },
+  ];
+}
+
+describe('DomainDetail: setup, ready to send and the zone file', () => {
+  it('shows the ready-to-send state, how many required and recommended records are published, and one Check DNS button', async () => {
+    mockFetch({ 'GET /api/v1/domains/:id': makeDomain({ records: extraRecords() }) });
+    renderWithApp(<DomainDetail id="d1" />);
+    expect((await screen.findByTestId('ready-state')).textContent).toBe('Ready to send');
+    expect(screen.getByTestId('record-progress').textContent).toContain('Required records: 2 of 2 published.');
+    expect(screen.getByTestId('record-progress').textContent).toContain('Recommended records: 1 of 3 published.');
+    expect(screen.getAllByRole('button', { name: 'Check DNS' })).toHaveLength(1);
+  });
+
+  it('a domain that cannot send yet says so', async () => {
+    mockFetch({ 'GET /api/v1/domains/:id': makeDomain({ status: 'pending', readyToSend: false }) });
+    renderWithApp(<DomainDetail id="d1" />);
+    expect((await screen.findByTestId('ready-state')).textContent).toBe('Not ready to send');
+  });
+
+  it('labels each record required or recommended and shows mismatch, missing and the purpose of the new records', async () => {
+    mockFetch({ 'GET /api/v1/domains/:id': makeDomain({ records: extraRecords() }) });
+    renderWithApp(<DomainDetail id="d1" />);
+    const table = await screen.findByRole('table', { name: 'DNS records to publish' });
+    expect(within(table).getByText('Mismatch')).toBeTruthy();
+    expect(within(table).getByText('TLS-RPT')).toBeTruthy();
+    expect(within(table).getByText('Bounce MX')).toBeTruthy();
+    expect(within(table).getAllByTestId('dns-level').map((e) => e.textContent).filter((t) => t === 'Required')).toHaveLength(2);
+    expect(within(table).getAllByTestId('dns-level').map((e) => e.textContent).filter((t) => t === 'Recommended')).toHaveLength(4); // the bounce MX is advice the customer cannot publish: shown, not counted
+    // Found vs expected for the mismatch and the missing row.
+    expect(within(table).getByText('v=TLSRPTv1; rua=mailto:other@x.test')).toBeTruthy();
+    expect(within(table).getAllByText('Found in DNS')).toHaveLength(2);
+    expect(within(table).getByText('Asks receivers to send daily TLS reports.')).toBeTruthy();
+  });
+
+  it('shows the zone file from the records endpoint and copies all of it', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } });
+    const m = mockFetch({
+      'GET /api/v1/domains/:id': makeDomain(),
+      'GET /api/v1/domains/:id/records': { id: 'd1', name: 'mail.example.com', readyToSend: true, checkedAt: null, records: [], zoneFile: ZONE, mtaStsPolicy: null },
+    });
+    renderWithApp(<DomainDetail id="d1" />);
+    expect((await screen.findByTestId('zone-file')).textContent).toBe(ZONE);
+    fireEvent.click(screen.getByRole('button', { name: 'Copy zone file' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(ZONE));
+    expect(m.callsTo('GET', '/api/v1/domains/d1/records').length).toBeGreaterThan(0);
+    expect(screen.queryByTestId('mta-sts-policy')).toBeNull();
+  });
+
+  it('shows the MTA-STS policy file EggMail serves and the name that must point at the server', async () => {
+    mockFetch({
+      'GET /api/v1/domains/:id': makeDomain(),
+      'GET /api/v1/domains/:id/records': {
+        id: 'd1',
+        name: 'mail.example.com',
+        readyToSend: true,
+        checkedAt: null,
+        records: [],
+        zoneFile: ZONE,
+        mtaStsPolicy: { url: 'https://mta-sts.mail.example.com/.well-known/mta-sts.txt', host: 'mta-sts.mail.example.com', content: 'version: STSv1\r\nmode: testing\r\nmx: mta.example.net\r\nmax_age: 604800\r\n' },
+      },
+    });
+    renderWithApp(<DomainDetail id="d1" />);
+    expect((await screen.findByTestId('mta-sts-url')).textContent).toBe('https://mta-sts.mail.example.com/.well-known/mta-sts.txt');
+    expect(screen.getByTestId('mta-sts-policy').textContent).toContain('mx: mta.example.net');
+    expect(screen.getByText(/must point at this server/)).toBeTruthy();
+  });
+
+  it('loads the zone file again after a DKIM rotation, which adds a record to it', async () => {
+    const key = { selector: 'eggmail1', publicKey: 'OLDKEY', active: true, createdAt: '2026-09-01T00:00:00.000Z', retiredAt: null };
+    const next = { selector: 'eggmail2', publicKey: 'NEWKEY', active: false, createdAt: '2026-10-12T08:00:00.000Z', retiredAt: null };
+    let zone = 'ZONE BEFORE';
+    const m = mockFetch({
+      'GET /api/v1/domains/:id': makeDomain({ dkimKeys: [key] }),
+      'POST /api/v1/domains/:id/dkim/rotate': () => {
+        zone = 'ZONE AFTER';
+        return makeDomain({ dkim: next, dkimKeys: [key, next] });
+      },
+      'GET /api/v1/domains/:id/records': () => ({ id: 'd1', name: 'mail.example.com', readyToSend: true, checkedAt: null, records: [], zoneFile: zone, mtaStsPolicy: null }),
+    });
+    renderWithApp(<DomainDetail id="d1" />);
+    expect((await screen.findByTestId('zone-file')).textContent).toBe('ZONE BEFORE');
+    fireEvent.click(screen.getByRole('button', { name: 'Rotate DKIM key' }));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Rotate key' }));
+    await waitFor(() => expect(screen.getByTestId('zone-file').textContent).toBe('ZONE AFTER'));
+    expect(m.callsTo('GET', '/api/v1/domains/d1/records').length).toBeGreaterThan(1);
+  });
+
+  it('still works when the records endpoint fails: the table is there, the zone file is not', async () => {
+    mockFetch({ 'GET /api/v1/domains/:id': makeDomain(), 'GET /api/v1/domains/:id/records': () => problem(500, 'server_error') });
+    renderWithApp(<DomainDetail id="d1" />);
+    await screen.findByRole('table', { name: 'DNS records to publish' });
+    expect(screen.queryByTestId('zone-file')).toBeNull();
+  });
+
+  it('Check DNS shows the result of the check in the table and loads the zone file again', async () => {
+    const checked = makeDomain({ status: 'verified', lastCheckedAt: '2026-10-12T08:00:00.000Z', records: records({ spf: { status: 'ok', found: 'v=spf1 include:spf.eggmail.example.net ~all' } }) });
+    const m = mockFetch({
+      'GET /api/v1/domains/:id': makeDomain({ status: 'pending', readyToSend: false }),
+      'POST /api/v1/domains/:id/verify': checked,
+      'GET /api/v1/domains/:id/records': { id: 'd1', name: 'mail.example.com', readyToSend: true, checkedAt: null, records: [], zoneFile: ZONE, mtaStsPolicy: null },
+    });
+    renderWithApp(<DomainDetail id="d1" />);
+    expect((await screen.findByTestId('ready-state')).textContent).toBe('Not ready to send');
+    const before = m.callsTo('GET', '/api/v1/domains/d1/records').length;
+    fireEvent.click(screen.getByRole('button', { name: 'Check DNS' }));
+    await waitFor(() => expect(screen.getByTestId('ready-state').textContent).toBe('Ready to send'));
+    await waitFor(() => expect(m.callsTo('GET', '/api/v1/domains/d1/records').length).toBeGreaterThan(before));
   });
 });
 
@@ -108,7 +226,7 @@ describe('DomainDetail: loading states', () => {
   });
 });
 
-describe('DomainDetail: verify now cooldown', () => {
+describe('DomainDetail: check DNS cooldown', () => {
   it('disables the button for 30 s with a countdown, then re-enables it', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const m = mockFetch({
@@ -116,22 +234,22 @@ describe('DomainDetail: verify now cooldown', () => {
       'POST /api/v1/domains/:id/verify': makeDomain({ status: 'temporary_failure', lastCheckedAt: '2026-10-12T08:00:00.000Z' }),
     });
     renderWithApp(<DomainDetail id="d1" />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Verify now' }));
-    const waiting = await screen.findByRole('button', { name: /Verify again in 30 s/ });
+    fireEvent.click(await screen.findByRole('button', { name: 'Check DNS' }));
+    const waiting = await screen.findByRole('button', { name: /Check again in 30 s/ });
     expect((waiting as HTMLButtonElement).disabled).toBe(true);
     expect(m.callsTo('POST', '/api/v1/domains/d1/verify')).toHaveLength(1);
 
     await act(async () => {
       vi.advanceTimersByTime(12_000);
     });
-    await waitFor(() => expect(screen.getByRole('button', { name: /Verify again in (1[7-9]|2\d) s/ })).toBeTruthy());
+    await waitFor(() => expect(screen.getByRole('button', { name: /Check again in (1[7-9]|2\d) s/ })).toBeTruthy());
 
     await act(async () => {
       vi.advanceTimersByTime(20_000);
     });
-    const again = await screen.findByRole('button', { name: 'Verify now' });
+    const again = await screen.findByRole('button', { name: 'Check DNS' });
     expect((again as HTMLButtonElement).disabled).toBe(false);
-    expect(screen.getByText('You can verify again.')).toBeTruthy();
+    expect(screen.getByText('You can check again.')).toBeTruthy();
   });
 
   it('on 429 uses Retry-After for the cooldown and explains it', async () => {
@@ -140,8 +258,8 @@ describe('DomainDetail: verify now cooldown', () => {
       'POST /api/v1/domains/:id/verify': () => problem(429, 'rate_limited', {}, { 'Retry-After': '17' }),
     });
     renderWithApp(<DomainDetail id="d1" />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Verify now' }));
-    expect(await screen.findByRole('button', { name: /Verify again in 1[67] s/ })).toBeTruthy();
+    fireEvent.click(await screen.findByRole('button', { name: 'Check DNS' }));
+    expect(await screen.findByRole('button', { name: /Check again in 1[67] s/ })).toBeTruthy();
     expect(screen.getByText(/Too many requests/)).toBeTruthy();
   });
 });

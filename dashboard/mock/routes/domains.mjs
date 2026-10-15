@@ -1,4 +1,4 @@
-// Domains: list/create/delete, verify (30 s rate limit), DKIM rotation.
+// Domains: list/create/delete, records (zone file), verify (30 s rate limit), DKIM rotation.
 import { randomBytes } from 'node:crypto';
 import { HttpError, daysAgo, minutesAgo, newId, validate, iso } from '../lib.mjs';
 
@@ -17,14 +17,60 @@ function fakeKey(seed) {
   return s + 'IDAQAB';
 }
 
+const ALL_PURPOSES = ['dkim', 'return_path', 'spf', 'dmarc', 'tls_rpt', 'mta_sts', 'mta_sts_host', 'bounce_mx', 'ptr'];
+
+/** Every record in one state (the common case of the seeded domains), with single purposes overridden. */
+function statusesFor(state, overrides = {}) {
+  return { ...Object.fromEntries(ALL_PURPOSES.map((p) => [p, state])), ...overrides };
+}
+
 function makeRecords(name, selector, key, statuses = {}) {
   const dkimValue = `v=DKIM1; k=rsa; p=${key}`;
+  const state = (purpose) => statuses[purpose] || 'ok';
+  const rec = (type, host, value, purpose, required, note) => {
+    const status = state(purpose);
+    const publishable = type !== 'PTR' && (type !== 'MX' || host === name || host.endsWith(`.${name}`));   // the reverse DNS and the operator's bounce MX are not the customer's to publish
+    return { type, host, value, ttl: 3600, purpose, required, publishable, note, status, expected: value, found: status === 'ok' ? value : null };
+  };
+  const dkim = rec('TXT', `${selector}._domainkey.${name}`, dkimValue, 'dkim', true, 'Lets receivers verify that mail from this domain is signed by EggMail.');
+  if (statuses.dkimFound !== undefined) dkim.found = statuses.dkimFound;
   return [
-    { type: 'TXT', host: `${selector}._domainkey.${name}`, value: dkimValue, ttl: 3600, purpose: 'dkim', status: statuses.dkim || 'ok', expected: dkimValue, found: statuses.dkimFound ?? (statuses.dkim === 'ok' || !statuses.dkim ? dkimValue : null) },
-    { type: 'CNAME', host: `bounces.${name}`, value: 'bounce.eggmail.example.net', ttl: 3600, purpose: 'return_path', status: statuses.return_path || 'ok', expected: 'bounce.eggmail.example.net', found: statuses.return_path && statuses.return_path !== 'ok' ? null : 'bounce.eggmail.example.net' },
-    { type: 'TXT', host: name, value: 'v=spf1 include:spf.eggmail.example.net ~all', ttl: 3600, purpose: 'spf', status: statuses.spf || 'ok', expected: 'v=spf1 include:spf.eggmail.example.net ~all', found: statuses.spf && statuses.spf !== 'ok' ? null : 'v=spf1 include:spf.eggmail.example.net ~all' },
-    { type: 'TXT', host: `_dmarc.${name}`, value: 'v=DMARC1; p=none; rua=mailto:dmarc@' + name, ttl: 3600, purpose: 'dmarc', status: statuses.dmarc || 'ok', expected: 'v=DMARC1; p=none; rua=mailto:dmarc@' + name, found: statuses.dmarc && statuses.dmarc !== 'ok' ? null : 'v=DMARC1; p=none; rua=mailto:dmarc@' + name },
+    dkim,
+    rec('CNAME', `bounces.${name}`, 'bounce.eggmail.example.net', 'return_path', true, 'Makes bounce messages for this domain reach EggMail.'),
+    rec('TXT', name, 'v=spf1 include:spf.eggmail.example.net ~all', 'spf', false, 'Authorizes this server to send for the domain. Keep a single SPF record per domain: merge this into an existing one.'),
+    rec('TXT', `_dmarc.${name}`, `v=DMARC1; p=none; rua=mailto:dmarc@${name}`, 'dmarc', false, 'Tells receivers what to do with mail that fails authentication and where to send reports. The default only monitors (p=none).'),
+    rec('TXT', `_smtp._tls.${name}`, `v=TLSRPTv1; rua=mailto:tls-rpt@${name}`, 'tls_rpt', false, 'Asks receivers to send daily TLS reports (RFC 8460) to the address in rua.'),
+    rec('TXT', `_mta-sts.${name}`, 'v=STSv1; id=0123456789abcdef', 'mta_sts', false, `Announces the MTA-STS policy that EggMail serves at https://mta-sts.${name}/.well-known/mta-sts.txt. The id changes when the policy changes.`),
+    rec('CNAME', `mta-sts.${name}`, 'mta.eggmail.example.net', 'mta_sts_host', false, `Must lead to this server (mta.eggmail.example.net) so it can serve the policy over HTTPS; its certificate has to cover mta-sts.${name}.`),
+    rec('MX', 'bounce.eggmail.example.net', '10 mta.eggmail.example.net', 'bounce_mx', false, 'Published once by the operator for all domains: delivers bounces for the bounce domain to this server (port 25 reaches the bounce listener).'),
+    rec('PTR', 'mta.eggmail.example.net', 'mta.eggmail.example.net', 'ptr', false, "Advice: the reverse DNS of the sending IP should be this server's host name. It is set at whoever owns the IP address (your hosting provider), not in your zone."),
   ];
+}
+
+const PURPOSE_LABEL = { dkim: 'DKIM', return_path: 'Return-path', spf: 'SPF', dmarc: 'DMARC', bounce_mx: 'Bounce MX', tls_rpt: 'TLS-RPT', mta_sts: 'MTA-STS', mta_sts_host: 'MTA-STS host', ptr: 'Reverse DNS' };
+const fqdn = (n) => (n.endsWith('.') ? n : `${n}.`);
+const quoted = (v) =>
+  v
+    .match(/.{1,255}/g)
+    .map((piece) => `"${piece.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`)
+    .join(' ');
+
+function zoneLine(r, zone) {
+  const inZone = r.host === zone || r.host.endsWith(`.${zone}`);
+  if (r.type === 'TXT') return `${fqdn(r.host)} ${r.ttl} IN TXT ${quoted(r.value)}`;
+  if (r.type === 'CNAME') return `${fqdn(r.host)} ${r.ttl} IN CNAME ${fqdn(r.value)}`;
+  if (r.type === 'MX' && !inZone) return `; MX ${r.host} -> ${r.value} (published once by whoever runs EggMail, not in this zone)`;
+  if (r.type === 'MX') {
+    const [preference, target] = r.value.split(' ');
+    return `${fqdn(r.host)} ${r.ttl} IN MX ${preference} ${fqdn(target)}`;
+  }
+  return `; ${r.type} ${r.host} -> ${r.value}`;
+}
+
+function zoneFile(d) {
+  const lines = [`; DNS records for ${d.name}`, '; Required records decide whether the domain can send; recommended ones improve delivery and give you reports.'];
+  for (const r of d.records) lines.push('', `; ${PURPOSE_LABEL[r.purpose]} (${r.required ? 'required' : 'recommended'}): ${r.note}`, zoneLine(r, d.name));
+  return `${lines.join('\n')}\n`;
 }
 
 function makeDomain(name, status, opts = {}) {
@@ -50,20 +96,20 @@ function seed() {
   return [
     makeDomain('example.com', 'verified', { ageDays: 60 }),
     makeDomain('mail.example.com', 'temporary_failure', {
-      statuses: { dkim: 'invalid', dkimFound: 'v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA-truncated' },
+      statuses: { dkim: 'mismatch', dkimFound: 'v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA-truncated' },
       lastError: 'DKIM record at eggmail1._domainkey.mail.example.com does not match the expected public key.',
       lastCheckedAt: minutesAgo(4),
       nextCheckAt: iso(Date.now() + 3_600_000),
       ageDays: 20,
     }),
     makeDomain('newsletter.example.net', 'pending', {
-      statuses: { dkim: 'pending', return_path: 'missing', spf: 'pending', dmarc: 'pending' },
+      statuses: statusesFor('pending', { return_path: 'missing' }),
       lastCheckedAt: null,
       nextCheckAt: iso(Date.now() + 120_000),
       ageDays: 0,
     }),
     makeDomain('old.example.org', 'failed', {
-      statuses: { dkim: 'missing', return_path: 'missing', spf: 'missing', dmarc: 'missing' },
+      statuses: statusesFor('missing'),
       sendingPaused: true,
       lastError: 'Records were not found for more than 72 hours; sending is paused.',
       lastCheckedAt: minutesAgo(50),
@@ -77,9 +123,12 @@ export function getDomains(ctx) {
   return ctx.tenantData('domains', seed);
 }
 
+/** Verified, or in the grace period of a temporary failure, and not paused (design section 8). */
+const readyToSend = (d) => (d.status === 'verified' || d.status === 'temporary_failure') && !d.sendingPaused;
+
 const view = (d) => {
   const { _verifies, _lastVerifyAt, ...pub } = d;
-  return pub;
+  return { ...pub, readyToSend: readyToSend(d) };
 };
 
 function find(ctx) {
@@ -108,7 +157,7 @@ export function register(r) {
         else if (getDomains(ctx).some((d) => d.name === name)) fail('name', 'This domain already exists.');
       });
       const d = makeDomain(name, 'pending', {
-        statuses: { dkim: 'pending', return_path: 'pending', spf: 'pending', dmarc: 'pending' },
+        statuses: statusesFor('pending'),
         lastCheckedAt: null,
         nextCheckAt: iso(Date.now() + 120_000),
         ageDays: 0,
@@ -123,6 +172,28 @@ export function register(r) {
   );
 
   r.get('/api/v1/domains/:id', (ctx) => view(find(ctx)), { tenant: true });
+
+  // What to publish, as records and as zone-file text; nothing is looked up.
+  r.get(
+    '/api/v1/domains/:id/records',
+    (ctx) => {
+      const d = find(ctx);
+      return {
+        id: d.id,
+        name: d.name,
+        readyToSend: readyToSend(d),
+        checkedAt: d.lastCheckedAt,
+        records: d.records,
+        zoneFile: zoneFile(d),
+        mtaStsPolicy: {
+          url: `https://mta-sts.${d.name}/.well-known/mta-sts.txt`,
+          host: `mta-sts.${d.name}`,
+          content: 'version: STSv1\r\nmode: testing\r\nmx: mta.eggmail.example.net\r\nmax_age: 604800\r\n',
+        },
+      };
+    },
+    { tenant: true },
+  );
 
   r.delete(
     '/api/v1/domains/:id',
@@ -142,7 +213,7 @@ export function register(r) {
       const since = Date.now() - d._lastVerifyAt;
       if (since < VERIFY_COOLDOWN_MS) {
         const wait = Math.ceil((VERIFY_COOLDOWN_MS - since) / 1000);
-        throw new HttpError(429, 'rate_limited', 'Verify now is limited to once per 30 seconds per domain.', {}, { 'Retry-After': String(wait) });
+        throw new HttpError(429, 'rate_limited', 'Checking is limited to once per 30 seconds per domain.', {}, { 'Retry-After': String(wait) });
       }
       d._lastVerifyAt = Date.now();
       d._verifies += 1;
@@ -173,7 +244,8 @@ export function register(r) {
       const created = { selector, publicKey: key, active: false, createdAt: iso(), retiredAt: null };
       d.dkimKeys.push(created);
       d.dkim = created;
-      d.records.push({ type: 'TXT', host: `${selector}._domainkey.${d.name}`, value, ttl: 3600, purpose: 'dkim', status: 'pending', expected: value, found: null });
+      const note = 'Lets receivers verify that mail from this domain is signed by EggMail.';
+      d.records.splice(1, 0, { type: 'TXT', host: `${selector}._domainkey.${d.name}`, value, ttl: 3600, purpose: 'dkim', required: false, publishable: true, note, status: 'pending', expected: value, found: null });
       return view(d);
     },
     { tenant: true },

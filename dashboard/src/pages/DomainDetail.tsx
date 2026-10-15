@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { api } from '../api/endpoints';
 import { ApiError } from '../api/client';
 import { friendlyMessage, isCode } from '../api/errorMessages';
-import { DnsHints, DnsRecordsTable, DomainStatusChip } from '../components/DnsRecordsTable';
+import { DnsHints, DnsRecordsTable, DomainStatusChip, ZoneFileBlock, recordProgress } from '../components/DnsRecordsTable';
 import { DomainStateBanner } from '../components/DomainStateBanner';
 import type { DkimKeyInfo } from '../api/types';
 import { Button, Card, Chip, ConfirmDialog, CopyButton, EmptyState, ErrorNotice, KeyValue, Loading, Notice, PageHeader } from '../components/ui';
@@ -14,6 +14,10 @@ const VERIFY_COOLDOWN_SECONDS = 30;
 export default function DomainDetail({ id }: { id?: string }) {
   const domainId = id ?? '';
   const { data: domain, error, loading, reload, setData } = useApi(() => api.domain(domainId), [domainId]);
+  // The text to publish (zone file, MTA-STS policy file) is loaded again whenever the domain changed: a check, a DKIM rotation.
+  const recordsState = useApi(async () => (domain ? api.domainRecords(domainId) : undefined), [domainId, domain?.lastCheckedAt, domain?.dkimKeys?.length, domain?.dkim?.selector, domain?.status]);
+  // Only the text of this domain (the previous one stays in the state while another is loading).
+  const publishing = recordsState.data?.id === domainId ? recordsState.data : undefined;
   useDocumentTitle(domain ? domain.name : 'Domain');
 
   const cooldown = useCooldown();
@@ -28,7 +32,7 @@ export default function DomainDetail({ id }: { id?: string }) {
     if (cooldown.remaining > 0) wasCoolingDown.current = true;
     else if (wasCoolingDown.current) {
       wasCoolingDown.current = false;
-      setAnnounce('You can verify again.');
+      setAnnounce('You can check again.');
     }
   }, [cooldown.remaining]);
 
@@ -37,14 +41,14 @@ export default function DomainDetail({ id }: { id?: string }) {
       const d = await api.verifyDomain(domainId);
       setData(d);
       setVerifyNote(null);
-      setAnnounce('Verification requested.');
+      setAnnounce('DNS check finished.');
       cooldown.start(VERIFY_COOLDOWN_SECONDS);
       return d;
     } catch (e) {
       if (isCode(e, 'rate_limited')) {
         cooldown.start((e as ApiError).retryAfter ?? VERIFY_COOLDOWN_SECONDS);
         setVerifyNote(friendlyMessage(e));
-        setAnnounce('Verify is rate limited.');
+        setAnnounce('Checking is rate limited.');
         return undefined;
       }
       throw e;
@@ -87,6 +91,7 @@ export default function DomainDetail({ id }: { id?: string }) {
   if (!domain) return null;
 
   const coolingDown = cooldown.remaining > 0;
+  const progress = recordProgress(domain.records);
   const keys: DkimKeyInfo[] = domain.dkimKeys?.length ? domain.dkimKeys : [domain.dkim];
   // The signing key is the active one; a key that is neither active nor retired is a pending rotation.
   const signing = keys.find((k) => k.active) ?? domain.dkim;
@@ -105,9 +110,6 @@ export default function DomainDetail({ id }: { id?: string }) {
           <>
             <DomainStatusChip status={domain.status} />
             {domain.sendingPaused && <Chip tone="bad">Sending paused</Chip>}
-            <Button variant="primary" onClick={() => void verify.run()} busy={verify.busy} disabled={coolingDown}>
-              {coolingDown ? `Verify again in ${cooldown.remaining} s` : 'Verify now'}
-            </Button>
           </>
         }
       />
@@ -120,6 +122,29 @@ export default function DomainDetail({ id }: { id?: string }) {
 
       <DomainStateBanner domain={domain} />
 
+      <Card title="Setup" id="setup">
+        <div class="readiness">
+          <div>
+            <div class="readiness-state" data-testid="ready-state">
+              {domain.readyToSend ? <Chip tone="ok">Ready to send</Chip> : <Chip tone="warn">Not ready to send</Chip>}
+            </div>
+            <p class="small" data-testid="record-progress">
+              Required records: {progress.requiredOk} of {progress.requiredTotal} published.
+              {progress.recommendedTotal > 0 && ` Recommended records: ${progress.recommendedOk} of ${progress.recommendedTotal} published.`}
+            </p>
+          </div>
+          <div class="readiness-actions">
+            <Button variant="primary" onClick={() => void verify.run()} busy={verify.busy} disabled={coolingDown}>
+              {coolingDown ? `Check again in ${cooldown.remaining} s` : 'Check DNS'}
+            </Button>
+          </div>
+        </div>
+        <p class="hint">
+          Publish the records below at your DNS provider, then choose Check DNS: EggMail looks every record up and shows what it found. A check is limited to once every 30
+          seconds per domain; EggMail also re-checks automatically. Mail can be sent once the required records are published; the recommended ones improve delivery.
+        </p>
+      </Card>
+
       <Card title="Verification">
         <KeyValue
           items={[
@@ -129,12 +154,33 @@ export default function DomainDetail({ id }: { id?: string }) {
             ['Last error', domain.lastError ?? 'None'],
           ]}
         />
-        <p class="hint">Verify now is limited to once every 30 seconds per domain. EggMail also re-checks automatically.</p>
       </Card>
 
       <Card title="DNS records">
         <DnsRecordsTable records={domain.records} />
       </Card>
+
+      {publishing && (
+        <Card title="Zone file">
+          <ZoneFileBlock text={publishing.zoneFile} />
+        </Card>
+      )}
+
+      {publishing?.mtaStsPolicy && (
+        <Card title="MTA-STS policy file">
+          <p>
+            EggMail serves this file itself at <code data-testid="mta-sts-url">{publishing.mtaStsPolicy.url}</code>. The name <code>{publishing.mtaStsPolicy.host}</code> must point at this server
+            (the MTA-STS host record above), and the HTTPS certificate the server presents must cover it.
+          </p>
+          <div class="value-cell">
+            <span class="label">Served policy</span>
+            <CopyButton text={publishing.mtaStsPolicy.content} what="MTA-STS policy" />
+          </div>
+          <pre class="zone-file" data-testid="mta-sts-policy" tabIndex={0}>
+            {publishing.mtaStsPolicy.content}
+          </pre>
+        </Card>
+      )}
       <DnsHints />
 
       <Card

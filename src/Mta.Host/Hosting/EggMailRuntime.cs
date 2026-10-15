@@ -274,7 +274,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
         };
     }
 
-    private static IDnsResolver CreateDns(MtaConfig config)
+    internal static IDnsResolver CreateDns(MtaConfig config)
     {
         var servers = config.Dns.Servers.Count > 0
             ? config.Dns.Servers.Select(ParseEndpoint).ToList()

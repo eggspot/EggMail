@@ -757,8 +757,9 @@ public class CertesRenewalInfoWireTests
     [InlineData("urn:ietf:params:acme:error:conflict", 409, true)]
     [InlineData("urn:ietf:params:acme:error:unauthorized", 403, true)]
     [InlineData("urn:ietf:params:acme:error:rateLimited", 429, false)]
-    [InlineData("urn:ietf:params:acme:error:serverInternal", 500, false)]
-    public async Task Only_a_refused_link_leads_to_a_plain_order(string type, int status, bool fallsBack)
+    [InlineData("urn:ietf:params:acme:error:serverInternal", 500, true)]   // a CA that has not indexed the certificate it just issued (Pebble), or a hiccup
+    [InlineData("urn:ietf:params:acme:error:serverInternal", 503, true)]
+    public async Task Only_a_refused_link_or_a_failing_ca_leads_to_a_plain_order(string type, int status, bool fallsBack)
     {
         var (pem, _) = CertificateWithAuthorityKeyIdentifier();
         var log = new ListLog();
