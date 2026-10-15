@@ -130,6 +130,51 @@ public class ClientTests
         Assert.Empty(server.Handler.Messages);
     }
 
+    private static async Task<List<string>> RcptLinesAsync(string ehloCapabilities, params string[] recipients)
+    {
+        var lines = new List<string>();
+        await using var peer = new ScriptedServer(async c =>
+        {
+            await c.SendAsync("220 x ESMTP\r\n");
+            await c.ReadLineAsync();
+            await c.SendAsync("250-x\r\n250 " + ehloCapabilities + "\r\n");
+            await c.ReadLineAsync();   // MAIL FROM
+            await c.SendAsync("250 ok\r\n");
+            for (int i = 0; i < recipients.Length; i++)
+            {
+                lines.Add(await c.ReadLineAsync());
+                await c.SendAsync("250 ok\r\n");
+            }
+
+            await c.ReadLineAsync();   // DATA
+            await c.SendAsync("354 go\r\n");
+            await c.ReadDataAsync();
+            await c.SendAsync("250 queued\r\n");
+            await c.HoldOpenAsync(100);
+        });
+        await using var conn = await SmtpClientConnection.ConnectAsync(peer.Target(SmtpTlsPolicy.Disabled), Options);
+        var result = await conn.SendAsync(new SmtpEnvelope(EmailAddress.Parse("s@example.org"), recipients.Select(r => EmailAddress.Parse(r)).ToArray(), false, false), Msg("hi\r\n"));
+        Assert.True(result.Delivered);
+        return lines;
+    }
+
+    [Fact]
+    public async Task The_original_recipient_is_declared_when_the_server_offers_dsn_so_a_forwarded_bounce_still_names_it()
+    {
+        var lines = await RcptLinesAsync("DSN", "alice@dest.example", "o'brien+tag=x@dest.example");
+
+        Assert.Equal("RCPT TO:<alice@dest.example> ORCPT=rfc822;alice@dest.example", lines[0]);
+        Assert.Equal("RCPT TO:<o'brien+tag=x@dest.example> ORCPT=rfc822;o'brien+2Btag+3Dx@dest.example", lines[1]);   // xtext: + and = are escaped
+    }
+
+    [Fact]
+    public async Task No_orcpt_is_sent_to_a_server_that_does_not_offer_dsn()
+    {
+        var lines = await RcptLinesAsync("SIZE 1000", "alice@dest.example");
+
+        Assert.Equal("RCPT TO:<alice@dest.example>", lines[0]);
+    }
+
     [Fact]
     public async Task Stripped_starttls_is_detected_when_required_and_recorded_when_opportunistic()
     {

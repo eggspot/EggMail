@@ -32,6 +32,94 @@ public class VerpTests
     }
 
     [Fact]
+    public void A_token_bound_to_a_destination_domain_fits_the_local_part_limit_and_round_trips()
+    {
+        var codec = Codec();
+        var tenant = Ids.New();
+        var domain = Ids.New();
+
+        string local = codec.CreateLocalPart(tenant, domain, Now, "dest.example");
+
+        Assert.Equal(63, local.Length);   // b+ and 61 characters: 38 bytes
+        Assert.True(local.Length <= 64);
+        Assert.True(local.All(c => char.IsAsciiLetterLower(c) || char.IsAsciiDigit(c) || c is '+'));
+        Assert.True(codec.TryDecode(local, Now.AddHours(30), TimeSpan.FromDays(14), out var t));
+        Assert.Equal(tenant, t.TenantId);
+        Assert.True(VerpCodec.MatchesDomain(t, domain));
+        Assert.True(t.BoundToDestination);
+        Assert.True(EmailAddress.TryParse(codec.CreateAddress(tenant, domain, "bounces.example.com", Now, "dest.example"), false, out _));
+    }
+
+    [Theory]
+    [InlineData("dest.example", "dest.example", VerpDestinationCheck.Match)]
+    [InlineData("dest.example", "DEST.Example", VerpDestinationCheck.Match)]
+    [InlineData("dest.example", "dest.example.", VerpDestinationCheck.Match)]
+    [InlineData("Bücher.example", "xn--bcher-kva.example", VerpDestinationCheck.Match)]
+    [InlineData("xn--bcher-kva.example", "BÜCHER.example", VerpDestinationCheck.Match)]
+    [InlineData("dest.example", "other.example", VerpDestinationCheck.Mismatch)]
+    [InlineData("dest.example", "sub.dest.example", VerpDestinationCheck.Mismatch)]
+    [InlineData("dest.example", "dest.example.evil.example", VerpDestinationCheck.Mismatch)]
+    [InlineData("dest.example", "", VerpDestinationCheck.Mismatch)]
+    public void The_destination_check_compares_normalised_domains(string issuedFor, string named, VerpDestinationCheck expected)
+    {
+        var codec = Codec();
+        Assert.True(codec.TryDecode(codec.CreateLocalPart(Ids.New(), Ids.New(), Now, issuedFor), Now, TimeSpan.FromDays(1), out var token));
+
+        Assert.Equal(expected, codec.CheckDestination(token, named));
+    }
+
+    [Fact]
+    public void The_destination_tag_is_keyed_so_a_tag_cannot_be_computed_from_another_installations_token()
+    {
+        var a = Codec();
+        var b = Codec();
+        Assert.True(a.TryDecode(a.CreateLocalPart(Ids.New(), Ids.New(), Now, "dest.example"), Now, TimeSpan.FromDays(1), out var tokenA));
+        Assert.True(b.TryDecode(b.CreateLocalPart(Ids.New(), Ids.New(), Now, "dest.example"), Now, TimeSpan.FromDays(1), out var tokenB));
+
+        Assert.NotEqual(tokenA.DestinationTag, tokenB.DestinationTag);
+    }
+
+    [Fact]
+    public void Tampering_with_any_character_of_a_bound_token_is_rejected()
+    {
+        var codec = Codec();
+        string local = codec.CreateLocalPart(Ids.New(), Ids.New(), Now, "dest.example");
+        for (int i = 2; i < local.Length; i++)
+        {
+            var copy = local.ToCharArray();
+            copy[i] = copy[i] == 'a' ? 'b' : 'a';
+            Assert.False(codec.TryDecode(new string(copy), Now, TimeSpan.FromDays(1), out _), $"flip at {i}");
+        }
+
+        Assert.False(codec.TryDecode(local + "a", Now, TimeSpan.FromDays(1), out _));
+        Assert.False(codec.TryDecode(local[..^1], Now, TimeSpan.FromDays(1), out _));
+    }
+
+    [Fact]
+    public void A_token_without_a_destination_is_still_accepted_and_says_nothing_about_the_destination()
+    {
+        var codec = Codec();
+        string local = codec.CreateLocalPart(Ids.New(), Ids.New(), Now);
+
+        Assert.Equal(58 + 2, local.Length);
+        Assert.True(codec.TryDecode(local, Now, TimeSpan.FromDays(1), out var token));
+        Assert.False(token.BoundToDestination);
+        Assert.Equal(VerpDestinationCheck.Unbound, codec.CheckDestination(token, "anything.example"));
+    }
+
+    [Fact]
+    public void A_version_1_token_cannot_be_turned_into_a_bound_one_by_changing_its_length_or_version_nibble()
+    {
+        var codec = Codec();
+        string v1 = codec.CreateLocalPart(Ids.New(), Ids.New(), Now);
+        string v2 = codec.CreateLocalPart(Ids.New(), Ids.New(), Now, "dest.example");
+
+        // The version nibble is the first character's high bits: swap the first characters between the two kinds of token.
+        Assert.False(codec.TryDecode("b+" + v2[2] + v1[3..], Now, TimeSpan.FromDays(1), out _));
+        Assert.False(codec.TryDecode("b+" + v1[2] + v2[3..], Now, TimeSpan.FromDays(1), out _));
+    }
+
+    [Fact]
     public void Decoding_is_case_insensitive_because_mail_systems_fold_case()
     {
         var codec = Codec();

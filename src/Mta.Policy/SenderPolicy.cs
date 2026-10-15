@@ -130,6 +130,9 @@ public sealed class SenderPolicy
             ? null
             : new SenderRejection("too_many_recipients", 452, "4.5.3", $"Too many recipients: at most {_options.MaxRecipientsPerMessage} per message.");
 
+    /// <summary>First label of a sending domain's own return-path host (<c>bounce.example.com</c>): the domain records ask for it, delivery uses it and the bounce listener accepts it.</summary>
+    public const string DefaultReturnPathLabel = "bounce";
+
     /// <summary>
     /// Chooses the return-path host: the tenant's own host when its return-path CNAME is verified, otherwise the shared bounce domain.
     /// </summary>

@@ -20,7 +20,7 @@ public class OutageTests : StorageTestBase
         TestDatabase db = await PostgresTestServer.Instance.CreateDatabaseAsync();
         var direct = new NpgsqlConnectionStringBuilder(db.ConnectionString);
         _proxy = new TcpProxy(direct.Host!, direct.Port);
-        var viaProxy = new NpgsqlConnectionStringBuilder(db.ConnectionString) { Host = "127.0.0.1", Port = _proxy.Port, Timeout = 3, Pooling = true };
+        var viaProxy = new NpgsqlConnectionStringBuilder(db.ConnectionString) { Host = "127.0.0.1", Port = _proxy.Port, Timeout = 30, Pooling = true };   // Cut() refuses connections at once, so a long connect timeout costs nothing in an outage; 3 s was exceeded by InitializeAsync on a loaded CI runner
         _pg.Adopt(db);
         return PostgresStorage.Create(PgHarness.WithDatabase(options, viaProxy.ConnectionString), Clock);
     }
