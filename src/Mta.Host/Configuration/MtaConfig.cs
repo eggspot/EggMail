@@ -201,7 +201,7 @@ public sealed class ThrottleSection
     /// <summary>Ceiling of messages per minute to one destination domain.</summary>
     public double MaxMessagesPerMinute { get; init; } = 600;
 
-    /// <summary>Messages sent over one connection before it is closed.</summary>
+    /// <summary>Reserved: validated and passed on, but the delivery engine does not enforce it yet (see docs/operations.md).</summary>
     public int MaxMessagesPerConnection { get; init; } = 100;
 
     /// <summary>Connections allowed at first, before the destination has shown it accepts more.</summary>

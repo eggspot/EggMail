@@ -50,6 +50,22 @@ public sealed class WebhookRealHandlerTests : IDisposable
     }
 
     [Fact]
+    public async Task The_production_handler_never_uses_a_proxy_follows_no_redirect_and_connects_through_the_ssrf_guard()
+    {
+        var storage = new InMemoryStorage(new StorageOptions(), SystemClock.Instance);
+        await storage.InitializeAsync(default);
+        await using var dispatcher = new WebhookDispatcher(storage.Webhooks, storage.Config, new PlainProtector());
+
+        using SocketsHttpHandler handler = dispatcher.CreateHandler();
+
+        // The guard validates the address of the connection it makes; through a proxy that would be the proxy's, whatever HTTPS_PROXY says.
+        Assert.False(handler.UseProxy);
+        Assert.False(handler.AllowAutoRedirect);
+        Assert.False(handler.UseCookies);
+        Assert.NotNull(handler.ConnectCallback);
+    }
+
+    [Fact]
     public async Task A_sampled_webhook_call_does_not_hand_trace_headers_to_the_receiver()
     {
         var storage = new InMemoryStorage(new StorageOptions { History = new HistoryOptions { Mode = HistoryMode.Full } }, SystemClock.Instance);

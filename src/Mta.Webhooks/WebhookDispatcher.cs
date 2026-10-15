@@ -320,21 +320,24 @@ public sealed class WebhookDispatcher : IAsyncDisposable
         return _clients.GetOrAdd(key, _ => CreateClient());
     }
 
-    private HttpClient CreateClient()
+    private HttpClient CreateClient() =>
+        new(_handlerOverride ?? CreateHandler(), disposeHandler: _handlerOverride is null) { Timeout = Timeout.InfiniteTimeSpan };
+
+    /// <summary>The handler of production deliveries (a test can inspect it).</summary>
+    internal SocketsHttpHandler CreateHandler() => new()
     {
-        HttpMessageHandler handler = _handlerOverride ?? new SocketsHttpHandler
-        {
-            AllowAutoRedirect = false,
-            UseCookies = false,
-            PooledConnectionLifetime = TimeSpan.FromMinutes(2),
-            ConnectTimeout = _options.Timeout,
-            ConnectCallback = ConnectGuardedAsync,
-            // While our webhook span is the current activity the handler would add traceparent/tracestate to the request, handing customers'
-            // receivers our trace ids. Nothing of ours belongs on a request to a third party.
-            ActivityHeadersPropagator = DistributedContextPropagator.CreateNoOutputPropagator(),
-        };
-        return new HttpClient(handler, disposeHandler: _handlerOverride is null) { Timeout = Timeout.InfiniteTimeSpan };
-    }
+        AllowAutoRedirect = false,
+        UseCookies = false,
+        // The connect callback below validates the address it connects to. Through a proxy that address would be the proxy's, and the
+        // proxy would reach whatever the URL says: the SSRF guard would check the wrong hop. Never use one, whatever HTTP(S)_PROXY says.
+        UseProxy = false,
+        PooledConnectionLifetime = TimeSpan.FromMinutes(2),
+        ConnectTimeout = _options.Timeout,
+        ConnectCallback = ConnectGuardedAsync,
+        // While our webhook span is the current activity the handler would add traceparent/tracestate to the request, handing customers'
+        // receivers our trace ids. Nothing of ours belongs on a request to a third party.
+        ActivityHeadersPropagator = DistributedContextPropagator.CreateNoOutputPropagator(),
+    };
 
     private async ValueTask<Stream> ConnectGuardedAsync(SocketsHttpConnectionContext context, CancellationToken ct)
     {

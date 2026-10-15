@@ -893,6 +893,9 @@ internal sealed class SmtpSession
         SmtpReply? failure = null;
         var chunk = cmd;
         long started = _server.Clock.Timestamp;
+        // BDAT bodies have no terminator to scan for, but they are sent on with DATA: the same line-ending rule as for DATA applies (a bare LF is smuggling material).
+        var lineEndings = new LineEndingValidator(_options.RejectNulInData);
+        LineEndingStatus lineStatus = LineEndingStatus.Ok;
 
         try
         {
@@ -944,6 +947,10 @@ internal sealed class SmtpSession
                         foreach (var seg in buffer.Slice(0, take))
                         {
                             message.Write(seg.Span);
+                            if (lineStatus == LineEndingStatus.Ok)
+                            {
+                                lineStatus = lineEndings.Check(seg.Span);
+                            }
                         }
 
                         if (message.Capacity > reserved)
@@ -966,6 +973,17 @@ internal sealed class SmtpSession
 
                     remaining -= take;
                     _transport.Input.AdvanceTo(buffer.GetPosition(take));
+                    if (lineStatus != LineEndingStatus.Ok)
+                    {
+                        await CloseOnBareLineEndingAsync(lineStatus).ConfigureAwait(false);
+                        return;
+                    }
+                }
+
+                if (!failed && chunk.LastChunk && lineEndings.Complete() is var ending && ending != LineEndingStatus.Ok)
+                {
+                    await CloseOnBareLineEndingAsync(ending).ConfigureAwait(false);   // the body ends in a CR
+                    return;
                 }
 
                 if (failed)
@@ -1027,6 +1045,14 @@ internal sealed class SmtpSession
         {
             _server.Budget.Release(reserved);
         }
+    }
+
+    private async ValueTask CloseOnBareLineEndingAsync(LineEndingStatus status)
+    {
+        SmtpMetrics.ProtocolErrors.Add(1);
+        _log.Write(MtaLogLevel.Warning, "smtp.server", $"session {_ctx.SessionId} from {_ctx.RemoteEndPoint}: {status} in BDAT data (possible smuggling attempt)");
+        await ReplyAsync(SmtpReplies.BareLineEnding).ConfigureAwait(false);
+        _close = true;
     }
 
     /// <summary>Reads the next command during a BDAT sequence. Returns the BDAT command, or null if the sequence ended (RSET/QUIT/error).</summary>
