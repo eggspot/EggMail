@@ -45,8 +45,15 @@ workflow refuses a stable tag without a non-empty section for that exact version
   to the recipients that are still waiting (all of them, or the ones named); a recipient whose delivery attempt is running is left alone and
   reported as in flight. Works with and without per-message history, publishes a `message.cancelled` webhook event and is implemented on every storage backend (decision 86; adds the index `delivery_queue (message_id)`, schema version 7).
 
+### Fixed
+
+- `BDAT` bodies are held to the same line-ending rule as `DATA` (bare LF, bare CR and NUL are refused with `500 5.5.2` and the connection is closed) instead of being acknowledged and bounced at delivery.
+- A full disk on the SQLite backend is answered `452 4.3.1` instead of `451 4.3.0`.
+- `Delivery:Throttle:MaxMessagesPerConnection` is documented as reserved: it was read but never enforced.
+
 ### Security
 
+- Webhook deliveries never go through a proxy, so `HTTP_PROXY`/`HTTPS_PROXY` in the environment cannot bypass the SSRF guard.
 - No known vulnerabilities; no independent security audit has been done yet. Report problems as described in [SECURITY.md](SECURITY.md).
 
 [Unreleased]: https://github.com/eggspot/EggMail/commits/main

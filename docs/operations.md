@@ -105,7 +105,7 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | `Delivery:RetryDelays` | built-in ladder | Delays between retries (2 m, 5 m, 15 m, 30 m, 1 h, 2 h, 4 h); the last repeats |
 | `Delivery:Throttle:MaxConnections` | 20 | Ceiling of concurrent connections to one destination domain |
 | `Delivery:Throttle:MaxMessagesPerMinute` | 600 | Ceiling of messages per minute to one destination domain |
-| `Delivery:Throttle:MaxMessagesPerConnection` | 100 | Messages over one connection before it is closed |
+| `Delivery:Throttle:MaxMessagesPerConnection` | 100 | Reserved: read and validated, but **not enforced yet** (a connection is closed when it goes idle, and a transaction carries one message group); only `MaxConnections` and `MaxMessagesPerMinute` limit a destination today |
 | `Delivery:Throttle:InitialConnections` | 5 | Connections allowed at first; grows while the destination keeps accepting |
 | `Delivery:Throttle:InitialMessagesPerMinute` | 120 | Messages per minute allowed at first; grows the same way |
 | `Delivery:RemotePort` | 25 | Destination port for direct MX delivery; lab setups only |
@@ -348,6 +348,7 @@ PostgreSQL command latency and pool state come from the Npgsql driver's own mete
 - Queue backlog: `mta_delivery_queue_oldest_due_age_seconds` above a few minutes for more than a few scrapes, or `mta_delivery_queue_depth{state="queued"}` growing steadily. `mta_delivery_queue_sample_age_seconds` above a minute means both are stale.
 - Repeated deferrals to one domain: the metrics carry no domain label (it is unbounded); the dashboard's per-domain statistics and the message events show which one. Alert on the `deferred` share of `mta_delivery_attempts_total`.
 - Certificates: `mta_tls_certificate_expiry_seconds` below 14 days (ACME renews with a third of the lifetime left) or `mta_tls_certificates == 0`.
+- Disk full on the SQLite backend: submissions are answered `452 4.3.1 Insufficient system storage` (clients retry; other storage failures are `451 4.3.0`) and the log has "the disk is full" at error level. Free space (or move `Sqlite:DataDirectory`) and intake resumes by itself; nothing needs a restart. Watch the free space of the volume yourself: the process does not export it.
 - Durability warnings: `mta_storage_sqlite_sync_off == 1` when you did not choose `Sqlite:SyncMode=Off`, and `mta_storage_sqlite_quarantined == 1` (a file was found corrupt and replaced by an empty one; the evidence is in `<data>/quarantine/`).
 - Backups: `mta_backup_runs_total{outcome="failed"}` increasing, or `time() - mta_backup_last_success_timestamp_seconds` above two backup intervals. The gauge exists from start when a backup is already on disk, and is absent on a fresh install until the first one: with backups enabled on SQLite also alert on `absent(mta_backup_last_success_timestamp_seconds)` for longer than the interval (a PostgreSQL deployment has no such series, since backups are the database's own).
 - SQLite write pressure (advisory; switching backends is manual): `mta_storage_sqlite_writer_queue_depth{file="queue.db"}` high for minutes, or the p99 of `mta_storage_sqlite_commit_duration_seconds` above about 100 ms.

@@ -8,7 +8,7 @@ Hand-written and package-free (decision 4). `Mta.Smtp.Protocol` is pure (no I/O)
 - STARTTLS: any byte buffered behind the `STARTTLS` command aborts the upgrade (RFC 3207 §4.2 / CVE-2011-0411 family). After the handshake the session starts over and the client must EHLO again.
 - AUTH is offered only on encrypted sessions (or an explicitly allowed plain listener). Failed attempts cost a delay and count toward the per-session error limit.
 - Limits: line length, recipients, message size (`552`), errors per session (`421`), messages per session, per-read and total DATA time, global and per-IP connection caps (keyed globally across ports), a global in-flight bytes budget for messages being received (`452`).
-- BDAT chunk payloads are binary and inert: commands inside a chunk are never interpreted.
+- BDAT chunk payloads are inert: commands inside a chunk are never interpreted. They are not binary: the server does not advertise BINARYMIME, so a BDAT body gets the same line-ending rule as DATA (`LineEndingValidator`, state kept across chunks, so a CR at the end of one chunk and its LF at the start of the next are one line ending): a bare LF, a bare CR (also a CR at the very end) or a NUL is answered `500 5.5.2` and the connection is closed, nothing is queued. Before, only DATA was checked; the outbound client refuses such a message, so a BDAT message with a bare LF was acknowledged with `250` and bounced later.
 
 ## Performance design
 

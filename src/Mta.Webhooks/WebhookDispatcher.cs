@@ -326,6 +326,9 @@ public sealed class WebhookDispatcher : IAsyncDisposable
         {
             AllowAutoRedirect = false,
             UseCookies = false,
+            // The connect callback below validates the address it connects to. Through a proxy that address would be the proxy's, and the
+            // proxy would reach whatever the URL says: the SSRF guard would check the wrong hop. Never use one, whatever HTTP(S)_PROXY says.
+            UseProxy = false,
             PooledConnectionLifetime = TimeSpan.FromMinutes(2),
             ConnectTimeout = _options.Timeout,
             ConnectCallback = ConnectGuardedAsync,
