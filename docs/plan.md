@@ -59,7 +59,7 @@ This is the last per-component table recorded. Later steps are listed as deltas 
 | Packaging | 4 |
 | Test infrastructure | 9 |
 | Performance | 5 |
-| ACME, cert store, hot reload, DNS-01 (Certes) | 4 |
+| ACME, cert store, hot reload, HTTP-01 and DNS-01 (Certes; HTTP-01 and EAB added by decision 87) | 4 |
 | Postgres provider (EF model, queue claim, batching, partition-retention job) | 9 |
 | Blob providers, FS + S3 (later dropped, see decision 11) | 12 |
 | **Total** | **236** |

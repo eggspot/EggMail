@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Mta.Core;
+using Mta.Host.Tls;
 using Mta.Observability;
 using Mta.Storage;
 
@@ -29,6 +30,8 @@ public static class WarningTexts
         "self_signed_certificate" => "The server is using a SELF-SIGNED certificate: mail servers and browsers will not trust it. Set EGGMAIL_HOSTNAME and EGGMAIL_ACME_EMAIL for a free trusted certificate (ACME), or upload one under Certificates.",
         "certificate_expiring" => "A TLS certificate expires within 14 days.",
         "certificate_expired" => "A TLS certificate has expired.",
+        "acme_pending" => "A certificate is being requested from the certificate authority (ACME). Until it is issued the server uses a self-signed certificate.",
+        "acme_failing" => "Requesting or renewing a certificate through ACME is failing; see the server log.",
         _ => "Warning: " + code,
     };
 }
@@ -45,8 +48,12 @@ public sealed class StorageHealthContributor(IStorage storage) : IHealthContribu
     }
 }
 
-/// <summary>Certificate warnings: only a self-signed certificate in use, and certificates close to or past expiry.</summary>
-public sealed class CertificateHealthContributor(IStorage storage, IClock clock) : IHealthContributor
+/// <summary>
+/// Certificate warnings: only a self-signed certificate in use, certificates close to or past expiry, and the state of ACME: <c>acme_pending</c> while
+/// the first certificate is awaited and <c>acme_failing</c> while an order or a renewal fails (with the last error and the next attempt, from the
+/// renewal state in the config store, so every replica says the same). The self-signed certificate keeps serving meanwhile.
+/// </summary>
+public sealed class CertificateHealthContributor(IStorage storage, IClock clock, Mta.Host.Configuration.MtaConfig? config = null) : IHealthContributor
 {
     public static readonly TimeSpan ExpiryWarning = TimeSpan.FromDays(14);
 
@@ -71,7 +78,50 @@ public sealed class CertificateHealthContributor(IStorage storage, IClock clock)
             warnings.Add(new HealthWarning("certificate_expiring", WarningTexts.For("certificate_expiring")));
         }
 
+        if (config is null || config.Acme.Enabled)
+        {
+            var acmeWarning = await AcmeWarningAsync(certificates, now, cancellationToken).ConfigureAwait(false);
+            if (acmeWarning is not null)
+            {
+                warnings.Add(acmeWarning);
+            }
+        }
+
         return new HealthReport(true, warnings, new Dictionary<string, string>());
+    }
+
+    private async ValueTask<HealthWarning?> AcmeWarningAsync(IReadOnlyList<CertificateRecord> active, DateTimeOffset now, CancellationToken ct)
+    {
+        var renewals = await storage.Config.GetAcmeRenewalsAsync(ct).ConfigureAwait(false);
+        // Only what the renewal service retries by itself is a state worth a banner; a failed record of names nobody retries is in the admin view only.
+        var retried = config is null ? null : AcmeFailureCategory.RetriedNames(config.Acme, active);
+        var failing = renewals.Where(r => r.Status == "failed" && (retried is null || retried.Contains(r.CertificateName)))
+            .OrderBy(r => r.CertificateName == config?.Acme.CertificateName ? 0 : 1).ThenBy(r => r.CertificateName, StringComparer.Ordinal).ToList();
+        if (failing.Count > 0)
+        {
+            var row = failing[0];
+            var current = active.Where(c => c.Source == "acme" && c.Name == row.CertificateName).OrderByDescending(c => c.NotAfter).FirstOrDefault();
+            string serving = current is null
+                ? (active.All(c => c.Source == "selfsigned") ? "Until one is issued the server uses a self-signed certificate." : "The server keeps using the certificate it has.")
+                : current.NotAfter <= now
+                    ? $"The previous certificate expired on {current.NotAfter:yyyy-MM-dd}."
+                    : $"The previous certificate stays in use until {current.NotAfter:yyyy-MM-dd}.";
+            string next = row.NextAttemptAt is { } at ? $" Next attempt: {at:yyyy-MM-dd HH:mm} UTC." : "";
+            string more = failing.Count > 1 ? $" ({failing.Count - 1} more certificate{(failing.Count > 2 ? "s" : "")} failing.)" : "";
+            // The category only, never the error text: this endpoint is unauthenticated. The text is in the log and in the admin view.
+            return new HealthWarning("acme_failing",
+                $"Getting a certificate from the certificate authority failed {row.Failures} time{(row.Failures == 1 ? "" : "s")} in a row: {AcmeFailureCategory.Describe(row.LastError)}.{next} {serving}{more} Details: server log and the ACME renewals in the admin certificates page.");
+        }
+
+        if (config is not null && config.Acme.Domains.Count > 0
+            && !active.Any(c => c.Source == "acme" && c.Name == config.Acme.CertificateName && c.NotAfter > now))
+        {
+            string names = string.Join(", ", config.Acme.Domains);
+            return new HealthWarning("acme_pending",
+                $"The certificate for {names} is being requested from the certificate authority. {(active.All(c => c.Source == "selfsigned") ? "Until it is issued the server uses a self-signed certificate; this takes a few minutes after the first start." : "Until it is issued the server keeps using the certificate it has.")}");
+        }
+
+        return null;
     }
 }
 

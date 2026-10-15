@@ -56,6 +56,7 @@ services:
       - "2525:2525"
       - "8443:8443"
       - "127.0.0.1:8080:8080"
+      # - "80:80"                           # ACME HTTP-01 (EGGMAIL_ACME_EMAIL above): the certificate authority connects to port 80 of EGGMAIL_HOSTNAME; see compose.yaml
       # - "25:2526"
     volumes:
       - eggmail-data:/data                  # bootstrap file and quarantined files; the queue and history live in PostgreSQL

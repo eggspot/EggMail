@@ -58,7 +58,7 @@ export default function Domains(_props: Record<string, unknown>) {
               setClientError(undefined);
             }}
             error={clientError ?? serverError}
-            hint="For example mail.example.com. EggMail creates a DKIM key and shows the DNS records to publish."
+            hint="For example mail.example.com. EggMail creates a DKIM key and shows the DNS records to publish (SPF, DKIM, DMARC, bounce, MTA-STS, TLS-RPT) as a zone file, and checks them for you."
             autocomplete="off"
             spellcheck={false}
           />

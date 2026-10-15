@@ -190,8 +190,12 @@ export interface CancelMessageResponse {
 // ---- domains ----
 
 export type DomainStatus = 'pending' | 'verifying' | 'verified' | 'temporary_failure' | 'failed';
-export type RecordPurpose = 'dkim' | 'return_path' | 'spf' | 'dmarc';
-export type RecordStatus = 'ok' | 'missing' | 'invalid' | 'pending';
+export type RecordPurpose = 'dkim' | 'return_path' | 'spf' | 'dmarc' | 'bounce_mx' | 'tls_rpt' | 'mta_sts' | 'mta_sts_host' | 'ptr';
+/**
+ * `missing`: nothing of that kind at the name. `invalid`: a record exists but is malformed or there are several where one is allowed.
+ * `mismatch`: a well-formed record exists with another value than expected. `pending`: not looked up yet.
+ */
+export type RecordStatus = 'ok' | 'missing' | 'invalid' | 'mismatch' | 'pending';
 
 export interface DnsRecord {
   type: string;
@@ -202,6 +206,12 @@ export interface DnsRecord {
   status: RecordStatus;
   found?: string | null;
   expected?: string;
+  /** Required records decide whether the domain can send; the others are recommended. */
+  required: boolean;
+  /** False for advice the customer cannot act on in the domain's zone (the reverse DNS of the sending IP, the operator's bounce MX): it does not count in "published" totals. */
+  publishable: boolean;
+  /** One sentence saying what the record is for. */
+  note?: string | null;
 }
 
 /** One DKIM key of a domain: `active` keys sign; a key that is neither active nor retired is a pending rotation (published as advice, not signing yet). */
@@ -221,11 +231,31 @@ export interface Domain {
   lastCheckedAt?: string | null;
   nextCheckAt?: string | null;
   lastError?: string | null;
+  /** Verified (or in the grace period of a temporary failure) and not paused: mail can be sent from the domain. */
+  readyToSend: boolean;
   records: DnsRecord[];
   /** The newest key (which may be a pending rotation). */
   dkim: DkimKeyInfo;
   /** Every key, oldest first. Absent in older servers and fixtures. */
   dkimKeys?: DkimKeyInfo[];
+}
+
+/** The MTA-STS policy file EggMail serves for a domain. */
+export interface MtaStsPolicy {
+  url: string;
+  host: string;
+  content: string;
+}
+
+/** `GET /domains/{id}/records`: what to publish, as records and as zone-file text. Nothing is looked up in DNS by this call. */
+export interface DomainRecords {
+  id: string;
+  name: string;
+  readyToSend: boolean;
+  checkedAt: string | null;
+  records: DnsRecord[];
+  zoneFile: string;
+  mtaStsPolicy: MtaStsPolicy | null;
 }
 
 // ---- suppressions ----

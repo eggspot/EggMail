@@ -36,7 +36,7 @@ public abstract class AcmeIssuanceTests : IAsyncLifetime
     private static async Task<bool> WithTimeout(Task<bool> task) => await task.WaitAsync(TimeSpan.FromMinutes(2));
 
     /// <summary>Does the stored chain (leaf plus the intermediate the CA sent) lead to the CA's root?</summary>
-    private static async Task AssertTrustedByPebbleAsync(CertificateRecord row)
+    internal static async Task AssertTrustedByPebbleAsync(CertificateRecord row)
     {
         var presented = new X509Certificate2Collection();
         presented.ImportFromPem(row.ChainPem);

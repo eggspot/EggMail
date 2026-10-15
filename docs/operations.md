@@ -19,6 +19,7 @@ Things that are easy to get wrong:
 
 - **Healthcheck command.** The chiseled image has no shell and `/app` is not on `PATH`: use `["CMD", "/app/mta", "--healthcheck"]` (the `HEALTHCHECK` of the image does). `["CMD", "mta", "--healthcheck"]` fails with "executable file not found in $PATH". The release workflow checks this on every build (`deploy/smoke/image.sh` prints the image's `PATH` and tries `mta`).
 - **First administrator.** Docker and Compose: nothing to do, a password is generated and printed once (see [Quick start](#quick-start-and-the-minimal-environment)); `EGGMAIL_ADMIN_PASSWORD` in the compose file chooses it, or a file secret through `EGGMAIL_ADMIN_PASSWORD_FILE` (the file must be readable by uid 1654: Compose does not apply `uid` or `mode` to file secrets outside Swarm). Kubernetes: a Secret mounted at `/run/secrets/eggmail` (`Dashboard__BootstrapAdminPasswordFile`). Or `mta admin create` while the SQLite server is stopped. Further users are made in the dashboard or the API while the server runs (see "Users while the server runs").
+- **First sending domain.** Set `Domains__Bootstrap=example.com`: the first start registers the domain, generates its DKIM key and writes the DNS records to create into the log (one JSON line per line of the zone file, category `Mta.domains`: `docker compose logs eggmail | grep Mta.domains`); the dashboard shows them with a **Check DNS** button (see "Adding a sending domain and its DNS records").
 - **Volume ownership.** The image prepares `/data` for uid 1654; a new Kubernetes volume is owned by root, hence `fsGroup: 1654` in the StatefulSet.
 - **Inbound port 25 for bounces** needs a public MX record and a platform that offers inbound 25 (many load balancers do not). It maps to the bounce-only listener 2526 of the container and is not a submission port, see [Ports](#ports).
 - **Kubernetes NetworkPolicy** is enforced only by a CNI that implements it; the smoke test applies the policy on kind but does not test enforcement.
@@ -54,7 +55,7 @@ A small, fixed set of variables for the common cases. They are **documented alia
 | `EGGMAIL_HOSTNAME` | `Hostname`, `Acme:Domains` | The DNS name of this server, for example `mail.example.com`: the name in SMTP greetings (HELO/EHLO), `Received` headers and generated `Message-ID`s, in the first-run certificate and the name an ACME certificate is ordered for (the dashboard on 8443 serves the same certificate, so browse to this name). It must be the name in the reverse DNS (PTR) of the sending IP address. Refused when it is a URL, has a port, or is an IP address; the log warns about an underscore or a single label, which receiving servers dislike. Without it the machine name is used (in Docker a random container id) and the log says to set it; the self-signed certificate then keeps the first name instead of being replaced each time a container is recreated. Setting it replaces a self-signed certificate made for another name |
 | `EGGMAIL_ACME_EMAIL` | `Acme:Enabled`, `Acme:Email`, `Acme:Domains` | Contact for the certificate account. **With `EGGMAIL_HOSTNAME` it turns ACME on** for that name (see [TLS certificates and ACME](#tls-certificates-and-acme)); without a host name it is refused |
 | `EGGMAIL_ACME_STAGING` | `Acme:DirectoryUrl` | `true`: order from the Let's Encrypt staging CA (certificates that clients do not trust; use while testing, production rate-limits failures) |
-| `EGGMAIL_ACME_DIRECTORY` | `Acme:DirectoryUrl` | ACME directory URL of any other CA. Not together with `EGGMAIL_ACME_STAGING=true` |
+| `EGGMAIL_ACME_DIRECTORY` | `Acme:DirectoryUrl` | ACME directory URL of any other CA (a name such as `ZeroSsl` is accepted by the long-form `Acme:Directory`, which wins over this URL when set). Not together with `EGGMAIL_ACME_STAGING=true` |
 | `CLOUDFLARE_API_TOKEN` | `Acme:CloudflareApiToken`, `Acme:Challenge` | Cloudflare token with DNS edit rights; **selects the DNS-01 challenge** (works without inbound port 80, allows wildcard names). Unprefixed on purpose: it is the name Cloudflare's own tooling and the common ACME clients (lego, certbot's plugin, acme.sh) read, so a token you already have works unchanged |
 | `CLOUDFLARE_API_TOKEN_FILE` | `Acme:CloudflareApiTokenFile`, `Acme:Challenge` | The same, read from a file (a mounted secret) |
 | `EGGMAIL_ADMIN_USER` | `Dashboard:BootstrapAdminUser` | User name of the first administrator (default `admin`). Checked when the administrator is created, so a wrong value does not stop `--healthcheck` or `mta admin create` |
@@ -74,7 +75,7 @@ Not covered by an alias, because they are rarely needed on a first start: everyt
 | Goal | Variables |
 |---|---|
 | Try it | none |
-| A real server with a trusted certificate (HTTP-01 or DNS-01, see ACME) | `EGGMAIL_HOSTNAME`, `EGGMAIL_ACME_EMAIL` (+ `CLOUDFLARE_API_TOKEN` for DNS-01) |
+| A real server with a trusted certificate | `EGGMAIL_HOSTNAME`, `EGGMAIL_ACME_EMAIL` and port 80 published (HTTP-01), or add `CLOUDFLARE_API_TOKEN` instead of port 80 (DNS-01, also for wildcards) |
 | ... and your domain ready at the first start | add `EGGMAIL_DOMAINS` |
 | Your own administrator password | add `EGGMAIL_ADMIN_PASSWORD_FILE` |
 | PostgreSQL | add `EGGMAIL_DATABASE` (one variable) |
@@ -90,7 +91,7 @@ With Compose the same variables go under `environment:` (the shipped `deploy/com
 | 4465 | 465 | Submission over implicit TLS |
 | 2525 | 2525 | Alternate submission, STARTTLS, for networks that block 587 |
 | 2526 | **25**, only if you want bounces | The **bounce-only** listener: it accepts nothing but mail addressed to the signed bounce addresses (`b+token@<Delivery:BounceDomain>`), so that asynchronous bounces and complaints reach EggMail. It is not a submission or open relay port. The container runs without privileges and cannot bind port 25 itself, hence `-p 25:2526` maps the public port to it. **Outbound** mail to other servers also uses port 25, but that is a connection the container opens: nothing to publish. Without `Delivery:BounceDomain` no bounce address exists and nothing needs inbound 25 |
-| 80 | 80, only for ACME HTTP-01 | The certificate authority must reach port 80 of `EGGMAIL_HOSTNAME` when `EGGMAIL_ACME_EMAIL` is used without a Cloudflare token (see [TLS certificates and ACME](#tls-certificates-and-acme) for the listener and its mapping) |
+| 80 | 80, only for ACME HTTP-01 | The built-in challenge listener (`Acme:Http01ListenPort`, default 80). The certificate authority must reach port 80 of `EGGMAIL_HOSTNAME` when `EGGMAIL_ACME_EMAIL` is used without a Cloudflare token, so add `-p 80:80`. It answers `/.well-known/acme-challenge/<token>` and nothing else. Docker lets the non-root image bind port 80; under Kubernetes or rootless Podman set `Acme__Http01ListenPort=8081` and publish `-p 80:8081` ([TLS certificates and ACME](#tls-certificates-and-acme)) |
 | 8443 | 8443 | Dashboard and API over HTTPS. Restrict who can reach it: it is an administration surface |
 | 8080 | do not publish, or `127.0.0.1:8080:8080` | Plain HTTP: `/healthz`, `/readyz`, `/metrics` for probes and first set-up on the host itself |
 
@@ -119,7 +120,7 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | Key | Default | Meaning |
 |---|---|---|
 | `Hostname` | machine name | Name in SMTP greetings, `Received` headers and EHLO; should match the PTR record of the sending IP |
-| `Startup:RequireUnicodeSupport` | true | Refuse to run `serve`, `migrate-db`, `migrate-storage`, `admin` and `secrets` when the Unicode self-test fails (see "Unicode support" below); `false` only logs a warning |
+| `Startup:RequireUnicodeSupport` | true | Refuse to run `serve`, `migrate-db`, `migrate-storage`, `admin`, `domains` and `secrets` when the Unicode self-test fails (see "Unicode support" below); `false` only logs a warning |
 | `Storage:Backend` | `Sqlite` | `Sqlite` or `Postgres` (same image) |
 | `Sqlite:DataDirectory` | `/data` | Where the database files live (mount a volume here) |
 | `Sqlite:SyncMode` | `Off` | `Off`, `Normal`, `Full` for queue and stats files. **`Off` is safe against a process kill but not against power loss or an OS crash**: files can corrupt and acknowledged mail can be lost. Use `Normal` or `Full`, or PostgreSQL, if you need that |
@@ -220,15 +221,22 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | `Tls:PollInterval` | `00:00:30` | How often replicas look for a changed certificate (database and override files) |
 | `Tls:ReportingEnabled` | true | Collect outbound TLS results and send daily TLS-RPT reports (RFC 8460) to domains that ask |
 | `Tls:ReportContact` | `postmaster@<Hostname>` | Contact in the reports |
-| `Acme:Enabled` | false | ACME with Cloudflare DNS-01 (verified against the Pebble test CA in CI, not yet against a production CA; see [TLS certificates and ACME](#tls-certificates-and-acme)). Needs `Acme:CloudflareApiToken` or `Acme:CloudflareApiTokenFile` |
-| `Acme:DirectoryUrl` | Let's Encrypt production | Use the staging directory while testing |
-| `Acme:Email` | none | Contact for the ACME account |
-| `Acme:Domains` | none | *List.* Names for the certificate renewed from configuration (wildcards need DNS-01, the only method). Certificates requested through the API are renewed as well |
+| `Acme:Enabled` | false | Get and renew a certificate from an ACME CA (Let's Encrypt by default) automatically; with `Hostname` and `Acme:Email` set that is all it takes (HTTP-01 on port 80). Verified against the Pebble test CA in CI, not yet against a production CA; see [TLS certificates and ACME](#tls-certificates-and-acme) |
+| `Acme:Email` | none | Contact for the ACME account (some CAs, such as ZeroSSL, require it) |
+| `Acme:Domains` | the `Hostname` | *List.* Names for the certificate renewed from configuration. Wildcard names (`*.example.com`) need DNS-01. Internationalized names are sent in their ASCII (`xn--`) form. Certificates requested through the API are renewed as well |
+| `Acme:Challenge` | `Auto` | `Auto`: DNS-01 when a Cloudflare token is configured, otherwise HTTP-01. `Http01`: HTTP-01 on the built-in listener (no DNS access needed). `Dns01`: DNS-01 through the DNS provider (needs the token; wildcards; no inbound port) |
+| `Acme:Http01ListenPort` | 80 | HTTP-01: the port of the built-in challenge listener. The CA always connects to port 80 of the name, so leave it at 80 or map port 80 to this one (container, load balancer). It answers `GET /.well-known/acme-challenge/<token>` and nothing else |
+| `Acme:Http01BindAddress` | `::` | HTTP-01: the address of that listener (`::` is every IPv4 and IPv6 address) |
+| `Acme:Directory` | Let's Encrypt production | The CA by name (`LetsEncrypt`, `LetsEncryptStaging`, `ZeroSsl`) or the ACME directory URL of any CA. Wins over `Acme:DirectoryUrl` when set. Use `LetsEncryptStaging` while testing |
+| `Acme:DirectoryUrl` | Let's Encrypt production | The same as a URL only (kept for compatibility; prefer `Acme:Directory`) |
+| `Acme:EabKeyId` | none | External account binding (needed by ZeroSSL and some other CAs, not by Let's Encrypt): the key identifier the CA gave you. Used when the account is registered |
+| `Acme:EabHmacKey` | none | The base64url HMAC key of the binding (prefer the file form) |
+| `Acme:EabHmacKeyFile` | none | File holding that key |
 | `Acme:CertificateName` | `default` | Name of that certificate in the database |
-| `Acme:DnsProvider` | `Cloudflare` | The only provider so far |
-| `Acme:CloudflareApiToken` | none | API token with DNS edit rights (prefer the file form) |
+| `Acme:DnsProvider` | `Cloudflare` | The only provider so far (used by DNS-01) |
+| `Acme:CloudflareApiToken` | none | DNS-01: API token with DNS edit rights (prefer the file form). Its presence selects DNS-01 under `Acme:Challenge=Auto` |
 | `Acme:CloudflareApiTokenFile` | none | File holding that token |
-| `Acme:PropagationDelay` | `00:00:30` | Wait after publishing the challenge record |
+| `Acme:PropagationDelay` | `00:00:30` | DNS-01: wait after publishing the challenge record (HTTP-01 has no propagation) |
 | `Acme:RenewAtRemainingFraction` | 0.3333 | Renew when this fraction of the lifetime remains (between 0 and 1); used when the CA gives no renewal information |
 | `Acme:UseRenewalInfo` | true | Ask the CA when to renew (ACME Renewal Information, RFC 9773) and follow its suggested window; falls back to the lifetime rule when the CA has none or fails |
 | `Acme:CheckInterval` | `01:00:00` | How often the renewal service looks |
@@ -265,7 +273,7 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | `Api:MaxWebhooksPerTenant` | 50 | |
 | `Api:MaxStatsRows` | 50000 | Rows one statistics query may return |
 | `Api:MetricsAllowedNetworks` | loopback and private ranges | *List.* Networks (CIDR) allowed to read `/metrics`; it carries no credentials, so keep it off the public internet |
-| `Api:SpfInclude` | none | `include:` host suggested to customers in their SPF record |
+| `Api:SpfInclude` | none | `include:` host suggested to customers in their SPF record (see [Sending domains](#sending-domains-and-their-dns-records)) |
 | `Observability:MetricsEndpointEnabled` | true | Serve `/metrics`. Off also removes the Prometheus exporter itself (no meter listener of ours); OTLP is unaffected |
 | `Observability:OtlpEndpoint` | none | OTLP endpoint, an `http://` or `https://` URL (for example `http://collector:4317`); `collector:4317` is refused at start. When set, metrics, traces and logs are exported there. Empty: no exporter, and no span is ever created |
 | `Observability:OtlpProtocol` | `Grpc` | `Grpc` (port 4317) or `HttpProtobuf` (port 4318; EggMail appends `/v1/metrics`, `/v1/traces`, `/v1/logs`) |
@@ -285,6 +293,18 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | `Webhooks:UserAgent` | `EggMail-Webhooks/1.0` | |
 | `Webhooks:OutboxRetentionDays` | 7 | Finished deliveries; `0` keeps forever |
 | `Webhooks:AttemptLogDays` | 7 | Attempt log; `0` keeps forever |
+
+### Sending domains and their DNS records
+
+| Key | Default | Meaning |
+|---|---|---|
+| `Domains:Bootstrap` | none | *List* of domain names to register at start for the first tenant (in an environment variable `Domains__Bootstrap`; commas, semicolons or spaces separate several). Idempotent and safe with several replicas; a new domain gets its DKIM key and the DNS records to create are written to the log ([below](#adding-a-sending-domain-and-its-dns-records)). An entry that is not a domain name stops the start |
+| `Domains:DmarcPolicy` | `none` | Policy of the suggested DMARC record: `none` (monitor only), `quarantine` or `reject` |
+| `Domains:DmarcReportAddress` | `dmarc@{domain}` | E-mail address in the `rua` of the suggested DMARC record; `{domain}` stands for the sending domain. The address has to receive mail, and reports for a domain whose `rua` is on another domain are only sent if that domain publishes an authorization record (below). One address; `;`, `,`, white space and control characters stop the start, because the value is written into a DNS record |
+| `Domains:TlsReportAddress` | `tls-rpt@{domain}` | Destination in the `rua` of the suggested TLS-RPT record: one e-mail address or one `https://` URL (same rules as above) |
+| `Domains:MtaStsMode` | `Off` | `None`, `Testing` or `Enforce`: EggMail serves the MTA-STS policy file (`mode: none`, `testing` or `enforce`) of every registered domain and suggests the MTA-STS and TLS-RPT records. Global, not per domain. Needs a fully qualified `Hostname`. Read the warning [below](#mta-sts) first |
+| `Domains:MtaStsMaxAge` | `7.00:00:00` | `max_age` of the served policy (1 minute to 31557600 seconds) |
+| `Domains:MtaStsMx` | `Hostname` | *List.* The `mx:` lines of the served policy: fully qualified host names in lower case with no trailing dot; `*.example.net` is allowed, `*.*.example.net` is not. Anything else stops the start |
 
 ### Backups and backend switch
 
@@ -350,25 +370,123 @@ Once one administrator exists, the others are made in the dashboard (**Users**, 
 - **Own password:** the **Account** page (`POST /api/v1/me/password`) asks for the current password, signs the user's other sessions out and keeps the current one. Ten wrong attempts from one address or for one user name within 15 minutes lock that address or name out of sign-in, SMTP AUTH and this form alike (`429`, `Retry-After`).
 - **Trail:** there is no audit table. Every user change writes one log line at information level, for example `Dashboard user updated: actor root, user 0192..., enabled=False role=tenant ...`, with no password or hash; keep the server log if you need to answer "who disabled this account".
 
-## DNS records for a sending domain
+## Adding a sending domain and its DNS records
 
-For each domain the dashboard/API shows the exact records: a DKIM TXT at `<selector>._domainkey.<domain>` (required), a CNAME `bounce.<domain>` to your bounce domain (required when `Delivery:BounceDomain` is set), plus advice for SPF (`v=spf1 ... ~all`) and DMARC. Sending is allowed once DKIM (and the return-path record) verify.
+A domain can send once EggMail has found its **required** records in DNS. There are three ways to add one, and each ends at the same list of exact records to create:
 
-Your sending IP also needs a PTR record that matches `Hostname`, and outbound port 25 must not be blocked by your provider. Deliverability work (IP reputation, warm-up, abuse handling) is operational and not done by the software.
+1. **At start**, for a new installation: `Domains__Bootstrap=example.com` (or `--Domains:Bootstrap=example.com`; several names separated by commas). EggMail creates a tenant named `Default` when there is none, registers each domain that is missing in the oldest tenant, generates its DKIM key and **writes the DNS records to the log, once, when the domain is registered** (one log line per line of the zone file). Starting again changes nothing and prints nothing new; several replicas starting together register each domain once (a lease in the database, `domains-bootstrap`). A name another tenant has registered is left alone with a warning.
+2. **In the dashboard**: Domains, enter the name, Add domain. The page of the domain shows everything below.
+3. **With the API**: `POST /api/v1/domains` `{ "name": "example.com" }`; `GET /api/v1/domains/{id}/records` returns the records and the same text as a zone file ([api.md](api.md#domains-domains-scope)).
+
+**Printing the records again:** `mta domains records example.com` writes the zone-file text to the standard output, and `mta domains check example.com` looks every record up in DNS and prints its status with what was found next to what is expected (it saves nothing). Both read the database, so with SQLite the server must be stopped (one process owns the data directory); while it runs, use the dashboard or `GET /api/v1/domains/{id}/records?format=zone`, which returns plain text, for example `curl -H "Authorization: Bearer $KEY" "$URL/api/v1/domains/$ID/records?format=zone"`.
+
+### The records
+
+For `example.com`, with `Hostname=mta.example.net`, `Delivery:BounceDomain=bounces.example.net`, `Delivery:PublicSendingIp=203.0.113.25` and `Domains:MtaStsMode=Testing`, the page, the API, the log and `mta domains records` give this (the DKIM key is shortened here; the real value is a 392 character key, written as two quoted strings because one string holds at most 255 characters):
+
+```
+; DNS records for example.com
+; Required records decide whether the domain can send; recommended ones improve delivery and give you reports.
+; SPF and DMARC are shown as comments: add them only if the domain has none, otherwise merge them into the record that exists (two SPF records break SPF).
+
+; DKIM (required): Lets receivers verify that mail from this domain is signed by EggMail.
+egg202610._domainkey.example.com. 3600 IN TXT "v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA..." "...IDAQAB"
+
+; Return-path (required): Makes bounce messages for this domain reach EggMail.
+bounce.example.com. 3600 IN CNAME bounces.example.net.
+
+; SPF (recommended): Authorizes this server to send for the domain. Keep a single SPF record per domain: merge this into an existing one.
+; example.com. 3600 IN TXT "v=spf1 ip4:203.0.113.25 ~all"
+
+; DMARC (recommended): Tells receivers what to do with mail that fails authentication and where to send reports. The default only monitors (p=none).
+; _dmarc.example.com. 3600 IN TXT "v=DMARC1; p=none; rua=mailto:dmarc@example.com"
+
+; TLS-RPT (recommended): Asks receivers to send daily TLS reports (RFC 8460) to the address in rua. Publish it only if this server receives the domain's mail.
+_smtp._tls.example.com. 3600 IN TXT "v=TLSRPTv1; rua=mailto:tls-rpt@example.com"
+
+; MTA-STS (recommended): Announces the MTA-STS policy that EggMail serves at https://mta-sts.example.com/.well-known/mta-sts.txt. The id changes when the policy changes. Publish it only if this server receives the domain's mail.
+_mta-sts.example.com. 3600 IN TXT "v=STSv1; id=3f6c1d0a9b2e4f57"
+
+; MTA-STS host (recommended): Must lead to this server (mta.example.net) so it can serve the policy over HTTPS; its certificate has to cover mta-sts.example.com.
+mta-sts.example.com. 3600 IN CNAME mta.example.net.
+
+; Bounce MX (recommended): Published once by the operator for all domains: delivers bounces for the bounce domain to this server (port 25 reaches the bounce listener).
+; MX bounces.example.net -> 10 mta.example.net (published once by whoever runs EggMail, not in this zone)
+
+; Reverse DNS (recommended): Advice: the reverse DNS of the sending IP should be this server's host name. It is set at whoever owns the IP address (your hosting provider), not in your zone.
+; PTR 25.113.0.203.in-addr.arpa -> mta.example.net
+```
+
+| Record | What it does | Where it comes from |
+|---|---|---|
+| **DKIM** TXT `<selector>._domainkey.<domain>` (required) | receivers verify the signature EggMail adds | the domain's RSA-2048 key, generated when the domain is added; the selector is `egg<YYYYMM>` |
+| **Return-path** CNAME `bounce.<domain>` (required when `Delivery:BounceDomain` is set) | bounces for the domain reach EggMail | `Delivery:BounceDomain` |
+| **SPF** TXT on the domain | authorizes this server | `include:` of `Api:SpfInclude`, `ip4:`/`ip6:` of `Delivery:PublicSendingIp`, or else `a:` of `Hostname`; then `~all`. Nothing of these configured: no SPF record |
+| **DMARC** TXT `_dmarc.<domain>` | policy and report address | `Domains:DmarcPolicy` (default `p=none`, monitoring only), `Domains:DmarcReportAddress` |
+| **TLS-RPT** TXT `_smtp._tls.<domain>` | where receivers send TLS reports about mail to this domain (only with `Domains:MtaStsMode`) | `Domains:TlsReportAddress` |
+| **MTA-STS** TXT `_mta-sts.<domain>` and CNAME `mta-sts.<domain>` | announce and locate the policy file (only with `Domains:MtaStsMode`) | the id is a hash of the policy file, so it changes exactly when the policy does; the CNAME points at `Hostname` |
+| **Bounce MX** MX on the bounce domain | the receiving side of the return-path CNAME: bounces are delivered to this server | `Hostname`; one record for all domains, published once by whoever runs EggMail, not by each customer |
+| **Reverse DNS** PTR | receivers compare the sending IP's reverse name with the EHLO name | advice only: it is set at whoever owns the IP address, so it is a comment in the zone file, not a line |
+
+A record that cannot be created in the customer's zone is a comment in the zone file instead of a line: the reverse DNS, and the bounce MX when the bounce domain is not inside the domain (with `Delivery:BounceDomain=bounces.example.com` the MX for `example.com` is a real line). **SPF and DMARC are comments in the zone file.** Most domains have both already, and a second record of either kind breaks it (two SPF records are a permanent error, two DMARC records are ignored), so importing the file must never add one: copy the value into the record that exists, or uncomment the line when the domain has none. When there is nothing to authorize (no `Api:SpfInclude`, no `Delivery:PublicSendingIp`, no fully qualified `Hostname`) no SPF record is suggested at all, because `v=spf1 ~all` authorizes nothing, and the file says so. **TLS-RPT and the two MTA-STS records appear only with `Domains:MtaStsMode`** (they concern mail the domain *receives*); their notes and the zone-file comments repeat that they are to be published only if this server receives the domain's mail.
+
+Only the two required records decide whether the domain can send; everything else is recommended and never blocks sending. When `Hostname` is not a fully qualified name (the machine-name default), the bounce MX, the MTA-STS records and the reverse-DNS advice are left out because they would name a host nobody can reach.
+
+**The bounce path.** Port 25 of the host (`Hostname`) has to reach the bounce listener (the listener named `bounce`, container port 2526 by default, `Smtp:Listeners:<name>:Port`), and the bounce domain's MX record has to name that host. Without the MX record no bounce, complaint report or delayed-delivery notice ever arrives. Which of the two names carries the envelope sender of outgoing mail (the shared bounce domain, or the verified `bounce.<domain>` of the sending domain) is a delivery matter, described in [components/delivery.md](components/delivery.md); the MX of the bounce domain is needed either way, because the per-domain CNAME leads to it.
+
+**Reverse DNS.** Your sending IP needs a PTR record that matches `Hostname`, and outbound port 25 must not be blocked by your provider. `Delivery:PublicSendingIp` makes the check look at exactly that IP; without it EggMail looks up the addresses of `Hostname` and reverses each one. Deliverability work (IP reputation, warm-up, abuse handling) is operational and not done by the software.
+
+### Check DNS and what the statuses mean
+
+The **Check DNS** button of the domain page (`POST /api/v1/domains/{id}/verify`) looks every record up at once, stores the result, and shows for each record its status and, when it is not OK, what was found next to what is expected. At most one check per 30 seconds per domain; EggMail also re-checks on its own (every 90 seconds at first, then less often, daily once verified). The top of the page says **Ready to send** or **Not ready to send** and counts the published records ("Required records: 2 of 2 published. Recommended records: 3 of 4 published."). The count leaves out what the customer cannot publish in the domain's zone: the reverse DNS, and the operator's bounce MX when the bounce domain is outside the domain; those rows are still checked and shown.
+
+| Status | Meaning |
+|---|---|
+| OK | found as expected. SPF is judged by what the record authorizes (RFC 7208 evaluation of the sending address: CIDR ranges, `include:`, `a:` and `mx` count), DMARC also by the record of the organizational domain for a subdomain, and a CNAME may lead through other names |
+| Missing | nothing of that kind at the name |
+| Invalid | a record exists but is malformed, or there are several where one is allowed (two SPF records make SPF fail; two DMARC records are ignored) |
+| Mismatch | a well-formed record with another value: another DKIM key, another CNAME target, an SPF record without our mechanism, an older MTA-STS id, an MX or PTR naming another host |
+| Pending | not looked up yet, or the DNS server did not answer (a DNS outage never changes a domain's state) |
+
+DMARC and TLS-RPT accept any valid record: the policy and report address are the customer's to choose, so a stricter DMARC policy is OK. An SPF record that holds other senders is OK as long as it contains the mechanism EggMail asked for. DNS changes can take a while to spread; a record that was just published may show as missing for the length of its previous TTL. A check looks records up four at a time and gives each record 20 seconds; a record that does not answer in time is Pending. What DNS returned is kept per record up to 2,048 characters.
+
+**Reports sent to another domain (RFC 7489 section 7.1).** If the `rua` address of the DMARC record is on a different domain than the sending domain (for example `Domains:DmarcReportAddress=reports@ops.example.net` for `example.com`), receivers send the reports only if `ops.example.net` publishes an authorization record: a TXT record `example.com._report._dmarc.ops.example.net` with the value `v=DMARC1`. EggMail does not create or check that record, because it belongs to the zone of the report address; without it the reports are silently dropped. TLS-RPT has no such rule.
+
+### MTA-STS
+
+MTA-STS (RFC 8461) protects mail **sent to** a domain: it tells other servers to deliver to your MX hosts only over verified TLS. EggMail is an outbound server, so this only makes sense for a domain whose MX records point at this server (for example a domain used only for sending and bounces). **Do not turn it on for a domain whose mail is received somewhere else** (Google Workspace, Microsoft 365, another MTA): in `Enforce` mode senders would refuse to deliver to your real MX hosts, and even in `Testing` the policy is wrong for that domain. Use `Domains:MtaStsMx` for the hosts that do receive the domain's mail, and `Testing` first. The switch is global: all registered domains get the policy.
+
+With `Domains:MtaStsMode=Testing` or `Enforce`:
+
+- EggMail answers `GET https://mta-sts.<domain>/.well-known/mta-sts.txt` itself, on the dashboard listeners, for every registered domain, with `version: STSv1`, the mode, one `mx:` line per `Domains:MtaStsMx` entry (default: `Hostname`) and `max_age:`. Any other path on a `mta-sts.<domain>` host, and the policy path of a domain that is not registered, is 404; the dashboard is not offered under that name.
+- **`mta-sts.<domain>` must point at this server** (the CNAME shown on the domain page, to `Hostname`), and the HTTPS port 443 of that name must reach the HTTPS listener (container port 8443, `Dashboard:HttpsPort`).
+- **The certificate must cover `mta-sts.<domain>`**: senders refuse a policy served with a certificate for another name. The listener presents the stored certificate that matches the requested name (or the default one); list `mta-sts.<domain>` in `Acme:Domains` (HTTP-01 proves it on port 80 like any other name, once the name points at this server; a `*.<domain>` wildcard needs DNS-01), or upload a certificate that has it ([TLS certificates and ACME](#tls-certificates-and-acme)). Until it does, the page shows the records as OK and senders still ignore the policy.
+- **Turning it off properly.** Senders keep a policy until its `max_age` runs out (7 days by default; it can be up to a year), and an `enforce` policy keeps blocking delivery for that long if the file simply disappears. To retire MTA-STS, first set `Domains:MtaStsMode=None`: the served file says `mode: none`, the `_mta-sts` id changes (update the TXT record), senders fetch it and forget the old policy; keep it for at least the old `max_age`, and only then set `Off` and remove the records.
+- Probes and the CA's HTTP-01 challenge (`/healthz`, `/readyz`, `/.well-known/acme-challenge/`) are answered on every host name, also on `mta-sts.<domain>`; nothing else of the dashboard is.
+- The `id` in the `_mta-sts` TXT record is a hash of the policy file. When you change the mode, the max age or the `mx:` lines the id changes, and the domain page shows the record as **Mismatch** until the TXT record is updated to the new value.
 
 ## TLS certificates and ACME
 
 Certificates live in the database and are served by SMTP (STARTTLS and implicit TLS) and by the dashboard/API HTTPS listener. A new instance starts with a self-signed certificate for `Hostname` (every start says so in the log and the dashboard flags it with a persistent banner; a certificate made for another host name, before `EGGMAIL_HOSTNAME` was set, is replaced by one for the new name, and one that expires within 30 days is replaced at the next start; any other certificate wins over it); import a certificate in the dashboard, mount one with `Tls:CertificatePath`/`KeyPath` (it takes precedence), or let EggMail order one.
 
-**Built-in ACME** (`Acme:Enabled=true`) orders one certificate for `Acme:Domains` (the SMTP and dashboard host names) from the CA at `Acme:DirectoryUrl`, using the **DNS-01** challenge only. DNS-01 needs no inbound port 80 or 443; the only supported DNS provider is Cloudflare, with a token that has Zone:Read and DNS:Edit for the zone (`Acme:CloudflareApiToken` or `Acme:CloudflareApiTokenFile`). Wildcard names work. The ACME account is created on the first order and kept (encrypted) in the database for that directory; it is part of a backend switch bundle. Email addresses given to the CA (`Acme:Email`) get no expiry notices from Let's Encrypt any more, so monitor expiry yourself.
+**Built-in ACME** (`Acme:Enabled=true`) orders one certificate for `Acme:Domains` (the SMTP and dashboard host names; by default the `Hostname`) from the CA of `Acme:Directory`, Let's Encrypt production unless you say otherwise. The ACME account is created on the first order and kept (encrypted) in the database for that directory; it is part of a backend switch bundle. Email addresses given to the CA (`Acme:Email`) get no expiry notices from Let's Encrypt any more, so monitor expiry yourself.
+
+**The two-setting start.** Set `Hostname=mail.example.com` and `Acme:Enabled=true` and `Acme:Email=you@example.com` (in a container: `Hostname`, `Acme__Enabled`, `Acme__Email`, or the short environment names of the deployment files) and publish port 80. The server starts with its self-signed certificate, asks Let's Encrypt for a real one over HTTP-01 within a minute, and renews it by itself. No DNS access is needed; the name only has to resolve to this server and the CA must be able to reach its port 80 from the internet.
+
+* **HTTP-01** (the default without a DNS token). The CA fetches `http://<name>/.well-known/acme-challenge/<token>` and EggMail's **own tiny listener** answers it: it is a separate socket server (not the dashboard, not Kestrel) that serves exactly that path for a token an order is waiting for and refuses everything else (404, 405 or 400, no body, connection closed; at most 8 KiB of request head within 2 seconds, 5 seconds in all, 128 connections and 8 per client address), so port 80 never exposes the dashboard or API. It is bound only while ACME with HTTP-01 is enabled, on **every** replica (see below). `Acme:Http01ListenPort` is 80; the image runs as a non-root user, which Docker allows to bind port 80 (its default `net.ipv4.ip_unprivileged_port_start=0`); under Kubernetes or rootless Podman set `Acme__Http01ListenPort=8081` and publish or route port 80 to 8081 (`docker run -p 80:8081`, a Service with `targetPort: 8081`). Allow the CA's inbound connections to that port in your firewall and in the network policy.
+* **DNS-01** (with `Acme:CloudflareApiToken` or `Acme:CloudflareApiTokenFile`, or `Acme:Challenge=Dns01`). Needs no inbound port; the only supported DNS provider is Cloudflare, with a token that has Zone:Read and DNS:Edit for the zone. Wildcard names work only with DNS-01 (RFC 8555): a wildcard in `Acme:Domains` without a DNS token is a configuration error at start, and a wildcard requested later through the API is a recorded failure that says so.
+* **No port 80?** If the listener cannot bind its port (in use by another web server, not allowed), the server says so in the log (`ACME HTTP-01: ... already in use ...`, once, and again when the problem changes), no order is started (the CA is not asked, so no failed validation counts against the name), the failure is recorded, the listener tries again every minute and the order follows within five minutes of the port becoming free. Free the port, change `Acme:Http01ListenPort` and forward port 80 to it, or switch to DNS-01.
+* **While there is no certificate** the self-signed certificate keeps serving SMTP and the dashboard, and the dashboard shows a banner: `acme_pending` while the first order is awaited, `acme_failing` (with the failure count, a category such as "the port for the HTTP-01 challenge could not be bound", "the CA could not validate the challenge" or "the CA could not be reached", and the time of the next attempt) while orders fail, in the capabilities warnings and `/readyz` like the other warnings. A failing **renewal** raises the same warning and says until when the current certificate is still good. Both clear as soon as a certificate is issued. Anybody who can read `/api/v1/capabilities` sees that text, so it holds a category and never the error: the full last error, with what the CA said, is in the server log and in the admin view (`GET /api/v1/admin/certificates/acme`, the dashboard's Certificates page, ACME renewals). `Acme:Directory` and `Acme:DirectoryUrl` are the same setting in two spellings (the name or URL form and the URL-only form; `Acme:Directory` wins when both are set); neither may contain credentials, a query string or a fragment.
+* **Several replicas** share one certificate: only the replica holding the lease orders, but the CA connects to whichever replica the load balancer picks. Every replica therefore runs the listener, and the ordering replica publishes each token in the config store (`challenge_state_json` of the certificate's renewal row; removed when the order ends, ignored after two hours); a replica that did not order reads it from there (one read at most every 50 ms, whatever arrives on port 80). Route port 80 of the host name to all replicas (or any of them). A load balancer that terminates port 80 itself must forward `/.well-known/acme-challenge/` to them unchanged.
+* **Other CAs and external account binding.** `Acme:Directory=ZeroSsl` (or any ACME directory URL) selects another CA. CAs that require external account binding refuse the registration without it: set `Acme:EabKeyId` and `Acme:EabHmacKey` or `Acme:EabHmacKeyFile` to what the CA's account page gives you (ZeroSSL: a key id and a base64url HMAC key); without them the failure says so. The binding is only used to register the account; it is stored once per directory like any account.
 
 Renewal is checked hourly (`Acme:CheckInterval`). When the CA supports ACME Renewal Information (ARI; Let's Encrypt does) EggMail asks it when to renew and renews at a random time inside the window it suggests (when that time falls before the next hourly check), and never later than when a sixth of the lifetime is left. A window that has passed, for example after a revocation or an incident, means renew at the next check, but a certificate younger than a day (or a twentieth of its lifetime if longer; 4.5 days for 90 days) is never renewed on advice alone, so a CA that keeps saying "now" cannot make EggMail order at every check. The CA is asked about once per its `Retry-After` (between a minute and a day, 6 hours without one). After a server error or a network failure it is asked again after 5 minutes, doubling up to 6 hours; after any other error after 6 hours. A CA without ARI (asked again daily), an ARI request that fails, or `Acme:UseRenewalInfo=false` falls back to renewing when a third of the lifetime is left. The renewal order names the certificate it replaces. The last advice (window, chosen time, errors, failure count) is stored in the certificate's renewal row (`ari_json`) and logged; it is not shown in the API yet. A failed order, a DNS provider error, validation failure or an unreachable CA is recorded and retried after 10 minutes, then 20, 40, … up to 6 hours; the certificate in use keeps being served. Status, failure count, last error and next attempt are in the admin API (`GET /api/v1/admin/certificates/acme`). With several replicas only one orders at a time (a lease row); the others pick the new certificate up from the database within `Tls:PollInterval` without a restart.
 
-**Use the staging CA first.** Production Let's Encrypt rate-limits failed validations and new accounts. Set `Acme:DirectoryUrl=https://acme-staging-v02.api.letsencrypt.org/directory`, check that a certificate is issued (it is not trusted by clients), then switch to `https://acme-v02.api.letsencrypt.org/directory`. Accounts are per directory, so switching the directory registers a second account; the existing certificate is not re-ordered until it is due or you request one (`POST /api/v1/admin/certificates/acme`).
+**Use the staging CA first.** Production Let's Encrypt rate-limits failed validations and new accounts. Set `Acme:Directory=LetsEncryptStaging`, check that a certificate is issued (it is not trusted by clients), then remove the setting (production is the default). Accounts are per directory, so switching the directory registers a second account; the existing certificate is not re-ordered until it is due or you request one (`POST /api/v1/admin/certificates/acme`).
 
-What has been verified: the whole flow (order, DNS-01 validation, finalize, encrypted storage, renewal, back-off, hot swap into SMTP and HTTPS) runs in CI against the Pebble test CA ([components/acme.md](components/acme.md)). What has not: a real CA, the real Cloudflare API (the provider is unit-tested only against a fake), and real DNS propagation (`Acme:PropagationDelay` of 30 s is a guess; Let's Encrypt validates from several vantage points, so raise it if validation fails right after the records were created).
+What has been verified: the whole flow (order, HTTP-01 and DNS-01 validation, external account binding, finalize, encrypted storage, renewal, back-off, hot swap into SMTP and HTTPS) runs in CI against the Pebble test CA, which really connects to the built-in listener ([components/acme.md](components/acme.md)). What has not: a real CA (rate limits, CAA, the real validation from several vantage points), ZeroSSL's EAB, the real Cloudflare API (the provider is unit-tested only against a fake), real DNS propagation (`Acme:PropagationDelay` of 30 s is a guess; Let's Encrypt validates from several vantage points, so raise it if validation fails right after the records were created), and binding port 80 inside a real container as the non-root user.
 
-Checklist for the first real-CA run: a domain whose zone is in Cloudflare and a host name inside it that you will use as `Hostname`/`Acme:Domains`; the API token; outbound HTTPS to the CA and to `api.cloudflare.com`; the staging run above. Afterwards verify from outside that the certificate is served on port 587/465 (`openssl s_client -starttls smtp -connect <host>:587 -servername <host>`) and on the dashboard port, with the intermediate certificate included.
+Checklist for the first real-CA run, HTTP-01: a public host name whose A/AAAA record points to this server (the CA tries IPv6 first when there is an AAAA record, so make sure it works over both or has none), port 80 reachable from the internet and published to the container, outbound HTTPS to the CA, the staging run above. For DNS-01 instead: a domain whose zone is in Cloudflare and a host name inside it; the API token; outbound HTTPS to `api.cloudflare.com`. Afterwards verify from outside that the certificate is served on port 587/465 (`openssl s_client -starttls smtp -connect <host>:587 -servername <host>`) and on the dashboard port, with the intermediate certificate included.
 
 ## Backups and restore (SQLite)
 
@@ -546,7 +664,7 @@ What is shared between replicas, and what is not (decision 82):
 
 | What | With N replicas |
 |---|---|
-| Queue, history, suppressions, configuration, certificates and ACME renewal, domain verification | One copy in the database; claims use `SKIP LOCKED`, renewals and checks take leases |
+| Queue, history, suppressions, configuration, certificates and ACME renewal, domain verification, `Domains:Bootstrap` | One copy in the database; claims use `SKIP LOCKED`, renewals, checks and the start-up registration of domains take leases (a replica that finds the `domains-bootstrap` lease taken skips it; each domain is registered and its records are logged once) |
 | Failed-login lockout (`SMTP AUTH` and the API/dashboard sign-in) | One budget for all replicas (10 failures per address and per user name in 15 minutes), counted in the database as keyed digests. Costs one small read per login attempt, one write per failed attempt, and a delete after a success that follows failures. If the database cannot be reached or is slow each replica counts on its own until it is back |
 | Connections and messages per minute to one destination (`Delivery:Throttle:MaxConnections`, `Delivery:Throttle:MaxMessagesPerMinute`) | The ceiling holds for all replicas together: each takes its share (a ceiling of 20 connections is 7, 7 and 6 on three replicas). A replica that joins or leaves is noticed within about 5 s (a replica that dies within 20 s); until then the sum of the shares can be above a ceiling for a few seconds. Set `Delivery:Throttle:MaxConnections` at least as high as the number of replicas, otherwise every replica still gets one |
 | A destination that throttled one replica, a mail server found down | The other replicas slow down or skip an MX host within about 5 s, for at most the base cool-down (5 minutes) and not if they connected to it in the last 2 minutes; relay routes are never opened by another replica. Each replica still probes a down server itself once its cool-down is over |

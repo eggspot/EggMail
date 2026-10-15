@@ -7,6 +7,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Mta.Core;
 using Mta.Host.Configuration;
+using Mta.Host.Domains;
 using Mta.Host.Hosting;
 using Mta.Host.Switching;
 using Mta.Host.Tls;
@@ -15,14 +16,14 @@ using Mta.Storage;
 
 namespace Mta.Host;
 
-/// <summary>The <c>mta</c> command line: <c>serve</c> (default), <c>--healthcheck</c>, <c>migrate-db</c>, <c>migrate-storage</c>, <c>admin</c>, <c>self-test</c>, <c>--version</c>.</summary>
+/// <summary>The <c>mta</c> command line: <c>serve</c> (default), <c>--healthcheck</c>, <c>migrate-db</c>, <c>migrate-storage</c>, <c>admin</c>, <c>domains</c>, <c>self-test</c>, <c>--version</c>.</summary>
 internal static class Cli
 {
     public static async Task<int> RunAsync(string[] args)
     {
         (string command, string[] rest) = SplitCommand(args);
         // Every command that handles mail, addresses or accounts needs working Unicode; --version, --healthcheck and self-test (which reports it) do not.
-        if (command is "serve" or "migrate-db" or "migrate-storage" or "admin" or "secrets" && !UnicodeSelfTest.Enforce(RequiresUnicodeSupport(rest), UnicodeLog(command), Console.Error))
+        if (command is "serve" or "migrate-db" or "migrate-storage" or "admin" or "domains" or "secrets" && !UnicodeSelfTest.Enforce(RequiresUnicodeSupport(rest), UnicodeLog(command), Console.Error))
         {
             return UnicodeSelfTest.FailedExitCode;
         }
@@ -40,12 +41,14 @@ internal static class Cli
                 return await MigrateStorageCommand.RunAsync(rest, Console.Out, Console.Error).ConfigureAwait(false);
             case "admin":
                 return await AdminCommand.RunAsync(rest, Console.Out, Console.Error).ConfigureAwait(false);
+            case "domains":
+                return await DomainsCommand.RunAsync(rest, Console.Out, Console.Error).ConfigureAwait(false);
             case "self-test":
                 return SelfTest(rest);
             case "serve":
                 return await ServeAsync(rest).ConfigureAwait(false);
             default:
-                Console.Error.WriteLine($"Unknown command '{command}'. Commands: serve (default), migrate-db, migrate-storage, admin, self-test, --healthcheck, --version.");
+                Console.Error.WriteLine($"Unknown command '{command}'. Commands: serve (default), migrate-db, migrate-storage, admin, domains, self-test, --healthcheck, --version.");
                 return 64;
         }
     }
@@ -244,6 +247,11 @@ internal static class Cli
             return 2;
         }
 
+        if (gate.Mode == StartupMode.Normal && config.Domains.Bootstrap.Count > 0)
+        {
+            await DomainBootstrap.RunAsync(config, storage, runtime.Secrets, clock, startupLog, CancellationToken.None).ConfigureAwait(false);   // Domains:Bootstrap (EGGMAIL_DOMAINS)
+        }
+
         StartupChecks.LogAdvice(config, startupLog);
 
         builder.Services.AddSingleton(loaded);
@@ -293,6 +301,7 @@ internal static class Cli
         builder.WebHost.ConfigureKestrel(k => KestrelHosting.Configure(k, config, runtime.Certificates));
 
         var app = builder.Build();
+        app.UseMtaStsPolicy();   // the MTA-STS policy file of the registered domains, when Domains:MtaStsMode serves it; before the dashboard's static files, which must not answer under that host name
         DashboardHosting.Map(app);
         ApiHosting.Map(app, runtime);
         await app.RunAsync().ConfigureAwait(false);

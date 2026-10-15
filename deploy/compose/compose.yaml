@@ -29,7 +29,7 @@ services:
       EGGMAIL_HOSTNAME: ${EGGMAIL_HOSTNAME}
       EGGMAIL_ADMIN_USER: ${EGGMAIL_ADMIN_USER:-admin}
       EGGMAIL_ADMIN_PASSWORD: ${EGGMAIL_ADMIN_PASSWORD:-}   # empty: generated on the first start and printed once in the log
-      # EGGMAIL_ACME_EMAIL: ${EGGMAIL_ACME_EMAIL}           # with the host name above: a free, automatically renewed certificate (needs port 80 or a Cloudflare token)
+      # EGGMAIL_ACME_EMAIL: ${EGGMAIL_ACME_EMAIL}           # with the host name above: a free, automatically renewed certificate (uncomment "80:80" below, or set a Cloudflare token)
       # CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN}       # selects the DNS-01 challenge
       # EGGMAIL_DOMAINS: example.com                        # sending domains to register at the start
       # Sqlite__SyncMode: Normal              # Off (the default) survives a process kill, not power loss: see docs/operations.md
@@ -41,6 +41,8 @@ services:
       - "8443:8443"                         # dashboard and API (HTTPS)
       - "127.0.0.1:8080:8080"               # HTTP probes and first setup, loopback of the Docker host only
       # - "25:2526"                         # bounce listener: needs an MX record for Delivery__BounceDomain pointing here
+      # - "80:80"                           # ACME HTTP-01: the certificate authority connects to port 80 of EGGMAIL_HOSTNAME (with EGGMAIL_ACME_EMAIL above);
+      #                                       # the built-in listener answers /.well-known/acme-challenge/ there and nothing else. Without DNS-01 (Acme__CloudflareApiToken) this is required.
     volumes:
       - eggmail-data:/data                  # SQLite files, backups, bootstrap file: a local volume only, never network storage
     read_only: true

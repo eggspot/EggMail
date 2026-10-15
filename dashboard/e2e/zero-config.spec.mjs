@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import https from 'node:https';
+import net from 'node:net';
 import { expect, test } from '@playwright/test';
 import { ApiClient } from './support/apiClient.mjs';
 import { createRecipientDomain, createVerifiedDomain, unique } from './support/fixtures.mjs';
@@ -206,6 +207,7 @@ test.describe('the simple environment variables', () => {
         EGGMAIL_ADMIN_USER: 'owner',
         EGGMAIL_ADMIN_PASSWORD: 'chosen-by-the-operator-1',
         EGGMAIL_RELAY: 'smtp.relay.example:587',
+        EGGMAIL_DOMAINS: 'first.zero.example, second.zero.example',
       },
     });
   });
@@ -227,7 +229,56 @@ test.describe('the simple environment variables', () => {
     const admin = await new ApiClient(stack.baseURL).signIn('owner', 'chosen-by-the-operator-1');
     const routes = await admin.ok('GET', '/api/v1/admin/relay-routes');
     expect(routes).toHaveLength(1);
+    // EGGMAIL_DOMAINS registered both domains at the start (for a tenant called Default, made because there was none) and printed their DNS records.
+    const tenants = await admin.ok('GET', '/api/v1/admin/tenants');
+    const tenant = tenants.find((t) => t.name === 'Default');
+    expect(tenant).toBeTruthy();
+    const domains = await admin.ok('GET', '/api/v1/domains', undefined, { tenantId: tenant.id });
+    expect((domains.items ?? domains).map((d) => d.name).sort()).toEqual(['first.zero.example', 'second.zero.example']);
+    expect(stack.log()).toContain('first.zero.example');
+
     expect(routes[0]).toMatchObject({ name: 'configuration-relay', host: 'smtp.relay.example', port: 587, tlsMode: 'verify', hasPassword: false, domains: ['*'] });
+  });
+});
+
+test.describe('the documented recipe: EGGMAIL_HOSTNAME + EGGMAIL_ACME_EMAIL', () => {
+  test('starts, turns ACME on with the HTTP-01 listener (no Cloudflare token), keeps serving the self-signed certificate and says so', async () => {
+    test.setTimeout(180_000);
+    // Port 80 cannot be bound on a test machine (or as a non-root user), so the listener gets a free port: the same setting as `-p 80:8081` in the docs. The CA is an
+    // address nothing listens on, so no real CA is ever asked; the order fails, which is recorded and shown as a warning while the self-signed certificate keeps serving.
+    const challengePort = await new Promise((resolve) => {
+      const server = net.createServer();
+      server.listen(0, '127.0.0.1', () => {
+        const { port } = server.address();
+        server.close(() => resolve(port));
+      });
+    });
+    const stack = await startZeroConfigStack({
+      name: 'recipe',
+      variables: {
+        EGGMAIL_HOSTNAME: 'mail.zero.example',
+        EGGMAIL_ACME_EMAIL: 'ops@zero.example',
+        EGGMAIL_ACME_DIRECTORY: 'http://127.0.0.1:9/directory',
+        Acme__Http01ListenPort: String(challengePort),
+        Acme__Http01BindAddress: '127.0.0.1',
+      },
+    });
+    try {
+      expect((await fetch(`${stack.baseURL}/healthz`)).status).toBe(200);
+      const unknownToken = await fetch(`http://127.0.0.1:${challengePort}/.well-known/acme-challenge/abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG`);
+      expect(unknownToken.status).toBe(404);                       // the built-in listener is there and knows no such token
+      expect((await fetch(`http://127.0.0.1:${challengePort}/`)).status).not.toBe(200);   // and serves nothing else
+
+      await expect.poll(async () => (await (await fetch(`${stack.baseURL}/api/v1/capabilities`)).json()).warnings.map((w) => w.code).filter((c) => c.startsWith('acme_')), { timeout: 60_000 }).not.toEqual([]);
+      const codes = (await (await fetch(`${stack.baseURL}/api/v1/capabilities`)).json()).warnings.map((w) => w.code);
+      expect(codes).toContain('self_signed_certificate');          // still the placeholder, and the dashboard says so next to the ACME state
+
+      const starttls = await submit({ port: stack.ports.submission, mode: 'starttls', send: false });
+      expect(starttls.certificate.selfSigned).toBe(true);
+      expect(starttls.certificate.subjectAltName).toContain('DNS:mail.zero.example');
+    } finally {
+      await stack.stop();
+    }
   });
 });
 

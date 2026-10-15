@@ -55,14 +55,14 @@ Then, in the dashboard: add your sending domain (it shows the DNS records to pub
 
 ```sh
 docker run -d --name eggmail-prod \
-  -p 587:5587 -p 465:4465 -p 2525:2525 -p 8443:8443 -v eggmail-prod-data:/data \
+  -p 587:5587 -p 465:4465 -p 2525:2525 -p 8443:8443 -p 80:80 -v eggmail-prod-data:/data \
   -e EGGMAIL_HOSTNAME=mail.example.com \
   -e EGGMAIL_ACME_EMAIL=admin@example.com \
   -e EGGMAIL_DOMAINS=example.com \
   ghcr.io/eggspot/eggmail:nightly
 ```
 
-`EGGMAIL_HOSTNAME` is the name in SMTP greetings, the certificate and the dashboard; together with `EGGMAIL_ACME_EMAIL` it turns on a free, automatically renewed certificate. `EGGMAIL_DOMAINS` registers your sending domains at the start, `CLOUDFLARE_API_TOKEN` selects the DNS-01 challenge instead of port 80, `EGGMAIL_ADMIN_PASSWORD_FILE` lets you choose the administrator password instead of having one generated, `EGGMAIL_RELAY=host:port` adds a smarthost fallback. What you must still do outside the container (DNS records, reverse DNS, outbound port 25, firewall) is [listed in the operations guide](docs/operations.md#what-only-you-can-do-outside-the-container); port 25 is not a submission port ([ports](docs/operations.md#ports)).
+`EGGMAIL_HOSTNAME` is the name in SMTP greetings, the certificate and the dashboard; together with `EGGMAIL_ACME_EMAIL` it turns on a free, automatically renewed certificate, proved over HTTP-01 on port 80 (the `-p 80:80`: the certificate authority must reach that port of your host name; the built-in listener answers the challenge path and nothing else). `EGGMAIL_DOMAINS` registers your sending domains at the start, `CLOUDFLARE_API_TOKEN` selects the DNS-01 challenge instead (no port 80, wildcards possible), `EGGMAIL_ADMIN_PASSWORD_FILE` lets you choose the administrator password instead of having one generated, `EGGMAIL_RELAY=host:port` adds a smarthost fallback. What you must still do outside the container (DNS records, reverse DNS, outbound port 25, firewall) is [listed in the operations guide](docs/operations.md#what-only-you-can-do-outside-the-container); port 25 is not a submission port ([ports](docs/operations.md#ports)).
 
 **Lost the administrator password?** (Use your own container and volume names.) Create another administrator (SQLite: the server container must be stopped; PostgreSQL: it can run, add your `-e EGGMAIL_DATABASE=...`), then reset or delete the old account in the dashboard:
 
@@ -81,7 +81,7 @@ services:
     environment:
       EGGMAIL_HOSTNAME: mail.example.com
       EGGMAIL_ACME_EMAIL: admin@example.com
-    ports: ["587:5587", "465:4465", "2525:2525", "8443:8443"]
+    ports: ["587:5587", "465:4465", "2525:2525", "8443:8443", "80:80"]   # 80: the certificate authority, HTTP-01
     volumes: ["eggmail-data:/data"]
 volumes:
   eggmail-data:
@@ -98,7 +98,7 @@ services:
       EGGMAIL_HOSTNAME: mail.example.com
       EGGMAIL_ACME_EMAIL: admin@example.com
       EGGMAIL_DATABASE: "Host=postgres;Database=eggmail;Username=eggmail;Password=change-me"   # the only difference
-    ports: ["587:5587", "465:4465", "2525:2525", "8443:8443"]
+    ports: ["587:5587", "465:4465", "2525:2525", "8443:8443", "80:80"]   # 80: the certificate authority, HTTP-01
     volumes: ["eggmail-data:/data"]
   postgres:
     image: postgres:17

@@ -18,13 +18,6 @@ public partial class ConfigurationDocumentationTests
     [GeneratedRegex(@"`([A-Z][A-Za-z0-9]*(?::[A-Za-z0-9<>*-]+)*)`")]
     private static partial Regex KeySpan();
 
-    /// <summary>
-    /// Keys an environment alias stands for whose section is added by a change that is not in this build yet (domain onboarding: <c>Domains:Bootstrap</c>; the HTTP-01
-    /// challenge: <c>Acme:Challenge</c>). The alias layer already writes them; until the code reads them they may appear in the guide without a reader.
-    /// Remove an entry here when its section lands.
-    /// </summary>
-    internal static readonly string[] KeysFromOtherChanges = ["Domains:Bootstrap", "Acme:Challenge"];
-
     internal static SortedSet<string> KeysReadByCodeForTests() => KeysReadByCode();
 
     internal static string DocumentationPath()
@@ -114,7 +107,6 @@ public partial class ConfigurationDocumentationTests
         string[] unknown = DocumentedKeys()
             .Where(k => !read.Contains(k)
                 && !DocumentedFamilies.Any(f => k.StartsWith(f, StringComparison.OrdinalIgnoreCase))
-                && !KeysFromOtherChanges.Contains(k, StringComparer.OrdinalIgnoreCase)
                 && !Mta.Host.Api.SettingsService.TenantSettingKeys.Contains(k, StringComparer.OrdinalIgnoreCase))   // per-tenant settings: stored per tenant, not deployment configuration
             .Order(StringComparer.OrdinalIgnoreCase)
             .ToArray();

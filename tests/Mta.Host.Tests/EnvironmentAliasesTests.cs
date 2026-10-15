@@ -74,6 +74,25 @@ public class EnvironmentAliasesTests
     }
 
     [Fact]
+    public void The_documented_recipe_host_name_and_acme_email_alone_is_valid_and_uses_http_01_and_a_cloudflare_token_selects_dns_01()
+    {
+        LoadedConfig http = Load([], ("EGGMAIL_HOSTNAME", "mail.example.com"), ("EGGMAIL_ACME_EMAIL", "ops@example.com"));
+        Assert.True(http.IsValid, string.Join("; ", http.Errors));
+        Assert.True(http.Config.Acme.Enabled);
+        Assert.False(http.Config.Acme.UsesDns01());                       // no Cloudflare token: the built-in HTTP-01 listener answers the CA
+        Assert.Equal(["mail.example.com"], http.Config.Acme.Domains);
+        Assert.Equal("ops@example.com", http.Config.Acme.Email);
+
+        LoadedConfig dns = Load([], ("EGGMAIL_HOSTNAME", "mail.example.com"), ("EGGMAIL_ACME_EMAIL", "ops@example.com"), ("CLOUDFLARE_API_TOKEN", "cf"));
+        Assert.True(dns.IsValid, string.Join("; ", dns.Errors));
+        Assert.True(dns.Config.Acme.UsesDns01());
+
+        LoadedConfig staging = Load([], ("EGGMAIL_HOSTNAME", "mail.example.com"), ("EGGMAIL_ACME_EMAIL", "ops@example.com"), ("EGGMAIL_ACME_STAGING", "true"));
+        Assert.True(staging.IsValid, string.Join("; ", staging.Errors));
+        Assert.Equal(AcmeSection.LetsEncryptStagingDirectoryUrl, staging.Config.Acme.EffectiveDirectoryUrl());
+    }
+
+    [Fact]
     public void The_host_name_alone_does_not_turn_acme_on()
     {
         Dictionary<string, string?> values = Values(Translate(("EGGMAIL_HOSTNAME", "mail.example.com")));
@@ -441,6 +460,30 @@ public class EnvironmentAliasesTests
     }
 
     [Fact]
+    public void EGGMAIL_DOMAINS_replaces_the_bootstrap_domains_of_a_lower_layer_and_a_long_form_list_replaces_the_alias_list()
+    {
+        string directory = TemporaryDirectory();
+        try
+        {
+            string appSettings = Path.Combine(directory, "appsettings.json");
+            File.WriteAllText(appSettings, """{ "Domains": { "Bootstrap": ["old-one.example", "old-two.example"], "MtaStsMx": ["mx1.example.com", "mx2.example.com"] } }""");
+            Func<string, string?> env = name => name == "EGGMAIL_DOMAINS" ? "new.example" : null;
+
+            MtaConfig fromAlias = ConfigLoader.Load(ConfigLoader.Build([], dataDirectoryHint: directory, appSettingsPath: appSettings, environment: env)).Config;
+            Assert.Equal(["new.example"], fromAlias.Domains.Bootstrap);                       // not [new.example, old-two.example]
+            Assert.Equal(["mx1.example.com", "mx2.example.com"], fromAlias.Domains.MtaStsMx);   // a list nobody else mentions is untouched
+
+            MtaConfig fromCommandLine = ConfigLoader.Load(ConfigLoader.Build(["--Domains:Bootstrap:0=cli.example", "--Domains:MtaStsMx:0=mx.cli.example"], dataDirectoryHint: directory, appSettingsPath: appSettings, environment: env)).Config;
+            Assert.Equal(["cli.example"], fromCommandLine.Domains.Bootstrap);                 // the command line owns the list
+            Assert.Equal(["mx.cli.example"], fromCommandLine.Domains.MtaStsMx);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void A_list_in_the_same_layer_keeps_all_its_entries_and_a_separated_value_is_split()
     {
         string directory = TemporaryDirectory();
@@ -501,24 +544,11 @@ public class EnvironmentAliasesTests
     }
 
     [Fact]
-    public void Keys_exempted_because_another_change_adds_them_are_not_read_yet()
-    {
-        // When the change that reads such a key lands, this fails: delete the entry from KeysFromOtherChanges, it then has to be documented and read like every key.
-        SortedSet<string> read = ConfigurationDocumentationTests.KeysReadByCodeForTests();
-        Assert.All(ConfigurationDocumentationTests.KeysFromOtherChanges, key => Assert.DoesNotContain(key, read));
-    }
-
-    [Fact]
     public void Every_key_an_alias_stands_for_is_a_key_the_code_reads()
     {
         SortedSet<string> read = ConfigurationDocumentationTests.KeysReadByCodeForTests();
         foreach (string key in EnvironmentAliases.Aliases.SelectMany(a => a.Keys).Distinct())
         {
-            if (ConfigurationDocumentationTests.KeysFromOtherChanges.Contains(key, StringComparer.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
             Assert.True(read.Contains(key), $"an environment variable maps to {key}, which nothing reads");
         }
     }

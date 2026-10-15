@@ -68,6 +68,12 @@ public sealed class ApiOptions
     /// <summary>Optional SPF <c>include:</c> suggested to customers.</summary>
     public string? SpfInclude { get; set; }
 
+    /// <summary>
+    /// The full set of options of the DNS records suggested for a sending domain. When null, they are derived from <see cref="BounceDomain"/> and <see cref="SpfInclude"/>
+    /// alone (no host name, so no bounce MX, MTA-STS or reverse-DNS advice).
+    /// </summary>
+    public Mta.Host.Domains.DomainRecordOptions? DomainRecords { get; set; }
+
     /// <summary>Domain used for generated Message-IDs of messages composed by the API when the From domain cannot be used.</summary>
     public string MessageIdDomain { get; set; } = "localhost";
 
