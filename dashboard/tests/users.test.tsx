@@ -3,7 +3,7 @@ import { fireEvent, screen, waitFor, within } from '@testing-library/preact';
 import Account from '../src/pages/Account';
 import Users from '../src/pages/admin/Users';
 import type { DashboardUser, Tenant } from '../src/api/types';
-import { json, mockFetch, problem, renderWithApp } from './helpers';
+import { json, makeApp, mockFetch, problem, renderWithApp } from './helpers';
 
 const tenants: Tenant[] = [
   { id: 't_acme', name: 'Acme Corp', status: 'active' },
@@ -252,6 +252,21 @@ describe('Account page', () => {
     await screen.findByText('Password changed. Your other sessions were signed out.');
     expect(m.callsTo('POST', '/api/v1/me/password')[0].body).toEqual({ currentPassword: 'old password!', newPassword: 'a brand new password' });
     expect((screen.getByLabelText('Current password') as HTMLInputElement).value).toBe('');
+  });
+
+  it('with a temporary password, a failure to load the dashboard after a successful change is not reported as a failed change', async () => {
+    const m = mockFetch({ 'POST /api/v1/me/password': () => undefined });
+    const base = makeApp({ role: 'admin' });
+    renderWithApp(<Account />, { role: 'admin', me: { ...base.me!, mustChangePassword: true }, refreshMe: async () => { throw new Error('offline'); } });
+    fireEvent.input(screen.getByLabelText('Current password'), { target: { value: 'temporary password 1' } });
+    fireEvent.input(screen.getByLabelText('New password'), { target: { value: 'my own new password' } });
+    fireEvent.input(screen.getByLabelText('New password again'), { target: { value: 'my own new password' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Change password' }));
+
+    expect(await screen.findByRole('button', { name: 'Reload the dashboard' })).toBeTruthy();
+    expect(screen.getByText(/Your password was changed/)).toBeTruthy();
+    expect(m.callsTo('POST', '/api/v1/me/password')).toHaveLength(1);
+    expect(screen.queryByText(/offline/)).toBeNull();   // the error of the follow-up call is not shown as if the change had failed
   });
 
   it('shows the server message for a wrong current password under the field', async () => {

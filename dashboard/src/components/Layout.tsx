@@ -74,6 +74,8 @@ export function Layout({ children }: { children: ComponentChildren }) {
     mainRef.current?.focus();
   }, [path]);
 
+  // With a temporary password there is nothing to navigate to: the one page is the password change.
+  const forced = me?.mustChangePassword === true;
   const items = NAV_ITEMS.filter((i) => !i.admin || isAdmin);
 
   return (
@@ -82,9 +84,11 @@ export function Layout({ children }: { children: ComponentChildren }) {
         Skip to content
       </a>
       <header class="topbar">
-        <button type="button" class="btn btn-small nav-toggle" aria-expanded={navOpen} aria-controls="site-nav" onClick={() => setNavOpen(!navOpen)}>
-          Menu
-        </button>
+        {!forced && (
+          <button type="button" class="btn btn-small nav-toggle" aria-expanded={navOpen} aria-controls="site-nav" onClick={() => setNavOpen(!navOpen)}>
+            Menu
+          </button>
+        )}
         <a class="brand" href="/">
           <span class="brand-egg" aria-hidden="true" /> EggMail
         </a>
@@ -119,17 +123,19 @@ export function Layout({ children }: { children: ComponentChildren }) {
       </header>
       <WarningBanner />
       <div class="body">
-        <nav id="site-nav" class={`sidenav${navOpen ? ' open' : ''}`} aria-label="Main">
-          <ul>
-            {items.map((i) => (
-              <li key={i.href}>
-                <a href={i.href} aria-current={isActive(path, i.href) ? 'page' : undefined}>
-                  {i.label}
-                </a>
-              </li>
-            ))}
-          </ul>
-        </nav>
+        {!forced && (
+          <nav id="site-nav" class={`sidenav${navOpen ? ' open' : ''}`} aria-label="Main">
+            <ul>
+              {items.map((i) => (
+                <li key={i.href}>
+                  <a href={i.href} aria-current={isActive(path, i.href) ? 'page' : undefined}>
+                    {i.label}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </nav>
+        )}
         <main id="main" ref={mainRef} tabIndex={-1} class="main">
           {children}
         </main>

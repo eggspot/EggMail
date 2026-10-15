@@ -1,9 +1,13 @@
 name: ci
 
 on:
+  # No path filter on pull requests: a workflow that a filter skips never reports a status, and then a branch rule that requires the
+  # check (`build-test`) leaves a documentation-only pull request waiting forever. The workflow always starts; the first step decides
+  # whether the change is documentation only, and if it is every later step is skipped and the job still ends green (about a minute
+  # of billing for a documentation change, nothing extra for a code change). Pushes to main keep the filter: nothing waits on them,
+  # and a documentation-only commit then gets no status at all instead of a green one that tested nothing.
   pull_request:
     branches: [main]
-    paths-ignore: ['docs/**', '**.md', '.github/FUNDING.yml']
   push:
     branches: [main]
     paths-ignore: ['docs/**', '**.md', '.github/FUNDING.yml']
@@ -26,12 +30,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 2   # the merge commit of a pull request and both its parents: changed-code.sh diffs HEAD^1..HEAD
+      - name: Is this more than documentation?
+        id: changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}   # empty on a push: then everything runs
+        # Fail-safe: only the exact word "false" skips the tests (every later step runs unless code=false); a script that fails or prints
+        # anything else runs them.
+        run: echo "code=$(.github/scripts/changed-code.sh "$BASE_SHA" || echo true)" >> "$GITHUB_OUTPUT"
       # Cheapest checks first (seconds): the deployment files and the scripts the release workflow runs. The full test of the
       # files against a real image happens in the release workflow (deploy/smoke).
       - name: Deployment files and scripts (static checks)
+        if: steps.changes.outputs.code != 'false'
         run: |
           shellcheck deploy/smoke/*.sh .github/scripts/*.sh
+          .github/scripts/test-changed-code.sh
+          GITHUB_EVENT_NAME=push .github/scripts/test-changed-code.sh   # as on main: the self-test must not depend on the event it runs in
           python3 -m py_compile deploy/smoke/smoke.py bench/compare-allocations.py bench/measure-startup.py bench/summarize-throughput.py bench/compare/provision_eggmail.py
           export EGGMAIL_HOSTNAME=mail.example.com EGGMAIL_DB_PASSWORD=x EGGMAIL_IMAGE=ghcr.io/eggspot/eggmail:nightly SMOKE_HOST_IP=127.0.0.1
           docker compose -f deploy/compose/compose.yaml config --quiet
@@ -61,6 +75,7 @@ jobs:
       # A plain `docker run` instead of a service container so the server can take flags: several test projects run in
       # parallel against it and the default max_connections=100 ran out ("53300: too many clients"). fsync=off is fine for tests.
       - name: PostgreSQL 17 for the tests
+        if: steps.changes.outputs.code != 'false'
         run: |
           docker run -d --name pg -p 5432:5432 -e POSTGRES_USER=eggmail -e POSTGRES_PASSWORD=eggmail -e POSTGRES_DB=postgres postgres:17 \
             -c max_connections=600 -c fsync=off -c synchronous_commit=off -c full_page_writes=off
@@ -73,6 +88,7 @@ jobs:
       # 127.0.0.1 only, -defaultIPv6 "": Pebble connects over IPv4, so a runner without an IPv6 loopback cannot break the tests): no PEBBLE_VA_ALWAYS_VALID.
       # A second Pebble (port 14100) refuses accounts without external account binding, for the EAB tests.
       - name: Pebble ACME test CA for the ACME tests
+        if: steps.changes.outputs.code != 'false'
         run: |
           docker run -d --name challtestsrv --network host ghcr.io/letsencrypt/pebble-challtestsrv:2.10.1 \
             -http01 "" -https01 "" -tlsalpn01 "" -doh "" -defaultIPv6 ""
@@ -87,29 +103,37 @@ jobs:
             curl -sf --cacert "$RUNNER_TEMP/pebble.minica.pem" "$url" >/dev/null || { docker logs pebble; docker logs pebble-eab; exit 1; }
           done
       - uses: actions/setup-dotnet@v4
+        if: steps.changes.outputs.code != 'false'
         with:
           dotnet-version: 10.0.x
       - uses: actions/cache@v4
+        if: steps.changes.outputs.code != 'false'
         with:
           path: ~/.nuget/packages
           key: nuget-${{ runner.os }}-${{ hashFiles('Directory.Packages.props', 'global.json') }}
           restore-keys: nuget-${{ runner.os }}-
       - name: Restore
+        if: steps.changes.outputs.code != 'false'
         run: dotnet restore EggMail.slnx
       - name: Build
+        if: steps.changes.outputs.code != 'false'
         run: dotnet build EggMail.slnx -c Release --no-restore
       - name: Test
+        if: steps.changes.outputs.code != 'false'
         env:
           EGGMAIL_TEST_ACME_DIRECTORY: https://localhost:14000/dir
           EGGMAIL_TEST_ACME_EAB_DIRECTORY: https://localhost:14100/dir
           EGGMAIL_TEST_ACME_CA_FILE: ${{ runner.temp }}/pebble.minica.pem
+          EGGMAIL_REQUIRE_EXTERNAL_TESTS: '1'   # a missing PostgreSQL or Pebble fails the run instead of turning their tests into silent skips
         run: dotnet test EggMail.slnx -c Release --no-build --logger "trx;LogFileName=test.trx" --results-directory TestResults
       - uses: actions/setup-node@v4
+        if: steps.changes.outputs.code != 'false'
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: dashboard/package-lock.json
       - name: Dashboard (install without scripts, verify signatures, lint, test, build, CSP check)
+        if: steps.changes.outputs.code != 'false'
         working-directory: dashboard
         run: |
           npm ci --ignore-scripts
@@ -121,27 +145,31 @@ jobs:
       # Real-browser end-to-end tests (Chromium) against the real server: they run after the unit tests and reuse the Release build and the
       # dashboard build above. The PostgreSQL service of this job is the target of the storage-switch tests.
       - name: Playwright version
+        if: steps.changes.outputs.code != 'false'
         id: playwright
         working-directory: dashboard
         run: echo "version=$(node -p "require('./node_modules/@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
       - name: Cache Playwright browsers
+        if: steps.changes.outputs.code != 'false'
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-chromium-${{ steps.playwright.outputs.version }}
       - name: Install Chromium for Playwright
+        if: steps.changes.outputs.code != 'false'
         working-directory: dashboard
         run: npx playwright install --with-deps chromium
       - name: Dashboard end-to-end tests (real server, real browser)
+        if: steps.changes.outputs.code != 'false'
         working-directory: dashboard
         run: npx playwright test
       - name: Pebble logs on failure
-        if: failure()
+        if: failure() && steps.changes.outputs.code != 'false'
         run: |
           docker logs pebble 2>&1 | tail -200 || true
           docker logs pebble-eab 2>&1 | tail -100 || true
       - name: Upload test results on failure
-        if: failure()
+        if: failure() && steps.changes.outputs.code != 'false'
         uses: actions/upload-artifact@v4
         with:
           name: test-results

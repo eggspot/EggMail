@@ -8,8 +8,8 @@ Tested deployment files are in `deploy/` (the release workflow tests them agains
 
 | Deployment | Files | Notes |
 |---|---|---|
-| Docker Compose, SQLite (default) | `deploy/compose/compose.yaml` | One container, one volume at `/data`, one replica. Read-only root filesystem, no capabilities, 60 s stop grace |
-| Docker Compose, PostgreSQL | `deploy/compose/compose.postgres.yaml` | EggMail plus `postgres:17`; one database role for both duties (use a managed PostgreSQL with an owner and a runtime role in production) |
+| Docker Compose, SQLite (default) | `deploy/compose/compose.yaml` | The quick start with `EGGMAIL_*` variables: one container, one volume at `/data`, one replica. Read-only root filesystem, no capabilities, 60 s stop grace |
+| Docker Compose, PostgreSQL | `deploy/compose/compose.postgres.yaml` | The quick start plus one variable, `EGGMAIL_DATABASE`: EggMail plus `postgres:17`; one database role for both duties (use a managed PostgreSQL with an owner and a runtime role in production) |
 | DANE: local validating resolver | `deploy/compose/compose.unbound.yaml` (add with a second `-f`), `deploy/kubernetes/components/unbound` | Unbound sidecar, sets `Dns:Servers`, `Dns:RequestDnssec` and `Dns:TrustAuthenticatedData` together |
 | Kubernetes, SQLite | `deploy/kubernetes/sqlite` | StatefulSet (one replica, ReadWriteOnce claim), `fsGroup` for the volume, startup/liveness (`/healthz`) and readiness (`/readyz`) probes |
 | Kubernetes, PostgreSQL | `deploy/kubernetes/postgres` | Deployment (raise `replicas` for availability; read [Running more than one replica](#running-more-than-one-replica) first), connection strings from a Secret |
@@ -18,11 +18,94 @@ Tested deployment files are in `deploy/` (the release workflow tests them agains
 Things that are easy to get wrong:
 
 - **Healthcheck command.** The chiseled image has no shell and `/app` is not on `PATH`: use `["CMD", "/app/mta", "--healthcheck"]` (the `HEALTHCHECK` of the image does). `["CMD", "mta", "--healthcheck"]` fails with "executable file not found in $PATH". The release workflow checks this on every build (`deploy/smoke/image.sh` prints the image's `PATH` and tries `mta`).
-- **First administrator.** Compose: a file secret read through `Dashboard__BootstrapAdminPasswordFile` (the file must be readable by uid 1654: Compose does not apply `uid` or `mode` to file secrets outside Swarm). Kubernetes: a Secret mounted at `/run/secrets/eggmail`. Or `mta admin create` while the SQLite server is stopped. Further users are made in the dashboard or the API while the server runs (see "Users while the server runs").
+- **First administrator.** Docker and Compose: nothing to do, a password is generated and printed once (see [Quick start](#quick-start-and-the-minimal-environment)); `EGGMAIL_ADMIN_PASSWORD` in the compose file chooses it, or a file secret through `EGGMAIL_ADMIN_PASSWORD_FILE` (the file must be readable by uid 1654: Compose does not apply `uid` or `mode` to file secrets outside Swarm). Kubernetes: a Secret mounted at `/run/secrets/eggmail` (`Dashboard__BootstrapAdminPasswordFile`). Or `mta admin create` while the SQLite server is stopped. Further users are made in the dashboard or the API while the server runs (see "Users while the server runs").
 - **First sending domain.** Set `Domains__Bootstrap=example.com`: the first start registers the domain, generates its DKIM key and writes the DNS records to create into the log (one JSON line per line of the zone file, category `Mta.domains`: `docker compose logs eggmail | grep Mta.domains`); the dashboard shows them with a **Check DNS** button (see "Adding a sending domain and its DNS records").
 - **Volume ownership.** The image prepares `/data` for uid 1654; a new Kubernetes volume is owned by root, hence `fsGroup: 1654` in the StatefulSet.
-- **Inbound port 25 for bounces** needs a public MX record and a platform that offers inbound 25 (many load balancers do not).
+- **Inbound port 25 for bounces** needs a public MX record and a platform that offers inbound 25 (many load balancers do not). It maps to the bounce-only listener 2526 of the container and is not a submission port, see [Ports](#ports).
 - **Kubernetes NetworkPolicy** is enforced only by a CNI that implements it; the smoke test applies the policy on kind but does not test enforcement.
+
+## Quick start and the minimal environment
+
+### One command, no configuration
+
+```sh
+docker run -d --name eggmail -p 587:5587 -p 465:4465 -p 2525:2525 -p 8443:8443 \
+  -v eggmail-data:/data ghcr.io/eggspot/eggmail:nightly
+docker logs eggmail          # the generated dashboard password, printed once (see below)
+```
+
+That is a working mail server: SMTP submission with AUTH on 587 (STARTTLS), 465 (implicit TLS) and 2525, the API and dashboard on `https://<host>:8443`, SQLite in the volume. The first start creates everything it needs by itself and says what it did in the log:
+
+- the data directory and the SQLite files in `/data` (a data directory that cannot be written stops the start with the reason: in Docker use a named volume, or `chown 1654:1654` a bind-mounted directory);
+- the Data Protection key ring and the VERP key, kept in the config database (the key ring is unprotected until you set `Secrets:KeyProtection`; the log says so);
+- the **first dashboard administrator** `admin` with a **generated password**, printed once in a block delimited by `==== EGGMAIL FIRST START: DASHBOARD ADMINISTRATOR ====` and `==== END OF THE ONE-TIME PASSWORD (it is never shown again) ====`. It goes to the console only (never into the structured log that an OTLP exporter might ship), only the first time, and only if no administrator exists. It is a **temporary** password: the dashboard accepts nothing but a new password at the first sign-in (the API answers `403 password_change_required` to everything else), and the generated one stops working with that. Until someone signs in, **it is as readable as the container log**: Docker's log files and drivers, a Kubernetes log shipper or a collector all keep the console output, and the password has no expiry and stays valid until it is changed, so sign in right after the first start (or choose the password yourself, below, and nothing is printed). To choose the password yourself set `EGGMAIL_ADMIN_PASSWORD_FILE` (a mounted secret, preferred) or `EGGMAIL_ADMIN_PASSWORD` before the first start: then nothing is printed and the password you set is the one that stays. **If you lose the password** see [Lost password](#lost-password);
+- a **self-signed certificate** for `Hostname`, used by STARTTLS, implicit TLS and the dashboard. Every start says so in the log (`Serving a SELF-SIGNED certificate ...`), the API reports the warning `self_signed_certificate`, and the dashboard shows a persistent banner on every page, including the sign-in page. Clients that verify certificates (browsers, most mail clients) will complain until you set up a real one (`EGGMAIL_HOSTNAME` with `EGGMAIL_ACME_EMAIL`, or upload one). Mail servers that receive your mail do not require a trusted certificate from a sender;
+- a **DKIM key per sending domain**, generated when the domain is added (dashboard, API, or `EGGMAIL_DOMAINS`); the dashboard then shows the DNS records to publish.
+
+What is left to do in the dashboard: add each **sending domain** (it shows the DNS records to publish; the domain sends once its DKIM record verifies), create an **SMTP credential** or an **API key** (Credentials), and point the application at port 587 or `POST /api/v1/messages`.
+
+A start that cannot work is refused: the exit code is 2 and the message names the variable and says what to set (`configuration error: EGGMAIL_ACME_EMAIL needs EGGMAIL_HOSTNAME: ...`).
+
+### The simple environment variables
+
+A small, fixed set of variables for the common cases. They are **documented aliases** for configuration keys, not a second configuration system: the keys of [Configuration](#configuration) stay authoritative. Precedence, highest first: command line, `EGGMAIL_HOSTNAME`, long-form environment variables (`Acme__Email`, ...), the other `EGGMAIL_*` variables, the bootstrap file and `appsettings.json`, settings stored in the database, built-in defaults. `EGGMAIL_HOSTNAME` is the one alias above the long-form environment: configuration keys are not case sensitive, so the `HOSTNAME` variable that Docker and Kubernetes set in every container (the container id or pod name) is the key `Hostname` and would otherwise beat it. So a key set the long way is never changed by an alias, and the dashboard shows a key set by an alias as set by the deployment. A blank value counts as unset. A list (`Acme:Domains`) belongs to the highest layer that mentions it, as a whole: `EGGMAIL_HOSTNAME` with `EGGMAIL_ACME_EMAIL` gives exactly that one domain, whatever a mounted `appsettings.json` lists. The test `EnvironmentAliasesTests` keeps this table and the code identical; a value that is wrong is reported by the name of its variable and never repeated (a relay address or a connection string can contain a password).
+
+| Variable | Stands for | Meaning |
+|---|---|---|
+| `EGGMAIL_HOSTNAME` | `Hostname`, `Acme:Domains` | The DNS name of this server, for example `mail.example.com`: the name in SMTP greetings (HELO/EHLO), `Received` headers and generated `Message-ID`s, in the first-run certificate and the name an ACME certificate is ordered for (the dashboard on 8443 serves the same certificate, so browse to this name). It must be the name in the reverse DNS (PTR) of the sending IP address. Refused when it is a URL, has a port, or is an IP address; the log warns about an underscore or a single label, which receiving servers dislike. `docker run --hostname` and the Compose `hostname:` set the container's own name, which is **not** read as a chosen name (the log still says nobody chose one): use `EGGMAIL_HOSTNAME`. When it differs from a `Hostname` in a mounted file or the long-form environment the log says that it overrides it (only `--Hostname=` on the command line is above it). Without it the machine name is used (in Docker a random container id) and the log says to set it; the self-signed certificate then keeps the first name instead of being replaced each time a container is recreated. Setting it replaces a self-signed certificate made for another name |
+| `EGGMAIL_ACME_EMAIL` | `Acme:Enabled`, `Acme:Email`, `Acme:Domains` | Contact for the certificate account. **With `EGGMAIL_HOSTNAME` it turns ACME on** for that name (see [TLS certificates and ACME](#tls-certificates-and-acme)); without a host name it is refused |
+| `EGGMAIL_ACME_STAGING` | `Acme:Directory` | `true`: order from the Let's Encrypt staging CA (certificates that clients do not trust; use while testing, production rate-limits failures) |
+| `EGGMAIL_ACME_DIRECTORY` | `Acme:Directory` | ACME directory URL of any other CA, or a name (`LetsEncrypt`, `LetsEncryptStaging`, `ZeroSsl`). Both CA variables write `Acme:Directory`, the key that wins over `Acme:DirectoryUrl`, so a `DirectoryUrl` in a mounted file cannot override them silently (a long-form `Acme:Directory` in the environment or on the command line still wins, as always). Not together with `EGGMAIL_ACME_STAGING=true` |
+| `CLOUDFLARE_API_TOKEN` | `Acme:CloudflareApiToken`, `Acme:Challenge` | Cloudflare token with DNS edit rights; **selects the DNS-01 challenge** (works without inbound port 80, allows wildcard names). Unprefixed on purpose: it is the name Cloudflare's own tooling and the common ACME clients (lego, certbot's plugin, acme.sh) read, so a token you already have works unchanged |
+| `CLOUDFLARE_API_TOKEN_FILE` | `Acme:CloudflareApiTokenFile`, `Acme:Challenge` | The same, read from a file (a mounted secret) |
+| `EGGMAIL_ADMIN_USER` | `Dashboard:BootstrapAdminUser` | User name of the first administrator (default `admin`). Checked when the administrator is created, so a wrong value does not stop `--healthcheck` or `mta admin create` |
+| `EGGMAIL_ADMIN_PASSWORD` | `Dashboard:BootstrapAdminPassword` | Password of the first administrator, 10 to 1,024 characters, white space at both ends trimmed like the contents of the file. Visible to whoever can inspect the container: prefer the file form. Unset (and no file): a password is generated and printed once. Checked only when the administrator is created (while none exists) |
+| `EGGMAIL_ADMIN_PASSWORD_FILE` | `Dashboard:BootstrapAdminPasswordFile` | The same password read from a file. A file that cannot be read, or holds a password that is too short, stops the start (while no administrator exists yet). Not together with `EGGMAIL_ADMIN_PASSWORD` |
+| `EGGMAIL_DOMAINS` | `Domains:Bootstrap` | Sending domains to register at the start, separated by commas. The registration itself and the DNS records it leads to are described in [DNS records for a sending domain](#dns-records-for-a-sending-domain) |
+| `EGGMAIL_DATABASE` | `Storage:Backend`, `Storage:Postgres:RuntimeConnectionString` | **One variable switches from SQLite to PostgreSQL**: a connection string (`Host=db;Database=eggmail;Username=eggmail;Password=...`) or a URL (`postgres://user:password@db:5432/eggmail?sslmode=require`; percent-encode special characters in the password; only `sslmode` is read from the URL). One role serves as schema owner and runtime role, and health warns `postgres_single_role`: for production set `Storage:Postgres:OwnerConnectionString` and `Storage:Postgres:RuntimeConnectionString` separately (the long forms win over this variable). For a database on another host use `sslmode=require` (or `verify-full`; in the Npgsql form `SSL Mode=Require`): without it the password and the data cross the network in clear text. The schema is created at the start. `/data` still holds the bootstrap file. **If `/data` already holds the SQLite files of an earlier run** (and no bootstrap file from a deliberate switch), the start logs a warning that their content is not used: move it with the Storage switch or `mta migrate-storage` first ([Backend switch](design.md#46-switching-backends-manual-and-symmetric)) |
+| `EGGMAIL_RELAY` | `Delivery:Relay:Address` | Optional `host:port` of a smarthost (a name, not an IP address), for networks that block outbound port 25. Kept as the relay route `configuration-relay` for every recipient domain, tried **after** direct delivery fails ([Relay routes and per-domain TLS](#relay-routes-and-per-domain-tls)). TLS mode `implicit` on port 465, `verify` otherwise (`Delivery:Relay:TlsMode` changes it). The route follows the configuration at every start (host, port, TLS mode, login); priority, domains and the enabled flag stay as set in the dashboard; unsetting the variable removes the route |
+| `EGGMAIL_RELAY_USER` | `Delivery:Relay:User` | Login on that relay; needs a password |
+| `EGGMAIL_RELAY_PASSWORD` | `Delivery:Relay:Password` | Its password (stored encrypted like every relay password) |
+| `EGGMAIL_RELAY_PASSWORD_FILE` | `Delivery:Relay:PasswordFile` | The same, read from a file |
+
+Not covered by an alias, because they are rarely needed on a first start: everything else in [Configuration](#configuration) (use `Name__With__Underscores` environment variables, a mounted `appsettings.json`, or the command line).
+
+**Minimal sets**
+
+| Goal | Variables |
+|---|---|
+| Try it | none |
+| A real server with a trusted certificate | `EGGMAIL_HOSTNAME`, `EGGMAIL_ACME_EMAIL` and port 80 published (HTTP-01), or add `CLOUDFLARE_API_TOKEN` instead of port 80 (DNS-01, also for wildcards) |
+| ... and your domain ready at the first start | add `EGGMAIL_DOMAINS` |
+| Your own administrator password | add `EGGMAIL_ADMIN_PASSWORD_FILE` |
+| PostgreSQL | add `EGGMAIL_DATABASE` (one variable) |
+| Behind a provider that blocks port 25 | add `EGGMAIL_RELAY` (+ `EGGMAIL_RELAY_USER` and `EGGMAIL_RELAY_PASSWORD_FILE`) |
+
+With Compose the same variables go under `environment:` (the shipped `deploy/compose/compose.yaml` and `compose.postgres.yaml` do exactly that); PostgreSQL needs a database server, so its compose file also has one.
+
+### Ports
+
+| Container port | Publish as | Purpose |
+|---|---|---|
+| 5587 | 587 | Submission, STARTTLS, AUTH required |
+| 4465 | 465 | Submission over implicit TLS |
+| 2525 | 2525 | Alternate submission, STARTTLS, for networks that block 587 |
+| 2526 | **25**, only if you want bounces | The **bounce-only** listener: it accepts nothing but mail addressed to the signed bounce addresses (`b+token@<Delivery:BounceDomain>`), so that asynchronous bounces and complaints reach EggMail. It is not a submission or open relay port. The container runs without privileges and cannot bind port 25 itself, hence `-p 25:2526` maps the public port to it. **Outbound** mail to other servers also uses port 25, but that is a connection the container opens: nothing to publish. Without `Delivery:BounceDomain` no bounce address exists and nothing needs inbound 25 |
+| 80 | 80, only for ACME HTTP-01 | The built-in challenge listener (`Acme:Http01ListenPort`, default 80). The certificate authority must reach port 80 of `EGGMAIL_HOSTNAME` when `EGGMAIL_ACME_EMAIL` is used without a Cloudflare token, so add `-p 80:80`. It answers `/.well-known/acme-challenge/<token>` and nothing else. Docker lets the non-root image bind port 80; under Kubernetes or rootless Podman set `Acme__Http01ListenPort=8081` and publish `-p 80:8081` ([TLS certificates and ACME](#tls-certificates-and-acme)) |
+| 8443 | 8443 | Dashboard and API over HTTPS. Restrict who can reach it: it is an administration surface |
+| 8080 | do not publish, or `127.0.0.1:8080:8080` | Plain HTTP: `/healthz`, `/readyz`, `/metrics` for probes and first set-up on the host itself |
+
+### What only you can do outside the container
+
+None of this can be done by the software, and mail does not reach inboxes without it:
+
+1. **DNS for the server**: an `A` (and `AAAA`) record for `EGGMAIL_HOSTNAME` pointing at the server.
+2. **Reverse DNS (PTR)** of the sending IP address pointing back at `EGGMAIL_HOSTNAME`. It is set at the provider that owns the address (a control panel setting or a support ticket), not in your zone.
+3. **Outbound port 25 must be open.** Many cloud providers block it by default (and unblock it on request); EggMail delivers directly to the recipients' servers on port 25. If you cannot get it opened, set `EGGMAIL_RELAY`.
+4. **DNS for every sending domain**: the DKIM `TXT` record the dashboard shows when you add the domain (required), an SPF record that authorizes the sending IP (or the relay) and a DMARC record (advice), plus the `bounce.<domain>` CNAME when `Delivery:BounceDomain` is set. See [DNS records for a sending domain](#dns-records-for-a-sending-domain).
+5. **Firewall**: inbound 587/465/2525 for your senders, 8443 for administrators only, 80 for ACME HTTP-01, 25 for bounces (and an `MX` record for the bounce domain).
+6. **Reputation**: a new IP address starts without one. Warm up (`Sending:WarmupEnabled`), send wanted mail, watch the complaint rate; blocklists and mailbox providers decide, not EggMail.
+7. **For DNS-01 with Cloudflare**: the zone of `EGGMAIL_HOSTNAME` must be in Cloudflare and the token needs the DNS edit permission for that zone.
 
 ## Configuration
 
@@ -112,6 +195,11 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | `Delivery:Throttle:InitialMessagesPerMinute` | 120 | Messages per minute allowed at first; grows the same way |
 | `Delivery:RemotePort` | 25 | Destination port for direct MX delivery; lab setups only |
 | `Delivery:AllowPrivateMxAddresses` | false | Allow MX hosts that resolve to loopback or private addresses; lab setups only |
+| `Delivery:Relay:Address` | none | `host:port` of a relay (smarthost) kept as the relay route `configuration-relay` for every recipient domain, tried after direct delivery (`EGGMAIL_RELAY`; see [Relay routes and per-domain TLS](#relay-routes-and-per-domain-tls)) |
+| `Delivery:Relay:User` | none | Login on that relay (needs a password) |
+| `Delivery:Relay:Password` | none | Its password; prefer the file |
+| `Delivery:Relay:PasswordFile` | none | File holding it |
+| `Delivery:Relay:TlsMode` | `implicit` on port 465, else `verify` | `verify`, `implicit`, `required`, `starttls` or `none` (refused together with a login) |
 | `Delivery:PublicSendingIp` | none | The address receiving servers see for our connections; reported as `sending-mta-ip` in TLS-RPT reports. Set it when EggMail is behind NAT or a proxy. Without it only a public local address of the connection is reported; private, loopback and link-local addresses are left out |
 | `Dns:Servers` | system resolvers | Resolvers (IP with optional port) |
 | `Dns:RequestDnssec` | true | Ask for DNSSEC records (needed for DANE) |
@@ -170,6 +258,7 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | `Dashboard:HttpsEnabled` | true | |
 | `Dashboard:BootstrapAdminUser` | `admin` | User name created at start when no administrator exists |
 | `Dashboard:BootstrapAdminPasswordFile` | none | File holding that user's password (see below) |
+| `Dashboard:BootstrapAdminPassword` | none | That password itself, for platforms that only pass environment variables (prefer the file: it is visible to whoever can inspect the container). With neither this nor the file the server generates a password and prints it once. Not together with the file |
 | `Api:MaxBodyBytes` | 1048576 | Largest JSON body of every endpoint except sending (checked while streaming) |
 | `Api:MaxSendBodyBytes` | 41943040 | Largest JSON body of `POST /messages` and `/messages/raw` (40 MiB; attachments are base64). The server request limit follows it (at least 64 MiB) |
 | `Api:MaxInFlightSendBytes` | 536870912 | Send-request bytes held in memory at once; beyond it the API answers `429` |
@@ -245,7 +334,31 @@ A listener named in configuration replaces the default of the same name member b
 
 ## First administrator
 
-Set `Dashboard:BootstrapAdminPasswordFile` (a file holding the password, for example a mounted secret) and `Dashboard:BootstrapAdminUser`: when no administrator exists the server creates one at start. Or, with the server stopped (SQLite allows one process per data directory), run `mta admin create --user NAME --password-file FILE` (`--role tenant --tenant SLUG` for a tenant user; the password can also come from `MTA_ADMIN_PASSWORD`, never from the command line). Passwords need 10 to 1,024 characters.
+When no administrator exists the server creates one at start, in this order of preference: the password in `Dashboard:BootstrapAdminPasswordFile` (a file, for example a mounted secret; `EGGMAIL_ADMIN_PASSWORD_FILE`), the password in `Dashboard:BootstrapAdminPassword` (`EGGMAIL_ADMIN_PASSWORD`; not together with the file), or, when neither is set, a **generated password printed once** ([Quick start](#quick-start-and-the-minimal-environment)). The user name is `Dashboard:BootstrapAdminUser` (`EGGMAIL_ADMIN_USER`, default `admin`). Passwords need 10 to 1,024 characters. A configured password that cannot be used (file unreadable or empty, too short, both forms set, the name already taken by a user who is not an administrator) stops the start with the reason, instead of starting a server nobody can sign in to. Several replicas on one PostgreSQL race harmlessly: exactly one creates the administrator, and only that one prints a generated password, so read the log of the replica that was started first on the empty database (or set `EGGMAIL_ADMIN_PASSWORD_FILE` on all of them).
+
+Or, with the server stopped (SQLite allows one process per data directory), run `mta admin create --user NAME --password-file FILE` (`--role tenant --tenant SLUG` for a tenant user; the password can also come from `MTA_ADMIN_PASSWORD`, never from the command line).
+
+A generated password is **temporary**: the first dashboard sign-in asks for a new one before anything else (`403 password_change_required` for every other call of that session). A password you set with `EGGMAIL_ADMIN_PASSWORD(_FILE)` is yours and is not marked. The mark lives in the stored hash, so no setting has to be remembered and any new password clears it.
+
+### Lost password
+
+Another administrator can **Reset password** in the dashboard. If there is none, create one from the command line. The image's entry point is `/app/mta`, so the arguments after the image name are the command; the name must be new (`rescue` here), and the password at least 10 characters:
+
+```sh
+# SQLite (the default): the server container must be stopped, one process owns the data directory
+docker stop eggmail
+docker run --rm -v eggmail-data:/data -e MTA_ADMIN_PASSWORD='a-new-password-1' ghcr.io/eggspot/eggmail:nightly admin create --user rescue
+docker start eggmail
+
+# PostgreSQL (EGGMAIL_DATABASE): the server can keep running; give the command the same database
+docker run --rm -e EGGMAIL_DATABASE='Host=db;Database=eggmail;Username=eggmail;Password=...' -e MTA_ADMIN_PASSWORD='a-new-password-1' ghcr.io/eggspot/eggmail:nightly admin create --user rescue
+
+# Docker Compose
+docker compose stop eggmail && docker compose run --rm -e MTA_ADMIN_PASSWORD='a-new-password-1' eggmail admin create --user rescue && docker compose start eggmail
+```
+
+Sign in as `rescue`, then reset or delete the account whose password was lost. The first-start notice prints the SQLite form.
+
 
 ### Users while the server runs
 
@@ -353,9 +466,13 @@ With `Domains:MtaStsMode=Testing` or `Enforce`:
 - Probes and the CA's HTTP-01 challenge (`/healthz`, `/readyz`, `/.well-known/acme-challenge/`) are answered on every host name, also on `mta-sts.<domain>`; nothing else of the dashboard is.
 - The `id` in the `_mta-sts` TXT record is a hash of the policy file. When you change the mode, the max age or the `mx:` lines the id changes, and the domain page shows the record as **Mismatch** until the TXT record is updated to the new value.
 
+### Bounce addresses and the return path
+
+Once the return-path CNAME is verified, the envelope sender of the mail of that domain is `b+<token>@bounce.<domain>` instead of `b+<token>@<Delivery:BounceDomain>` (a domain whose CNAME is missing keeps using the shared bounce domain). Receivers check SPF against that name: the CNAME makes `bounce.<domain>` resolve the TXT record of your bounce domain, so publish **one SPF record at the bounce domain** that names your sending IP (`v=spf1 ip4:203.0.113.10 ~all`), and the check passes and aligns (relaxed) with the `From` domain, which is what makes DMARC pass through SPF as well as through DKIM. The MX of the bounce domain (`Delivery:BounceDomain` → `Hostname`) receives the bounces for both forms of address: a mail server resolving the MX of `bounce.<domain>` follows the CNAME. The bounce listener (port 25) accepts a valid token at the shared bounce domain, or at a registered domain's `bounce.<domain>` once that domain's CNAME is verified, and refuses everything else. Bounce addresses are bound to the destination domain of the message: a report (bounce or complaint) is acted on only for addresses in that domain (or the `Original-Recipient` it names), so someone who received one message cannot get another address suppressed by sending a forged report to the address in the `Return-Path`. Tokens issued before this binding existed keep working until they expire (14 days). **Rolling upgrade:** a replica of an older build cannot read the new bounce addresses and answers `550` for them, so run mixed versions only for the length of a rollout. When the receiving server offers DSN, EggMail sends the address it used as `ORCPT`, so a bounce for a forwarded address still names it (`Original-Recipient`); a report that names only a forwarding target is ignored and counted in `mta_bounce_reports_ignored_total`. A sending domain so long that `b+<token>@bounce.<domain>` would exceed 254 characters uses the shared bounce domain (a warning in the log).
+
 ## TLS certificates and ACME
 
-Certificates live in the database and are served by SMTP (STARTTLS and implicit TLS) and by the dashboard/API HTTPS listener. A new instance starts with a self-signed certificate for `Hostname` (the dashboard flags it); import a certificate in the dashboard, mount one with `Tls:CertificatePath`/`KeyPath` (it takes precedence), or let EggMail order one.
+Certificates live in the database and are served by SMTP (STARTTLS and implicit TLS) and by the dashboard/API HTTPS listener. A new instance starts with a self-signed certificate for `Hostname` (every start says so in the log and the dashboard flags it with a persistent banner; a certificate made for another host name, before `EGGMAIL_HOSTNAME` was set, is replaced by one for the new name, and one that expires within 30 days is replaced at the next start; any other certificate wins over it); import a certificate in the dashboard, mount one with `Tls:CertificatePath`/`KeyPath` (it takes precedence), or let EggMail order one.
 
 **Built-in ACME** (`Acme:Enabled=true`) orders one certificate for `Acme:Domains` (the SMTP and dashboard host names; by default the `Hostname`) from the CA of `Acme:Directory`, Let's Encrypt production unless you say otherwise. The ACME account is created on the first order and kept (encrypted) in the database for that directory; it is part of a backend switch bundle. Email addresses given to the CA (`Acme:Email`) get no expiry notices from Let's Encrypt any more, so monitor expiry yourself.
 
@@ -443,6 +560,9 @@ and set `Storage:Postgres:ReadOnlyConnectionString` to a connection string for i
 | `mta_storage_sqlite_wal_size_bytes` | gauge | `file` | Size of the write-ahead log |
 | `mta_storage_sqlite_sync_off` | gauge | `file` | 1 for a file running with `synchronous=OFF`, else 0 (`sqlite_sync_off`) |
 | `mta_storage_sqlite_quarantined` | gauge | `file` | 1 for a file that failed its start-up integrity check and was moved aside when this process started, else 0 |
+| `mta_process_open_fds` | gauge | none | Open file descriptors (sockets and files), Linux only (no series elsewhere). Returns to its idle value when load stops; a climb is a leak |
+| `mta_process_threads` | gauge | none | Operating-system threads of the process (not only the thread pool's) |
+| `mta_bounce_reports_ignored_total` | counter | `kind` (`bounce`, `complaint`) | Reports that arrived under a valid bounce address and were not acted on because they name an address outside the domain the bounce address was issued for (no suppression, no webhook). A trickle is forwarded mail whose server does not return the Original-Recipient; a burst is somebody trying to get addresses suppressed |
 | `mta_tls_certificate_expiry_seconds` | gauge | `name`, `source` | Seconds until each served certificate expires |
 | `mta_tls_certificates` | gauge | none | Certificates served; an expired one is no longer served, so alert on 0 as well |
 | `mta_backup_runs_total` | counter | `outcome` (`success`, `failed`) | Scheduled backup runs |
@@ -467,6 +587,7 @@ PostgreSQL command latency and pool state come from the Npgsql driver's own mete
 - Queue backlog: `mta_delivery_queue_oldest_due_age_seconds` above a few minutes for more than a few scrapes, or `mta_delivery_queue_depth{state="queued"}` growing steadily. `mta_delivery_queue_sample_age_seconds` above a minute means both are stale.
 - Repeated deferrals to one domain: the metrics carry no domain label (it is unbounded); the dashboard's per-domain statistics and the message events show which one. Alert on the `deferred` share of `mta_delivery_attempts_total`.
 - Certificates: `mta_tls_certificate_expiry_seconds` below 14 days (ACME renews with a third of the lifetime left) or `mta_tls_certificates == 0`.
+- Leaks over days: `mta_process_open_fds` and `mta_process_threads` should settle under constant load and return to their idle values when it stops; alert on a slope (for example `deriv(mta_process_open_fds[6h]) > 0` for a day). Memory comes from the platform (`docker stats`, the cgroup) or from the .NET runtime meter where the host exports it.
 - Disk full on the SQLite backend: submissions are answered `452 4.3.1 Insufficient system storage` (clients retry; other storage failures are `451 4.3.0`) and the log has "the disk is full" at error level. Free space (or move `Sqlite:DataDirectory`) and intake resumes by itself; nothing needs a restart. Watch the free space of the volume yourself: the process does not export it.
 - Durability warnings: `mta_storage_sqlite_sync_off == 1` when you did not choose `Sqlite:SyncMode=Off`, and `mta_storage_sqlite_quarantined == 1` (a file was found corrupt and replaced by an empty one; the evidence is in `<data>/quarantine/`).
 - Backups: `mta_backup_runs_total{outcome="failed"}` increasing, or `time() - mta_backup_last_success_timestamp_seconds` above two backup intervals. The gauge exists from start when a backup is already on disk, and is absent on a fresh install until the first one: with backups enabled on SQLite also alert on `absent(mta_backup_last_success_timestamp_seconds)` for longer than the interval (a PostgreSQL deployment has no such series, since backups are the database's own).
@@ -478,7 +599,7 @@ PostgreSQL command latency and pool state come from the Npgsql driver's own mete
 **What leaves the box over OTLP.** Treat the collector as part of your trust boundary.
 
 - Span attributes: the message id, the tenant id (an opaque id, kept so a tenant's traces can be found when supporting them), the recipient count, message size, source (`Smtp`/`Api`), the attempt number, the **recipient domain** of each delivery attempt, the MX host name, SMTP and enhanced codes, the webhook event type and the HTTP status code. No recipient or sender address, subject, body, webhook URL or endpoint id is exported in spans. Webhook calls to your customers carry no `traceparent` or other trace header either.
-- Metrics: labels are the small fixed sets in the tables. The one label that can contain a customer's name is the certificate `name` of `mta_tls_certificate_expiry_seconds` (`selfsigned:<hostname>`, `default`, or the name given to an ACME or uploaded certificate, which may be a domain). The Prometheus exporter keeps at most 1000 label combinations per metric and counts what it refuses in `eggmail_exporter_dropped_series_total` (only rendered once above 0: it means some label is unbounded); the OpenTelemetry SDK's own per-metric limit (2000 by default) applies to the OTLP export.
+- Metrics: labels are the small fixed sets in the tables. The one label that can contain a customer's name is the certificate `name` of `mta_tls_certificate_expiry_seconds` (`selfsigned:<hostname>:<thumbprint prefix>`, `default`, or the name given to an ACME or uploaded certificate, which may be a domain). The Prometheus exporter keeps at most 1000 label combinations per metric and counts what it refuses in `eggmail_exporter_dropped_series_total` (only rendered once above 0: it means some label is unbounded); the OpenTelemetry SDK's own per-metric limit (2000 by default) applies to the OTLP export.
 - Logs: the same records as the JSON console log, with their formatted message text (deliberately: raw templates are hard to read in a log backend). Log messages can contain recipient addresses and remote server error text, for example in delivery failures. If that must not leave the host, leave `Observability:OtlpEndpoint` empty and ship the JSON console log through your own pipeline, where you can filter it.
 
 **Logs.** With an endpoint set, the structured log (the same records as the JSON console log) is exported over OTLP as well. Records written before the logging pipeline exists (configuration errors) are console only.
@@ -489,7 +610,7 @@ Alert also on the readiness warnings of `/readyz` (`sqlite_sync_off`, `sqlite_qu
 
 **Direct delivery is the default.** Every message goes straight to the recipient's mail server on port 25. A relay (a smarthost or provider on 587, 465 or 2525) is an **opt-in fallback for the recipient domains you list**, for a network that blocks outbound port 25 or for a destination that only accepts mail from a known relay. It changes what the destination sees (the relay's IP, so SPF and the bounce path are the relay's business), which is why nothing is rerouted by default and the delivery history records the route of each delivery.
 
-Manage both in the dashboard (administrators: **Relay routes**, **TLS policies**) or through the admin API ([api.md](api.md#relay-routes-and-tls-policies-role-admin-addition)); there is no configuration key. Both are server-wide, stored in the config part of the database (so they move with a backend switch) and reloaded by the delivery engine within 30 seconds on every replica, and at once on the replica that took the change.
+Manage both in the dashboard (administrators: **Relay routes**, **TLS policies**) or through the admin API ([api.md](api.md#relay-routes-and-tls-policies-role-admin-addition)). The one exception is a single relay from the deployment configuration (`EGGMAIL_RELAY` and the keys of the `Delivery:Relay:Address` family): the server keeps it as the route `configuration-relay`, updates its host, port, TLS mode and login from the configuration at every start and removes it when the configuration is gone; do not use that name for a route of your own. Both are server-wide, stored in the config part of the database (so they move with a backend switch) and reloaded by the delivery engine within 30 seconds on every replica, and at once on the replica that took the change.
 
 * **A relay route** names the host, port, TLS mode, optional login, a priority and the recipient domains it carries (`example.com`; `*.example.com` for every subdomain at any depth, which does **not** include `example.com` itself, so list both to cover both; or `*`). Order of attempts: direct delivery, then the matching relays by priority. A connect timeout or refusal moves on to the next route; a 4xx, a TLS failure or a dropped connection is retried on the same route; a 5xx rejection is final and never sent through another route; a route that keeps failing to connect is skipped for a cooldown (circuit breaker) and tried again afterwards. To make a relay the only way out, list `*` and keep in mind that direct delivery is still tried first; there is no switch that disables direct delivery in the dashboard. A relay host is a host name, not an IP address (the engine resolves it in DNS). If the relay refuses the login (a rotated password, a mistyped one) the affected mail waits and is retried (`454 4.7.0 relay authentication failed`) instead of bouncing: fix the route and it goes out. **Mail sent through a relay is not covered by TLS policies, MTA-STS or DANE of the destination**; the dashboard and the API warn when an `encrypt` or `verify` policy overlaps a relay's domains.
 * **The relay password** is encrypted with the same key ring as DKIM and webhook secrets (`Secrets:KeyProtection`) before it is stored, is never returned by the API or shown by the dashboard (only "password set"), and is not written to the log. To change it, type a new one; to drop it, "Remove the stored user name and password". Changing the host, port or TLS mode of a route that keeps its login needs the password typed again (a stored secret is never sent somewhere new on its own). Use TLS mode `verify` (STARTTLS, usually 587) or `implicit` (port 465) with a login: both validate the relay's certificate and host name. `required` only encrypts and `starttls` is opportunistic, so a password would go to whoever answers; the dashboard and the API warn, and `none` with a login is refused.

@@ -17,15 +17,37 @@ public class BounceAddressCacheTests
     {
         public int Runs;
 
-        public EmailAddress? Make(VerpCodec codec, Guid tenant, Guid domain, DateTimeOffset now)
+        public EmailAddress? Make(VerpCodec codec, Guid tenant, Guid domain, DateTimeOffset now, string host = "bounces.egg.test", string destination = "dest.example")
         {
             Runs++;
-            return EmailAddress.Parse(codec.CreateAddress(tenant, domain, "bounces.egg.test", now));
+            return EmailAddress.Parse(codec.CreateAddress(tenant, domain, host, now, destination));
         }
     }
 
-    private static EmailAddress? Get(BounceAddressCache cache, Counting counter, VerpCodec codec, Guid tenant, Guid domain, DateTimeOffset now) =>
-        cache.GetOrCreate(codec.ActiveKeyId, tenant, domain, VerpCodec.HourStamp(now), (counter, codec, tenant, domain, now), static s => s.counter.Make(s.codec, s.tenant, s.domain, s.now));
+    private static EmailAddress? Get(BounceAddressCache cache, Counting counter, VerpCodec codec, Guid tenant, Guid domain, DateTimeOffset now, string host = "bounces.egg.test", string destination = "dest.example") =>
+        cache.GetOrCreate(codec.ActiveKeyId, tenant, domain, host, destination, VerpCodec.HourStamp(now), (counter, codec, tenant, domain, now, host, destination), static s => s.counter.Make(s.codec, s.tenant, s.domain, s.now, s.host, s.destination));
+
+    [Fact]
+    public void The_host_and_the_destination_domain_are_part_of_the_key_because_the_address_carries_both()
+    {
+        var cache = new BounceAddressCache();
+        var counter = new Counting();
+        var now = new DateTimeOffset(2026, 10, 15, 10, 5, 0, TimeSpan.Zero);
+
+        var shared = Get(cache, counter, Codec, TenantA, DomainOne, now);
+        var dedicated = Get(cache, counter, Codec, TenantA, DomainOne, now, host: "bounce.example.com");
+        var otherDestination = Get(cache, counter, Codec, TenantA, DomainOne, now, destination: "other.example");
+
+        Assert.Equal(3, counter.Runs);
+        Assert.EndsWith("@bounce.example.com", dedicated!.Value.ToString());
+        Assert.EndsWith("@bounces.egg.test", shared!.Value.ToString());
+        Assert.NotEqual(shared, otherDestination);   // another destination domain is another tag
+        Assert.True(Codec.TryDecode(otherDestination!.Value.LocalPart, now, TimeSpan.FromHours(1), out var token));
+        Assert.Equal(VerpDestinationCheck.Match, Codec.CheckDestination(token, "other.example"));
+
+        Assert.Equal(dedicated, Get(cache, counter, Codec, TenantA, DomainOne, now, host: "bounce.example.com"));
+        Assert.Equal(3, counter.Runs);
+    }
 
     [Fact]
     public void An_address_is_made_once_per_tenant_domain_and_hour_and_each_combination_has_its_own()
@@ -96,14 +118,14 @@ public class BounceAddressCacheTests
     {
         var cache = new BounceAddressCache(maxEntries: 3);
         int runs = 0;
-        Assert.Null(cache.GetOrCreate(1, TenantA, DomainOne, 5, 0, _ => { runs++; return null; }));
-        Assert.Null(cache.GetOrCreate(1, TenantA, DomainOne, 5, 0, _ => { runs++; return null; }));
+        Assert.Null(cache.GetOrCreate(1, TenantA, DomainOne, "h", "d", 5, 0, _ => { runs++; return null; }));
+        Assert.Null(cache.GetOrCreate(1, TenantA, DomainOne, "h", "d", 5, 0, _ => { runs++; return null; }));
         Assert.Equal(2, runs);
         Assert.Equal(0, cache.Count);
 
         for (int hour = 0; hour < 20; hour++)
         {
-            var made = cache.GetOrCreate(1, TenantA, DomainOne, hour, hour, h => EmailAddress.Parse($"b+h{h}@bounces.egg.test"));
+            var made = cache.GetOrCreate(1, TenantA, DomainOne, "h", "d", hour, hour, h => EmailAddress.Parse($"b+h{h}@bounces.egg.test"));
             Assert.Equal($"b+h{hour}@bounces.egg.test", made!.Value.ToString());
             Assert.True(cache.Count <= 3);
         }
