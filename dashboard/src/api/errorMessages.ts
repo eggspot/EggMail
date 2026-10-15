@@ -4,6 +4,7 @@ import { ApiError } from './client';
 const MESSAGES: Record<string, string> = {
   unauthorized: 'You are not signed in, or your session has expired. Please sign in again.',
   forbidden: 'You do not have permission to do that.',
+  password_change_required: 'This account has a temporary password. Choose your own on the Account page first.',
   tenant_disabled: 'This tenant is suspended, so it cannot be used right now. An administrator can activate it again.',
   not_found: 'That item was not found. It may have been deleted.',
   validation_failed: 'Some of the values are not valid. Check the highlighted fields.',

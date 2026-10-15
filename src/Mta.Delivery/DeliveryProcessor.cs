@@ -295,7 +295,7 @@ public sealed class DeliveryProcessor
         (Guid domainId, string host) = await FindReturnPathAsync(d.SendingDomain, ct).ConfigureAwait(false);
 
         // The token is also bound to the destination domain (all recipients of a delivery group share it), so a report that names an address in
-        // another domain cannot get that address suppressed (docs/decisions.md 91). It only changes with the key, the tenant, the sending domain,
+        // another domain cannot get that address suppressed (docs/decisions.md 92). It only changes with the key, the tenant, the sending domain,
         // the host, the destination domain and the hour: see BounceAddressCache.
         var verp = _s.Verp;
         EmailAddress? bounce = _bounceAddresses.GetOrCreate(verp.ActiveKeyId, d.TenantId, domainId, host, d.RecipientDomain, Mta.Dsn.VerpCodec.HourStamp(now), (verp, d.TenantId, domainId, host, d.RecipientDomain, now), static s =>

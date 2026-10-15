@@ -76,37 +76,9 @@ public static class ApiHosting
     }
 
     /// <summary>
-    /// Creates the first administrator from <c>Dashboard:BootstrapAdminUser</c> and the password in <c>Dashboard:BootstrapAdminPasswordFile</c> when no admin
-    /// exists yet. The password is read from a file so it never appears in the environment or the process list.
+    /// Creates the first administrator when no administrator exists yet (<see cref="FirstAdministrator"/>): from <c>Dashboard:BootstrapAdminPassword</c>, from the file
+    /// <c>Dashboard:BootstrapAdminPasswordFile</c>, or with a generated password (returned in the result so the caller can print it once; it is never logged).
     /// </summary>
-    public static async Task EnsureBootstrapAdminAsync(MtaConfig config, IStorage storage, IClock clock, IMtaLog log, CancellationToken ct)
-    {
-        string? file = config.Dashboard.BootstrapAdminPasswordFile;
-        if (string.IsNullOrWhiteSpace(file))
-        {
-            return;
-        }
-
-        try
-        {
-            if ((await storage.Config.GetDashboardUsersAsync(ct).ConfigureAwait(false)).Any(u => u.Role == DashboardRole.Admin))
-            {
-                return;
-            }
-
-            string password = (await File.ReadAllTextAsync(file, ct).ConfigureAwait(false)).Trim();
-            if (await DashboardAccounts.EnsureAdminAsync(storage.Config, clock, config.Dashboard.BootstrapAdminUser, password, ct).ConfigureAwait(false))
-            {
-                log.Write(MtaLogLevel.Information, "startup", $"Created the first dashboard administrator '{config.Dashboard.BootstrapAdminUser}'.");
-            }
-        }
-        catch (StorageConflictException)
-        {
-            // Another replica created the administrator at the same moment.
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
-        {
-            log.Write(MtaLogLevel.Error, "startup", "The bootstrap administrator could not be created (Dashboard:BootstrapAdminPasswordFile): " + ex.Message);
-        }
-    }
+    public static Task<FirstAdministratorResult> EnsureFirstAdministratorAsync(MtaConfig config, IStorage storage, IClock clock, IMtaLog log, CancellationToken ct) =>
+        FirstAdministrator.EnsureAsync(config, storage.Config, clock, log, ct);
 }

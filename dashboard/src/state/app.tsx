@@ -28,6 +28,8 @@ export interface AppContextValue {
   logout: () => Promise<void>;
   retry: () => void;
   refreshCapabilities: () => Promise<void>;
+  /** Reads who is signed in again (after the temporary password was replaced) and loads what the full dashboard needs. */
+  refreshMe: () => Promise<void>;
   /** Admin only: reloads the tenant list behind the header picker (after a tenant was created, renamed or suspended). `select` also acts on that tenant. */
   refreshTenants: (select?: string) => Promise<void>;
 }
@@ -47,6 +49,7 @@ const defaultValue: AppContextValue = {
   logout: async () => {},
   retry: () => {},
   refreshCapabilities: async () => {},
+  refreshMe: async () => {},
   refreshTenants: async () => {},
 };
 
@@ -79,7 +82,8 @@ export function AppProvider({ children }: { children: ComponentChildren }) {
 
   const loadTenants = useCallback(
     async (user: Me) => {
-      if (user.role !== 'admin') {
+      // With a temporary password every call but /me, the password change and sign-out is refused, so there is nothing to load yet.
+      if (user.role !== 'admin' || user.mustChangePassword) {
         setTenants([]);
         applyTenant(null);
         return;
@@ -184,6 +188,12 @@ export function AppProvider({ children }: { children: ComponentChildren }) {
     [loadTenants, refreshCapabilities],
   );
 
+  const refreshMe = useCallback(async () => {
+    const user = await api.me();
+    await loadTenants(user);
+    setMe(user);
+  }, [loadTenants]);
+
   const logout = useCallback(async () => {
     try {
       await api.logout();
@@ -211,9 +221,10 @@ export function AppProvider({ children }: { children: ComponentChildren }) {
       logout,
       retry: () => setAttempt((n) => n + 1),
       refreshCapabilities,
+      refreshMe,
       refreshTenants,
     }),
-    [status, me, capabilities, offlineError, signInNotice, tenants, tenantId, applyTenant, login, logout, refreshCapabilities, refreshTenants],
+    [status, me, capabilities, offlineError, signInNotice, tenants, tenantId, applyTenant, login, logout, refreshCapabilities, refreshMe, refreshTenants],
   );
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

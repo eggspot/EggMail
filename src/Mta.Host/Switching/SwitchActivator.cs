@@ -112,6 +112,7 @@ public sealed class SwitchActivator(IConfigurationRoot configuration, string boo
             return provider switch
             {
                 Microsoft.Extensions.Configuration.EnvironmentVariables.EnvironmentVariablesConfigurationProvider => "an environment variable",
+                Mta.Host.Configuration.EnvironmentAliasesProvider => "an EGGMAIL_* environment variable",
                 Microsoft.Extensions.Configuration.CommandLine.CommandLineConfigurationProvider => "the command line",
                 FileConfigurationProvider => "a mounted configuration file",
                 _ => "the deployment configuration",

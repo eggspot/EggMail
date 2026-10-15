@@ -231,7 +231,7 @@ public class DeliveryDkimAndLimitsTests
         Assert.True(verp.TryDecode(sender[..sender.IndexOf('@')], DateTimeOffset.UtcNow, TimeSpan.FromHours(1), out var token));
         Assert.Equal(DeliveryFixture.Tenant, token.TenantId);
         Assert.True(Mta.Dsn.VerpCodec.MatchesDomain(token, domainId));
-        // Bound to the domain the message went to: a report that names an address elsewhere is not acted on (docs/decisions.md 91).
+        // Bound to the domain the message went to: a report that names an address elsewhere is not acted on (docs/decisions.md 92).
         Assert.Equal(Mta.Dsn.VerpDestinationCheck.Match, verp.CheckDestination(token, "dest.example"));
         Assert.Equal(Mta.Dsn.VerpDestinationCheck.Mismatch, verp.CheckDestination(token, "other.example"));
     }
