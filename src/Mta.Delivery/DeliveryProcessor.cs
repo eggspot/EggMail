@@ -267,7 +267,7 @@ public sealed class DeliveryProcessor
 
     // ---------------------------------------------------------------- envelope
 
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (Guid Id, long ExpiresAt)> _domainIds = new(StringComparer.OrdinalIgnoreCase);
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (Guid Id, string ReturnPathHost, long ExpiresAt)> _domainIds = new(StringComparer.OrdinalIgnoreCase);
 
     private async ValueTask<EmailAddress> ChooseEnvelopeFromAsync(ClaimedDelivery d, DateTimeOffset now, CancellationToken ct)
     {
@@ -276,30 +276,36 @@ public sealed class DeliveryProcessor
             return d.EnvelopeFrom;
         }
 
-        // The token carries the sending domain's id so a bounce can be attributed without a lookup of the message.
-        Guid domainId = await FindDomainIdAsync(d.SendingDomain, ct).ConfigureAwait(false);
-        string address = _s.Verp.CreateAddress(d.TenantId, domainId, _options.BounceDomain!, now);
+        // The token carries the sending domain's id so a bounce can be attributed without a lookup of the message. The host after the @ is the
+        // sending domain's own return-path host (bounce.<domain>) once its CNAME has been verified, otherwise the shared bounce domain: only
+        // the first is a domain the customer controls, which is what lets SPF align with the From domain.
+        (Guid domainId, string host) = await FindReturnPathAsync(d.SendingDomain, ct).ConfigureAwait(false);
+        // The token is also bound to the destination domain (all recipients of a delivery group share it), so a report that names an address in
+        // another domain cannot get that address suppressed (docs/decisions.md 88).
+        string address = _s.Verp.CreateAddress(d.TenantId, domainId, host, now, d.RecipientDomain);
         // allowUtf8: a bounce domain configured as a U-label is accepted and put on the wire in its A-label form (the local part is ASCII).
         return EmailAddress.TryParse(address, allowUtf8: true, out var parsed) ? parsed : d.EnvelopeFrom;
     }
 
-    private async ValueTask<Guid> FindDomainIdAsync(string? sendingDomain, CancellationToken ct)
+    private async ValueTask<(Guid Id, string Host)> FindReturnPathAsync(string? sendingDomain, CancellationToken ct)
     {
+        string shared = _options.BounceDomain!;
         if (string.IsNullOrEmpty(sendingDomain))
         {
-            return Guid.Empty;
+            return (Guid.Empty, shared);
         }
 
         long now = _s.Clock.Timestamp;
         if (_domainIds.TryGetValue(sendingDomain, out var cached) && now < cached.ExpiresAt)
         {
-            return cached.Id;
+            return (cached.Id, cached.ReturnPathHost);
         }
 
         var record = await _s.Storage.Config.FindDomainByNameAsync(sendingDomain, ct).ConfigureAwait(false);
         Guid id = record?.Id ?? Guid.Empty;
-        _domainIds[sendingDomain] = (id, now + 60 * Stopwatch.Frequency);
-        return id;
+        string host = SenderPolicy.SelectReturnPath(record, shared).Host;
+        _domainIds[sendingDomain] = (id, host, now + 60 * Stopwatch.Frequency);
+        return (id, host);
     }
 
     // ---------------------------------------------------------------- routes

@@ -79,22 +79,58 @@ public sealed class BounceProcessor
         switch (report.Kind)
         {
             case InboundReportKind.DeliveryStatus:
-                await HandleBounceAsync(tenant, report, now, ct).ConfigureAwait(false);
+                await HandleBounceAsync(tenant, token, report, now, ct).ConfigureAwait(false);
                 return BounceOutcome.Bounce;
             case InboundReportKind.FeedbackReport:
-                await HandleComplaintAsync(tenant, report, now, ct).ConfigureAwait(false);
+                await HandleComplaintAsync(tenant, token, report, now, ct).ConfigureAwait(false);
                 return BounceOutcome.Complaint;
             default:
                 return BounceOutcome.Ignored;
         }
     }
 
-    private async Task HandleBounceAsync(Tenant tenant, InboundReport report, DateTimeOffset now, CancellationToken ct)
+    /// <summary>
+    /// The address a report is about: the first of the candidates that parses and, when the token is bound to a destination domain, lies in that
+    /// domain. Anyone who received a message holds a valid token (it is in the Return-Path), so without this a forged report could name any
+    /// address and have it suppressed for the tenant. A forwarded message is reported by the final server with the forwarding target as
+    /// Final-Recipient; the Original-Recipient field is what names the address the message was sent to, so it is a candidate as well.
+    /// </summary>
+    private bool TryChooseRecipient(VerpToken token, string kind, out EmailAddress address, params string?[] candidates)
+    {
+        EmailAddress? first = null;
+        foreach (string? candidate in candidates)
+        {
+            if (!EmailAddress.TryParse(candidate, allowUtf8: true, out var parsed))
+            {
+                continue;
+            }
+
+            switch (_verp.CheckDestination(token, parsed.Domain))
+            {
+                case VerpDestinationCheck.Unbound:   // a token issued before destinations were bound: the first usable address, as before
+                case VerpDestinationCheck.Match:
+                    address = parsed;
+                    return true;
+                default:
+                    first ??= parsed;
+                    break;
+            }
+        }
+
+        if (first is not null)
+        {
+            _log.Write(MtaLogLevel.Information, "bounce", $"{kind} ignored: it names an address outside the domain its bounce address was issued for");
+        }
+
+        address = default;
+        return false;
+    }
+
+    private async Task HandleBounceAsync(Tenant tenant, VerpToken token, InboundReport report, DateTimeOffset now, CancellationToken ct)
     {
         foreach (var r in report.Recipients.Where(r => r.IsPermanentFailure))
         {
-            string? address = r.FinalRecipient ?? r.OriginalRecipient;
-            if (!EmailAddress.TryParse(address, allowUtf8: true, out var parsed))
+            if (!TryChooseRecipient(token, "bounce", out var parsed, r.FinalRecipient, r.OriginalRecipient))
             {
                 continue;
             }
@@ -114,9 +150,9 @@ public sealed class BounceProcessor
         }
     }
 
-    private async Task HandleComplaintAsync(Tenant tenant, InboundReport report, DateTimeOffset now, CancellationToken ct)
+    private async Task HandleComplaintAsync(Tenant tenant, VerpToken token, InboundReport report, DateTimeOffset now, CancellationToken ct)
     {
-        if (!EmailAddress.TryParse(report.ArfOriginalRecipient, allowUtf8: true, out var parsed))
+        if (!TryChooseRecipient(token, "complaint", out var parsed, report.ArfOriginalRecipient))
         {
             _log.Write(MtaLogLevel.Information, "bounce", "complaint without a usable original recipient was ignored");
             return;
