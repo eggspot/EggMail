@@ -227,20 +227,28 @@ Run NTP (`timedatectl status` shows `System clock synchronized: yes`). DKIM sign
 
 ## 2. DNS records
 
-EggMail shows the exact records to publish for each sending domain. Create the domain, then copy the records **from the dashboard** (Domains, open the domain, "DNS records") or from the API:
+EggMail prints the exact records to publish for each sending domain ([operations.md, "Adding a sending domain and its DNS records"](operations.md#adding-a-sending-domain-and-its-dns-records)). Add the domain in the dashboard (Domains, Add domain) or with the API, and take the records from the domain's page or as a zone file:
 
 ```sh
-$ curl -sk -b jar -H "X-CSRF-Token: $CSRF" -H "X-Tenant-Id: $TENANT" -H 'content-type: application/json' -d "{\"name\":\"$DOMAIN\"}" $API/domains | tee domain.json | jq -r '.records[] | "\(.purpose)\t\(.required)\t\(.type)\t\(.host)\t\(.value)"'
-dkim    true    TXT     egg202610._domainkey.example.com    v=DKIM1; k=rsa; p=MIIBIjANBgkqh...
-return_path  true  CNAME  bounce.example.com   bounces.example.com
-spf     false   TXT     example.com   v=spf1 ~all
-dmarc   false   TXT     _dmarc.example.com   v=DMARC1; p=none; rua=mailto:dmarc@example.com
+$ curl -sk -b jar -H "X-CSRF-Token: $CSRF" -H "X-Tenant-Id: $TENANT" -H 'content-type: application/json' -d "{\"name\":\"$DOMAIN\"}" $API/domains | tee domain.json | jq '{id, status, readyToSend}'
 $ export DOMAIN_ID=$(jq -r .id domain.json)
+$ curl -sk -b jar -H "X-Tenant-Id: $TENANT" "$API/domains/$DOMAIN_ID/records?format=zone"
+; DNS records for example.com
+; DKIM (required): Lets receivers verify that mail from this domain is signed by EggMail.
+egg202610._domainkey.example.com. 3600 IN TXT "v=DKIM1; k=rsa; p=MIIBIjANBgkqh..." "...IDAQAB"
+; Return-path (required): Makes bounce messages for this domain reach EggMail.
+bounce.example.com. 3600 IN CNAME bounces.example.com.
+; SPF (recommended): ... ; example.com. 3600 IN TXT "v=spf1 ip4:203.0.113.10 ~all"
+; DMARC (recommended): ... ; _dmarc.example.com. 3600 IN TXT "v=DMARC1; p=none; rua=mailto:dmarc@example.com"
 ```
 
-Only the **required** records (DKIM, and the return-path CNAME when `Delivery:BounceDomain` is set) decide verification; SPF and DMARC are advice. The selector is `egg<YYYYMM>` of the creation month, so your selector name will differ from the example. Use the values the dashboard shows, not the ones in this document.
+For a fresh installation you can instead let the server register the domain at start: `Domains__Bootstrap: example.com` in `compose.yaml` creates a `Default` tenant, the domain and its DKIM key, and writes the records to the log once (`docker compose logs eggmail | grep -A30 "DNS records for"`). `mta domains records example.com` and `mta domains check example.com` do the same offline; with SQLite the server must be stopped first.
 
-The state machine ([api.md](api.md#domains-domains-scope)): the domain is `pending`, checked 90 s after creation, then every 90 s for 15 minutes, then every 15 minutes for 24 hours, then hourly. `POST $API/domains/$DOMAIN_ID/verify` checks immediately (once per 30 s).
+**Set these two before you copy anything**, because the records depend on them: `Hostname` must be the fully qualified name (`mail.example.com`; with a machine-name default the MTA-STS, bounce-MX and PTR advice is left out), and `Delivery__PublicSendingIp: 203.0.113.10` in `compose.yaml` (without it, and without `Api__SpfInclude`, the SPF record is derived from the A record of `Hostname` or left out).
+
+Only the **required** records (DKIM, and the return-path CNAME when `Delivery:BounceDomain` is set) decide verification; SPF, DMARC, TLS-RPT, MTA-STS, the bounce MX and the PTR are recommended and never block sending. The selector is `egg<YYYYMM>` of the creation month, so your selector name will differ from the example. Use the values the dashboard shows, not the ones in this document.
+
+The state machine ([api.md](api.md#domains-domains-scope)): the domain is `pending`, checked 90 s after creation, then every 90 s for 15 minutes, then every 15 minutes for 24 hours, then hourly. The **Check DNS** button, or `POST $API/domains/$DOMAIN_ID/verify`, checks immediately (once per 30 s) and the page shows for each record OK, Missing, Invalid, Mismatch or Pending with what was found next to what is expected.
 
 ### 2.1 DKIM
 
@@ -290,24 +298,24 @@ $ swaks --to postmaster@$BOUNCE --from you@gmail.com --server $HOST --port 25 -t
 - **Works if**: `RCPT TO:<postmaster@bounces.example.com>` is accepted and `RCPT TO:<anyone@example.org>` is refused (`550`/`554`: the listener is not an open relay). The dashboard/API `returnPathVerified` is `true` once the CNAME is found.
 - **If not**: a connection that hangs or times out means port 25 inbound is blocked (provider or the `25:2526` mapping missing). A refused `postmaster@` means `Delivery:BounceDomain` is not set to the domain in the RCPT.
 
-> **Which build.** The envelope sender is on the sending domain's own `bounce.example.com` host (so SPF aligns with the `From` domain) only in builds that contain decision 89 ([progress.md](progress.md#plan-coverage), PR 90). Older builds, including every `nightly` before it, always used the shared bounce domain (`b+token@bounces.example.com`): SPF then passes for `bounces.example.com` but does not align with the `From` domain, and `dmarc=pass` comes from DKIM alone. Check which one you run: the `Authentication-Results` of step 3 shows `smtp.mailfrom=b+...@bounce.example.com` (new) or `@bounces.example.com` (old). The records are the same for both.
+> **Which build.** The envelope sender is on the sending domain's own `bounce.example.com` host (so SPF aligns with the `From` domain) only in builds that contain decision 90 ([progress.md](progress.md#plan-coverage), PR 90). Older builds, including every `nightly` before it, always used the shared bounce domain (`b+token@bounces.example.com`): SPF then passes for `bounces.example.com` but does not align with the `From` domain, and `dmarc=pass` comes from DKIM alone. Check which one you run: the `Authentication-Results` of step 3 shows `smtp.mailfrom=b+...@bounce.example.com` (new) or `@bounces.example.com` (old). The records are the same for both.
 
 ### 2.3 SPF for the sending domain (advice) and the DMARC record
 
-The dashboard's advice for the `From` domain is `v=spf1 ~all`: an SPF record that authorizes **nothing**. It is harmless (DMARC passes through DKIM) but also useless. Make it say what is true:
+SPF for the `From` domain is shown as a comment in the zone file, because most domains already have an SPF record and a second one breaks SPF: merge the mechanism into the record that exists, or uncomment the line when there is none. With `Delivery__PublicSendingIp` set it reads:
 
 ```text
 example.com.   TXT  "v=spf1 ip4:203.0.113.10 ~all"
 ```
 
-If you send from several customer domains, publish one record at your own name and let the customers `include:` it, and set `Api:SpfInclude` to that name so the dashboard suggests it:
+If you send for several customer domains, publish one record at your own name and let the customers `include:` it, and set `Api:SpfInclude` to that name so the suggestion reads `include:`:
 
 ```sh
 # DNS (your own domain):  spf.example.com. TXT "v=spf1 ip4:203.0.113.10 -all"
-# compose.yaml:           Api__SpfInclude: spf.example.com     # then the dashboard advice reads  v=spf1 include:spf.example.com ~all
+# compose.yaml:           Api__SpfInclude: spf.example.com     # then the suggestion reads  v=spf1 include:spf.example.com ~all
 ```
 
-DMARC. The dashboard suggests `v=DMARC1; p=none; rua=mailto:dmarc@example.com`. Two things to decide first:
+DMARC. The suggestion is `v=DMARC1; p=none; rua=mailto:dmarc@example.com` (`Domains:DmarcPolicy` and `Domains:DmarcReportAddress` change it). Two things to decide first:
 
 1. **A mailbox must receive the reports.** `dmarc@example.com` must exist and be read, and EggMail does not receive mail for your domain. Point `rua` at a real mailbox you read, for example `rua=mailto:dmarc-reports@example.com` on your normal mail provider. If the `rua` address is on a **different domain** than the policy domain, that other domain must authorize it with a record, or large receivers will not send reports:
 
@@ -329,7 +337,7 @@ $ dig +short TXT $DOMAIN | grep spf1
 ### 2.4 Verify the domain
 
 ```sh
-$ curl -sk -b jar -H "X-CSRF-Token: $CSRF" -H "X-Tenant-Id: $TENANT" -X POST $API/domains/$DOMAIN_ID/verify | jq '{status, returnPathVerified, lastError, records: [.records[] | {purpose, status}]}'
+$ curl -sk -b jar -H "X-CSRF-Token: $CSRF" -H "X-Tenant-Id: $TENANT" -X POST $API/domains/$DOMAIN_ID/verify | jq '{status, readyToSend, returnPathVerified, lastError, records: [.records[] | {purpose, status}]}'
 { "status": "verified", "returnPathVerified": true, "lastError": null,
   "records": [ {"purpose":"dkim","status":"ok"}, {"purpose":"return_path","status":"ok"}, {"purpose":"spf","status":"ok"}, {"purpose":"dmarc","status":"ok"} ] }
 ```
@@ -339,7 +347,12 @@ $ curl -sk -b jar -H "X-CSRF-Token: $CSRF" -H "X-Tenant-Id: $TENANT" -X POST $AP
 
 ### 2.5 MTA-STS and TLS-RPT for the bounce domain (optional but recommended)
 
-**What applies to EggMail.** Today EggMail is an outbound server (inbound mail support is planned and will change this section: hosting MTA-STS and receiving TLS reports for domains EggMail accepts mail for). It *consumes* the MTA-STS and TLS-RPT records of the domains it sends to; it does **not** host policy files for yours. Those records protect mail *to* a domain, so they matter for the domains that receive mail: the bounce domain (the only domain EggMail itself receives for) and your real mailbox domain (whatever hosts `you@example.com`; its provider usually publishes MTA-STS for you, see their docs). Doing it for the bounce domain protects the bounces and complaint reports (which contain recipient addresses) in transit and gets you TLS reports from Google, Microsoft and others about how they reach it.
+**What applies to EggMail.** MTA-STS and TLS-RPT protect mail *to* a domain, so they matter only for a domain whose MX records point at this server (inbound mail support is planned and will make that the common case). Two situations:
+
+- **A registered sending domain that also receives its mail on EggMail** (rare today): set `Domains__MtaStsMode: Testing` (later `Enforce`). EggMail then serves `https://mta-sts.<domain>/.well-known/mta-sts.txt` itself, the domain page lists the `_mta-sts` TXT, the `mta-sts.<domain>` CNAME and the `_smtp._tls` TXT, and port 443 of that name must reach the HTTPS listener (container port 8443) with a certificate that covers `mta-sts.<domain>` (list it in `Acme:Domains`). Details and the safe way to switch it off: [operations.md, MTA-STS](operations.md#mta-sts). Everything below is the same check, done by hand.
+- **The bounce domain** (`bounces.example.com`), which EggMail receives for but which is not a registered sending domain: EggMail does not serve its policy, so publish it yourself as follows. Protecting bounces and complaint reports (they contain recipient addresses) in transit, and getting TLS reports from Google, Microsoft and others about how they reach it, is worth an hour.
+
+Your real mailbox domain (wherever `you@example.com` lives) is the business of its mail provider, who usually publishes both.
 
 1. **The policy file.** It must be served over HTTPS at `https://mta-sts.bounces.example.com/.well-known/mta-sts.txt` with a certificate valid for `mta-sts.bounces.example.com`, status 200, no redirects. EggMail does not serve it; use any static HTTPS host (a small web server, Cloudflare Pages or Workers with a custom hostname, an S3/CDN bucket). Content, line endings CRLF preferred, LF accepted by most:
 
@@ -852,7 +865,7 @@ JSON
 ```
 
    - **Works if**: a test pull request cannot be merged until `build-test` is green, and a direct push to `main` is refused.
-   - **Pitfall (read before enabling)**: `ci` has `paths-ignore: docs/**, **.md` on `pull_request`. A pull request that changes only documentation never starts the workflow, so the required check stays "Expected: waiting for status" forever and the pull request can never be merged. Builds of the repository that contain decision 88 (PR 89) start the workflow on every pull request and skip the work inside the job for documentation-only changes, which a required check can live with. Before that, either merge that change first or do not mark the check required: look at `.github/workflows/ci.yml` (`paths-ignore` under `pull_request` means the old behaviour).
+   - **Pitfall (read before enabling)**: `ci` has `paths-ignore: docs/**, **.md` on `pull_request`. A pull request that changes only documentation never starts the workflow, so the required check stays "Expected: waiting for status" forever and the pull request can never be merged. Builds of the repository that contain decision 89 (PR 89) start the workflow on every pull request and skip the work inside the job for documentation-only changes, which a required check can live with. Before that, either merge that change first or do not mark the check required: look at `.github/workflows/ci.yml` (`paths-ignore` under `pull_request` means the old behaviour).
 
 5. Also worth a minute: Settings, **Actions**, General: "Workflow permissions: read repository contents" (the workflows declare their own), "Require approval for first-time contributors"; **Code security**: enable Dependabot alerts and secret scanning with push protection (free for public repositories).
 
