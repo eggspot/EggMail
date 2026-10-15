@@ -170,7 +170,7 @@ public sealed class WebhooksApi(ApiAuthenticator auth, IStorage storage, ISecret
         ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.Webhooks).ConfigureAwait(false);
         WebhookEndpointRecord endpoint = await FindOwnAsync(caller, id, context.RequestAborted).ConfigureAwait(false);
 
-        // An inbound route whose action posts to the endpoint would fail every message from now on: the route has to be changed first (decision 92).
+        // An inbound route whose action posts to the endpoint would fail every message from now on: the route has to be changed first (decision 95).
         var routes = await storage.Inbound.GetRoutesUsingWebhookEndpointAsync(endpoint.Id, context.RequestAborted).ConfigureAwait(false);
         if (routes.Count > 0)
         {

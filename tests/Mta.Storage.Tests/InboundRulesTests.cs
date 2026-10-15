@@ -247,4 +247,86 @@ public class InboundRulesTests
         Assert.Throws<ArgumentException>(() => StorageOptionsValidation.Validate(new StorageOptions { Inbound = new InboundStorageOptions { RetentionDays = -1 } }));
         Assert.Equal(["Inbound:RetentionDays"], StorageOptionsValidation.UnlimitedRetentionKnobs(new StorageOptions { Inbound = new InboundStorageOptions { RetentionDays = 0 } }));
     }
+
+    private static readonly InboundCeilings Ceilings = new(10_000_000, 100, 10, 1L << 30, 4L << 30, 30);
+
+    [Fact]
+    public void A_tenant_can_only_lower_the_operators_limits()
+    {
+        InboundDomainSettings ok = new(Domain, Tenant, true, InboundDmarcAction.Flag, 5_000_000, 50, 5, 1L << 29, 14, Now);
+        Assert.Empty(InboundRules.ValidateSettings(ok, Ceilings));
+        Assert.Empty(InboundRules.ValidateSettings(InboundDomainSettings.Disabled(Domain, Tenant, Now), Ceilings));   // nothing set: the ceilings and defaults apply
+        Assert.Empty(InboundRules.ValidateSettings(ok with { MaxMessageBytes = 10_000_000, MaxMessagesPerMinute = 100, MaxMessagesPerMinutePerRemote = 10, MaxStoredBytes = 1L << 30, RetentionDays = 30 }, Ceilings));   // equal is fine
+
+        string[] fields = InboundRules.ValidateSettings(ok with { MaxMessageBytes = 10_000_001, MaxMessagesPerMinute = 101, MaxMessagesPerMinutePerRemote = 11, MaxStoredBytes = (1L << 30) + 1, RetentionDays = 31 }, Ceilings).Select(e => e.Field).ToArray();
+        Assert.Equal(["maxMessageBytes", "maxMessagesPerMinute", "maxMessagesPerMinutePerRemote", "maxStoredBytes", "retentionDays"], fields);
+
+        // Unlimited and forever are above any finite ceiling.
+        Assert.Equal(["maxStoredBytes", "retentionDays"], InboundRules.ValidateSettings(ok with { MaxStoredBytes = 0, RetentionDays = 0 }, Ceilings).Select(e => e.Field).ToArray());
+
+        // Without a stored-bytes or retention ceiling, unlimited and forever are the operator's to allow.
+        var open = Ceilings with { MaxStoredBytesPerDomain = 0, MaxRetentionDays = 0 };
+        Assert.Empty(InboundRules.ValidateSettings(ok with { MaxStoredBytes = 0, RetentionDays = 0 }, open));
+    }
+
+    [Theory]
+    [InlineData(null, 7, 0, 7)]
+    [InlineData(null, 7, 5, 5)]
+    [InlineData(3, 7, 5, 3)]
+    [InlineData(90, 7, 30, 30)]
+    [InlineData(0, 7, 30, 30)]
+    [InlineData(0, 7, 0, 0)]
+    [InlineData(null, 0, 30, 30)]
+    [InlineData(null, -1, 0, 7)]
+    public void The_retention_ceiling_cuts_a_longer_value_and_turns_forever_into_the_ceiling(int? domain, int serverDefault, int ceiling, int expected)
+    {
+        Assert.Equal(expected, InboundRules.ResolveRetentionDays(domain, serverDefault, ceiling));
+    }
+
+    [Fact]
+    public void The_server_retention_options_must_fit_their_ceiling()
+    {
+        StorageOptionsValidation.Validate(new StorageOptions { Inbound = new InboundStorageOptions { RetentionDays = 7, MaxRetentionDays = 30 } });
+        Assert.Throws<ArgumentException>(() => StorageOptionsValidation.Validate(new StorageOptions { Inbound = new InboundStorageOptions { RetentionDays = 0, MaxRetentionDays = 30 } }));
+        Assert.Throws<ArgumentException>(() => StorageOptionsValidation.Validate(new StorageOptions { Inbound = new InboundStorageOptions { RetentionDays = 31, MaxRetentionDays = 30 } }));
+        Assert.Throws<ArgumentException>(() => StorageOptionsValidation.Validate(new StorageOptions { Inbound = new InboundStorageOptions { MaxRetentionDays = -1 } }));
+    }
+
+    [Fact]
+    public void A_forward_route_refuses_its_own_domain_as_a_target()
+    {
+        InboundRouteRecord route = Route(action: InboundActionKind.Forward, forwardTo: ["a@Example.COM", "b@elsewhere.test"]);
+        Assert.Empty(InboundRules.ValidateRoute(route));   // the pure rules do not know the domain
+        var errors = InboundRules.ValidateRoute(route, "example.com");
+        Assert.Equal(["forwardTo[0]"], errors.Select(e => e.Field).ToArray());
+        Assert.Empty(InboundRules.ValidateRoute(Route(action: InboundActionKind.Forward, forwardTo: ["b@elsewhere.test"]), "example.com"));
+    }
+
+    [Theory]
+    [InlineData("postmaster", true)]
+    [InlineData("PostMaster", true)]
+    [InlineData("postmaster+x", false)]
+    [InlineData("abuse", false)]
+    [InlineData("", false)]
+    public void Postmaster_is_recognized_ignoring_case(string local, bool expected)
+    {
+        Assert.Equal(expected, InboundRules.IsPostmaster(local));
+    }
+
+    [Fact]
+    public void The_forward_key_depends_only_on_the_inbound_message_and_outlives_every_retry()
+    {
+        Guid id = Guid.Parse("01900000-0000-7000-8000-0000000000aa");
+        Assert.Equal("inbound:0190000000007000800000000000" + "00aa", InboundRules.ForwardKey(id));
+        Assert.Equal(InboundRules.ForwardKey(id), InboundRules.ForwardKey(id));
+        Assert.True(InboundRules.ForwardKeyLifetime > TimeSpan.FromDays(30));
+        Assert.Equal(3, InboundRules.MaxForwardHops);
+    }
+
+    [Fact]
+    public void An_unchecked_result_set_has_no_verdicts()
+    {
+        InboundAuthResults none = InboundAuthResults.NotChecked;
+        Assert.All(new[] { none.Spf, none.SpfHelo, none.Dkim, none.Dmarc, none.Arc }, v => Assert.Equal(InboundVerdict.None, v));
+    }
 }

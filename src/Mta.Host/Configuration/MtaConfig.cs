@@ -469,7 +469,7 @@ public sealed class ApiSection
 }
 
 /// <summary>
-/// Inbound mail (design section 11, decision 92). The retention of received mail is <c>Inbound:RetentionDays</c>, bound with the storage options.
+/// Inbound mail (design section 11, decision 95). The retention of received mail is <c>Inbound:RetentionDays</c>, bound with the storage options.
 /// A domain's own settings override these defaults; <c>null</c> in a domain's settings means the value here.
 /// </summary>
 public sealed class InboundSection

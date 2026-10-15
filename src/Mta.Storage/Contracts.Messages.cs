@@ -10,7 +10,7 @@ public enum MessageSource : byte
     Bounce,
     System,
 
-    /// <summary>A copy of received mail forwarded by an inbound route (decision 92). Like <see cref="Api"/> mail it never gets a bounce message, only events and webhooks.</summary>
+    /// <summary>A copy of received mail forwarded by an inbound route (decision 95). Like <see cref="Api"/> mail it never gets a bounce message, only events and webhooks.</summary>
     Forward,
 }
 
@@ -107,6 +107,12 @@ public sealed class AcceptedMessage
     /// <see cref="IntakeResult.IdempotencyFingerprint"/> on a duplicate, so the caller can tell a safe retry from key reuse with another body.
     /// </summary>
     public string? IdempotencyFingerprint { get; set; }
+
+    /// <summary>
+    /// How long <see cref="IdempotencyKey"/> is remembered. Null: <c>Queue:IdempotencyKeyLifetime</c> (24 h, the API's promise). A forward of received mail (decision 95) sets a year,
+    /// because its key must outlive the retry ladder and every manual retry, not just a client's retry window.
+    /// </summary>
+    public TimeSpan? IdempotencyKeyLifetime { get; set; }
 
     public string? RemoteAddress { get; set; }
     public string? Authenticated { get; set; }

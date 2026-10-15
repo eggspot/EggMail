@@ -17,7 +17,7 @@ workflow refuses a stable tag without a non-empty section for that exact version
 
 ### Added
 
-- Inbound mail, design and storage contracts (decision 92, [design.md section 11](docs/design.md#11-inbound-mail)): receiving for domains a tenant enables, SPF/DKIM/DMARC/ARC verification, per-domain routes (webhook, forward with SRS, store, discard), retention, the `inbound` API scope. Storage on all backends (schema version 8, bundle format 1.3), the retention job `inbound_retention`, and the HTTP API (settings, routes, received messages, downloads, retry; scope `inbound`, `Inbound:*` and `Api:MaxInboundRoutesPerDomain` keys) are in; the SMTP receive path, the route actions and the dashboard pages follow in later changes.
+- Inbound mail, design and storage contracts (decision 95, [design.md section 11](docs/design.md#11-inbound-mail)): receiving for domains a tenant enables, SPF/DKIM/DMARC/ARC verification, per-domain routes (webhook, forward with SRS, store, discard), retention, the `inbound` API scope. Storage on all backends (schema version 8, bundle format 1.3), the retention job `inbound_retention`, and the HTTP API (settings, routes, received messages, downloads, retry; scope `inbound`, `Inbound:*` and `Api:MaxInboundRoutesPerDomain` keys) are in; the SMTP receive path, the route actions and the dashboard pages follow in later changes.
 - Outbound SMTP server and client written on the .NET base class library only (STARTTLS, implicit TLS, AUTH, pipelining, BDAT, request
   smuggling and STARTTLS-injection defences), with a CI guard that the protocol assemblies have no package references.
 - Message handling: MIME parser/builder/editor, DKIM signing and verification, SPF, DMARC, Authentication-Results, ARC, DSN/ARF, VERP,

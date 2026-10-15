@@ -19,7 +19,7 @@ public static class ApiScopes
     public const string Suppressions = "suppressions";
     public const string Keys = "keys";
 
-    /// <summary>Received mail: inbound settings, routes and messages (decision 92). Separate from <c>read</c> because it exposes the content of other people's mail.</summary>
+    /// <summary>Received mail: inbound settings, routes and messages (decision 95). Separate from <c>read</c> because it exposes the content of other people's mail.</summary>
     public const string Inbound = "inbound";
 
     public static readonly IReadOnlyList<string> All = [Send, Read, Domains, Webhooks, Suppressions, Keys, Inbound];
