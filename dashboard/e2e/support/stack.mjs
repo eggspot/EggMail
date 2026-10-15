@@ -14,16 +14,26 @@ const repoRoot = path.resolve(dashboardDir, '..');
 export const ADMIN_USER = 'e2e-admin';
 export const ADMIN_PASSWORD = 'e2e-correct-horse-battery-staple';
 
-/** A free loopback TCP port (bind to 0 and release it; good enough on a test machine). */
-async function freePort() {
-  return await new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const { port } = server.address();
-      server.close(() => resolve(port));
-    });
-  });
+/**
+ * `count` distinct free loopback TCP ports. All the sockets are held open until every port is known: asking for one port at a time
+ * (bind to 0, release, repeat) can hand the same number out twice, and the server then refuses to start with "Listeners 'submission'
+ * and 'bounce' use the same port" (seen in CI).
+ */
+async function freePorts(count) {
+  const servers = [];
+  try {
+    for (let i = 0; i < count; i++) {
+      const server = net.createServer();
+      await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', resolve);
+      });
+      servers.push(server);
+    }
+    return servers.map((server) => server.address().port);
+  } finally {
+    await Promise.all(servers.map((server) => new Promise((resolve) => server.close(resolve))));
+  }
 }
 
 function run(command, args, options) {
@@ -79,8 +89,8 @@ export async function startStack({ name = 'main', tenantUsers = [], switchConnec
   const dns = await startFakeDns();
   const sink = await startSmtpSink();
   const webhooks = await startWebhookReceiver();
-  const httpPort = await freePort();
-  const smtpPorts = { submission: await freePort(), submissions: await freePort(), alternate: await freePort(), bounce: await freePort() };
+  const [httpPort, submission, submissions, alternate, bounce] = await freePorts(5);
+  const smtpPorts = { submission, submissions, alternate, bounce };
 
   const configArgs = [
     `--Sqlite:DataDirectory=${dataDir}`,
