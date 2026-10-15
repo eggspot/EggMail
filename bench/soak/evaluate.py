@@ -247,7 +247,9 @@ def evaluate(run_dir, thresholds, strict=None):
         add("no acknowledged message lost", "PASS" if lost == 0 else "FAIL",
             "%d acknowledged, %d delivered at least once, %d lost%s" % (
                 verification.get("acknowledged", 0), verification.get("delivered_unique_of_acknowledged", 0), lost,
-                (" (first: %s)" % verification.get("lost_sample", [])[:10]) if lost else ""))
+                ((" (first: %s)" % verification.get("lost_sample", [])[:10]) +
+                 ("; the queue had not drained, so these may only be waiting for a retry (a destination that answers 4xx twice in a row delays a message 7 minutes, three times 22)"
+                  if (verification.get("drain") or {}).get("drained") is False else "")) if lost else ""))
         unflagged = verification.get("duplicates_unflagged")
         duplicates = verification.get("duplicates", 0)
         if verification.get("duplicates_verifiable") is False:
@@ -483,7 +485,8 @@ def summary_markdown(run_dir, result):
         out.append("```")
         out.append("")
     if stats:
-        out.append("The load generator's own counters: %d accepted, %d refused by the server, %d connection errors in total." % (stats[-1]["accepted"], stats[-1]["rejected"], stats[-1]["connect_errors"]))
+        out.append("The load generator's own counters: %d accepted, %d refused by the server, %d connection errors in total; the server ended %d sessions at its per-session message limit (421, `Smtp:MaxMessagesPerSession`) and the generator reconnected." % (
+            stats[-1]["accepted"], stats[-1]["rejected"], stats[-1]["connect_errors"], stats[-1].get("session_limit_closes", 0)))
         out.append("")
     drills = [e for e in events if e.get("type") in ("crash_ready", "crash_failed", "crash_check", "backup_drill")]
     if drills:

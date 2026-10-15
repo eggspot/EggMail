@@ -134,6 +134,7 @@ internal static class LoadCommand
             Failed = failed,
             Rejected = rejected,
             ConnectErrors = connectErrors,
+            SessionLimitCloses = workers.Sum(w => Interlocked.Read(ref w.SessionLimitCloses)),
             MessagesPerSecond = Math.Round(accepted / seconds, 1),
             MegabytesPerSecond = Math.Round(bytesAccepted / seconds / 1_000_000, 2),
             LatencyMs = new { P50 = Math.Round(Pct(0.50), 3), P95 = Math.Round(Pct(0.95), 3), P99 = Math.Round(Pct(0.99), 3), Max = Math.Round(Pct(1.0), 3) },
@@ -197,6 +198,7 @@ internal static class LoadCommand
                 accepted = workers.Sum(w => Interlocked.Read(ref w.Accepted)),
                 rejected = workers.Sum(w => Interlocked.Read(ref w.Rejected)),
                 connect_errors = workers.Sum(w => Interlocked.Read(ref w.ConnectErrors)),
+                session_limit_closes = workers.Sum(w => Interlocked.Read(ref w.SessionLimitCloses)),
                 interval_accepted = samples.Count,
                 p50_ms = Ms(0.50),
                 p95_ms = Ms(0.95),
@@ -296,6 +298,7 @@ internal static class LoadCommand
         public long Failed;
         public long Rejected;
         public long ConnectErrors;
+        public long SessionLimitCloses;
         public long BytesAccepted;
         public readonly List<long> Latencies = new(1 << 16);
         private readonly object _intervalLock = new();
@@ -423,7 +426,23 @@ internal static class LoadCommand
                         }
                     }
 
-                    if (!ok) { CountFailure(); abnormal = true; break; }
+                    if (!ok)
+                    {
+                        // The server's own limit on messages per session (Smtp:MaxMessagesPerSession) ends a session politely with 421 at the next
+                        // MAIL FROM: a client reconnects, it has not been refused. Counted on its own, so it neither hides a real 421 nor looks like an error.
+                        if (_replyCode == 421 && _replyText.Contains("Too many messages", StringComparison.OrdinalIgnoreCase))
+                        {
+                            Interlocked.Increment(ref SessionLimitCloses);
+                        }
+                        else
+                        {
+                            CountFailure();
+                        }
+
+                        abnormal = true;
+                        break;
+                    }
+
                     await _stream.WriteAsync(message, io);
                     await _stream.WriteAsync(dot, io);
                     ok = await ExpectAsync(250, io);
@@ -444,7 +463,10 @@ internal static class LoadCommand
                     }
                 }
 
-                await _stream.WriteAsync("QUIT\r\n"u8.ToArray(), io);
+                if (!abnormal)
+                {
+                    await _stream.WriteAsync("QUIT\r\n"u8.ToArray(), io);
+                }
             }
             catch (Exception ex) when (ex is IOException or SocketException or OperationCanceledException or System.Security.Authentication.AuthenticationException)
             {
