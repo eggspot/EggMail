@@ -5,7 +5,7 @@ using Mta.Storage.Transfer;
 namespace Mta.Storage.InMemory;
 
 /// <summary>In-memory <see cref="IConfigStore"/>; same semantics as the EF implementation (normalization, uniqueness, leases).</summary>
-internal sealed partial class InMemoryConfigStore : IConfigStore
+internal sealed partial class InMemoryConfigStore : IConfigStore, IInboundConfigStore
 {
     private readonly object _gate = new();
     private readonly Dictionary<Guid, TenantEntity> _tenants = [];
