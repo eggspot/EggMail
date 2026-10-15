@@ -41,6 +41,7 @@ workflow refuses a stable tag without a non-empty section for that exact version
   sidecar so DANE works, Kubernetes manifests (StatefulSet for SQLite, Deployment for PostgreSQL, Services, NetworkPolicy, probes)
   and an end-to-end smoke test that the release workflow runs against the pushed image.
 - Benchmark harness (`bench/`) and a scheduled allocation-regression gate with a checked-in baseline.
+- Throughput matrix for both backends, each durable and non-durable, reported in pairs (`bench/run-local-matrix.sh` on a laptop, the `bench-throughput` workflow on a runner), and a soak test of the real published host (`bench/soak/run-soak.sh`, the `soak` workflow): hours of load, `kill -9` and backup/restore drills, PASS/FAIL criteria for lost messages, unflagged duplicates, memory, descriptor and thread growth, error rate and queue drain. `/metrics` also exports the .NET runtime meter (garbage collections, working set, thread pool).
 - Cancelling queued mail: `POST /api/v1/messages/{id}/cancel` and a "Cancel delivery" action on the dashboard's message page stop delivery
   to the recipients that are still waiting (all of them, or the ones named); a recipient whose delivery attempt is running is left alone and
   reported as in flight. Works with and without per-message history, publishes a `message.cancelled` webhook event and is implemented on every storage backend (decision 86; adds the index `delivery_queue (message_id)`, schema version 7).

@@ -114,6 +114,19 @@ On a MacBook (osx-arm64, laptop under load) the same start-up comparison gave 1.
 
 Changing the decision is a one-line edit (`READYTORUN` in `release.yml`); `docker build --build-arg READYTORUN=false` builds the JIT image.
 
+## All workflows at a glance
+
+Billing comes first (one job per workflow on `ubuntu-latest`, tight timeouts, nothing heavy on every push): this is what runs when, and what it costs in billed Linux minutes.
+
+| Workflow | Trigger | Job time limit | What it proves | Typical cost | Where described |
+|---|---|---|---|---|---|
+| `ci` | pull requests into `main` and pushes to `main`, docs-only changes skipped | 30 min | build with warnings as errors, all tests with PostgreSQL 17 and Pebble, the dashboard, static checks of scripts and deployment files | about 13 min | [development.md](development.md#continuous-integration) |
+| `release` | tag `vX.Y.Z[-pre]`, daily `nightly`, manual (publishes `nightly-<sha>` only) | 45 min | the image: multi-arch build, SBOM, provenance, smoke tests, tags | see above | this document |
+| `bench-gate` | weekly (Monday 04:41 UTC, only when `main` changed) and manual | 20 min | allocation per message has not grown | about 1 min | [benchmarks.md](benchmarks.md#the-allocation-gate) |
+| `bench-throughput` | manual | 45 min | the throughput matrix: both backends, each durable and non-durable, ingest and delivery, reported in pairs ("noisy, not publishable"); JIT versus ReadyToRun | 25 to 40 min | [benchmarks.md](benchmarks.md#the-throughput-run) |
+| `soak` | manual; a monthly schedule that is **off** until the repository variable `EGGMAIL_SOAK_SCHEDULE` is `true` | 358 min (the 6 h hosted limit) | hours of load on the real host: no acknowledged message lost, no unflagged duplicate, memory and descriptor growth, kill -9 and backup/restore drills | its wall time (a 2 h run: about 130 min; 6 h: about 360) | [soak.md](soak.md) |
+| `fuzz` | weekly (Sunday 03:23 UTC) and manual | 90 min | coverage-guided fuzzing of the parsers | about 55 min a week | [security.md](security.md#fuzzing) |
+
 ## Deployment files
 
 The files are in `deploy/` and are the ones the smoke tests run; [operations.md](operations.md) lists them with the pitfalls. Ports are the container ports of decision 17: `5587` (587 STARTTLS), `4465` (465 implicit TLS), `2525`, `2526` (the port-25 bounce role) and `8443` (dashboard and API over HTTPS); `8080` (HTTP probes and first setup) is published on the loopback interface of the Docker host only, or not at all in Kubernetes. The first start generates a self-signed certificate ([design.md §7.3](design.md#73-tls)).

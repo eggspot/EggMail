@@ -56,6 +56,8 @@ Defaults: SQLite backend in `Sqlite:DataDirectory` (default `/data`), SMTP on 55
 
 `src/Mta.Tools` builds `mta-tools` (see [benchmarks.md](benchmarks.md)). Benchmarks use BenchmarkDotNet: `dotnet run -c Release --project bench/Mta.Benchmarks -- --filter "*Dkim*"`.
 
+The throughput matrix of both backends, durable and non-durable, runs with `bench/run-local-matrix.sh` (a results folder and a markdown table; [benchmarks.md](benchmarks.md#the-same-matrix-on-a-laptop-or-a-server-of-your-own)). Hours of load against the real `mta serve`, with `kill -9` and restore drills and a PASS/FAIL verdict, run with `bench/soak/run-soak.sh --hours 2 --backend sqlite` ([soak.md](soak.md)).
+
 ## Fuzzing
 
 `dotnet test` includes `tests/Mta.Fuzz.Tests` (seeds, checked-in corpus, past findings and a fixed number of seeded mutations per parser, no timing assertions). The long, coverage-guided runs are `.github/workflows/fuzz.yml` (weekly, or run it by hand with the `seconds_per_target` and `targets` inputs). Details, the list of targets and how to add a regression input are in [security.md](security.md#fuzzing).
@@ -82,4 +84,4 @@ Tests never assert elapsed time, throughput or process memory (they measure the 
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` builds and tests on Linux in one job with PostgreSQL 17 and Pebble (with its challenge test server) started by `docker run` before the tests, then checks the dashboard. Run `dotnet test EggMail.slnx` locally before pushing; without the environment variables above the PostgreSQL and ACME tests start a local cluster or are skipped. `release.yml` publishes the image and smoke-tests it ([release.md](release.md)); `bench-gate.yml` (weekly allocation gate) and `bench-throughput.yml` (manual) are described in [benchmarks.md](benchmarks.md). The deployment smoke tests in `deploy/smoke/` need Docker and are meant for Actions, but `deploy/smoke/smoke.py` runs against a locally started `mta serve` too (see its docstring).
+`.github/workflows/ci.yml` builds and tests on Linux in one job with PostgreSQL 17 and Pebble (with its challenge test server) started by `docker run` before the tests, then checks the dashboard. Run `dotnet test EggMail.slnx` locally before pushing; without the environment variables above the PostgreSQL and ACME tests start a local cluster or are skipped. `release.yml` publishes the image and smoke-tests it ([release.md](release.md)); `bench-gate.yml` (weekly allocation gate), `bench-throughput.yml` (manual) and `soak.yml` (manual) are described in [benchmarks.md](benchmarks.md) and [soak.md](soak.md). The deployment smoke tests in `deploy/smoke/` need Docker and are meant for Actions, but `deploy/smoke/smoke.py` runs against a locally started `mta serve` too (see its docstring).

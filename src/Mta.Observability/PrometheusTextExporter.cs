@@ -33,8 +33,11 @@ public sealed class PrometheusTextExporter : IDisposable
     private readonly ConcurrentDictionary<string, Family> _families = new(StringComparer.Ordinal);
     private readonly Func<Meter, bool> _filter;
 
-    /// <summary>Meters exported by default: every <c>Mta.*</c> meter and Npgsql's own (PostgreSQL command latency and connection pool).</summary>
-    public static bool IsDefaultMeter(Meter meter) => meter.Name.StartsWith("Mta.", StringComparison.Ordinal) || meter.Name == "Npgsql";
+    /// <summary>
+    /// Meters exported by default: every <c>Mta.*</c> meter, Npgsql's own (PostgreSQL command latency and connection pool) and the .NET runtime's
+    /// <c>System.Runtime</c> meter (garbage collections, heap, working set, thread pool: what a soak run or a leak hunt reads).
+    /// </summary>
+    public static bool IsDefaultMeter(Meter meter) => meter.Name.StartsWith("Mta.", StringComparison.Ordinal) || meter.Name is "Npgsql" or "System.Runtime";
 
     public PrometheusTextExporter(Func<Meter, bool>? filter = null)
     {

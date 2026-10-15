@@ -70,6 +70,7 @@ The container healthcheck is `["CMD", "/app/mta", "--healthcheck"]`: the chisele
 | [docs/decisions.md](docs/decisions.md) | The decisions record (owner and design decisions A–T and items 1–52) |
 | [docs/plan.md](docs/plan.md) | Components with engineer-week estimates, phases, cut order, risks, calendar |
 | [docs/benchmarks.md](docs/benchmarks.md) | How performance is measured and compared, per mode; the allocation regression gate; the Postfix/KumoMTA comparison setup; trend numbers from CI |
+| [docs/soak.md](docs/soak.md) | The soak test: hours of load against the real host with kill -9 and restore drills, the PASS/FAIL criteria, how to run it locally and in Actions |
 | [docs/release.md](docs/release.md) | Release and packaging: the single Docker image, `ghcr.io/eggspot/eggmail`, the GitHub Actions release workflow and its smoke tests, release assets, compose and Kubernetes files |
 | [CHANGELOG.md](CHANGELOG.md) | What changed in each release (Keep a Changelog, Semantic Versioning); the source of the GitHub Release notes |
 | [docs/funding.md](docs/funding.md) | Sponsorship and funding policy draft, platform options, the owner's setup steps |

@@ -31,8 +31,9 @@ jobs:
       # files against a real image happens in the release workflow (deploy/smoke).
       - name: Deployment files and scripts (static checks)
         run: |
-          shellcheck deploy/smoke/*.sh .github/scripts/*.sh
-          python3 -m py_compile deploy/smoke/smoke.py bench/compare-allocations.py bench/measure-startup.py bench/summarize-throughput.py bench/compare/provision_eggmail.py
+          shellcheck deploy/smoke/*.sh .github/scripts/*.sh bench/run-local-matrix.sh bench/soak/*.sh
+          python3 -m py_compile deploy/smoke/smoke.py bench/compare-allocations.py bench/measure-startup.py bench/summarize-throughput.py bench/compare/provision_eggmail.py bench/soak/soak.py bench/soak/evaluate.py bench/soak/sink.py
+          python3 bench/soak/evaluate.py --self-test
           export EGGMAIL_HOSTNAME=mail.example.com EGGMAIL_DB_PASSWORD=x EGGMAIL_IMAGE=ghcr.io/eggspot/eggmail:nightly SMOKE_HOST_IP=127.0.0.1
           docker compose -f deploy/compose/compose.yaml config --quiet
           docker compose -f deploy/compose/compose.postgres.yaml config --quiet
