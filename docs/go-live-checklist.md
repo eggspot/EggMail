@@ -22,7 +22,7 @@ Steps 1 to 5 get one domain sending with valid SPF, DKIM and DMARC. Step 6 (secu
 | [4](#4-acme-with-a-real-certificate-authority) | ACME: Cloudflare token, staging, production | Cloudflare zone | 1 h |
 | [5](#5-tls-rpt-reports) | TLS-RPT reports | step 3, a day of waiting | 2 days |
 | [6](#6-commission-an-independent-security-audit) | Independent security audit | budget | weeks |
-| [7](#7-the-7-day-soak) | 7-day soak with PASS/FAIL criteria | a spare server | 7 days |
+| [7](#7-the-7-day-soak) | 7-day soak with PASS/FAIL criteria (`bench/soak`, [soak.md](soak.md)) | a spare server | 7 days |
 | [8](#8-first-release) | Version bump, CHANGELOG, tag, verify image, flip compose defaults | | 1 h |
 | [9](#9-github-settings) | Vulnerability reporting, Sponsors, tag ruleset, branch protection | org admin | 30 min |
 | [10](#10-rollback-and-backup-restore-drill) | Rollback and restore drill | step 1 | 1 h |
@@ -290,7 +290,7 @@ $ swaks --to postmaster@$BOUNCE --from you@gmail.com --server $HOST --port 25 -t
 - **Works if**: `RCPT TO:<postmaster@bounces.example.com>` is accepted and `RCPT TO:<anyone@example.org>` is refused (`550`/`554`: the listener is not an open relay). The dashboard/API `returnPathVerified` is `true` once the CNAME is found.
 - **If not**: a connection that hangs or times out means port 25 inbound is blocked (provider or the `25:2526` mapping missing). A refused `postmaster@` means `Delivery:BounceDomain` is not set to the domain in the RCPT.
 
-> **Which build.** The envelope sender is on the sending domain's own `bounce.example.com` host (so SPF aligns with the `From` domain) only in builds that contain decision 88 ([progress.md](progress.md#plan-coverage), PR 90). Older builds, including every `nightly` before it, always used the shared bounce domain (`b+token@bounces.example.com`): SPF then passes for `bounces.example.com` but does not align with the `From` domain, and `dmarc=pass` comes from DKIM alone. Check which one you run: the `Authentication-Results` of step 3 shows `smtp.mailfrom=b+...@bounce.example.com` (new) or `@bounces.example.com` (old). The records are the same for both.
+> **Which build.** The envelope sender is on the sending domain's own `bounce.example.com` host (so SPF aligns with the `From` domain) only in builds that contain decision 89 ([progress.md](progress.md#plan-coverage), PR 90). Older builds, including every `nightly` before it, always used the shared bounce domain (`b+token@bounces.example.com`): SPF then passes for `bounces.example.com` but does not align with the `From` domain, and `dmarc=pass` comes from DKIM alone. Check which one you run: the `Authentication-Results` of step 3 shows `smtp.mailfrom=b+...@bounce.example.com` (new) or `@bounces.example.com` (old). The records are the same for both.
 
 ### 2.3 SPF for the sending domain (advice) and the DMARC record
 
@@ -693,52 +693,59 @@ Every finding becomes a pull request with a regression test (the project's rule,
 
 ## 7. The 7-day soak
 
-The only soak run so far is 14 minutes on a laptop ([progress.md](progress.md#hardening-done-after-interop-and-drills-2026-10-13)). The phase 6 gate needs 7 days.
+The only soak run so far is 14 minutes on a laptop ([progress.md](progress.md#hardening-done-after-interop-and-drills-2026-10-13)). The phase 6 gate needs 7 days. A GitHub-hosted runner stops a job after 6 hours, so the 7 days run on **a machine of yours**.
 
-The harness is described in [soak.md](soak.md) and lives in `bench/soak/` (the load, sink, sampling and report scripts). This section is the acceptance contract: what to run on which machine and the exact PASS/FAIL criteria. Where the harness lacks a measurement, the commands below get it from the operating system.
+The harness is `bench/soak/run-soak.sh` with the criteria in [soak.md](soak.md) (both come with PR 92; merge it first, then `git pull`). It publishes the real host, starts it as `mta serve` next to a sink, a DNS stub and a numbered-message load generator, kills it with `kill -9` on a schedule, restores backups into a second instance, samples memory, descriptors, threads, GC and queue depth every minute and writes `verdict.json` and `summary.md`. This section says how to run it for 168 hours and adds the criteria that only matter over a week; the criteria of soak.md apply unchanged.
 
 ### 7.1 Set-up
 
-- A **dedicated server** of the size you will run in production, **not** the production server, with Docker Compose as in step 1 (same image, same configuration, `Sqlite__SyncMode` as you will use in production). A second machine in the same network runs the sink and the load generator, so that the load generator does not compete for CPU.
-- A sink that accepts, discards and applies back-pressure: `mta-tools sink` (`src/Mta.Tools`; see its usage in [benchmarks.md](benchmarks.md)). Point EggMail at it in the lab way: `Dns__Servers__0=<sink-host-ip>:<dns port>` (a DNS stub that answers MX records for the test recipient domain, as `deploy/smoke/smoke.py` does), `Delivery__RemotePort=<sink port>`, `Delivery__AllowPrivateMxAddresses=true`. **Never run a soak against real recipients.**
-- A realistic profile: mixed message sizes (2 KB, 20 KB, 1 MB attachments), 1 to 5 recipients, 5 percent of recipients answering `4xx` (greylisting), 2 percent `5xx`, a few connection cuts after end of data, steady rate near 50 percent of the measured maximum with a daily peak at 80 percent. `docs/soak.md` and the scripts define the exact numbers; do not lower them to pass.
-- Sampling every 60 seconds for 7 days into a CSV: from `/metrics` (queue depth, oldest due age, attempts by outcome, SMTP counters, certificate expiry, backups) and from the host for the EggMail process:
+- A **dedicated machine** of the size you will run in production (not the production server): Linux, the .NET 10 SDK (`dotnet --version`), Python 3.9 or newer, 20 GB free, and, for the PostgreSQL run, PostgreSQL 17 binaries on `PATH` (`initdb`, `pg_ctl`, `psql`, `pg_dump`, `pg_restore`, `createdb`) or Docker (the script then starts a `postgres:17` container). It must not sleep, update itself or reboot for a week: disable unattended upgrades and automatic reboots, and run under `tmux`.
+- The run is **loopback only** (a sink and a DNS stub on the same machine, no real recipients). Never point a soak at real mail servers.
 
 ```sh
-# on the soak server; PID of the container's main process
-PID=$(docker inspect -f '{{.State.Pid}}' eggmail-eggmail-1)
-while true; do
-  printf '%s,%s,%s,%s,%s\n' "$(date -u +%FT%TZ)" \
-    "$(awk '/VmRSS/{print $2}' /proc/$PID/status)" \
-    "$(ls /proc/$PID/fd | wc -l)" \
-    "$(awk '/Threads/{print $2}' /proc/$PID/status)" \
-    "$(du -sb $(docker volume inspect eggmail_eggmail-data -f '{{.Mountpoint}}') | cut -f1)"
-  sleep 60
-done >> soak-process.csv       # columns: time, RSS kB, open FDs, threads, data bytes
+git clone https://github.com/eggspot/EggMail.git && cd EggMail && git checkout <the commit or tag you intend to release>
+ulimit -n 65536
+tmux new -s soak
+# SQLite as you will run it in production (decide Sqlite:SyncMode; see 1.7), history Full:
+bench/soak/run-soak.sh --hours 168 --backend sqlite --sync normal --history full --out /srv/soak/sqlite-168h
+# afterwards, or on a second machine, the PostgreSQL backend:
+bench/soak/run-soak.sh --hours 168 --backend postgres --sync full --history full --out /srv/soak/postgres-168h
 ```
 
-(Builds with decision 87 also export the same figures on `/metrics`: `mta_process_resident_memory_bytes`, `mta_process_open_fds`, `mta_process_threads`; this reads them from `/proc` so it works with any build and cross-checks the metric.)
+The defaults (30 messages a second, a size mix up to 512 KB, a `kill -9` every 20 minutes, a backup restore every 30, the last quarter of the run without drills) are the contract of soak.md; do not lower the rate or the drill frequency to make a run pass. Raise `--rate` to your real peak if it is higher.
+
+Check after the first hour (`tail -f /srv/soak/sqlite-168h/events.jsonl`, `tail /srv/soak/sqlite-168h/samples.csv`): load is accepted, `queue_depth` is low, a crash drill has happened and the server was ready again.
+
+- **Expect**: a final line `PASS` (or `PASS (n criteria skipped)`) and exit code 0; `summary.md` next to `verdict.json`.
+- **If a criterion fails**: [soak.md, "Interpreting a failure"](soak.md#interpreting-a-failure). A lost acknowledged message or an unflagged duplicate is a bug: stop, keep the whole results directory, open an issue. Fix, then **restart from zero**: a partial run proves nothing about a leak.
 
 ### 7.2 PASS/FAIL criteria
 
-All must hold over the full 168 hours. Any FAIL stops the soak, the cause is fixed and the soak restarts from zero (a partial restart proves nothing about leaks).
+All of soak.md's criteria must PASS, with these readings for a 168-hour run (the numbers are theirs; the table says what to check in the result):
 
-| # | Criterion | How measured | PASS | FAIL |
+| # | Criterion | Where | PASS | FAIL |
 |---|---|---|---|---|
-| 1 | Throughput | Accepted messages per second from `mta_smtp_server_messages_total` | The target rate is held every hour; no hour below 90 percent of the target; peak hours hold the peak rate | Any hour under 90 percent of target without a recorded cause |
-| 2 | Ingest latency | `mta_smtp_server_transaction_duration_seconds` p99 per hour | p99 under 100 ms at the target rate (the SQLite advisory threshold) | p99 over 250 ms for any hour, or a rising trend |
-| 3 | Error rate | `mta_smtp_server_messages_rejected_total` / accepted; `mta_smtp_server_protocol_errors_total`; log lines at `Error` level | No unexpected rejections (only the injected ones); zero `Error` log lines other than the injected remote failures; zero unhandled exceptions | Any unhandled exception, any rejection of valid mail, error-level lines that are not injected faults |
-| 4 | Memory flat | RSS (`soak-process.csv`) | After the first 2 hours, the linear-regression slope of hourly maxima is below 1 MB per day, and the last-day maximum is within 10 percent of the second-day maximum | RSS growing steadily, or any growth that continues after a quiet period |
-| 5 | FDs and threads flat | open FDs, thread count | Both return to their idle baseline when load stops (+/- 5); the busy maximum does not rise day over day | A monotonic climb (leak) |
-| 6 | Queue drains | `mta_delivery_queue_depth`, `mta_delivery_queue_oldest_due_age_seconds` | After load stops, queued reaches 0 within 15 minutes and deferred within the retry ladder; `oldest_due_age` stays under 5 minutes during steady load; total accepted minus the sink's received count equals the injected permanent failures plus the counted `possible_duplicate` effects | Messages lost (accepted not accounted for), or a queue that does not drain |
-| 7 | No loss, bounded duplicates | Compare the sink's received message IDs with the accepted IDs | Zero lost; every duplicate belongs to a delivery flagged `possible_duplicate` (the crash drills below); duplicate rate under 0.1 percent of deliveries and equal to the number of in-flight deliveries at each induced crash | Any message accepted with `250` and never delivered or bounced; a duplicate without the flag |
-| 8 | Crash and restart drills | Once per day: `docker kill --signal=KILL eggmail-eggmail-1` during load, then `docker compose up -d`; once: `docker compose restart` (graceful, SIGTERM); once: `docker stop -t 5`; on day 3 and 6 once more with a full disk (see 9) | After each, healthy again within 60 seconds; the queue resumes; criterion 7 holds; no corruption warning (`mta_storage_sqlite_quarantined` stays 0); SIGTERM within the 60 s grace leaves no `possible_duplicate` flags except for deliveries that took longer than the timeout | Start failure, quarantine, lost acknowledged mail after a process kill, or the container needing manual repair |
-| 9 | Disk growth | `soak-process.csv` data bytes; `/metrics` `mta_storage_sqlite_wal_size_bytes` | Growth stabilises once retention begins (`Retention:MetadataDays`, `Content:RetentionDays` are shortened to 1 day for the soak so it steady-states); the WAL stays under 1 GB; a deliberately filled disk (leave 100 MB) produces `452` replies and recovers when space returns, without corruption | Unbounded growth after retention should be pruning; WAL growing without checkpoint; a crash on disk full |
-| 10 | Backup and restore | `mta_backup_last_success_timestamp_seconds`; restore drill of step 10 on day 7 from the **newest backup taken during load** | Backups succeed every interval (no `failed` in `mta_backup_runs_total`); the restored copy starts and shows the tenants, domains, keys and recent history as of the backup | A failed backup, or a restore that does not start |
-| 11 | Certificates and DNS | `mta_tls_certificate_expiry_seconds`; no `ssrf_blocked`/`connect_failed` surprises | The certificate (from the lab CA or ACME staging) is renewed in time if the soak is longer than a third of its lifetime, or its expiry gauge never drops below 14 days | An expired certificate served |
-| 12 | Webhooks | `mta_webhooks_deliveries_total`, `mta_webhooks_failures_total` | Webhook deliveries match message outcomes; the receiver that fails for a day is disabled after `Webhooks:DisableAfter` and a `webhook.endpoint.disabled` event arrives | Lost events or a stuck outbox |
+| 1 | Throughput | `samples.csv` (`load_accepted`), `summary.md` | The load generator ran at least 95 % of the 168 hours; accepted messages per hour stay within 10 % of the offered rate in every hour outside a drill | An hour without load accepted for a reason that is not a drill |
+| 2 | No acknowledged message lost, no unflagged duplicate | `verification.json` | `lost = 0`, `unflagged = 0` | Anything else |
+| 3 | Error rate | `verdict.json` | At most 0.5 % of submissions failed outside crash windows | More |
+| 4 | Memory flat | `rss_mb` (and `working_set_mb`) | Median of the last quarter of the uninterrupted tail within 20 % of the first quarter; **and** the Theil-Sen slope reported in the verdict is below 1 MB per hour | A steady climb, even if under 20 % |
+| 5 | Descriptors and threads flat | `fds`, `threads` | Within `max(10, 10 %)` and `max(6, 10 %)` | A climb |
+| 6 | Queue drains | final drain | `queue.depth` and `deferred` 0 after the load stops, within the drain limit | Not drained |
+| 7 | Crash drills (about 380 `kill -9` in 7 days) | `events.jsonl` | Every one ready within 120 s, every acknowledged message delivered after the recovery grace | One that is not |
+| 8 | Backup and restore drills (about 250) | `events.jsonl` | Every restored copy passes `integrity_check`, becomes ready, signs the administrator in, lists messages | One that does not |
+| 9 | Graceful shutdown and host log | `verdict.json` | `SIGTERM` exits 0; no `Critical` or `Error` line in `host.log` that is not understood | Otherwise |
 
-Write the result into [progress.md](progress.md) with the date, the commit/image digest, the profile, and the CSV. **Works if** all twelve rows PASS in one uninterrupted 168-hour run.
+Add these checks that only a week shows (soak.md does not judge them; the data is in the results directory):
+
+| # | Check | How | PASS | FAIL |
+|---|---|---|---|---|
+| A | Disk growth settles | `disk_mb` in `samples.csv`; set the retention knobs to a short value for the run with `--extra-env Retention__MetadataDays=1 --extra-env Content__RetentionDays=6` (the minimum) so that retention starts within the week | After retention starts, `disk_mb` oscillates in a band; the last day's maximum is within 15 % of the third day's | Unbounded growth, or a WAL that keeps growing (`mta_storage_sqlite_wal_size_bytes`) |
+| B | Throughput does not decay | compare the latency columns of day 1 and day 7 (`lat_p95_ms`) | Day 7 within 25 % of day 1 on the same load | A slowly rising latency at constant load (index or retention cost) |
+| C | Memory does not creep across days | `rss_mb` per generation | The **median RSS of day 7's last generation** within 20 % of day 2's | Each generation starting higher than the one before |
+| D | Disk full behaves | once, after day 3: fill the volume until about 100 MB are left (`fallocate -l <size> /srv/soak/filler`), watch the load generator get `452` replies and `host.log` say "the disk is full", then delete the filler | Intake resumes by itself, no corruption (`mta_storage_sqlite_quarantined` 0), every acknowledged message still delivered | A crash, a quarantine, an acknowledged message lost |
+| E | The image, not only the published host | on day 1 and day 7, on another machine: run the compose file of step 1 for an hour under `mta-tools load` (`dotnet run --project src/Mta.Tools -c Release -- load --help`), `docker kill`, `docker compose up -d`, check `/readyz` and the queue | The container comes back healthy, the queue resumes | Otherwise |
+
+Record the result in [progress.md](progress.md): date, commit and image digest, machine, options, the `summary.md`, and keep `samples.csv`. **Works if** the soak PASSes for each backend you ship and A to E hold.
 
 ## 8. First release
 
@@ -845,7 +852,7 @@ JSON
 ```
 
    - **Works if**: a test pull request cannot be merged until `build-test` is green, and a direct push to `main` is refused.
-   - **Pitfall (read before enabling)**: `ci` has `paths-ignore: docs/**, **.md` on `pull_request`. A pull request that changes only documentation never starts the workflow, so the required check stays "Expected: waiting for status" forever and the pull request can never be merged. Builds of the repository that contain decision 87 (PR 89) start the workflow on every pull request and skip the work inside the job for documentation-only changes, which a required check can live with. Before that, either merge that change first or do not mark the check required: look at `.github/workflows/ci.yml` (`paths-ignore` under `pull_request` means the old behaviour).
+   - **Pitfall (read before enabling)**: `ci` has `paths-ignore: docs/**, **.md` on `pull_request`. A pull request that changes only documentation never starts the workflow, so the required check stays "Expected: waiting for status" forever and the pull request can never be merged. Builds of the repository that contain decision 88 (PR 89) start the workflow on every pull request and skip the work inside the job for documentation-only changes, which a required check can live with. Before that, either merge that change first or do not mark the check required: look at `.github/workflows/ci.yml` (`paths-ignore` under `pull_request` means the old behaviour).
 
 5. Also worth a minute: Settings, **Actions**, General: "Workflow permissions: read repository contents" (the workflows declare their own), "Require approval for first-time contributors"; **Code security**: enable Dependabot alerts and secret scanning with push protection (free for public repositories).
 
