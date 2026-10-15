@@ -134,7 +134,7 @@ These sit on the config store (`IRuntimeStateStore`, which `IConfigStore` extend
 
 **Crash windows.** Counters and TLS-RPT counts are written behind: a crash loses what was counted since the last flush (at most 10 s of sending counters, at most a minute of TLS-RPT counts); a graceful stop, a switch quiesce and the next start lose nothing. A TLS-RPT report that was sent but not yet deleted is sent again after a crash (at-least-once). An asynchronous report is attached after the suppression and the webhook are decided; a failure to attach is logged and never fails the bounce handling. Repeated delivery of one DSN adds one event per delivery (no de-duplication; the bounce listener always answers 250, so remotes do not retry). Version 5 (PostgreSQL `V005__headers_utf8.sql`) added `delivery_queue.headers_utf8`, the intake-time decision that a message's header section is internationalized (`AcceptedMessage.HeadersUtf8` to `ClaimedDelivery.HeadersUtf8`; it moves with the queued rows in a backend switch; old rows read false).
 
-## Inbound mail contracts (decision 91)
+## Inbound mail contracts (decision 92)
 
 `IStorage.Inbound` (`IInboundStore` = `IInboundConfigStore` + `IInboundMessageStore`, `Mta.Storage/Contracts.Inbound.cs`) is the storage side of [design.md section 11](../design.md#11-inbound-mail). A default interface member that throws `NotSupportedException` until a provider implements it. What it holds:
 

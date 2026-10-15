@@ -17,7 +17,7 @@ workflow refuses a stable tag without a non-empty section for that exact version
 
 ### Added
 
-- Inbound mail, design and storage contracts (decision 91, [design.md section 11](docs/design.md#11-inbound-mail)): receiving for domains a tenant enables, SPF/DKIM/DMARC/ARC verification, per-domain routes (webhook, forward with SRS, store, discard), retention, the `inbound` API scope. This change is the design and the contracts; the implementation follows in later changes.
+- Inbound mail, design and storage contracts (decision 92, [design.md section 11](docs/design.md#11-inbound-mail)): receiving for domains a tenant enables, SPF/DKIM/DMARC/ARC verification, per-domain routes (webhook, forward with SRS, store, discard), retention, the `inbound` API scope. This change is the design and the contracts; the implementation follows in later changes.
 - Outbound SMTP server and client written on the .NET base class library only (STARTTLS, implicit TLS, AUTH, pipelining, BDAT, request
   smuggling and STARTTLS-injection defences), with a CI guard that the protocol assemblies have no package references.
 - Message handling: MIME parser/builder/editor, DKIM signing and verification, SPF, DMARC, Authentication-Results, ARC, DSN/ARF, VERP,
@@ -60,6 +60,13 @@ workflow refuses a stable tag without a non-empty section for that exact version
 - Cancelling queued mail: `POST /api/v1/messages/{id}/cancel` and a "Cancel delivery" action on the dashboard's message page stop delivery
   to the recipients that are still waiting (all of them, or the ones named); a recipient whose delivery attempt is running is left alone and
   reported as in flight. Works with and without per-message history, publishes a `message.cancelled` webhook event and is implemented on every storage backend (decision 86; adds the index `delivery_queue (message_id)`, schema version 7).
+
+- Descriptor and thread metrics on `/metrics` and OTLP (`mta_process_open_fds` on Linux, `mta_process_threads`) so a long run can be judged for leaks without access to the host.
+
+### Changed
+
+- The container image no longer sets `Storage__Backend` and `Sqlite__DataDirectory` (the defaults are the same): an environment variable counts as supplied by the deployment, which made a backend switch from the one-container quick start print a cutover patch instead of writing the bootstrap file.
+- `ci` starts on every pull request and skips its work for documentation-only changes inside the job, so a branch rule that requires the `build-test` check never waits for a documentation-only pull request; a missing PostgreSQL or Pebble in CI now fails the run instead of silently skipping their tests.
 
 ### Security
 
