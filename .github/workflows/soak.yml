@@ -8,7 +8,7 @@ name: soak
 #   gh workflow run soak --ref <branch> -f hours=0.33 -f backend=both -f crash_interval_min=4 -f backup_interval_min=5 -f quiet_tail=0.4 -f sample_interval_s=15 -f claim_lease_min=2   # a 20 minute proof per backend
 #
 # BILLING. One job on one standard ubuntu-latest runner, billed for its whole wall time rounded up to the minute: a 6 hour soak bills about 360 minutes
-# (Linux, 1x). Nothing here runs on a push or a pull request. The scheduled run is OFF until the repository variable EGGMAIL_SOAK_SCHEDULE is
+# (Linux, 1x). Nothing here runs on a push or a pull request. The scheduled run is OFF until the repository variable SOAK_SCHEDULE_ENABLED is
 # set to 'true' (Settings, Secrets and variables, Actions, Variables); with it unset the schedule starts the workflow, the job is skipped and nothing is billed.
 #
 # LIMIT. A GitHub-hosted job may run 6 hours (360 minutes) including checkout, publish and the end-of-run drain. With backend=both the hours below
@@ -60,7 +60,7 @@ on:
       claim_lease_min:
         description: Delivery:ClaimLease in minutes (0 keeps the product default of 15); a short value lets a short proof run see crash recovery
         default: '0'
-  # Rare and off by default: needs the repository variable EGGMAIL_SOAK_SCHEDULE=true (see BILLING above). When on, it runs once a month with exactly
+  # Rare and off by default: needs the repository variable SOAK_SCHEDULE_ENABLED=true (see BILLING above). When on, it runs once a month with exactly
   # the input defaults: 2 hours of load on SQLite, history full, Sqlite:SyncMode=Off, 30 messages a second, a kill -9 every 20 minutes, a backup and
   # restore drill every 30, a sample a minute (docs/soak.md, "Schedule").
   schedule:
@@ -79,7 +79,7 @@ env:
 
 jobs:
   soak:
-    if: github.event_name != 'schedule' || vars.EGGMAIL_SOAK_SCHEDULE == 'true'
+    if: github.event_name != 'schedule' || vars.SOAK_SCHEDULE_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 358
     steps:

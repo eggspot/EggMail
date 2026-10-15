@@ -98,7 +98,7 @@ Billing comes first: nothing here runs on every pull request. Three workflows, a
 |---|---|---|---|
 | `bench-gate` | weekly (Monday 04:41 UTC, skipped when `main` has no commit in the last 8 days) and manual | Builds the harness, measures **allocation per message** two ways and compares with `bench/baseline/allocations.json`; fails above the thresholds | about one billed minute (the first run took 52 s) |
 | `bench-throughput` | manual only | Runs `bench/run-local-matrix.sh`: both backends, each **durable and non-durable** (SQLite `Sync=Off`, `Normal`, `Full`; PostgreSQL `synchronous_commit=off` and the default), ingest and end-to-end delivery, 3 interleaved runs each; publishes the raw JSON as an artifact and a markdown summary that reports every pair side by side; optionally measures JIT versus ReadyToRun throughput, start-up and size | about 25 to 40 minutes |
-| `soak` | manual only (a monthly schedule exists and is off until the repository variable `EGGMAIL_SOAK_SCHEDULE` is `true`) | Hours of load against the real published host with kill -9 and backup/restore drills and a PASS/FAIL verdict: [soak.md](soak.md) | its wall time: a 6 hour run bills about 360 minutes |
+| `soak` | manual only (a monthly schedule exists and is off until the repository variable `SOAK_SCHEDULE_ENABLED` is `true`) | Hours of load against the real published host with kill -9 and backup/restore drills and a PASS/FAIL verdict: [soak.md](soak.md) | its wall time: a 6 hour run bills about 360 minutes |
 
 ### The allocation gate
 
