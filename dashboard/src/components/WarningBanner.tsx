@@ -8,6 +8,8 @@ const SYNC_OFF_EXPLANATION =
 
 const KNOWN_TITLES: Record<string, string> = {
   sqlite_sync_off: 'Not power-loss safe',
+  acme_pending: 'Certificate pending',
+  acme_failing: 'Certificate request failing',
 };
 
 function collapsedKey(code: string) {
