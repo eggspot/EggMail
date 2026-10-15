@@ -17,7 +17,7 @@ public sealed class LoginRequest
 
 public sealed record SessionResponse(string User, string Role, Guid? TenantId);
 
-public sealed record MeResponse(string User, string Role, Guid? TenantId, string? TenantName, string? CsrfToken, string AuthenticatedBy, IReadOnlyList<string>? Scopes);
+public sealed record MeResponse(string User, string Role, Guid? TenantId, string? TenantName, string? CsrfToken, string AuthenticatedBy, IReadOnlyList<string>? Scopes, bool MustChangePassword = false);
 
 /// <summary><c>POST/DELETE /session</c> and <c>GET /me</c>.</summary>
 public sealed class SessionApi(SessionService sessions, ApiAuthenticator auth, ApiOptions options)
@@ -84,6 +84,7 @@ public sealed class SessionApi(SessionService sessions, ApiAuthenticator auth, A
             caller.Tenant?.Name,
             caller.CsrfToken,
             caller.Kind == CallerKind.Session ? "session" : "api_key",
-            caller.Scopes?.OrderBy(s => s, StringComparer.Ordinal).ToList()));
+            caller.Scopes?.OrderBy(s => s, StringComparer.Ordinal).ToList(),
+            caller.MustChangePassword));
     }
 }

@@ -17,7 +17,7 @@ workflow refuses a stable tag without a non-empty section for that exact version
 
 ### Added
 
-- Inbound mail, design and storage contracts (decision 92, [design.md section 11](docs/design.md#11-inbound-mail)): receiving for domains a tenant enables, SPF/DKIM/DMARC/ARC verification, per-domain routes (webhook, forward with SRS, store, discard), retention, the `inbound` API scope. This change is the design and the contracts; the implementation follows in later changes.
+- Inbound mail, design and storage contracts (decision 91, [design.md section 11](docs/design.md#11-inbound-mail)): receiving for domains a tenant enables, SPF/DKIM/DMARC/ARC verification, per-domain routes (webhook, forward with SRS, store, discard), retention, the `inbound` API scope. This change is the design and the contracts; the implementation follows in later changes.
 - Outbound SMTP server and client written on the .NET base class library only (STARTTLS, implicit TLS, AUTH, pipelining, BDAT, request
   smuggling and STARTTLS-injection defences), with a CI guard that the protocol assemblies have no package references.
 - Message handling: MIME parser/builder/editor, DKIM signing and verification, SPF, DMARC, Authentication-Results, ARC, DSN/ARF, VERP,
@@ -50,6 +50,13 @@ workflow refuses a stable tag without a non-empty section for that exact version
 - Allocation round 3: the ingest path allocates about 1.7 KB per 200-byte message and 3.5 KB per 2 KB message on SQLite (was 5.1 and 10.7 KB), the
   SMTP server path alone 0.1 KB (was 1 KB); delivery about 25 KB per recipient (was 28 KB). New setting `Delivery:MaxIdleConnectionsPerTarget`
   (default 2, unchanged behaviour) for the idle outbound connections kept per destination (decision 89).
+- Zero-configuration start: `docker run -p 587:5587 -p 465:4465 -p 2525:2525 -p 8443:8443 -v eggmail-data:/data ghcr.io/eggspot/eggmail` is a usable server. The first start creates the data
+  directory, the key ring, the VERP key, a self-signed certificate (said in the log at every start and as a persistent dashboard banner) and the first dashboard administrator with a
+  generated password printed once. A small set of documented `EGGMAIL_*` environment variables maps onto the existing configuration (`EGGMAIL_HOSTNAME`, `EGGMAIL_ACME_EMAIL` with the
+  host name turns ACME on, `EGGMAIL_ACME_STAGING`, `EGGMAIL_ACME_DIRECTORY`, `CLOUDFLARE_API_TOKEN`, `EGGMAIL_ADMIN_USER`, `EGGMAIL_ADMIN_PASSWORD(_FILE)`, `EGGMAIL_DOMAINS`, `EGGMAIL_DATABASE`
+  for PostgreSQL with one variable, `EGGMAIL_RELAY`); combinations that cannot work stop the start with a message that names the variable. New keys `Dashboard:BootstrapAdminPassword`
+  and `Delivery:Relay:*`. The generated administrator password is temporary: the dashboard (and the API, with `403 password_change_required`) allows nothing but choosing a new one at the first sign-in. The shipped Compose files use the new variables. A browser-and-SMTP end-to-end test starts the real host with nothing configured, and the release smoke test does
+  the same with the pushed image.
 - Cancelling queued mail: `POST /api/v1/messages/{id}/cancel` and a "Cancel delivery" action on the dashboard's message page stop delivery
   to the recipients that are still waiting (all of them, or the ones named); a recipient whose delivery attempt is running is left alone and
   reported as in flight. Works with and without per-message history, publishes a `message.cancelled` webhook event and is implemented on every storage backend (decision 86; adds the index `delivery_queue (message_id)`, schema version 7).

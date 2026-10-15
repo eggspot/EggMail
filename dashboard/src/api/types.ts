@@ -11,6 +11,8 @@ export interface Me {
   tenantId: string | null;
   /** CSRF token for mutating requests (also accepted from the X-CSRF-Token response header). */
   csrfToken?: string;
+  /** The user signed in with a temporary password (the generated one of the first administrator): only changing it, and signing out, are allowed until then. */
+  mustChangePassword?: boolean;
 }
 
 export interface CapabilityWarning {
