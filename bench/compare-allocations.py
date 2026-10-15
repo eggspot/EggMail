@@ -31,7 +31,8 @@ def compare(name, baseline, measured, percent, rows):
     if measured is None:
         rows.append((name, baseline, None, None, "MISSING"))
         return False
-    change = (measured - baseline) * 100.0 / baseline if baseline else 0.0
+    # A step that allocates nothing has no percentage: it regresses as soon as it allocates more than a few bytes (rounding of the per-call average).
+    change = (measured - baseline) * 100.0 / baseline if baseline else (0.0 if measured <= 16 else 100.0)
     if change > percent:
         verdict = "REGRESSION"
     elif change < -percent:

@@ -8,12 +8,23 @@ let counter = 0;
 /** A short unique token for names (tenants, domains, users), so specs never collide on the shared server. */
 export const unique = (prefix = 'e2e') => `${prefix}${Date.now().toString(36)}${(counter++).toString(36)}`;
 
-/** Publishes the records a domain asks for into the fake DNS. `except` lists purposes to leave out, `wrongDkim` publishes a different key. */
+/** The purposes whose records decide whether a domain can send. */
+export const REQUIRED_PURPOSES = ['dkim', 'return_path'];
+
+/**
+ * Publishes the records a domain asks for into the fake DNS, the way a correct setup would. `only` lists the purposes to publish, `except`
+ * purposes to leave out, `wrongDkim` publishes a key that is not a key. The reverse DNS (PTR) of a host name is published as an A record
+ * for the host plus the PTR record of that address (10.0.0.1 stands for the server).
+ */
 export function publishDomainRecords(dns, domain, { except = [], wrongDkim = false, only } = {}) {
   for (const record of domain.records) {
     if (except.includes(record.purpose) || (only && !only.includes(record.purpose))) continue;
     if (record.type === 'CNAME') dns.setCname(record.host, record.value);
-    else if (record.purpose === 'dkim' && wrongDkim) dns.setTxt(record.host, 'v=DKIM1; k=rsa; p=' + 'A'.repeat(380));
+    else if (record.type === 'MX') dns.setMx(record.host, record.value.split(' ')[1], Number(record.value.split(' ')[0]));
+    else if (record.type === 'PTR') {
+      dns.setA(record.value, '10.0.0.1');
+      dns.setPtr('1.0.0.10.in-addr.arpa', record.value);
+    } else if (record.purpose === 'dkim' && wrongDkim) dns.setTxt(record.host, 'v=DKIM1; k=rsa; p=' + 'A'.repeat(380));
     else dns.setTxt(record.host, record.value);
   }
 }
@@ -21,7 +32,7 @@ export function publishDomainRecords(dns, domain, { except = [], wrongDkim = fal
 /** Registers a domain for the tenant, publishes its required DNS records and verifies it, so mail can be sent from it. */
 export async function createVerifiedDomain(admin, stack, tenant, prefix = 'send') {
   const domain = await admin.ok('POST', '/api/v1/domains', { name: `${unique(prefix)}.mail.test` }, { tenantId: tenant.id });
-  publishDomainRecords(stack.dns, domain, { except: ['spf', 'dmarc'] });
+  publishDomainRecords(stack.dns, domain, { only: REQUIRED_PURPOSES });
   const verified = await admin.ok('POST', `/api/v1/domains/${domain.id}/verify`, undefined, { tenantId: tenant.id });
   if (verified.status !== 'verified') throw new Error(`the domain did not verify: ${JSON.stringify(verified)}`);
   return verified;

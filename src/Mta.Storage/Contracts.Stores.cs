@@ -40,6 +40,10 @@ public interface IMessageIntake
     /// <summary>
     /// Atomically (per backend semantics) stores the raw message in the spool, creates one queued delivery per recipient,
     /// records history content when <see cref="HistoryMode.Full"/>, updates the idempotency table and counts "accepted" statistics.
+    /// <para>
+    /// The caller reuses the <paramref name="message"/> object once the returned task has completed (or thrown): the implementation must be completely
+    /// done with it by then (no write still queued that reads it) and must not keep the object itself, only values taken from it.
+    /// </para>
     /// </summary>
     ValueTask<IntakeResult> AcceptAsync(AcceptedMessage message, CancellationToken cancellationToken);
 }

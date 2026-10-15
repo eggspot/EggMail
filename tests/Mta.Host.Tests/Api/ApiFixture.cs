@@ -70,6 +70,26 @@ internal sealed class MutableDns : IDnsResolver
         return this;
     }
 
+    public MutableDns AddMx(string name, ushort preference, string exchange)
+    {
+        lock (_gate)
+        {
+            _records.Add(new MxRecord(Normalize(name), 300, preference, Normalize(exchange)));
+        }
+
+        return this;
+    }
+
+    public MutableDns AddPtr(IPAddress address, string target)
+    {
+        lock (_gate)
+        {
+            _records.Add(new PtrRecord(DnsName.ReverseArpaName(address), 300, Normalize(target)));
+        }
+
+        return this;
+    }
+
     public MutableDns AddCname(string name, string target)
     {
         lock (_gate)
@@ -193,6 +213,7 @@ internal sealed class ApiFixture : IAsyncDisposable
         Options = new ApiOptions
         {
             BounceDomain = "bounces.egg.test",
+            SpfInclude = "spf.egg.test",
             MessageIdDomain = "egg.test",
             VerificationPollInterval = TimeSpan.FromHours(1),
             MetricsAllowedNetworks = ApiOptions.DefaultMetricsNetworks(),

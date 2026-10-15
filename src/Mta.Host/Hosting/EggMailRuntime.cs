@@ -49,6 +49,9 @@ public sealed class EggMailRuntime : IAsyncDisposable
 
     public AcmeRenewalService? Acme { get; init; }
 
+    /// <summary>The built-in HTTP-01 responder (null unless ACME is on and answers HTTP-01 challenges itself, <c>Acme:Challenge</c>); it runs on every replica.</summary>
+    public AcmeHttpChallengeListener? AcmeHttpListener { get; init; }
+
     /// <summary>The circuit breakers per route and MX host (shared among replicas through <see cref="ReplicaCoordinator"/>).</summary>
     public required RouteHealth Health { get; init; }
 
@@ -153,7 +156,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
         var mx = new MxResolver(dns, new MxResolverOptions { ExcludeSpecialAddresses = !config.Delivery.AllowPrivateMxAddresses });
         var mtaSts = new MtaStsPolicyStore(dns, new MtaStsPolicyFetcher(), clock: clock);
         var tls = new OutboundTlsPolicyResolver(mtaSts, new DaneTlsaLookup(dns));
-        var pool = new SmtpConnectionPool(new SmtpClientOptions { HeloName = config.Delivery.HeloName ?? config.Hostname, PreferChunking = config.Delivery.PreferChunking }, clock);
+        var pool = new SmtpConnectionPool(new SmtpClientOptions { HeloName = config.Delivery.HeloName ?? config.Hostname, PreferChunking = config.Delivery.PreferChunking }, clock, maxIdlePerTarget: config.Delivery.MaxIdleConnectionsPerTarget);
         var routeHealth = new RouteHealth(clock);
         var routes = new RoutePlanner(routeHealth);
         var sendingCounters = new InMemorySendingCounterStore();
@@ -201,15 +204,25 @@ public sealed class EggMailRuntime : IAsyncDisposable
             : new TlsReportSender(tlsJournal, storage.Config, new TlsRptRecordLookup(dns), new TlsRptHttpsSender(), storage.Intake, clock, config.Hostname, config.Tls.ReportContact ?? "postmaster@" + config.Hostname, log);
 
         AcmeRenewalService? acme = null;
+        AcmeHttpChallengeListener? acmeHttpListener = null;
         if (config.Acme.Enabled)
         {
-            if (acmeDnsOverride is null)
+            // DNS-01 needs a DNS provider and so credentials; without them (Acme:Challenge Auto or Http01) the server answers HTTP-01 itself.
+            if (acmeDnsOverride is null && config.Acme.HasDnsCredentials())
             {
-                string token = config.Acme.CloudflareApiToken ?? (config.Acme.CloudflareApiTokenFile is { } f ? File.ReadAllText(f).Trim() : throw new InvalidOperationException("Acme:CloudflareApiToken or Acme:CloudflareApiTokenFile is required."));
+                string token = config.Acme.CloudflareApiToken ?? File.ReadAllText(config.Acme.CloudflareApiTokenFile!).Trim();
                 acmeDnsOverride = new CloudflareDnsChallengeProvider(new HttpClient(), token);
             }
 
-            acme = new AcmeRenewalService(storage.Config, secrets, acmeRunnerOverride ?? new CertesOrderRunner(log: log), acmeDnsOverride, config.Acme, clock, log);
+            Http01Challenges? http01 = null;
+            if (config.Acme.UsesHttp01())
+            {
+                http01 = new Http01Challenges(storage.Config, clock, log);
+                http01.ExpectListener();
+                acmeHttpListener = new AcmeHttpChallengeListener(http01, config.Acme.Http01BindAddress, config.Acme.Http01ListenPort, http01, log);
+            }
+
+            acme = new AcmeRenewalService(storage.Config, secrets, acmeRunnerOverride ?? new CertesOrderRunner(log: log), acmeDnsOverride, config.Acme, clock, log, http: http01);
         }
 
         var runtime = new EggMailRuntime
@@ -217,13 +230,18 @@ public sealed class EggMailRuntime : IAsyncDisposable
             KeysProtectedAtRest = Mta.Host.Secrets.SecretsFactory.KeysProtectedAtRest(config.Secrets, storage.Config),
             Config = config, Storage = storage, Clock = clock, Log = log, Secrets = secrets, Certificates = certificates, Verp = verp,
             Submission = submission, AuthThrottle = throttle, SmtpServer = smtp, Delivery = delivery, Webhooks = webhooks, Dns = dns,
-            Pool = pool, Routes = routes, Limits = limits, Acme = acme, TlsReports = reports, Health = routeHealth, DestinationThrottle = destinationThrottle, ReplicaCoordinator = replicaCoordinator,
+            Pool = pool, Routes = routes, Limits = limits, Acme = acme, AcmeHttpListener = acmeHttpListener, TlsReports = reports, Health = routeHealth, DestinationThrottle = destinationThrottle, ReplicaCoordinator = replicaCoordinator,
             CounterPersistence = counterPersistence, TlsJournal = tlsJournal, TlsCollector = collector,
         };
         runtime._owned.Add(certificateMeters);
         if (replicaCoordinator is not null)
         {
             runtime._owned.Add(replicaCoordinator);
+        }
+
+        if (acmeHttpListener is not null)
+        {
+            runtime._owned.Add(acmeHttpListener);
         }
 
         runtime._owned.Add(pool);
@@ -256,7 +274,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
         };
     }
 
-    private static IDnsResolver CreateDns(MtaConfig config)
+    internal static IDnsResolver CreateDns(MtaConfig config)
     {
         var servers = config.Dns.Servers.Count > 0
             ? config.Dns.Servers.Select(ParseEndpoint).ToList()

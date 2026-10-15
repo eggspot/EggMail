@@ -1,25 +1,27 @@
 {
   "schema": 1,
-  "recordedOn": "GitHub-hosted ubuntu-latest runner (4 logical cores, Ubuntu 24.04, .NET 10.0.12), bench-gate run 38462613098, 2026-10-13, on main plus the deployment branch (after the allocation work of decisions 64 to 68). The pipeline value is a single run; the same code varied by about 2 percent between runs.",
+  "recordedOn": "GitHub-hosted ubuntu-latest runner, bench-gate run 38684023507, 2026-10-15, on this branch (allocation round 3, decision 89). The micro steps are identical on the runner and on the development laptop (3,309 B for SQLite SubmitAsync with a 2 KB message there, 3,307 B on the runner); the pipeline value is a single run and varies by a few percent between runs because the runtime's small pool of async state machines misses more or less under concurrency. Before round 3: SubmitAsync InMemory 2 KB 10,760 B, pipeline 11,180 B per message.",
   "thresholds": {
     "microPercent": 5,
     "pipelinePercent": 10
   },
   "micro": {
-    "MimeMessage.Parse": 672,
+    "MimeMessage.Parse": 504,
     "MessageHeaderEditor (Received only, ToArray)": 2256,
     "MessageHeaderEditor (remove Bcc, 2 prepends, Received, ToArray)": 2672,
-    "MessageContentExtractor.Extract(raw) (parses itself)": 4480,
-    "MessageContentExtractor.Extract(parsed message)": 3808,
-    "AddressList.Parse(From) + GetCommonDomain (the full parser, as before)": 712,
-    "AddressList.GetCommonDomain(From header) (the simple-address shortcut)": 80,
-    "Ids.New + EmailAddress.Parse x2": 152,
-    "SubmissionService.SubmitAsync, InMemory, history Full, 2 KB": 10760,
-    "SubmissionService.SubmitAsync, InMemory, history Full, tiny": 3568
+    "MessageContentExtractor.Extract(raw) (parses itself)": 4216,
+    "MessageContentExtractor.Extract(parsed message)": 3712,
+    "AddressList.Parse(From) + GetCommonDomain (the full parser, as before)": 664,
+    "AddressList.GetCommonDomain(From header) (the simple-address shortcut)": 0,
+    "Ids.New + EmailAddress.Parse x2": 64,
+    "SubmissionService.SubmitAsync, InMemory, history Full, 2 KB": 9704,
+    "SubmissionService.SubmitAsync, InMemory, history Full, tiny": 2512,
+    "SubmissionService.SubmitAsync, SQLite (sync off), history Full, 2 KB": 3309,
+    "SubmissionService.SubmitAsync, SQLite (sync off), history Full, tiny": 1507
   },
   "pipeline": {
     "sqlite-off-full": {
-      "bytesPerMessage": 11180,
+      "bytesPerMessage": 3570,
       "messages": 20000,
       "connections": 8,
       "sizeBytes": 2048,

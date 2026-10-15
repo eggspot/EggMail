@@ -60,7 +60,7 @@ internal sealed class SqliteTransferAccess(SqliteRuntime rt, IStorageModelHooks 
             // The work is asynchronous only in shape: EF over SQLite completes synchronously, and the writer thread has no
             // synchronization context, so waiting here cannot deadlock.
             return s.work(db, s.cancellationToken).GetAwaiter().GetResult();
-        }, cancellationToken).ConfigureAwait(false);
+        }, cancellationToken, needsDriverTransaction: true).ConfigureAwait(false);
 
         if (part == TransferPart.Config)
         {

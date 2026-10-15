@@ -1,4 +1,6 @@
+using System.Net;
 using Microsoft.Extensions.Configuration;
+using Mta.Host.Tls;
 using Mta.Storage;
 
 namespace Mta.Host.Configuration;
@@ -150,7 +152,15 @@ public static class ConfigLoader
 
         var acme = Bind<AcmeSection>(configuration, "Acme");
         var api = Bind<ApiSection>(configuration, "Api");
+        var domains = Bind<DomainsSection>(configuration, "Domains");
+        SplitEntries(domains.Bootstrap, configuration["Domains:Bootstrap"]);
+        SplitEntries(domains.MtaStsMx, configuration["Domains:MtaStsMx"]);
         SplitEntries(acme.Domains, configuration["Acme:Domains"]);
+        if (acme.Enabled && acme.Domains.Count == 0)
+        {
+            acme.Domains.Add(configuration["Hostname"] ?? config.Hostname);   // "set just the host name and an email": the certificate is for the server's own name
+        }
+
         SplitEntries(api.MetricsAllowedNetworks, configuration["Api:MetricsAllowedNetworks"]);
 
         return new MtaConfig
@@ -176,6 +186,7 @@ public static class ConfigLoader
             Tls = Bind<TlsSection>(configuration, "Tls"),
             Acme = acme,
             Api = api,
+            Domains = domains,
         };
     }
 
@@ -425,6 +436,11 @@ public static class ConfigLoader
             errors.Add("Delivery:Workers must be at least 1.");
         }
 
+        if (c.Delivery.MaxIdleConnectionsPerTarget is < 0 or > 256)
+        {
+            errors.Add("Delivery:MaxIdleConnectionsPerTarget must be between 0 and 256.");
+        }
+
         if (c.Switch.QuiesceTimeoutSeconds < 1)
         {
             errors.Add("Switch:QuiesceTimeoutSeconds must be at least 1.");
@@ -433,6 +449,71 @@ public static class ConfigLoader
         ValidateStorageTuning(c.Storage, errors);
         ValidateTlsAndAcme(c, errors);
         ValidateApi(c.Api, errors);
+        ValidateDomains(c, errors);
+    }
+
+    /// <summary>One destination for the <c>rua</c> tag of a DMARC or TLS-RPT record: it must not be able to end the tag or add a second one.</summary>
+    private static bool ValidReportDestination(string value, bool allowHttps)
+    {
+        string v = value.Trim();
+        if (v.Length == 0 || v.Length > 200 || v.Any(ch => char.IsWhiteSpace(ch) || char.IsControl(ch) || ch is ';' or ',' or '"' or '\\'))
+        {
+            return false;
+        }
+
+        if (allowHttps && v.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            return v.Length > "https://".Length;
+        }
+
+        string address = v.StartsWith("mailto:", StringComparison.OrdinalIgnoreCase) ? v["mailto:".Length..] : v;
+        int at = address.IndexOf('@', StringComparison.Ordinal);
+        return at > 0 && at == address.LastIndexOf('@') && at < address.Length - 1;
+    }
+
+    private static void ValidateDomains(MtaConfig c, List<string> errors)
+    {
+        DomainsSection d = c.Domains;
+        foreach (string name in d.Bootstrap)
+        {
+            if (!Mta.Host.Domains.DomainNames.TryNormalize(name, out _))
+            {
+                errors.Add($"Domains:Bootstrap entry '{name}' is not a valid domain name (such as mail.example.com).");
+            }
+        }
+
+        if (d.DmarcPolicy is not ("none" or "quarantine" or "reject"))
+        {
+            errors.Add($"Domains:DmarcPolicy must be none, quarantine or reject, not '{d.DmarcPolicy}'.");
+        }
+
+        if (d.MtaStsMaxAge < TimeSpan.FromMinutes(1) || d.MtaStsMaxAge > TimeSpan.FromSeconds(31_557_600))
+        {
+            errors.Add("Domains:MtaStsMaxAge must be between 1 minute and 31557600 seconds (RFC 8461).");
+        }
+
+        foreach (string mx in d.MtaStsMx)
+        {
+            if (Mta.Host.Domains.DomainRecordOptions.NormalizeMtaStsMx(mx) is null)
+            {
+                errors.Add($"Domains:MtaStsMx entry '{mx}' is not a fully qualified host name without a trailing dot (a single leading '*.' is allowed).");
+            }
+        }
+
+        if (d.DmarcReportAddress is { Length: > 0 } dmarc && !ValidReportDestination(dmarc, allowHttps: false))
+        {
+            errors.Add("Domains:DmarcReportAddress must be one e-mail address (it is written into the rua tag of a DNS record; no ';', ',' or white space). {domain} stands for the sending domain.");
+        }
+
+        if (d.TlsReportAddress is { Length: > 0 } tls && !ValidReportDestination(tls, allowHttps: true))
+        {
+            errors.Add("Domains:TlsReportAddress must be one e-mail address or one https:// URL (it is written into the rua tag of a DNS record; no ';', ',' or white space). {domain} stands for the sending domain.");
+        }
+
+        if (d.MtaStsMode != Mta.Host.Domains.MtaStsServingMode.Off && Mta.Host.Domains.DomainRecordOptions.UsableHostname(c.Hostname) is null)
+        {
+            errors.Add("Domains:MtaStsMode needs a fully qualified Hostname: mta-sts.<domain> has to point at it and it is the default mx: line of the policy.");
+        }
     }
 
     private static void ValidateStorageTuning(StorageOptions s, List<string> errors)
@@ -462,13 +543,51 @@ public static class ConfigLoader
             return;
         }
 
-        Require(Uri.TryCreate(acme.DirectoryUrl, UriKind.Absolute, out Uri? directory) && directory.Scheme is "https" or "http", "Acme:DirectoryUrl must be an absolute http(s) URL.", errors);
+        string? directoryUrl = acme.EffectiveDirectoryUrl();
+        Require(directoryUrl is not null && Uri.TryCreate(directoryUrl, UriKind.Absolute, out Uri? directory) && directory.Scheme is "https" or "http",
+            string.IsNullOrWhiteSpace(acme.Directory)
+                ? "Acme:DirectoryUrl must be an absolute http(s) URL."
+                : $"Acme:Directory '{acme.Directory}' must be LetsEncrypt, LetsEncryptStaging, ZeroSsl or the absolute http(s) URL of an ACME directory.", errors);
+        if (directoryUrl is not null && Uri.TryCreate(directoryUrl, UriKind.Absolute, out Uri? parsed))
+        {
+            // The URL is logged and shown to operators: it must not carry a password (userinfo), a token (query) or a fragment.
+            Require(parsed.UserInfo.Length == 0 && parsed.Query.Length == 0 && parsed.Fragment.Length == 0,
+                "Acme:Directory / Acme:DirectoryUrl must not contain credentials (user:password@), a query string or a fragment.", errors);
+        }
+
         Require(string.Equals(acme.DnsProvider, "Cloudflare", StringComparison.OrdinalIgnoreCase), $"Acme:DnsProvider '{acme.DnsProvider}' is not supported (only Cloudflare).", errors);
-        Require(!string.IsNullOrWhiteSpace(acme.CloudflareApiToken) || !string.IsNullOrWhiteSpace(acme.CloudflareApiTokenFile), "Acme:CloudflareApiToken or Acme:CloudflareApiTokenFile is required when Acme:Enabled is true.", errors);
+        Require(acme.Challenge != AcmeChallengeMode.Dns01 || acme.HasDnsCredentials(), "Acme:CloudflareApiToken or Acme:CloudflareApiTokenFile is required when Acme:Challenge is Dns01.", errors);
         Require(!string.IsNullOrWhiteSpace(acme.CertificateName), "Acme:CertificateName must not be empty.", errors);
         Require(acme.RenewAtRemainingFraction is > 0 and < 1, "Acme:RenewAtRemainingFraction must be between 0 and 1 (exclusive).", errors);
         Require(acme.CheckInterval > TimeSpan.Zero, "Acme:CheckInterval must be positive.", errors);
         Require(acme.PropagationDelay >= TimeSpan.Zero, "Acme:PropagationDelay must not be negative.", errors);
+        Require(string.IsNullOrWhiteSpace(acme.EabKeyId) == (string.IsNullOrWhiteSpace(acme.EabHmacKey) && string.IsNullOrWhiteSpace(acme.EabHmacKeyFile)),
+            "Acme:EabKeyId and Acme:EabHmacKey (or Acme:EabHmacKeyFile) must be set together (external account binding).", errors);
+
+        foreach (string name in acme.Domains)
+        {
+            if (AcmeNames.TryNormalize(name, out string? error) is null)
+            {
+                errors.Add(acme.Domains.Count == 1 && string.Equals(name, c.Hostname, StringComparison.OrdinalIgnoreCase)
+                    ? $"Acme is enabled without Acme:Domains, so the certificate is for the Hostname, and '{c.Hostname}' is not a public host name: set Hostname to the name of this server, for example mail.example.com."
+                    : "Acme:Domains: " + error);
+            }
+        }
+
+        bool wildcards = acme.Domains.Any(AcmeNames.IsWildcard);
+        if (wildcards && !acme.UsesDns01())
+        {
+            errors.Add("Acme:Domains has a wildcard name, which only DNS-01 can prove: set Acme:CloudflareApiToken (or Acme:CloudflareApiTokenFile) and, if Acme:Challenge is Http01, set it to Auto or Dns01.");
+        }
+
+        if (acme.UsesHttp01())
+        {
+            Require(acme.Http01ListenPort is >= 1 and <= 65535, "Acme:Http01ListenPort must be between 1 and 65535.", errors);
+            Require(IPAddress.TryParse(acme.Http01BindAddress, out _), "Acme:Http01BindAddress must be an IP address (:: for all).", errors);
+            Require(acme.Http01ListenPort != c.Dashboard.HttpPort && (!c.Dashboard.HttpsEnabled || acme.Http01ListenPort != c.Dashboard.HttpsPort),
+                $"Acme:Http01ListenPort {acme.Http01ListenPort} is the port of the dashboard (Dashboard:HttpPort / Dashboard:HttpsPort); the challenge listener needs a port of its own (it answers nothing but /.well-known/acme-challenge/).", errors);
+            Require(!c.Smtp.Listeners.Values.Any(l => l.Enabled && l.Port == acme.Http01ListenPort), $"Acme:Http01ListenPort {acme.Http01ListenPort} is also the port of an SMTP listener.", errors);
+        }
     }
 
     private static void ValidateApi(ApiSection api, List<string> errors)

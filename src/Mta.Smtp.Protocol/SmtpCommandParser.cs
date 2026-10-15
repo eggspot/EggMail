@@ -13,6 +13,12 @@ public sealed class SmtpParseOptions
     /// <summary>Whether SMTPUTF8 is advertised, which allows non-ASCII mailboxes.</summary>
     public bool AllowSmtpUtf8 { get; init; } = true;
 
+    /// <summary>
+    /// Optional memo of recently parsed mailboxes (one per session; it is not thread safe), so the sender of every message of a connection is not
+    /// allocated again. Parsing gives the same result with or without it.
+    /// </summary>
+    public EmailAddressCache? AddressCache { get; init; }
+
     public static readonly SmtpParseOptions Default = new();
 }
 
@@ -353,7 +359,7 @@ public static class SmtpCommandParser
         // Decoded into stack memory: only the address parts that the result keeps are allocated.
         Span<char> chars = inner.Length <= 512 ? stackalloc char[inner.Length] : new char[inner.Length];
         int length = Encoding.UTF8.GetChars(inner, chars);
-        if (!EmailAddress.TryParse(chars[..length], options.AllowSmtpUtf8, out address))
+        if (!EmailAddress.TryParse(chars[..length], options.AllowSmtpUtf8, options.AddressCache, out address))
         {
             return SmtpParseError.Syntax;
         }

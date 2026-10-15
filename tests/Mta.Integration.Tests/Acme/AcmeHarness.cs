@@ -64,8 +64,15 @@ internal sealed class AcmeHarness : IAsyncDisposable
     }
 
     /// <summary>A renewal service as a freshly started process would build it: its own runner (no cached state), the shared store and clock.</summary>
-    public AcmeRenewalService CreateService(IDnsChallengeProvider dns, IEnumerable<string> domains, RecordingHandler? http = null, IAcmeOrderRunner? runner = null, Func<double>? random = null) =>
-        new(Storage.Config, Secrets, runner ?? new CertesOrderRunner(http ?? Http), dns, Section(domains), Clock, Log, random);
+    public AcmeRenewalService CreateService(IDnsChallengeProvider? dns, IEnumerable<string> domains, RecordingHandler? http = null, IAcmeOrderRunner? runner = null, Func<double>? random = null,
+        IHttpChallengePublisher? challenges = null) =>
+        new(Storage.Config, Secrets, runner ?? new CertesOrderRunner(http ?? Http), dns, Section(domains), Clock, Log, random, challenges);
+
+    /// <summary>The challenge setting of the services this harness builds (<c>Acme:Challenge</c>).</summary>
+    public AcmeChallengeMode Challenge { get; set; } = AcmeChallengeMode.Auto;
+
+    /// <summary>External account binding of the services this harness builds.</summary>
+    public (string KeyId, string HmacKey)? Eab { get; set; }
 
     /// <summary>Follow the CA's renewal information (the default); tests of the plain lifetime rule switch it off.</summary>
     public bool UseRenewalInfo { get; set; } = true;
@@ -78,6 +85,9 @@ internal sealed class AcmeHarness : IAsyncDisposable
         Domains = [.. domains],
         PropagationDelay = TimeSpan.Zero,
         UseRenewalInfo = UseRenewalInfo,
+        Challenge = Challenge,
+        EabKeyId = Eab?.KeyId,
+        EabHmacKey = Eab?.HmacKey,
     };
 
     public async ValueTask DisposeAsync()
