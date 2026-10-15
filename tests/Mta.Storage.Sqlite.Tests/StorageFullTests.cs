@@ -18,6 +18,14 @@ public class StorageFullTests
     }
 
     [Theory]
+    [InlineData(13)]
+    [InlineData(13 | (1 << 8))]   // an extended result code of SQLITE_FULL
+    public void The_extended_result_code_is_masked_off(int code)
+    {
+        Assert.IsType<StorageFullException>(SqliteFileWriter.Translate(new SqliteException("full", code)));
+    }
+
+    [Theory]
     [InlineData(19)]   // constraint
     [InlineData(5)]    // busy
     [InlineData(11)]   // corrupt

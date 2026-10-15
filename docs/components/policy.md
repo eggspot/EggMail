@@ -60,11 +60,11 @@ Only `PermanentRecipient` suppresses, because a wrong suppression silently stops
 
 ## Per-destination throttling (`DestinationThrottle`)
 
-Keyed by `ThrottleKey(destination, route?)` (domain or MX host, optionally narrowed to a relay or sending IP; case-insensitive). Per key: a cap on concurrent connections, a cap on messages per connection, and a token bucket (messages per minute).
+Keyed by `ThrottleKey(destination, route?)` (domain or MX host, optionally narrowed to a relay or sending IP; case-insensitive). Per key: a cap on concurrent connections, a cap on messages per connection (`MaxMessagesPerConnection`: **defined and unit-tested here, but the delivery engine never asks for it**, so it does not limit anything yet), and a token bucket (messages per minute).
 
 | Setting | Proposed default |
 |---|---|
-| Ceilings (`Defaults`) | 20 connections, 600 messages/min, 100 messages per connection; per-destination `Overrides` supported |
+| Ceilings (`Defaults`) | 20 connections, 600 messages/min, 100 messages per connection (not enforced by the engine); per-destination `Overrides` supported |
 | Starting point | 5 connections, 120 messages/min (capped by the ceiling) |
 | Burst allowance | 10 s of the current rate |
 | Decrease (AIMD) | multiply by 0.5 on a `Throttled` signal (throttle class or 421), or on 3 `ConnectionFailure` signals within 30 s; floors 1 connection and 6 messages/min |

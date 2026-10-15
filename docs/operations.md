@@ -182,7 +182,7 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | `Observability:OtlpProtocol` | `Grpc` | `Grpc` (port 4317) or `HttpProtobuf` (port 4318; EggMail appends `/v1/metrics`, `/v1/traces`, `/v1/logs`) |
 | `Observability:TraceSampleRatio` | 0.1 | Share of messages whose trace is exported, 0 to 1. A message is traced completely or not at all |
 | `Observability:QueueSampleSeconds` | 15 | Seconds between samples of the queue for the `mta_delivery_queue_*` gauges; `0` turns them off |
-| `Webhooks:AllowHttp` | false | Allow plain `http` webhook endpoints (HTTPS only otherwise) |
+| `Webhooks:AllowHttp` | false | Allow plain `http` webhook endpoints (HTTPS only otherwise). Deliveries are made **directly**: `HTTP_PROXY`/`HTTPS_PROXY` are ignored on purpose, because the SSRF guard checks the address it connects to and through a proxy that is the proxy. The host needs outbound access to the receivers (in Kubernetes the NetworkPolicy allows TCP 443 to the public Internet) |
 | `Webhooks:Timeout` | `00:00:15` | One delivery attempt |
 | `Webhooks:MaxConcurrency` | 32 | Concurrent webhook deliveries |
 | `Webhooks:MaxConcurrencyPerEndpoint` | 4 | So one slow endpoint cannot take all workers |

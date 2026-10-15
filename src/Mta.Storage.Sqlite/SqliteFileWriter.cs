@@ -420,9 +420,13 @@ internal sealed class SqliteFileWriter : IAsyncDisposable
         command.Succeed();
     }
 
-    /// <summary>SQLITE_FULL (13) becomes <see cref="StorageFullException"/> so the SMTP layer can answer 452 4.3.1; everything else is passed on as it is.</summary>
+    /// <summary>
+    /// SQLITE_FULL (13, whatever its extended code) becomes <see cref="StorageFullException"/> so the SMTP layer can answer 452 4.3.1; everything else
+    /// is passed on as it is. The unix file system layer of SQLite already reports ENOSPC on a write as SQLITE_FULL, so there is no separate
+    /// SQLITE_IOERR variant to map.
+    /// </summary>
     internal static Exception Translate(Exception ex) =>
-        ex is SqliteException { SqliteErrorCode: 13 } ? new StorageFullException("The disk holding the SQLite files is full (SQLITE_FULL).", ex) : ex;
+        ex is SqliteException { SqliteErrorCode: var code } && (code & 0xFF) == 13 ? new StorageFullException("The disk holding the SQLite files is full (SQLITE_FULL).", ex) : ex;
 
     private void RunExclusive(WriterContext context, WriterCommand command)
     {

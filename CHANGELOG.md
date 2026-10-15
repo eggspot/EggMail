@@ -49,11 +49,15 @@ workflow refuses a stable tag without a non-empty section for that exact version
 
 - `BDAT` bodies are held to the same line-ending rule as `DATA` (bare LF, bare CR and NUL are refused with `500 5.5.2` and the connection is closed) instead of being acknowledged and bounced at delivery.
 - A full disk on the SQLite backend is answered `452 4.3.1` instead of `451 4.3.0`.
-- `Delivery:Throttle:MaxMessagesPerConnection` is documented as reserved: it was read but never enforced.
+
+### Changed
+
+- `Delivery:Throttle:MaxMessagesPerConnection` is documented as reserved: it is read and validated but the delivery engine never enforces it.
+- Webhook deliveries need direct network access to the receivers: a proxy configured through `HTTP_PROXY`/`HTTPS_PROXY` is ignored (see Security).
 
 ### Security
 
-- Webhook deliveries never go through a proxy, so `HTTP_PROXY`/`HTTPS_PROXY` in the environment cannot bypass the SSRF guard.
+- Webhook deliveries never go through a proxy, so `HTTP_PROXY`/`HTTPS_PROXY` in the environment cannot bypass the SSRF guard (the guard checks the address it connects to, which through a proxy is the proxy). Deployments that could only reach receivers through a proxy must allow direct egress for the webhook port range instead.
 - No known vulnerabilities; no independent security audit has been done yet. Report problems as described in [SECURITY.md](SECURITY.md).
 
 [Unreleased]: https://github.com/eggspot/EggMail/commits/main
