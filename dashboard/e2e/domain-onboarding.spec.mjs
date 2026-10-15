@@ -114,8 +114,8 @@ test.describe('adding a domain: the records, the check and the ready-to-send sta
     expect(plain.headers.get('content-type')).toContain('text/plain');
     expect(plain.body).toBe(onPage);
 
-    // Every record of the table is a line of the zone file; the long DKIM key is split in quoted strings of at most 255 characters.
-    for (const r of records.records.filter((x) => x.type !== 'PTR')) expect(onPage).toContain(`${r.host}. ${r.ttl} IN ${r.type} `);
+    // Every record of the table that belongs in the zone is a line of the zone file (the reverse DNS and the operator's bounce MX are comments); the long DKIM key is split in quoted strings of at most 255 characters.
+    for (const r of records.records.filter((x) => x.type !== 'PTR' && x.type !== 'MX')) expect(onPage).toContain(`${r.host}. ${r.ttl} IN ${r.type} `);
     const dkim = onPage.split('\n').find((l) => l.includes('._domainkey.'));
     const strings = [...dkim.matchAll(/"([^"]*)"/g)].map((m) => m[1]);
     expect(strings.length).toBeGreaterThan(1);
@@ -145,7 +145,7 @@ test.describe('domains from Domains:Bootstrap (EGGMAIL_DOMAINS) and the MTA-STS 
       expect(log).toContain(`mta-sts.${name}. 3600 IN CNAME mta.eggmail.test.`);
       expect(log).toContain(`bounce.${name}. 3600 IN CNAME bounces.eggmail.test.`);
     }
-    expect(log).toContain('; MX bounces.eggmail.test -> 10 mta.eggmail.test (published once by whoever runs EggMail, not in this zone)');
+    expect(log).toContain('; MX bounces.eggmail.test -\\u003E 10 mta.eggmail.test (published once by whoever runs EggMail, not in this zone)'); // the JSON encoder writes > as \\u003E
     expect(log).toContain('v=spf1 ip4:192.0.2.10 ~all');
   });
 

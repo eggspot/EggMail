@@ -239,7 +239,7 @@ public class ApiDomainOnboardingTests : IAsyncLifetime
         Assert.False(c.GetProperty("readyToSend").GetBoolean());
         Assert.Equal("mismatch", StatusOf(c, "return_path"));
         Assert.Equal("someone-else.test", Record(c, "return_path").GetProperty("found").GetString());
-        Assert.Contains("ReturnPath record bounce.onboard.example is mismatch", c.GetProperty("lastError").GetString());
+        Assert.Contains("ReturnPath record bounce.onboard.example does not have the expected value", c.GetProperty("lastError").GetString());
     }
 
     [Fact]

@@ -45,7 +45,12 @@ public sealed class DomainChecker
             checks.Add(check);
             if (record.Required && check.Status is DomainRecordStatus.Missing or DomainRecordStatus.Invalid or DomainRecordStatus.Mismatch)
             {
-                firstProblem ??= $"{record.Purpose} record {record.Host} is {check.Status.ToString().ToLowerInvariant()}";
+                firstProblem ??= $"{record.Purpose} record {record.Host} " + check.Status switch
+                {
+                    DomainRecordStatus.Missing => "is missing",
+                    DomainRecordStatus.Invalid => "is invalid",
+                    _ => "does not have the expected value",
+                };
             }
         }
 

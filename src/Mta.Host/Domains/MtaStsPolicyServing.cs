@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Text;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -18,22 +17,21 @@ namespace Mta.Host.Domains;
 public sealed class MtaStsPolicyMiddleware
 {
     private const string HostPrefix = "mta-sts.";
-    private const int MaxCachedNames = 4096;
-
     private static readonly TimeSpan CacheTime = TimeSpan.FromSeconds(30);
 
     private readonly RequestDelegate _next;
     private readonly IStorage _storage;
-    private readonly DomainRecordOptions _options;
     private readonly IClock _clock;
     private readonly byte[] _policy;
-    private readonly ConcurrentDictionary<string, (bool Registered, DateTimeOffset Expires)> _known = new(StringComparer.Ordinal);
+    private readonly SemaphoreSlim _refresh = new(1, 1);
+    private volatile NameSnapshot? _snapshot;
+
+    private sealed record NameSnapshot(HashSet<string> Names, DateTimeOffset LoadedAt);
 
     public MtaStsPolicyMiddleware(RequestDelegate next, IStorage storage, DomainRecordOptions options, IClock clock)
     {
         _next = next;
         _storage = storage;
-        _options = options;
         _clock = clock;
         _policy = Encoding.UTF8.GetBytes(MtaStsPolicyDocument.Render(options));
     }
@@ -76,23 +74,33 @@ public sealed class MtaStsPolicyMiddleware
         }
     }
 
-    /// <summary>Whether <paramref name="domain"/> is registered by any tenant. Answers (also the negative ones) are remembered for 30 seconds, bounded in number, so anonymous requests with made-up host names do not each reach the database.</summary>
+    /// <summary>
+    /// Whether <paramref name="domain"/> is registered by any tenant. The registered names are read as one list at most every 30 seconds (one request at a time
+    /// does the reading), so anonymous requests with invented host names never reach the database one by one. A domain added a moment ago is served within 30 seconds.
+    /// </summary>
     private async Task<bool> IsRegisteredAsync(string domain, CancellationToken ct)
     {
-        DateTimeOffset now = _clock.UtcNow;
-        if (_known.TryGetValue(domain, out var cached) && cached.Expires > now)
+        NameSnapshot? snapshot = _snapshot;
+        if (snapshot is null || _clock.UtcNow - snapshot.LoadedAt >= CacheTime)
         {
-            return cached.Registered;
+            await _refresh.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                snapshot = _snapshot;
+                if (snapshot is null || _clock.UtcNow - snapshot.LoadedAt >= CacheTime)
+                {
+                    var domains = await _storage.Config.GetDomainsAsync(null, ct).ConfigureAwait(false);
+                    snapshot = new NameSnapshot(domains.Select(d => d.Name).ToHashSet(StringComparer.OrdinalIgnoreCase), _clock.UtcNow);
+                    _snapshot = snapshot;
+                }
+            }
+            finally
+            {
+                _refresh.Release();
+            }
         }
 
-        bool registered = await _storage.Config.FindDomainByNameAsync(domain, ct).ConfigureAwait(false) is not null;
-        if (_known.Count >= MaxCachedNames)
-        {
-            _known.Clear();
-        }
-
-        _known[domain] = (registered, now + CacheTime);
-        return registered;
+        return snapshot.Names.Contains(domain);
     }
 }
 
