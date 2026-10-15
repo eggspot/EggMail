@@ -98,7 +98,7 @@ test.describe('domains and DNS verification', () => {
   test('records that are not published yet are shown as missing, and the check can be repeated only every 30 seconds', async ({ adminPage: page, admin, tenant }) => {
     const domain = (await admin.ok('POST', '/api/v1/domains', { name: `${unique('miss')}.mail.test` }, { tenantId: tenant.id }));
     await page.goto(`/domains/${domain.id}`);
-    await page.getByRole('button', { name: 'Verify now' }).click();
+    await page.getByRole('button', { name: 'Check DNS' }).click();
 
     await expect(chip(page, 'DKIM', 'Missing')).toBeVisible();
     await expect(chip(page, 'Return-path', 'Missing')).toBeVisible();
@@ -117,7 +117,7 @@ test.describe('domains and DNS verification', () => {
     const domain = (await admin.ok('POST', '/api/v1/domains', { name: `${unique('wrong')}.mail.test` }, { tenantId: tenant.id }));
     publishDomainRecords(stack.dns, domain, { wrongDkim: true, except: ['spf', 'dmarc'] });
     await page.goto(`/domains/${domain.id}`);
-    await page.getByRole('button', { name: 'Verify now' }).click();
+    await page.getByRole('button', { name: 'Check DNS' }).click();
 
     await expect(chip(page, 'DKIM', 'Invalid')).toBeVisible();
     await expect(chip(page, 'Return-path', 'OK')).toBeVisible();
@@ -132,7 +132,7 @@ test.describe('domains and DNS verification', () => {
     const domain = (await admin.ok('POST', '/api/v1/domains', { name: `${unique('ok')}.mail.test` }, { tenantId: tenant.id }));
     publishDomainRecords(stack.dns, domain, { except: ['spf', 'dmarc'] });
     await page.goto(`/domains/${domain.id}`);
-    await page.getByRole('button', { name: 'Verify now' }).click();
+    await page.getByRole('button', { name: 'Check DNS' }).click();
 
     await expect(page.getByRole('heading', { name: domain.name, exact: true }).locator('xpath=ancestor::header')).toContainText('Verified');
     await expect(chip(page, 'DKIM', 'OK')).toBeVisible();

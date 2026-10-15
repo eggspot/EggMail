@@ -33,7 +33,7 @@ public static class EggMailApiExtensions
         services.TryAddSingleton(sp =>
         {
             ApiOptions o = sp.GetRequiredService<ApiOptions>();
-            return new DomainRecordOptions { BounceDomain = o.BounceDomain, SpfInclude = o.SpfInclude };
+            return o.DomainRecords ?? new DomainRecordOptions { BounceDomain = o.BounceDomain, SpfInclude = o.SpfInclude };
         });
         services.TryAddSingleton<DomainChecker>();
         services.TryAddSingleton<IStorageSwitchService, UnavailableStorageSwitchService>();
@@ -108,9 +108,29 @@ public static class EggMailApiExtensions
             MaxWebhooksPerTenant = api.MaxWebhooksPerTenant,
             MaxStatsRows = api.MaxStatsRows,
             SpfInclude = api.SpfInclude,
+            DomainRecords = DomainRecordOptionsFrom(config),
             MetricsAllowedNetworks = api.MetricsAllowedNetworks.Count == 0
                 ? ApiOptions.DefaultMetricsNetworks()
                 : api.MetricsAllowedNetworks.Select(Mta.Webhooks.IpNetwork.Parse).ToList(),
+        };
+    }
+
+    /// <summary>The options of the DNS records suggested for a sending domain: the bounce domain, host name, sending IP and the <c>Domains:*</c> settings.</summary>
+    public static DomainRecordOptions DomainRecordOptionsFrom(MtaConfig config)
+    {
+        DomainsSection d = config.Domains;
+        return new DomainRecordOptions
+        {
+            BounceDomain = config.Delivery.BounceDomain,
+            SpfInclude = config.Api.SpfInclude,
+            ServerHostname = DomainRecordOptions.UsableHostname(config.Hostname),
+            PublicSendingIp = config.Delivery.PublicSendingIp,
+            DmarcPolicy = d.DmarcPolicy,
+            DmarcReportAddress = d.DmarcReportAddress,
+            TlsReportAddress = d.TlsReportAddress,
+            MtaStsMode = d.MtaStsMode,
+            MtaStsMaxAge = d.MtaStsMaxAge,
+            MtaStsMx = d.MtaStsMx.Select(m => m.Trim().ToLowerInvariant()).ToList(),
         };
     }
 

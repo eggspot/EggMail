@@ -206,6 +206,7 @@ public sealed class DomainVerificationService : BackgroundService
         DomainRecordStatus.Ok => "ok",
         DomainRecordStatus.Missing => "missing",
         DomainRecordStatus.Invalid => "invalid",
+        DomainRecordStatus.Mismatch => "mismatch",
         _ => "pending",
     };
 
@@ -214,18 +215,24 @@ public sealed class DomainVerificationService : BackgroundService
         "ok" => DomainRecordStatus.Ok,
         "missing" => DomainRecordStatus.Missing,
         "invalid" => DomainRecordStatus.Invalid,
+        "mismatch" => DomainRecordStatus.Mismatch,
         _ => DomainRecordStatus.Pending,
     };
 
     /// <summary>The DKIM keys that must currently be published: the signing key, a pending (rotated-in) key, and retired keys during their grace.</summary>
-    public IReadOnlyList<StoredDkimKey> PublishedKeys(IReadOnlyList<StoredDkimKey> keys, DateTimeOffset now) =>
-        keys.Where(k => k.Active || k.RetiredAt is null || now < k.RetiredAt.Value + _options.DkimRetirementGrace).OrderBy(k => k.CreatedAt).ThenBy(k => k.Id).ToList();
+    public IReadOnlyList<StoredDkimKey> PublishedKeys(IReadOnlyList<StoredDkimKey> keys, DateTimeOffset now) => PublishedKeys(keys, now, _options.DkimRetirementGrace);
+
+    public static IReadOnlyList<StoredDkimKey> PublishedKeys(IReadOnlyList<StoredDkimKey> keys, DateTimeOffset now, TimeSpan retirementGrace) =>
+        keys.Where(k => k.Active || k.RetiredAt is null || now < k.RetiredAt.Value + retirementGrace).OrderBy(k => k.CreatedAt).ThenBy(k => k.Id).ToList();
 
     /// <summary>The records the customer has to publish for <paramref name="domain"/> (required ones decide verification; the rest is advice).</summary>
-    public IReadOnlyList<ExpectedDomainRecord> PlanRecords(DomainRecord domain, IReadOnlyList<StoredDkimKey> keys, DateTimeOffset now)
+    public IReadOnlyList<ExpectedDomainRecord> PlanRecords(DomainRecord domain, IReadOnlyList<StoredDkimKey> keys, DateTimeOffset now) =>
+        PlanRecords(domain, keys, now, _recordOptions, _options.DkimRetirementGrace);
+
+    public static IReadOnlyList<ExpectedDomainRecord> PlanRecords(DomainRecord domain, IReadOnlyList<StoredDkimKey> keys, DateTimeOffset now, DomainRecordOptions recordOptions, TimeSpan retirementGrace)
     {
-        var published = PublishedKeys(keys, now);
-        var plan = DomainRecordPlanner.Plan(domain.Name, published.Select(k => new DomainDkimKey(k.Selector, k.PublicKeyBase64)), _recordOptions);
+        var published = PublishedKeys(keys, now, retirementGrace);
+        var plan = DomainRecordPlanner.Plan(domain.Name, published.Select(k => new DomainDkimKey(k.Selector, k.PublicKeyBase64)), recordOptions);
         var signing = published.Where(k => k.Active).Select(k => DkimKeyTools.GetDnsName(domain.Name, k.Selector).ToLowerInvariant()).ToHashSet(StringComparer.Ordinal);
         if (signing.Count == 0 && published.Count > 0)
         {

@@ -150,6 +150,9 @@ public static class ConfigLoader
 
         var acme = Bind<AcmeSection>(configuration, "Acme");
         var api = Bind<ApiSection>(configuration, "Api");
+        var domains = Bind<DomainsSection>(configuration, "Domains");
+        SplitEntries(domains.Bootstrap, configuration["Domains:Bootstrap"]);
+        SplitEntries(domains.MtaStsMx, configuration["Domains:MtaStsMx"]);
         SplitEntries(acme.Domains, configuration["Acme:Domains"]);
         SplitEntries(api.MetricsAllowedNetworks, configuration["Api:MetricsAllowedNetworks"]);
 
@@ -176,6 +179,7 @@ public static class ConfigLoader
             Tls = Bind<TlsSection>(configuration, "Tls"),
             Acme = acme,
             Api = api,
+            Domains = domains,
         };
     }
 
@@ -433,6 +437,42 @@ public static class ConfigLoader
         ValidateStorageTuning(c.Storage, errors);
         ValidateTlsAndAcme(c, errors);
         ValidateApi(c.Api, errors);
+        ValidateDomains(c, errors);
+    }
+
+    private static void ValidateDomains(MtaConfig c, List<string> errors)
+    {
+        DomainsSection d = c.Domains;
+        foreach (string name in d.Bootstrap)
+        {
+            if (!Mta.Host.Domains.DomainNames.TryNormalize(name, out _))
+            {
+                errors.Add($"Domains:Bootstrap entry '{name}' is not a valid domain name (such as mail.example.com).");
+            }
+        }
+
+        if (d.DmarcPolicy is not ("none" or "quarantine" or "reject"))
+        {
+            errors.Add($"Domains:DmarcPolicy must be none, quarantine or reject, not '{d.DmarcPolicy}'.");
+        }
+
+        if (d.MtaStsMaxAge < TimeSpan.FromMinutes(1) || d.MtaStsMaxAge > TimeSpan.FromSeconds(31_557_600))
+        {
+            errors.Add("Domains:MtaStsMaxAge must be between 1 minute and 31557600 seconds (RFC 8461).");
+        }
+
+        foreach (string mx in d.MtaStsMx)
+        {
+            if (Mta.Host.Domains.DomainRecordOptions.UsableHostname(mx.StartsWith("*.", StringComparison.Ordinal) ? mx[2..] : mx) is null)
+            {
+                errors.Add($"Domains:MtaStsMx entry '{mx}' is not a host name (a leading '*.' is allowed).");
+            }
+        }
+
+        if (d.MtaStsMode != Mta.Host.Domains.MtaStsServingMode.Off && Mta.Host.Domains.DomainRecordOptions.UsableHostname(c.Hostname) is null)
+        {
+            errors.Add("Domains:MtaStsMode needs a fully qualified Hostname (EGGMAIL_HOSTNAME): mta-sts.<domain> has to point at it and it is the default mx: line of the policy.");
+        }
     }
 
     private static void ValidateStorageTuning(StorageOptions s, List<string> errors)

@@ -31,12 +31,13 @@ public class DomainVerificationTests
     public void Plan_lists_dkim_return_path_and_advisory_records()
     {
         var (plan, _) = PlanFor("Example.COM.");
-        Assert.Equal(4, plan.Count);
+        Assert.Equal(5, plan.Count);   // no host name configured: no bounce MX, MTA-STS or reverse-DNS advice
         Assert.Equal("egg202610._domainkey.example.com", plan[0].Host);
         Assert.StartsWith("v=DKIM1; k=rsa; p=", plan[0].Value);
         Assert.Equal(("CNAME", "bounce.example.com", "bounces.mail.test"), (plan[1].Type, plan[1].Host, plan[1].Value));
         Assert.All(plan.Where(p => p.Purpose is DomainRecordPurpose.Spf or DomainRecordPurpose.Dmarc), p => Assert.False(p.Required));
         Assert.Equal("_dmarc.example.com", plan[3].Host);
+        Assert.Equal(("_smtp._tls.example.com", DomainRecordPurpose.TlsRpt), (plan[4].Host, plan[4].Purpose));
     }
 
     [Fact]
@@ -68,7 +69,7 @@ public class DomainVerificationTests
     }
 
     [Fact]
-    public async Task Wrong_dkim_key_and_wrong_cname_are_invalid()
+    public async Task Another_dkim_key_and_a_wrong_cname_target_are_a_mismatch()
     {
         var (plan, _) = PlanFor("example.com");
         using var other = DkimKeyTools.GenerateRsa2048();
@@ -77,8 +78,8 @@ public class DomainVerificationTests
             .AddCname(plan[1].Host, "someone-else.test");
         var result = await new DomainChecker(dns).CheckAsync(plan, default);
         Assert.Equal(VerificationCheckResult.RecordsNotOk, result.Result);
-        Assert.Equal(DomainRecordStatus.Invalid, result.Records[0].Status);
-        Assert.Equal(DomainRecordStatus.Invalid, result.Records[1].Status);
+        Assert.Equal(DomainRecordStatus.Mismatch, result.Records[0].Status);
+        Assert.Equal(DomainRecordStatus.Mismatch, result.Records[1].Status);
         Assert.Equal("someone-else.test", result.Records[1].Found);
     }
 

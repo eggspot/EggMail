@@ -1,5 +1,6 @@
 using System.Net;
 using Mta.Host.Api;
+using Mta.Host.Domains;
 using Mta.Smtp.Server;
 using Mta.Storage;
 using Mta.Webhooks;
@@ -32,6 +33,7 @@ public sealed class MtaConfig
     public TlsSection Tls { get; init; } = new();
     public AcmeSection Acme { get; init; } = new();
     public ApiSection Api { get; init; } = new();
+    public DomainsSection Domains { get; init; } = new();
 }
 
 public sealed class SmtpSection
@@ -352,4 +354,39 @@ public sealed class ApiSection
 
     /// <summary>SPF <c>include:</c> host suggested to customers in the DNS records of a sending domain.</summary>
     public string? SpfInclude { get; init; } = D.SpfInclude;
+}
+
+/// <summary>
+/// Sending domains and the DNS records they need (docs/operations.md, "Adding a sending domain"). The environment alias <c>EGGMAIL_DOMAINS</c> sets
+/// <see cref="Bootstrap"/>.
+/// </summary>
+public sealed class DomainsSection
+{
+    /// <summary>
+    /// Domain names to register for the first tenant at start (the default tenant <c>Default</c> is created when there is no tenant). Idempotent: a domain that
+    /// already exists is left alone, a newly registered one has its DKIM key generated and the DNS records to create written to the log. A list, given as
+    /// indexed entries or as one value separated by commas, semicolons or spaces.
+    /// </summary>
+    public List<string> Bootstrap { get; init; } = [];
+
+    /// <summary>Policy of the suggested DMARC record: <c>none</c> (monitor only), <c>quarantine</c> or <c>reject</c>.</summary>
+    public string DmarcPolicy { get; init; } = "none";
+
+    /// <summary>E-mail address in the <c>rua</c> of the suggested DMARC record; <c>{domain}</c> stands for the sending domain. Empty: <c>dmarc@{domain}</c>.</summary>
+    public string? DmarcReportAddress { get; init; }
+
+    /// <summary>Destination in the <c>rua</c> of the suggested TLS-RPT record: an e-mail address or an <c>https://</c> URL, <c>{domain}</c> stands for the sending domain. Empty: <c>tls-rpt@{domain}</c>.</summary>
+    public string? TlsReportAddress { get; init; }
+
+    /// <summary>
+    /// <c>Off</c> (default), <c>Testing</c> or <c>Enforce</c>: serve the MTA-STS policy file at <c>https://mta-sts.&lt;domain&gt;/.well-known/mta-sts.txt</c> for every registered
+    /// domain and suggest its DNS records. Only right when this server receives the mail of those domains.
+    /// </summary>
+    public MtaStsServingMode MtaStsMode { get; init; } = MtaStsServingMode.Off;
+
+    /// <summary><c>max_age</c> of the served MTA-STS policy.</summary>
+    public TimeSpan MtaStsMaxAge { get; init; } = TimeSpan.FromDays(7);
+
+    /// <summary><c>mx:</c> lines of the served MTA-STS policy. Empty: <c>Hostname</c>.</summary>
+    public List<string> MtaStsMx { get; init; } = [];
 }

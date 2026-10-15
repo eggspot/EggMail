@@ -27,7 +27,36 @@ describe('mock domains', () => {
     const dkim = d.records.find((r) => r.purpose === 'dkim');
     expect(dkim.host).toBe('eggmail1._domainkey.example.com');
     expect(dkim.value.length).toBeGreaterThan(255);
-    expect(d.records.map((r) => r.purpose).sort()).toEqual(['dkim', 'dmarc', 'return_path', 'spf']);
+    expect(d.records.map((r) => r.purpose).sort()).toEqual(['bounce_mx', 'dkim', 'dmarc', 'mta_sts', 'mta_sts_host', 'ptr', 'return_path', 'spf', 'tls_rpt']);
+    expect(d.records.filter((r) => r.required).map((r) => r.purpose).sort()).toEqual(['dkim', 'return_path']);
+    expect(d.readyToSend).toBe(true);
+  });
+
+  it('serves the records as a zone file with TXT values split into 255 character strings, and the MTA-STS policy', async () => {
+    mock = await startMock();
+    await mock.login('tenant');
+    const d = (await mock.get('/api/v1/domains')).data.find((x) => x.name === 'example.com');
+    const res = await mock.get(`/api/v1/domains/${d.id}/records`);
+    expect(res.status).toBe(200);
+    expect(res.data.readyToSend).toBe(true);
+    expect(res.data.records).toHaveLength(9);
+    const zone = res.data.zoneFile;
+    expect(zone).toContain('; DNS records for example.com');
+    expect(zone).toContain('eggmail1._domainkey.example.com. 3600 IN TXT "v=DKIM1; k=rsa; p=');
+    expect(zone).toMatch(/IN TXT "[^"]{255}" "/);
+    expect(zone).toContain('bounces.example.com. 3600 IN CNAME bounce.eggmail.example.net.');
+    expect(zone).toContain('bounce.eggmail.example.net. 3600 IN MX 10 mta.eggmail.example.net.');
+    expect(res.data.mtaStsPolicy.url).toBe('https://mta-sts.example.com/.well-known/mta-sts.txt');
+    expect((await mock.get('/api/v1/domains/nope/records')).status).toBe(404);
+  });
+
+  it('a failed domain is not ready to send; one in temporary failure still is (sending continues)', async () => {
+    mock = await startMock();
+    await mock.login('tenant');
+    const d = (await mock.get('/api/v1/domains')).data.find((x) => x.name === 'old.example.org');
+    expect(d.readyToSend).toBe(false);
+    const temp = (await mock.get('/api/v1/domains')).data.find((x) => x.name === 'mail.example.com');
+    expect(temp.readyToSend).toBe(true);
   });
 
   it('validates names on create (format and duplicates) with field errors', async () => {
