@@ -50,7 +50,8 @@ def print_pairs(groups):
     print()
     print("| Backend | History | What | Non-durable (median, min-max) | Durable (median, min-max) | Ratio | Ingest p99 ms (non-durable / durable) |")
     print("|---|---|---|---:|---:|---:|---|")
-    for backend, history, phase in sorted({(k[0], k[1], k[2]) for k in cells}):
+    order = lambda k: (k[0] != "sqlite", k[1] != "full", k[1], k[2] != "ingest")   # sqlite before postgres, history Full first, ingest before delivery
+    for backend, history, phase in sorted({(k[0], k[1], k[2]) for k in cells}, key=order):
         fast = cells.get((backend, history, phase, "off"))
         slow_syncs = ["full", "normal"] if backend == "sqlite" else ["on"]
         for sync in slow_syncs:
