@@ -22,6 +22,9 @@ public sealed class DatabaseCertificateProvider : IServerCertificateProvider
     private readonly IMtaLog _log;
     private readonly string _hostname;
     private readonly TlsSection _tls;
+    /// <summary>A self-signed certificate that expires within this is replaced at the next start.</summary>
+    internal static readonly TimeSpan SelfSignedRenewalMargin = TimeSpan.FromDays(30);
+
     private volatile Snapshot _snapshot = Snapshot.Empty;
     private long _lastVersion = -1;
     private string? _overrideFingerprint;
@@ -45,16 +48,40 @@ public sealed class DatabaseCertificateProvider : IServerCertificateProvider
     public IReadOnlyList<CertificateInfo> Describe() => _snapshot.Entries
         .Select(e => new CertificateInfo(e.Name, e.Subjects, e.Leaf.NotBefore, e.Leaf.NotAfter, e.Source, e.Leaf.Thumbprint)).ToList();
 
-    /// <summary>Loads certificates, generating the first-run self-signed certificate if the store is empty.</summary>
+    /// <summary>
+    /// Loads certificates, generating the first-run self-signed certificate if the store is empty. A self-signed certificate made for another host name
+    /// (the container got a new name, or <c>EGGMAIL_HOSTNAME</c> was set later) is replaced by one for the current name as long as nothing but self-signed
+    /// certificates exist. While a self-signed certificate is all there is, every start says so in the log.
+    /// </summary>
     public async Task InitializeAsync(CancellationToken ct)
     {
         await ReloadAsync(force: true, ct).ConfigureAwait(false);
-        if (_snapshot.Entries.Count == 0)
+        bool generate = _snapshot.Entries.Count == 0;
+        // A name is unique among certificates, so a replacement gets its own name (CertificateMaterial.CreateSelfSigned adds the thumbprint).
+        bool stale = UsingSelfSignedOnly && (!_snapshot.Entries.Any(e => e.Subjects.Any(s => CertificateMaterial.Matches(s, _hostname)))
+            || _snapshot.Entries.All(e => e.Leaf.NotAfter.ToUniversalTime() < _clock.UtcNow.UtcDateTime + SelfSignedRenewalMargin));
+        if (!generate && stale)
+        {
+            foreach (CertificateRecord old in (await _config.GetCertificatesAsync(ct).ConfigureAwait(false)).Where(c => c.Active && c.Source == "selfsigned"))
+            {
+                await _config.UpsertCertificateAsync(old with { Active = false }, ct).ConfigureAwait(false);
+            }
+
+            generate = true;
+        }
+
+        if (generate)
         {
             var record = CertificateMaterial.CreateSelfSigned(_hostname, _protector, _clock.UtcNow);
             await _config.UpsertCertificateAsync(record, ct).ConfigureAwait(false);
-            _log.Write(MtaLogLevel.Warning, "tls", $"No certificate found: generated a self-signed certificate for {_hostname}. Replace it with an ACME or uploaded certificate.");
             await ReloadAsync(force: true, ct).ConfigureAwait(false);
+        }
+
+        if (UsingSelfSignedOnly)
+        {
+            _log.Write(MtaLogLevel.Warning, "tls",
+                $"Serving a SELF-SIGNED certificate for {_hostname}: mail servers and browsers will not trust it, so STARTTLS and the dashboard work but show warnings. " +
+                "For a trusted certificate set EGGMAIL_HOSTNAME and EGGMAIL_ACME_EMAIL (free, automatic), or upload one in the dashboard.");
         }
     }
 
@@ -134,6 +161,9 @@ public sealed class DatabaseCertificateProvider : IServerCertificateProvider
                 }
             }
         }
+
+        // A first-run self-signed certificate is a placeholder: whatever else is served for the same name wins over it, whatever the certificates are called.
+        entries = entries.OrderBy(e => e.Source == "selfsigned" ? 1 : 0).ToList();
 
         if (entries.Count == 0 && _snapshot.Entries.Count > 0)
         {

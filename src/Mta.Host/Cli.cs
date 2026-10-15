@@ -198,6 +198,12 @@ internal static class Cli
         var startupLog = new MtaLogAdapter(startupLogs.Factory);
         var clock = SystemClock.Instance;
 
+        if (loaded.Config.Storage.Backend == StorageBackend.Sqlite && StartupChecks.DataDirectoryProblem(loaded.Config.Storage.Sqlite.DataDirectory) is { } dataProblem)
+        {
+            Console.Error.WriteLine("configuration error: " + dataProblem);
+            return 2;
+        }
+
         // One process owns a SQLite data directory (the offline migrate-storage commands take the same lock).
         using DataDirectoryLock? directoryLock = loaded.Config.Storage.Backend == StorageBackend.Sqlite ? DataDirectoryLock.Acquire(loaded.Config.Storage.Sqlite.DataDirectory) : null;
         var storage = StorageFactory.Create(loaded.Config.Storage, clock, startupLog);
@@ -220,7 +226,25 @@ internal static class Cli
         }
 
         await using var runtime = createdRuntime;
-        await ApiHosting.EnsureBootstrapAdminAsync(config, storage, clock, startupLog, CancellationToken.None).ConfigureAwait(false);
+        BootstrapAdminResult admin = await ApiHosting.EnsureBootstrapAdminAsync(config, storage, clock, startupLog, CancellationToken.None).ConfigureAwait(false);
+        if (admin.Outcome == BootstrapAdminOutcome.Problem)
+        {
+            Console.Error.WriteLine("configuration error: " + admin.Problem);
+            return 2;
+        }
+
+        if (admin.GeneratedPassword is { } generatedPassword)
+        {
+            BootstrapAdmin.WriteGeneratedPasswordNotice(Console.Out, admin.UserName, generatedPassword, config.Dashboard.HttpsPort);
+        }
+
+        if (gate.Mode == StartupMode.Normal && await RelayBootstrap.ApplyAsync(config, storage.Config, runtime.Secrets, startupLog, CancellationToken.None).ConfigureAwait(false) is { } relayProblem)
+        {
+            Console.Error.WriteLine("configuration error: " + relayProblem);
+            return 2;
+        }
+
+        StartupChecks.LogAdvice(config, loaded, startupLog);
 
         builder.Services.AddSingleton(loaded);
         builder.Services.AddSingleton(config);

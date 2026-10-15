@@ -1,14 +1,15 @@
-# EggMail with the PostgreSQL backend (the same image; the backend is selected by configuration).
+# EggMail with the PostgreSQL backend (the same image; the backend is selected by configuration): the quick start of the README with ONE extra
+# variable, EGGMAIL_DATABASE, which switches the image from SQLite to PostgreSQL.
 #
 #   cp .env.example .env            # then edit EGGMAIL_HOSTNAME, EGGMAIL_DB_PASSWORD (and EGGMAIL_IMAGE)
-#   mkdir -p secrets && printf '%s' 'a-long-admin-password' > secrets/admin_password.txt && chmod 644 secrets/admin_password.txt
-#   (644: the application runs as uid 1654 and Compose does not apply uid or mode to file secrets outside Swarm; keep the secrets/
-#   directory itself private to your user, mode 700, and out of version control)
 #   docker compose -f compose.postgres.yaml up -d
+#   docker compose -f compose.postgres.yaml logs eggmail    # the generated dashboard password is printed ONCE, see compose.yaml
+#
+# A file secret for the administrator password instead of EGGMAIL_ADMIN_PASSWORD works as described in compose.yaml.
 #
 # This example uses one database role for the schema owner and the runtime role to stay short. The design calls for a schema-owner role
 # (migrations, partitions) and a least-privilege runtime role (docs/design.md section 4.3), and for managed PostgreSQL with HA in
-# production: point Storage__Postgres__* at it and drop the postgres service. EGGMAIL_DB_PASSWORD is placed inside a connection string,
+# production: point EGGMAIL_DATABASE (or Storage__Postgres__OwnerConnectionString and ...RuntimeConnectionString) at it and drop the postgres service. EGGMAIL_DB_PASSWORD is placed inside a connection string,
 # so use letters and digits (or quote special characters the Npgsql way). More than one eggmail replica is safe on PostgreSQL.
 name: eggmail-postgres
 
@@ -41,13 +42,13 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      Hostname: ${EGGMAIL_HOSTNAME}
-      Storage__Backend: Postgres
-      Storage__Postgres__OwnerConnectionString: "Host=postgres;Database=eggmail;Username=eggmail;Password=${EGGMAIL_DB_PASSWORD}"
-      Storage__Postgres__RuntimeConnectionString: "Host=postgres;Database=eggmail;Username=eggmail;Password=${EGGMAIL_DB_PASSWORD}"
-      Mail__Database__Migrate: Auto        # Never = the serving process does not migrate; run `mta migrate-db` instead
-      Dashboard__BootstrapAdminUser: ${EGGMAIL_ADMIN_USER:-admin}
-      Dashboard__BootstrapAdminPasswordFile: /run/secrets/eggmail_admin_password
+      EGGMAIL_HOSTNAME: ${EGGMAIL_HOSTNAME}
+      EGGMAIL_DATABASE: "Host=postgres;Database=eggmail;Username=eggmail;Password=${EGGMAIL_DB_PASSWORD}"   # selects PostgreSQL; one role is both owner and runtime here
+      EGGMAIL_ADMIN_USER: ${EGGMAIL_ADMIN_USER:-admin}
+      EGGMAIL_ADMIN_PASSWORD: ${EGGMAIL_ADMIN_PASSWORD:-}   # empty: generated on the first start and printed once in the log
+      # EGGMAIL_ACME_EMAIL: ${EGGMAIL_ACME_EMAIL}           # with the host name above: a free, automatically renewed certificate
+      # EGGMAIL_DOMAINS: example.com                        # sending domains to register at the start
+      # Mail__Database__Migrate: Never       # the serving process does not migrate; run `mta migrate-db` instead
       # Delivery__BounceDomain: bounces.example.com
     ports:
       - "587:5587"
@@ -58,8 +59,6 @@ services:
       # - "25:2526"
     volumes:
       - eggmail-data:/data                  # bootstrap file and quarantined files; the queue and history live in PostgreSQL
-    secrets:
-      - eggmail_admin_password
     read_only: true
     tmpfs:
       - /tmp
@@ -73,10 +72,6 @@ services:
       retries: 3
       start_period: 20s
       start_interval: 2s
-
-secrets:
-  eggmail_admin_password:
-    file: ./secrets/admin_password.txt
 
 volumes:
   pgdata:

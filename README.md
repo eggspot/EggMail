@@ -39,14 +39,65 @@ Backend **characteristics** (not missing features): SQLite is single node and on
 
 ## Quick start
 
-One Docker image runs out of the box on the SQLite backend with one volume at `/data`; PostgreSQL is selected by configuration in the same image. There is no stable release yet, so there is no `latest` or version tag: use `nightly` (the daily build of `main`; the first scheduled build has not completed yet, manual runs publish `nightly-<short sha>`) and pin a digest, or a version tag once releases exist.
+One Docker image, one command, **no configuration**: it starts on SQLite with everything it needs and is usable at once. There is no stable release yet, so there is no `latest` or version tag: use `nightly` (the daily build of `main`; manual runs publish `nightly-<short sha>`) and pin a digest, or a version tag once releases exist.
 
 ```sh
-docker volume create eggmail-data
-# The first administrator (with SQLite the server must not be running while you do this; see docs/operations.md for the alternatives):
-docker run --rm -v eggmail-data:/data -e MTA_ADMIN_PASSWORD='a-long-password' ghcr.io/eggspot/eggmail:nightly admin create --user admin
 docker run -d --name eggmail -p 587:5587 -p 465:4465 -p 2525:2525 -p 8443:8443 \
   -v eggmail-data:/data ghcr.io/eggspot/eggmail:nightly
+docker logs eggmail    # the dashboard administrator password, printed ONCE, between two marker lines
+```
+
+Open `https://localhost:8443` (the certificate is self-signed until you set up a real one, and the dashboard says so), sign in as `admin` with the printed password and change it on the **Account** page. SMTP submission with AUTH works on 587 (STARTTLS), 465 (implicit TLS) and 2525. The first start creates the data directory and SQLite files, the key ring, the VERP key, the administrator and the certificate; a DKIM key is generated for every sending domain you add.
+
+**For a real server** add three or four variables (the complete list, with what each one maps to, is [The simple environment variables](docs/operations.md#the-simple-environment-variables); the long configuration keys keep working and win):
+
+```sh
+docker run -d --name eggmail \
+  -p 587:5587 -p 465:4465 -p 2525:2525 -p 8443:8443 -v eggmail-data:/data \
+  -e EGGMAIL_HOSTNAME=mail.example.com \
+  -e EGGMAIL_ACME_EMAIL=admin@example.com \
+  -e EGGMAIL_DOMAINS=example.com \
+  ghcr.io/eggspot/eggmail:nightly
+```
+
+`EGGMAIL_HOSTNAME` is the name in SMTP greetings, the certificate and the dashboard; together with `EGGMAIL_ACME_EMAIL` it turns on a free, automatically renewed certificate. `EGGMAIL_DOMAINS` registers your sending domains at the start, `CLOUDFLARE_API_TOKEN` selects the DNS-01 challenge instead of port 80, `EGGMAIL_ADMIN_PASSWORD_FILE` lets you choose the administrator password instead of having one generated, `EGGMAIL_RELAY=host:port` adds a smarthost fallback. What you must still do outside the container (DNS records, reverse DNS, outbound port 25, firewall) is [listed in the operations guide](docs/operations.md#what-only-you-can-do-outside-the-container); port 25 is not a submission port ([ports](docs/operations.md#ports)).
+
+**With Docker Compose** (the tested file is [`deploy/compose/compose.yaml`](deploy/compose/compose.yaml)):
+
+```yaml
+services:
+  eggmail:
+    image: ghcr.io/eggspot/eggmail:nightly
+    environment:
+      EGGMAIL_HOSTNAME: mail.example.com
+      EGGMAIL_ACME_EMAIL: admin@example.com
+    ports: ["587:5587", "465:4465", "2525:2525", "8443:8443"]
+    volumes: ["eggmail-data:/data"]
+volumes:
+  eggmail-data:
+```
+
+**With PostgreSQL**: the same, plus **one** variable, `EGGMAIL_DATABASE` (the tested file is [`deploy/compose/compose.postgres.yaml`](deploy/compose/compose.postgres.yaml)):
+
+```yaml
+services:
+  eggmail:
+    image: ghcr.io/eggspot/eggmail:nightly
+    depends_on: { postgres: { condition: service_healthy } }
+    environment:
+      EGGMAIL_HOSTNAME: mail.example.com
+      EGGMAIL_ACME_EMAIL: admin@example.com
+      EGGMAIL_DATABASE: "Host=postgres;Database=eggmail;Username=eggmail;Password=change-me"   # the only difference
+    ports: ["587:5587", "465:4465", "2525:2525", "8443:8443"]
+    volumes: ["eggmail-data:/data"]
+  postgres:
+    image: postgres:17
+    environment: { POSTGRES_USER: eggmail, POSTGRES_PASSWORD: change-me, POSTGRES_DB: eggmail }
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U eggmail -d eggmail"], interval: 5s, retries: 10 }
+volumes:
+  eggmail-data:
+  pgdata:
 ```
 
 Ready-made, tested deployment files live in [`deploy/`](deploy/):

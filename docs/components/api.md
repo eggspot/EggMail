@@ -10,7 +10,7 @@ app.MapEggMailApi();                                  // /api/v1/** plus /health
 
 ## Wiring into `mta serve`
 
-`Hosting/ApiHosting.cs` connects the API to the runtime built by `EggMailRuntime`: it registers the runtime's `SubmissionService`, `ISecretProtector`, `AuthThrottle` (the instance the SMTP ingest uses), `IDnsResolver` and `AcmeRenewalService`, calls `AddEggMailApi(loadedConfig)`, maps the routes (`/healthz` moved here from `DashboardHosting`), gives the webhook dispatcher the tenants' SSRF allowlists (`SettingsService.GetWebhookAllowlistSnapshot`) and creates the first administrator from `Dashboard:BootstrapAdminUser` and the password file `Dashboard:BootstrapAdminPasswordFile` when no admin exists. `Cli.ServeAsync` has three calls into it.
+`Hosting/ApiHosting.cs` connects the API to the runtime built by `EggMailRuntime`: it registers the runtime's `SubmissionService`, `ISecretProtector`, `AuthThrottle` (the instance the SMTP ingest uses), `IDnsResolver` and `AcmeRenewalService`, calls `AddEggMailApi(loadedConfig)`, maps the routes (`/healthz` moved here from `DashboardHosting`), gives the webhook dispatcher the tenants' SSRF allowlists (`SettingsService.GetWebhookAllowlistSnapshot`) and creates the first administrator when no admin exists (`Hosting/BootstrapAdmin.cs`): from `Dashboard:BootstrapAdminPassword`, else the password file `Dashboard:BootstrapAdminPasswordFile`, else a generated password that `Cli.ServeAsync` prints once to the console (decision 87); a password that cannot be used is a `Problem` result and stops the start. `Cli.ServeAsync` has three calls into it.
 
 ## What the host must provide
 

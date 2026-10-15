@@ -26,7 +26,7 @@ public static class WarningTexts
     {
         "sqlite_sync_off" => "SQLite runs with synchronous=OFF: a process kill is safe, but an operating system crash or power loss can corrupt the database and lose queued mail that was already acknowledged. Set Sqlite:SyncMode to Normal or Full, or use PostgreSQL, if you need power-loss safety.",
         "queue_persistence_memory" => "Queued mail is held in memory only and is lost when the server restarts (Sqlite:QueuePersistence=Memory).",
-        "self_signed_certificate" => "The server is using a self-signed certificate. Upload a certificate or request one through ACME.",
+        "self_signed_certificate" => "The server is using a SELF-SIGNED certificate: mail servers and browsers will not trust it. Set EGGMAIL_HOSTNAME and EGGMAIL_ACME_EMAIL for a free trusted certificate (ACME), or upload one under Certificates.",
         "certificate_expiring" => "A TLS certificate expires within 14 days.",
         "certificate_expired" => "A TLS certificate has expired.",
         _ => "Warning: " + code,
