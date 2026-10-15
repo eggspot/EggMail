@@ -338,6 +338,12 @@ public interface IConfigStore : IRuntimeStateStore
     /// </summary>
     ValueTask SetAcmeRenewalAdviceAsync(string certificateName, string? ariJson, CancellationToken ct);
 
+    /// <summary>
+    /// Sets only <see cref="AcmeRenewalRecord.ChallengeStateJson"/> of a certificate's renewal row (the HTTP-01 tokens of the order in flight, which every
+    /// replica must be able to answer) and touches nothing else. A missing row is created with status <c>ordering</c>.
+    /// </summary>
+    ValueTask SetAcmeRenewalChallengeStateAsync(string certificateName, string? challengeStateJson, CancellationToken ct);
+
     // Leases (renewal lock, singleton jobs) and idempotency
     ValueTask<LeaseRecord?> TryAcquireLeaseAsync(string name, string owner, TimeSpan duration, DateTimeOffset now, CancellationToken ct);
     ValueTask<bool> RenewLeaseAsync(string name, string owner, long fencingToken, TimeSpan duration, DateTimeOffset now, CancellationToken ct);

@@ -491,7 +491,7 @@ public sealed partial class AdminApi(
         errors.ThrowIfAny();
         return acme.Start(domains) switch
         {
-            AcmeStartResult.Started => ApiResults.Accepted(new AcmeRequestResponse("pending", $"Certificate requested for {string.Join(", ", domains)} using DNS-01. The result is recorded under GET /api/v1/admin/certificates/acme.")),
+            AcmeStartResult.Started => ApiResults.Accepted(new AcmeRequestResponse("pending", $"Certificate requested for {string.Join(", ", domains)} (HTTP-01 or DNS-01, as configured). The result is recorded under GET /api/v1/admin/certificates/acme.")),
             AcmeStartResult.AlreadyRunning => throw ApiException.Conflict("A certificate order is already running."),
             _ => throw ApiException.NotReady("ACME is not configured on this server (Acme:Enabled, a DNS provider and an email address)."),
         };
