@@ -153,6 +153,13 @@ internal sealed class PreparedCommand : IDisposable
         return this;
     }
 
+    /// <summary>Binds text that is already UTF-8 (an empty span is the empty string).</summary>
+    public PreparedCommand SetUtf8Text(int index, ReadOnlySpan<byte> utf8)
+    {
+        BindText(index, utf8);
+        return this;
+    }
+
     public PreparedCommand Set(int index, byte[]? value) => value is null ? SetNull(index) : SetBlob(index, value);
 
     public PreparedCommand SetBlob(int index, ReadOnlySpan<byte> value)

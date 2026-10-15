@@ -209,6 +209,50 @@ public sealed class MimePart
         return text;
     }
 
+    /// <summary>
+    /// The body as it is, when <see cref="GetText(long, out bool)"/> would produce exactly its bytes as UTF-8: a 7bit or 8bit body that is not cut by
+    /// <paramref name="maxBytes"/>, has no NUL, and is ASCII or valid UTF-8 in a charset that decodes those bytes unchanged (us-ascii, utf-8, none or an unknown one).
+    /// The memory is a slice of the parsed message. False for everything else (other charsets, quoted-printable or base64 bodies, cut or odd bodies): the caller
+    /// then decodes the text to a string.
+    /// </summary>
+    internal bool TryGetVerbatimUtf8Text(long maxBytes, out ReadOnlyMemory<byte> body)
+    {
+        body = default;
+        var enc = EffectiveEncoding;
+        if (enc is not (ContentTransferEncoding.SevenBit or ContentTransferEncoding.EightBit))
+        {
+            return false;
+        }
+
+        long cap = Math.Min(maxBytes, _limits.MaxDecodedBytes);
+        var bytes = Body;
+        var span = bytes.Span;
+        if (span.Length > cap || span.IndexOf((byte)0) >= 0)
+        {
+            return false;
+        }
+
+        string? charset = ContentType.Charset;
+        bool decodedAsIs;
+        if (charset is not null && MimeCharsets.TryGetEncoding(charset, out var encoding) && encoding.CodePage != 20127)
+        {
+            decodedAsIs = encoding.CodePage == 65001 && System.Text.Unicode.Utf8.IsValid(span);   // UTF-8: unchanged when valid, otherwise bad sequences become U+FFFD
+        }
+        else
+        {
+            // No usable charset (or us-ascii): ASCII, else UTF-8 when valid (MimeCharsets.DecodeUnlabeled); windows-1252 otherwise.
+            decodedAsIs = System.Text.Ascii.IsValid(span) || System.Text.Unicode.Utf8.IsValid(span);
+        }
+
+        if (!decodedAsIs)
+        {
+            return false;
+        }
+
+        body = bytes;
+        return true;
+    }
+
     // Composite types are never transfer-encoded (RFC 2045 section 6.4), except message/global and its relatives, which may be
     // quoted-printable or base64 (RFC 6532 section 3.7); the 8BITMIME downgrade produces exactly that.
     private ContentTransferEncoding EffectiveEncoding =>

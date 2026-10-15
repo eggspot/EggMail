@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text;
 using Mta.Core;
 using Mta.Mime;
 using Mta.Policy;
@@ -273,7 +275,7 @@ public sealed class SubmissionService
 
             byte[] raw = editor.ToArray();
             // Only headers are added or removed, so subject, bodies and attachments of the original parse are those of the stored message.
-            var content = ExtractContent(parsed);
+            var content = ExtractContent(parsed, request.Message, raw);
 
             // The tenant's setting is only looked up when it can matter: the operator allows attachment storage, the message has attachments to keep
             // and the request does not say.
@@ -526,20 +528,69 @@ public sealed class SubmissionService
         return row;
     }
 
-    private MessageContent? ExtractContent(MimeMessage parsed)
+    /// <summary>
+    /// The content for history. A text or HTML body that is already valid UTF-8 in the message (the usual one) is kept as the bytes of the stored copy
+    /// <paramref name="raw"/>, not as a string of twice the size: the storage binds those bytes as they are.
+    /// </summary>
+    private MessageContent? ExtractContent(MimeMessage parsed, ReadOnlyMemory<byte> original, byte[] raw)
     {
         if (_storage.HistoryMode != HistoryMode.Full || !_storageOptions.Content.Retain)
         {
             return null;
         }
 
-        var extracted = MessageContentExtractor.Extract(parsed, _storageOptions.Content.MaxStoredBodyBytes);
+        var extracted = MessageContentExtractor.Extract(parsed, _storageOptions.Content.MaxStoredBodyBytes, bodiesAsUtf8: true);
+        string? text = extracted.TextBody;
+        string? html = extracted.HtmlBody;
+        ReadOnlyMemory<byte>? textBytes = null;
+        ReadOnlyMemory<byte>? htmlBytes = null;
+        if (extracted.TextBodyUtf8 is { } textBody && !TryFindInStoredCopy(textBody, original, raw, out textBytes))
+        {
+            text = Encoding.UTF8.GetString(textBody.Span);   // the same string the extraction without the shortcut gives
+        }
+
+        if (extracted.HtmlBodyUtf8 is { } htmlBody && !TryFindInStoredCopy(htmlBody, original, raw, out htmlBytes))
+        {
+            html = Encoding.UTF8.GetString(htmlBody.Span);
+        }
+
         return new MessageContent(
             _storageOptions.Content.StoreSubject ? extracted.Subject : null,
-            extracted.TextBody,
-            extracted.HtmlBody,
+            text,
+            html,
+            textBytes,
+            htmlBytes,
             ToStoredAttachments(extracted.Attachments),
             extracted.IsTruncated);
+    }
+
+    /// <summary>
+    /// Finds <paramref name="body"/> (a slice of <paramref name="original"/>) in the stored copy: only headers are added or removed, so the stored message ends with the
+    /// same bytes as the original. False when it does not (line endings were repaired inside the body, the memory is not an array); the bytes are compared, never assumed.
+    /// </summary>
+    internal static bool TryFindInStoredCopy(ReadOnlyMemory<byte> body, ReadOnlyMemory<byte> original, byte[] raw, out ReadOnlyMemory<byte>? stored)
+    {
+        stored = null;
+        if (!MemoryMarshal.TryGetArray(body, out ArraySegment<byte> bodySegment) || !MemoryMarshal.TryGetArray(original, out ArraySegment<byte> originalSegment)
+            || !ReferenceEquals(bodySegment.Array, originalSegment.Array))
+        {
+            return false;
+        }
+
+        int offsetInOriginal = bodySegment.Offset - originalSegment.Offset;
+        if (offsetInOriginal < 0 || offsetInOriginal + body.Length > original.Length)
+        {
+            return false;
+        }
+
+        int start = raw.Length - (original.Length - offsetInOriginal);
+        if (start < 0 || start + body.Length > raw.Length || !raw.AsSpan(start, body.Length).SequenceEqual(body.Span))
+        {
+            return false;
+        }
+
+        stored = raw.AsMemory(start, body.Length);
+        return true;
     }
 
     private static IReadOnlyList<StoredAttachment> ToStoredAttachments(IReadOnlyList<Mta.Mime.AttachmentInfo> attachments)

@@ -132,7 +132,9 @@ public sealed class ContentType
     }
 
     /// <summary>Parses the value of a Content-Type header field; the same result as <c>Parse(header.GetValue(...))</c> without building the value string for the usual short ASCII value.</summary>
-    internal static ContentType ParseHeader(in MimeHeader header, MimeLimits limits)
+    internal static ContentType ParseHeader(in MimeHeader header, MimeLimits limits) => ParseHeader(header, limits, ContentTypeCache.Shared);
+
+    internal static ContentType ParseHeader(in MimeHeader header, MimeLimits limits, ContentTypeCache cache)
     {
         Span<char> value = stackalloc char[256];
         if (HeaderText.TryGetAsciiValue(header.RawValue.Span, value, out int length) && header.RawValue.Length <= limits.MaxHeaderValueBytes)
@@ -145,44 +147,22 @@ public sealed class ContentType
 
             // The same few values come back message after message ("text/plain; charset=utf-8"): the parsed object is immutable, so one is shared.
             // Only with the default limits (the result depends on them) and only for values that carry nothing specific to one message.
-            bool shareable = ReferenceEquals(limits, MimeLimits.Default) && length <= MaxSharedValueLength;
-            if (shareable && SharedContentTypes.TryGetValue(value, out ContentType? known))
+            bool shareable = ReferenceEquals(limits, MimeLimits.Default);
+            if (shareable && cache.TryGet(value, out ContentType? known))
             {
                 return known;
             }
 
             ContentType parsed = Parse(value, limits);
-            if (shareable && Volatile.Read(ref _sharedCount) < MaxSharedContentTypes && IsShareable(parsed) && SharedContentTypes.TryAdd(value.ToString(), parsed))
+            if (shareable)
             {
-                Interlocked.Increment(ref _sharedCount);
+                cache.TryAdd(value, parsed);
             }
 
             return parsed;
         }
 
         return Parse(header.GetValue(limits.MaxHeaderValueBytes), limits);
-    }
-
-    private const int MaxSharedValueLength = 100;
-    private const int MaxSharedContentTypes = 256;
-    private static int _sharedCount;
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, ContentType> SharedContentTypesTable = new(StringComparer.Ordinal);
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, ContentType>.AlternateLookup<ReadOnlySpan<char>> SharedContentTypes =
-        SharedContentTypesTable.GetAlternateLookup<ReadOnlySpan<char>>();
-
-    /// <summary>True when every parameter is one that does not differ between the messages of a sender: charset, format, delsp. A boundary or a file name is unique to a message.</summary>
-    private static bool IsShareable(ContentType contentType)
-    {
-        foreach (MimeParameter p in contentType.Parameters)
-        {
-            if (!(p.Name.Equals("charset", StringComparison.OrdinalIgnoreCase) || p.Name.Equals("format", StringComparison.OrdinalIgnoreCase)
-                || p.Name.Equals("delsp", StringComparison.OrdinalIgnoreCase)))
-            {
-                return false;
-            }
-        }
-
-        return true;
     }
 
     /// <summary>Parses a Content-Type value.</summary>
@@ -901,5 +881,58 @@ internal static class ParameterFormatter
         }
 
         sb.Append('"');
+    }
+}
+
+/// <summary>
+/// The Content-Type values that keep coming back (the same sender application writes the same header on every message), with their parsed form, so a message of such
+/// a sender does not build the content type again. A bounded table that never evicts: once it is full, other values are parsed as before. Only values whose parameters
+/// are the same for every message (charset, format, delsp) go in; a boundary or a file name is different each time and would only fill the table. The parsed objects
+/// are immutable, so sharing them is invisible.
+/// </summary>
+internal sealed class ContentTypeCache(int maxEntries = ContentTypeCache.DefaultMaxEntries)
+{
+    public const int DefaultMaxEntries = 256;
+    private const int MaxValueLength = 100;
+
+    public static ContentTypeCache Shared { get; } = new();
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, ContentType> _table = new(StringComparer.Ordinal);
+    private System.Collections.Concurrent.ConcurrentDictionary<string, ContentType>.AlternateLookup<ReadOnlySpan<char>>? _lookup;
+    private int _count;
+
+    public int Count => Volatile.Read(ref _count);
+
+    public bool TryGet(ReadOnlySpan<char> value, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out ContentType? contentType)
+    {
+        contentType = null;
+        return value.Length <= MaxValueLength && (_lookup ??= _table.GetAlternateLookup<ReadOnlySpan<char>>()).TryGetValue(value, out contentType);
+    }
+
+    public void TryAdd(ReadOnlySpan<char> value, ContentType parsed)
+    {
+        if (value.Length > MaxValueLength || Volatile.Read(ref _count) >= maxEntries || !IsShareable(parsed))
+        {
+            return;
+        }
+
+        if (_table.TryAdd(value.ToString(), parsed))
+        {
+            Interlocked.Increment(ref _count);
+        }
+    }
+
+    private static bool IsShareable(ContentType contentType)
+    {
+        foreach (MimeParameter p in contentType.Parameters)
+        {
+            if (!(p.Name.Equals("charset", StringComparison.OrdinalIgnoreCase) || p.Name.Equals("format", StringComparison.OrdinalIgnoreCase)
+                || p.Name.Equals("delsp", StringComparison.OrdinalIgnoreCase)))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 }

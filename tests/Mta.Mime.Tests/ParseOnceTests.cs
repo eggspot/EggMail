@@ -50,6 +50,80 @@ public class ParseOnceTests
         Assert.Equal(viaBytes.Anomalies, viaParsed.Anomalies);
     }
 
+    private static IEnumerable<byte[]> BodySamples()
+    {
+        foreach (byte[] sample in Samples())
+        {
+            yield return sample;
+        }
+
+        const string Head = "From: a@example.com\nSubject: s\n";
+        yield return T.Crlf(Head + "Content-Type: text/plain; charset=utf-8\n\nplain ascii\n");
+        yield return T.Crlf(Head + "Content-Type: text/plain; charset=utf-8\nContent-Transfer-Encoding: 8bit\n\nCafé über € 😀\n");
+        yield return T.Crlf(Head + "Content-Type: text/plain; charset=UTF-8\n\n﻿with a byte order mark\n");
+        yield return T.Crlf(Head + "\nno content type, plain\n");
+        yield return T.Crlf(Head + "\nno content type, café in utf-8\n");
+        yield return T.Crlf(Head + "Content-Type: text/plain; charset=x-unknown\n\nunknown charset, café\n");
+        yield return T.Crlf(Head + "Content-Type: text/plain; charset=us-ascii\n\nascii label, café\n");
+        yield return T.Crlf(Head + "Content-Type: text/plain; charset=iso-8859-1\nContent-Transfer-Encoding: 8bit\n\nlatin1 é\n");
+        yield return Concat(Encoding.ASCII.GetBytes("From: a@example.com\r\nContent-Type: text/plain; charset=iso-8859-1\r\nContent-Transfer-Encoding: 8bit\r\n\r\n"), [0x63, 0x61, 0x66, 0xE9, 0x0D, 0x0A]);
+        yield return Concat(Encoding.ASCII.GetBytes("From: a@example.com\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n"), [0x63, 0xC3, 0x28, 0x0D, 0x0A]);   // invalid UTF-8 labelled utf-8
+        yield return Concat(Encoding.ASCII.GetBytes("From: a@example.com\r\n\r\n"), [0x63, 0xE9, 0x0D, 0x0A]);   // unlabelled latin-1
+        yield return Concat(Encoding.ASCII.GetBytes("From: a@example.com\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n"), [0x61, 0x00, 0x62, 0x0D, 0x0A]);   // NUL
+        yield return T.Crlf(Head + "Content-Type: text/plain; charset=utf-8\nContent-Transfer-Encoding: quoted-printable\n\nCaf=C3=A9\n");
+        yield return T.Crlf(Head + "Content-Type: text/plain; charset=utf-8\nContent-Transfer-Encoding: base64\n\nQ2Fm w6k=\n");
+        yield return T.Crlf(Head + "Content-Type: text/plain; charset=utf-8\nContent-Transfer-Encoding: binary\n\nbinary\n");
+        yield return T.Crlf(Head + "Content-Type: text/plain; charset=utf-8\nContent-Transfer-Encoding: x-weird\n\nweird\n");
+        yield return T.Crlf(Head + "Content-Type: text/html; charset=utf-8\n\n<p>html café</p>\n");
+        yield return T.Crlf(Head + "Content-Type: text/plain; charset=utf-8\nContent-Disposition: attachment; filename=\"a.txt\"\n\nattached text\n");
+        yield return T.Crlf(T.Multipart("b2", "Content-Type: text/plain; charset=utf-8\nContent-Transfer-Encoding: 8bit\n\nplain café", "Content-Type: text/html; charset=utf-8\n\n<b>html café</b>", "Content-Type: text/plain; charset=utf-8\n\nsecond plain part"));
+        yield return T.Crlf(Head + "Content-Type: text/plain; charset=utf-8\n\n" + new string('x', 600) + " café " + new string('y', 600) + "\n");
+    }
+
+    private static byte[] Concat(byte[] a, byte[] b) => [.. a, .. b];
+
+    [Fact]
+    public void Bodies_taken_as_utf8_are_exactly_the_utf8_of_the_strings_the_plain_extraction_gives()
+    {
+        int bytesUsed = 0;
+        foreach (byte[] raw in BodySamples())
+        {
+            foreach (int max in new[] { 4096, 64, 5, 0 })
+            {
+                var plain = MessageContentExtractor.Extract(MimeMessage.Parse(raw), max);
+                var viaBytes = MessageContentExtractor.Extract(MimeMessage.Parse(raw), max, bodiesAsUtf8: true);
+                string? text = viaBytes.TextBodyUtf8 is { } t ? Encoding.UTF8.GetString(t.Span) : viaBytes.TextBody;
+                string? html = viaBytes.HtmlBodyUtf8 is { } h ? Encoding.UTF8.GetString(h.Span) : viaBytes.HtmlBody;
+                Assert.Equal(plain.TextBody, text);
+                Assert.Equal(plain.HtmlBody, html);
+                Assert.Equal(plain.Subject, viaBytes.Subject);
+                Assert.Equal(plain.Attachments, viaBytes.Attachments);
+                Assert.Equal(plain.TextTruncated, viaBytes.TextTruncated);
+                Assert.Equal(plain.HtmlTruncated, viaBytes.HtmlTruncated);
+                Assert.Equal(plain.IsTruncated, viaBytes.IsTruncated);
+                Assert.True(viaBytes.TextBodyUtf8 is null || viaBytes.TextBody is null);
+                Assert.True(viaBytes.HtmlBodyUtf8 is null || viaBytes.HtmlBody is null);
+                if (viaBytes.TextBodyUtf8 is not null || viaBytes.HtmlBodyUtf8 is not null)
+                {
+                    bytesUsed++;
+                }
+            }
+        }
+
+        Assert.True(bytesUsed > 10, "the shortcut must be taken for the ordinary UTF-8 bodies");
+
+        // Which bodies take it: the ones that need nothing done to them.
+        Assert.NotNull(UtfOf("Content-Type: text/plain; charset=utf-8\n\nplain\n"));
+        Assert.NotNull(UtfOf("Content-Type: text/plain; charset=UTF-8\nContent-Transfer-Encoding: 8bit\n\ncafé\n"));
+        Assert.NotNull(UtfOf("\nno header at all, ascii\n"));
+        Assert.Null(UtfOf("Content-Type: text/plain; charset=iso-8859-1\nContent-Transfer-Encoding: 8bit\n\ncafé\n"));   // would be recoded
+        Assert.Null(UtfOf("Content-Type: text/plain; charset=utf-8\nContent-Transfer-Encoding: base64\n\nQ2Fm\n"));   // decoded first
+        Assert.Null(UtfOf("Content-Type: text/plain; charset=utf-8\nContent-Transfer-Encoding: quoted-printable\n\ncaf=C3=A9\n"));
+
+        static ReadOnlyMemory<byte>? UtfOf(string headersAndBody) =>
+            MessageContentExtractor.Extract(MimeMessage.Parse(T.Crlf("From: a@example.com\n" + headersAndBody)), 4096, bodiesAsUtf8: true).TextBodyUtf8;
+    }
+
     private static string Describe(MimeMessage message)
     {
         var sb = new StringBuilder();
@@ -136,11 +210,12 @@ public class ParseOnceTests
             "text/plain; charset=utf-8", "text/plain; charset=UTF-8", "text/plain;charset=\"iso-8859-1\"", "text/html; charset=utf-8", "text/plain; format=flowed; delsp=yes; charset=us-ascii",
             "text/plain", "application/octet-stream", "not a content type", "text/", "/plain", "multipart/mixed; boundary=\"abc\"", "image/png; name=\"a.png\"", "text/plain; charset=utf-8; x-extra=1",
         ];
+        var cache = new ContentTypeCache();   // a cache of its own: the shared one is also filled by every other test of the process
         foreach (string value in values)
         {
-            byte[] raw = T.Crlf($"From: a@example.com\nContent-Type: {value}\n\nbody\n");
-            var first = MimeMessage.Parse(raw).Root.ContentType;
-            var second = MimeMessage.Parse(raw).Root.ContentType;
+            var header = HeaderList.Parse(T.Crlf($"Content-Type: {value}\n\nbody\n")).Single();
+            var first = ContentType.ParseHeader(header, MimeLimits.Default, cache);
+            var second = ContentType.ParseHeader(header, MimeLimits.Default, cache);
             var plain = ContentType.Parse(value);
             Assert.Equal(plain.MimeType, first.MimeType);
             Assert.Equal(plain.Charset, first.Charset);
@@ -151,10 +226,20 @@ public class ParseOnceTests
         }
 
         // Other limits give a result of their own (the limits shape the parse), never the shared object.
-        byte[] message = T.Crlf("From: a@example.com\nContent-Type: text/plain; charset=utf-8; format=flowed\n\nbody\n");
-        var limited = MimeMessage.Parse(message, new MimeLimits { MaxParameters = 1 }).Root.ContentType;
+        var limitedHeader = HeaderList.Parse(T.Crlf("Content-Type: text/plain; charset=utf-8; format=flowed\n\nbody\n")).Single();
+        var limited = ContentType.ParseHeader(limitedHeader, new MimeLimits { MaxParameters = 1 }, cache);
         Assert.Single(limited.Parameters);
-        Assert.Equal(2, MimeMessage.Parse(message).Root.ContentType.Parameters.Count);
+        Assert.Equal(2, ContentType.ParseHeader(limitedHeader, MimeLimits.Default, cache).Parameters.Count);
+
+        // A full table stops taking values and still parses everything correctly.
+        var small = new ContentTypeCache(maxEntries: 3);
+        for (int i = 0; i < 10; i++)
+        {
+            var h = HeaderList.Parse(T.Crlf($"Content-Type: text/plain; charset=x-{i}\n\nbody\n")).Single();
+            Assert.Equal($"x-{i}", ContentType.ParseHeader(h, MimeLimits.Default, small).Charset);
+        }
+
+        Assert.Equal(3, small.Count);
     }
 
     private static MimeHeader FromHeader(string value)

@@ -121,10 +121,11 @@ internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore, IMes
 
         if (s.Content is { } c)
         {
-            ctx.Command(HistorySql.ContentInsert)
-                .Set(0, day).Set(1, m.MessageId).Set(2, m.TenantId).Set(3, c.Subject).Set(4, c.Text).Set(5, c.Html)
-                .Set(6, StorageJson.SerializeAttachments(c.Attachments)).Set(7, c.Truncated ? 1 : 0)
-                .ExecuteNonQuery();
+            PreparedCommand insert = ctx.Command(HistorySql.ContentInsert).Set(0, day).Set(1, m.MessageId).Set(2, m.TenantId).Set(3, c.Subject);
+            // A body held as UTF-8 (the usual one) is bound as it is; the string is only made for a content that has no bytes.
+            if (c.TextUtf8 is { } textBytes) { insert.SetUtf8Text(4, textBytes.Span); } else { insert.Set(4, c.Text); }
+            if (c.HtmlUtf8 is { } htmlBytes) { insert.SetUtf8Text(5, htmlBytes.Span); } else { insert.Set(5, c.Html); }
+            insert.Set(6, StorageJson.SerializeAttachments(c.Attachments)).Set(7, c.Truncated ? 1 : 0).ExecuteNonQuery();
         }
 
         ctx.Command(HistorySql.EventInsert)

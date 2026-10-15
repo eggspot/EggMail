@@ -13,13 +13,65 @@ public enum MessageSource : byte
 
 public sealed record AcceptedRecipient(Guid DeliveryId, EmailAddress Address);
 
-/// <summary>Content extracted at accept time for history (only recorded when <see cref="HistoryMode.Full"/>).</summary>
-public sealed record MessageContent(
-    string? Subject,
-    string? Text,
-    string? Html,
-    IReadOnlyList<AttachmentInfo> Attachments,
-    bool Truncated);
+/// <summary>
+/// Content extracted at accept time for history (only recorded when <see cref="HistoryMode.Full"/>). A body is either a string or, for the intake path, the UTF-8 bytes
+/// it already is in the message (<see cref="TextUtf8"/>, <see cref="HtmlUtf8"/>): a storage that writes UTF-8 binds those bytes and never builds the string, and
+/// <see cref="Text"/> / <see cref="Html"/> still give the string (made on first use) for every other reader. Equal contents compare equal whichever way they are held.
+/// </summary>
+public sealed class MessageContent : IEquatable<MessageContent>
+{
+    private string? _text;
+    private string? _html;
+
+    public MessageContent(string? subject, string? text, string? html, IReadOnlyList<AttachmentInfo> attachments, bool truncated)
+    {
+        Subject = subject;
+        _text = text;
+        _html = html;
+        Attachments = attachments;
+        Truncated = truncated;
+    }
+
+    /// <summary>A content whose text and/or HTML body is held as UTF-8 bytes (a body given as bytes must be null as a string).</summary>
+    public MessageContent(string? subject, string? text, string? html, ReadOnlyMemory<byte>? textUtf8, ReadOnlyMemory<byte>? htmlUtf8, IReadOnlyList<AttachmentInfo> attachments, bool truncated)
+        : this(subject, text, html, attachments, truncated)
+    {
+        if ((text is not null && textUtf8 is not null) || (html is not null && htmlUtf8 is not null))
+        {
+            throw new ArgumentException("A body is held either as a string or as UTF-8 bytes, not both.");
+        }
+
+        TextUtf8 = textUtf8;
+        HtmlUtf8 = htmlUtf8;
+    }
+
+    public string? Subject { get; }
+
+    /// <summary>The text body as a string (made from <see cref="TextUtf8"/> on first use when it is held as bytes).</summary>
+    public string? Text => _text ?? (TextUtf8 is { } bytes ? _text = System.Text.Encoding.UTF8.GetString(bytes.Span) : null);
+
+    /// <summary>The HTML body as a string (made from <see cref="HtmlUtf8"/> on first use when it is held as bytes).</summary>
+    public string? Html => _html ?? (HtmlUtf8 is { } bytes ? _html = System.Text.Encoding.UTF8.GetString(bytes.Span) : null);
+
+    /// <summary>The text body as UTF-8 when it is held that way (and only then). The memory is stable: it belongs to the stored message.</summary>
+    public ReadOnlyMemory<byte>? TextUtf8 { get; }
+
+    /// <summary>The HTML body as UTF-8 when it is held that way (and only then).</summary>
+    public ReadOnlyMemory<byte>? HtmlUtf8 { get; }
+
+    public IReadOnlyList<AttachmentInfo> Attachments { get; }
+
+    public bool Truncated { get; }
+
+    public bool Equals(MessageContent? other) =>
+        other is not null && Subject == other.Subject && Text == other.Text && Html == other.Html && ReferenceEquals(Attachments, other.Attachments) && Truncated == other.Truncated;
+
+    public override bool Equals(object? obj) => Equals(obj as MessageContent);
+
+    public override int GetHashCode() => HashCode.Combine(Subject, Text, Html, Truncated);
+
+    public override string ToString() => $"MessageContent {{ Subject = {Subject}, Text = {Text}, Html = {Html}, Attachments = {Attachments}, Truncated = {Truncated} }}";
+}
 
 public sealed record AttachmentInfo(string? FileName, string? ContentType, long Size, string? ContentId);
 

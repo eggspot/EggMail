@@ -83,15 +83,37 @@ public static class ContentRules
     public static MessageContent Prepare(StorageOptions options, MessageContent content)
     {
         ContentOptions c = options.Content;
-        string? text = Truncate(content.Text, c.MaxStoredBodyBytes, out bool t1);
-        string? html = Truncate(content.Html, c.MaxStoredBodyBytes, out bool t2);
+        string? text = TruncateBody(content.TextUtf8 is null ? content.Text : null, content.TextUtf8, c.MaxStoredBodyBytes, out ReadOnlyMemory<byte>? textUtf8, out bool t1);
+        string? html = TruncateBody(content.HtmlUtf8 is null ? content.Html : null, content.HtmlUtf8, c.MaxStoredBodyBytes, out ReadOnlyMemory<byte>? htmlUtf8, out bool t2);
         string? subject = c.StoreSubject ? content.Subject : null;
         if (!t1 && !t2 && ReferenceEquals(subject, content.Subject))
         {
-            return content;   // nothing to cut or drop: the record is immutable, so it is passed on as it is
+            return content;   // nothing to cut or drop: the content is immutable, so it is passed on as it is
         }
 
-        return new MessageContent(subject, text, html, content.Attachments, content.Truncated || t1 || t2);
+        return new MessageContent(subject, text, html, textUtf8, htmlUtf8, content.Attachments, content.Truncated || t1 || t2);
+    }
+
+    /// <summary>
+    /// <see cref="Truncate"/> for a body held as a string or as UTF-8 bytes. Bytes that fit stay bytes (no string is made); bytes that do not fit are cut like the
+    /// string would be.
+    /// </summary>
+    private static string? TruncateBody(string? text, ReadOnlyMemory<byte>? utf8, int maxBytes, out ReadOnlyMemory<byte>? keptUtf8, out bool truncated)
+    {
+        keptUtf8 = null;
+        if (utf8 is { } bytes)
+        {
+            if (bytes.Length <= maxBytes)
+            {
+                truncated = false;
+                keptUtf8 = bytes;
+                return null;
+            }
+
+            text = System.Text.Encoding.UTF8.GetString(bytes.Span);
+        }
+
+        return Truncate(text, maxBytes, out truncated);
     }
 
     /// <summary>Truncates to at most <paramref name="maxBytes"/> UTF-8 bytes without splitting a character.</summary>
