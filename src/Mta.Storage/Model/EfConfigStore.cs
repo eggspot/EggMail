@@ -448,7 +448,16 @@ public sealed partial class EfConfigStore<TContext>(IConfigDbAccess<TContext> db
 
     public async ValueTask DeleteWebhookEndpointAsync(Guid tenantId, Guid id, CancellationToken ct)
     {
-        await Write(c => c.WebhookEndpoints.Where(w => w.Id == id && w.TenantId == tenantId).ExecuteDelete(), ct).ConfigureAwait(false);
+        // The schema has no foreign keys (references are soft by design), so the rule that a route's webhook endpoint cannot disappear is kept here, in the same write as the delete.
+        await Write(c =>
+        {
+            if (c.InboundRoutes.Any(r => r.ActionKind == InboundActionKind.Webhook && r.WebhookEndpointId == id && c.WebhookEndpoints.Any(w => w.Id == id && w.TenantId == tenantId)))
+            {
+                throw new StorageConflictException("The webhook endpoint is the target of inbound routes.");
+            }
+
+            return c.WebhookEndpoints.Where(w => w.Id == id && w.TenantId == tenantId).ExecuteDelete();
+        }, ct).ConfigureAwait(false);
         Interlocked.Increment(ref _webhookVersion);
     }
 

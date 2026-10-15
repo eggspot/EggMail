@@ -15,7 +15,8 @@ const SCOPE_HELP: Record<string, string> = {
   webhooks: 'manage webhooks',
   suppressions: 'manage suppressions',
   keys: 'manage API keys and SMTP credentials',
-  inbound: 'read received mail and manage inbound routes',
+  'inbound:read': 'read received mail, its settings and routes',
+  'inbound:write': 'change inbound settings and routes, delete and retry received mail',
 };
 
 function ApiKeysCard({ onSecret }: { onSecret: (title: string, value: string, hint: string) => void }) {

@@ -581,6 +581,11 @@ internal sealed partial class InMemoryConfigStore : IConfigStore
         {
             if (_endpoints.TryGetValue(id, out var w) && w.TenantId == tenantId)
             {
+                if (_inboundRoutes.Values.Any(r => r.ActionKind == InboundActionKind.Webhook && r.WebhookEndpointId == id))
+                {
+                    throw new StorageConflictException("The webhook endpoint is the target of inbound routes.");
+                }
+
                 _endpoints.Remove(id);
             }
         }

@@ -32,6 +32,8 @@ public sealed class InboundStoreFacade(IInboundConfigStore config, IInboundMessa
 
     public ValueTask<bool> DeleteAsync(Guid tenantId, Guid messageId, CancellationToken cancellationToken) => messages.DeleteAsync(tenantId, messageId, cancellationToken);
 
+    public ValueTask<long> DeleteMatchingAsync(InboundMessageQuery query, CancellationToken cancellationToken) => messages.DeleteMatchingAsync(query, cancellationToken);
+
     public ValueTask<InboundRetryResult> RetryActionAsync(Guid tenantId, Guid messageId, DateTimeOffset now, CancellationToken cancellationToken) => messages.RetryActionAsync(tenantId, messageId, now, cancellationToken);
 
     public ValueTask<IReadOnlyList<ClaimedInboundAction>> ClaimActionsAsync(string owner, int max, DateTimeOffset now, TimeSpan lease, CancellationToken cancellationToken) => messages.ClaimActionsAsync(owner, max, now, lease, cancellationToken);

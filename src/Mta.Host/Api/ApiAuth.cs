@@ -19,10 +19,13 @@ public static class ApiScopes
     public const string Suppressions = "suppressions";
     public const string Keys = "keys";
 
-    /// <summary>Received mail: inbound settings, routes and messages (decision 95). Separate from <c>read</c> because it exposes the content of other people's mail.</summary>
-    public const string Inbound = "inbound";
+    /// <summary>Received mail, read side: inbound settings and routes, search, content, raw, attachments, usage (decision 95). Separate from <c>read</c> because it exposes the content of other people's mail.</summary>
+    public const string InboundRead = "inbound:read";
 
-    public static readonly IReadOnlyList<string> All = [Send, Read, Domains, Webhooks, Suppressions, Keys, Inbound];
+    /// <summary>Received mail, write side: changing settings and routes, deleting and retrying messages. Does not include <see cref="InboundRead"/>.</summary>
+    public const string InboundWrite = "inbound:write";
+
+    public static readonly IReadOnlyList<string> All = [Send, Read, Domains, Webhooks, Suppressions, Keys, InboundRead, InboundWrite];
 
     public static bool IsKnown(string scope) => All.Contains(scope, StringComparer.Ordinal);
 

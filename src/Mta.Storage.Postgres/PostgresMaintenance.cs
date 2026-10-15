@@ -142,7 +142,7 @@ internal sealed class PostgresMaintenance(PostgresRuntime rt, PostgresQueueStore
         await Job("inbound_retention", async () =>
         {
             IReadOnlyDictionary<Guid, int?> retention = await rt.ConfigStore.GetInboundRetentionByDomainAsync(ct).ConfigureAwait(false);
-            long rows = await rt.InboundMessages.PurgeExpiredAsync(retention, rt.Options.Inbound.RetentionDays, now, rt.Options.Postgres.RetentionDeleteBatchSize, rt.Options.Postgres.RetentionDeletePause, ct).ConfigureAwait(false);
+            long rows = await rt.InboundMessages.PurgeExpiredAsync(retention, rt.Options.Inbound.RetentionDays, rt.Options.Inbound.MaxRetentionDays, now, rt.Options.Postgres.RetentionDeleteBatchSize, rt.Options.Postgres.RetentionDeletePause, ct).ConfigureAwait(false);
             return (rows, rt.Options.Inbound.RetentionDays == 0 ? "server default unlimited" : null);
         }).ConfigureAwait(false);
 

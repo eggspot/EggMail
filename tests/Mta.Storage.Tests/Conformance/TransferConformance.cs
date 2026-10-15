@@ -65,15 +65,15 @@ public abstract class TransferConformance : StorageTestBase
         Guid endpoint = await AddEndpointAsync(TenantA, true, "*");
 
         // Inbound mail: settings, a webhook and a forward route, a pending webhook action, a stored message and a discarded one.
-        await Storage.Inbound.UpsertSettingsAsync(new InboundDomainSettings(domainId, TenantA, true, InboundDmarcAction.QuarantineFlag, 5_000_000, 100, 10, 1L << 30, 30, now), default);
+        await Storage.Inbound.UpsertSettingsAsync(new InboundDomainSettings(domainId, TenantA, true, InboundDmarcAction.Flag, 5_000_000, 100, 10, 1L << 30, 30, now), default);
         Guid hookRoute = Ids.New();
         await Storage.Inbound.UpsertRouteAsync(new InboundRouteRecord(hookRoute, TenantA, domainId, "hook", 10, true, InboundMatchKind.Wildcard, "billing-*", true, InboundActionKind.Webhook, endpoint, InboundWebhookFormat.RawMime, [], now, now), default);
         await Storage.Inbound.UpsertRouteAsync(new InboundRouteRecord(Ids.New(), TenantA, domainId, "fwd", 20, true, InboundMatchKind.CatchAll, null, false, InboundActionKind.Forward, null, InboundWebhookFormat.Json, ["f@example.org"], now, now), default);
         InboundMessageDraft Inbound(InboundActionKind kind, int size) => new()
         {
             Id = Ids.New(now), TenantId = TenantA, DomainId = domainId, Domain = "example.com", ReceivedAt = now, RemoteAddress = "203.0.113.9", Helo = "mail.sender.test", TlsUsed = true, EnvelopeFrom = "a@sender.test",
-            EnvelopeTo = "billing-eu@example.com", Subject = "Invoice", Auth = new InboundAuthResults(InboundVerdict.Pass, "sender.test", InboundVerdict.Fail, "sender.test", InboundVerdict.Fail, "reject", InboundVerdict.None),
-            Disposition = InboundDmarcDisposition.QuarantineFlagged, RouteId = hookRoute, ActionKind = kind, Raw = new byte[size],
+            EnvelopeTo = "billing-eu@example.com", Subject = "Invoice", Auth = new InboundAuthResults(InboundVerdict.Pass, "sender.test", InboundVerdict.None, InboundVerdict.Fail, "sender.test", InboundVerdict.Fail, "reject", InboundVerdict.None),
+            Disposition = InboundDmarcDisposition.Flagged, RouteId = hookRoute, ActionKind = kind, Raw = new byte[size],
         };
         await Storage.Inbound.AcceptAsync([Inbound(InboundActionKind.Webhook, 300), Inbound(InboundActionKind.Store, 400), Inbound(InboundActionKind.Discard, 500)], default);
 

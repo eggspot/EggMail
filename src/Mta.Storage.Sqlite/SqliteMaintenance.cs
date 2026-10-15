@@ -119,7 +119,7 @@ internal sealed class SqliteMaintenance(SqliteRuntime rt, SqliteQueueStore queue
         {
             IReadOnlyDictionary<Guid, int?> retention = await rt.ConfigStore.GetInboundRetentionByDomainAsync(ct).ConfigureAwait(false);
             SqliteOptions sqlite = rt.Options.Sqlite;
-            return await rt.InboundMessages.PurgeExpiredAsync(retention, rt.Options.Inbound.RetentionDays, now, sqlite.RetentionDeleteBatchSize, sqlite.RetentionDeletePause, ct).ConfigureAwait(false);
+            return await rt.InboundMessages.PurgeExpiredAsync(retention, rt.Options.Inbound.RetentionDays, rt.Options.Inbound.MaxRetentionDays, now, sqlite.RetentionDeleteBatchSize, sqlite.RetentionDeletePause, ct).ConfigureAwait(false);
         }).ConfigureAwait(false);
 
         await Job("queue.reconcile", rt.QueueWriter, async () => await queue.ReconcileSpoolAsync(ct).ConfigureAwait(false),

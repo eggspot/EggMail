@@ -65,74 +65,9 @@ internal sealed class MemoryInbound(MemoryState s) : IInboundMessageStore
             cursor = InboundMapping.IdText(parsed);
         }
 
-        string? recipient = query.Recipient?.Trim().ToLowerInvariant();
-        string? sender = query.Sender?.Trim().ToLowerInvariant();
-        string? subject = string.IsNullOrEmpty(query.SubjectContains) ? null : InboundMapping.AsciiLower(query.SubjectContains);
-        DateTimeOffset? from = StorageTime.Normalize(query.From);
-        DateTimeOffset? to = StorageTime.Normalize(query.To);
         lock (s.Gate)
         {
-            IEnumerable<InboundMessageEntity> q = s.InboundMessages.Values;
-            if (query.TenantId is { } tenant)
-            {
-                q = q.Where(x => x.TenantId == tenant);
-            }
-
-            if (query.DomainId is { } domain)
-            {
-                q = q.Where(x => x.DomainId == domain);
-            }
-
-            if (recipient is not null)
-            {
-                q = q.Where(x => x.EnvelopeTo == recipient);
-            }
-
-            if (sender is not null)
-            {
-                q = q.Where(x => x.EnvelopeFrom == sender);
-            }
-
-            if (subject is not null)
-            {
-                q = q.Where(x => x.Subject is not null && InboundMapping.AsciiLower(x.Subject).Contains(subject, StringComparison.Ordinal));
-            }
-
-            if (query.RouteId is { } route)
-            {
-                q = q.Where(x => x.RouteId == route);
-            }
-
-            if (query.ActionKind is { } kind)
-            {
-                q = q.Where(x => x.ActionKind == kind);
-            }
-
-            if (query.ActionState is { } state)
-            {
-                q = q.Where(x => x.ActionState == state);
-            }
-
-            if (query.Dmarc is { } dmarc)
-            {
-                q = q.Where(x => x.Dmarc == dmarc);
-            }
-
-            if (query.Quarantined is { } quarantined)
-            {
-                q = q.Where(x => (x.Disposition == InboundDmarcDisposition.QuarantineFlagged) == quarantined);
-            }
-
-            if (from is { } f)
-            {
-                q = q.Where(x => x.ReceivedAt >= f);
-            }
-
-            if (to is { } t)
-            {
-                q = q.Where(x => x.ReceivedAt < t);
-            }
-
+            IEnumerable<InboundMessageEntity> q = s.InboundMessages.Values.Where(x => Matches(x, query));
             if (cursor is not null)
             {
                 q = q.Where(x => string.CompareOrdinal(InboundMapping.IdText(x.Id), cursor) < 0);
@@ -146,6 +81,59 @@ internal sealed class MemoryInbound(MemoryState s) : IInboundMessageStore
             }
 
             return R(new Page<InboundMessage>(rows, more ? Cursors.Encode(rows[^1].Id.ToString("D")) : null));
+        }
+    }
+
+    // The filters of a search or an erasure: the same meaning as EfInboundMessageStore.Filter.
+    private static bool Matches(InboundMessageEntity x, InboundMessageQuery query)
+    {
+        if (x.TenantId != query.TenantId || (query.DomainId is { } domain && x.DomainId != domain))
+        {
+            return false;
+        }
+
+        if (query.Recipient?.Trim().ToLowerInvariant() is { } recipient && x.EnvelopeTo != recipient)
+        {
+            return false;
+        }
+
+        if (query.Sender?.Trim().ToLowerInvariant() is { } sender && x.EnvelopeFrom != sender)
+        {
+            return false;
+        }
+
+        if (!string.IsNullOrEmpty(query.SubjectContains) && (x.Subject is null || !InboundMapping.AsciiLower(x.Subject).Contains(InboundMapping.AsciiLower(query.SubjectContains), StringComparison.Ordinal)))
+        {
+            return false;
+        }
+
+        if ((query.RouteId is { } route && x.RouteId != route) || (query.ActionKind is { } kind && x.ActionKind != kind) || (query.ActionState is { } state && x.ActionState != state)
+            || (query.Dmarc is { } dmarc && x.Dmarc != dmarc) || (query.DmarcFlagged is { } flagged && (x.Disposition == InboundDmarcDisposition.Flagged) != flagged))
+        {
+            return false;
+        }
+
+        return (StorageTime.Normalize(query.From) is not { } from || x.ReceivedAt >= from) && (StorageTime.Normalize(query.To) is not { } to || x.ReceivedAt < to);
+    }
+
+    public ValueTask<long> DeleteMatchingAsync(InboundMessageQuery query, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+        if (!InboundRules.HasFilter(query))
+        {
+            throw new ArgumentException("An erasure needs at least one filter besides the tenant.", nameof(query));
+        }
+
+        lock (s.Gate)
+        {
+            List<Guid> ids = s.InboundMessages.Values.Where(x => Matches(x, query)).Select(x => x.Id).ToList();
+            foreach (Guid id in ids)
+            {
+                s.InboundMessages.Remove(id);
+                s.InboundRaw.Remove(id);
+            }
+
+            return R((long)ids.Count);
         }
     }
 
@@ -201,6 +189,7 @@ internal sealed class MemoryInbound(MemoryState s) : IInboundMessageStore
 
             e.ActionState = InboundActionState.Pending;
             e.ActionAttempts = 0;
+            e.RetryGeneration++;
             e.ActionNextAttemptAt = StorageTime.Normalize(now);
             e.ActionFinishedAt = null;
             e.LeaseOwner = null;
@@ -316,12 +305,12 @@ internal sealed class MemoryInbound(MemoryState s) : IInboundMessageStore
     }
 
     /// <summary>The retention job; the same rules as <see cref="EfInboundMessageStore{TContext}.PurgeExpiredAsync"/>. Called with the state lock held.</summary>
-    internal long PurgeExpired(IReadOnlyDictionary<Guid, int?> domainRetentionDays, int defaultDays, DateTimeOffset now)
+    internal long PurgeExpired(IReadOnlyDictionary<Guid, int?> domainRetentionDays, int defaultDays, int ceilingDays, DateTimeOffset now)
     {
         long total = 0;
         foreach (InboundMessageEntity e in s.InboundMessages.Values.ToList())
         {
-            int days = InboundRules.ResolveRetentionDays(domainRetentionDays.GetValueOrDefault(e.DomainId), defaultDays);
+            int days = InboundRules.ResolveRetentionDays(domainRetentionDays.GetValueOrDefault(e.DomainId), defaultDays, ceilingDays);
             if (e.ActionState != InboundActionState.Pending && InboundRules.RetentionCutoff(now, days) is { } cutoff && e.ReceivedAt < StorageTime.Normalize(cutoff))
             {
                 s.InboundMessages.Remove(e.Id);

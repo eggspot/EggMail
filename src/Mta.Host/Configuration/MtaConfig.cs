@@ -487,6 +487,9 @@ public sealed class InboundSection
 
     /// <summary>Message bytes kept for one domain; at the limit new mail is refused with <c>452 4.2.2</c>. <c>0</c> is unlimited.</summary>
     public long MaxStoredBytesPerDomain { get; init; } = D.MaxStoredBytesPerDomain;
+
+    /// <summary>Message bytes kept for all domains of one tenant together; at the limit new mail is refused with <c>452 4.2.2</c>. <c>0</c> is unlimited.</summary>
+    public long MaxStoredBytesPerTenant { get; init; } = D.MaxStoredBytesPerTenant;
 }
 
 /// <summary>

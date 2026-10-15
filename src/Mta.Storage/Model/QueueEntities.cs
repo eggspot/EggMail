@@ -133,6 +133,7 @@ public sealed class InboundMessageEntity
     public long Size { get; set; }
     public InboundVerdict Spf { get; set; }
     public string? SpfDomain { get; set; }
+    public InboundVerdict SpfHelo { get; set; }
     public InboundVerdict Dkim { get; set; }
     public string? DkimDomain { get; set; }
     public InboundVerdict Dmarc { get; set; }
@@ -143,6 +144,9 @@ public sealed class InboundMessageEntity
     public InboundActionKind ActionKind { get; set; }
     public InboundActionState ActionState { get; set; }
     public int ActionAttempts { get; set; }
+
+    /// <summary>Incremented by every manual retry; part of the webhook id.</summary>
+    public int RetryGeneration { get; set; }
     public DateTimeOffset? ActionNextAttemptAt { get; set; }
     public DateTimeOffset? ActionFinishedAt { get; set; }
     public string? ActionLastError { get; set; }

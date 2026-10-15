@@ -158,7 +158,8 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | `Stats:RecipientDomainTopNDaily` | 10 | The same for the daily rollup |
 | `Stats:MaxSeriesPerHour` | 200000 | Cap on distinct statistic series in one hour; the overflow goes to `other` |
 | `Queue:MaxLifetime` | `5.00:00:00` | After this a deferred delivery expires and bounces. Must be shorter than `Content:RetentionDays` while history is recorded |
-| `Inbound:RetentionDays` | 7 | Days received mail (row and body) is kept when its domain sets no value; `0` keeps forever (see [Inbound mail](#inbound-mail)) |
+| `Inbound:RetentionDays` | 7 | Days received mail (row and body) is kept when its domain sets no value; `0` keeps forever unless `Inbound:MaxRetentionDays` is set (see [Inbound mail](#inbound-mail)) |
+| `Inbound:MaxRetentionDays` | 0 | **Ceiling:** the longest retention any domain gets. A domain's own value (and the default) is cut to it and "forever" becomes it; the API refuses a longer value. `0`: no ceiling |
 | `Queue:MaxLifetimeDays` | 5 | The same in whole days: the form the dashboard's settings page stores. If both are set, `Queue:MaxLifetime` wins |
 
 ### SMTP and delivery
@@ -303,10 +304,11 @@ Server defaults for the domains that receive mail; a domain's own settings overr
 
 | Key | Default | Meaning |
 |---|---|---|
-| `Inbound:MaxMessageSize` | `Smtp:MaxMessageSize` | Largest inbound message in bytes; a domain can lower it, never raise it |
-| `Inbound:MaxMessagesPerMinute` | 600 | Messages per minute accepted for one domain |
-| `Inbound:MaxMessagesPerMinutePerRemote` | 60 | Messages per minute accepted from one client address for one domain |
-| `Inbound:MaxStoredBytesPerDomain` | 2147483648 | Message bytes kept for one domain; at the limit new mail is refused with `452 4.2.2`; `0` is unlimited |
+| `Inbound:MaxMessageSize` | `Smtp:MaxMessageSize` | **Ceiling and default:** largest inbound message in bytes; a domain can lower it, never raise it |
+| `Inbound:MaxMessagesPerMinute` | 600 | **Ceiling and default:** messages per minute accepted for one domain |
+| `Inbound:MaxMessagesPerMinutePerRemote` | 60 | **Ceiling and default:** messages per minute accepted from one client address (an IPv6 /64) for one domain |
+| `Inbound:MaxStoredBytesPerDomain` | 2147483648 | **Ceiling and default:** message bytes kept for one domain, each recipient's copy counted; at the limit new mail is refused with `452 4.2.2`; `0` is unlimited (a finite ceiling also refuses "unlimited" in a domain's settings) |
+| `Inbound:MaxStoredBytesPerTenant` | 10737418240 | Message bytes kept for all domains of one tenant together (a tenant cannot multiply the per-domain limit by adding domains); `0` is unlimited |
 
 ### Sending domains and their DNS records
 
@@ -636,10 +638,10 @@ Received mail, the settings and routes of the domains that receive it, and the s
 
 - **Where it lives.** Settings and routes in the config part (`config.db`), messages and their bodies in the queue part (`queue.db`): `inbound_domain_settings`, `inbound_route`, `inbound_message`, `inbound_message_raw` (a body is a separate row so lists and claims never read it). One row and one body per accepted recipient. On PostgreSQL they are ordinary tables in the one database. Stored mail grows the hot `queue.db`: a deployment that stores a lot of mail should use a finite `Inbound:RetentionDays` (or per-domain `retentionDays`) and the per-domain `maxStoredBytes`, or PostgreSQL.
 - **Retention.** A message (row and body) is deleted when it is older than its domain's `retentionDays`, else `Inbound:RetentionDays` (default 7); **`0` keeps forever**, which shows as the health warning `retention_unlimited:Inbound:RetentionDays` and as `retention_unlimited` in the settings API. The job is `inbound_retention` of the storage maintenance (every five minutes with the other jobs, safe on several replicas): batched deletes (`Sqlite:RetentionDeleteBatchSize`, `Storage:Postgres:RetentionDeleteBatchSize`) on both backends, bodies first. The cutoff is read from the current settings when the job runs, so shortening a domain's retention frees old mail at the next run. **A message whose action is still pending is never deleted by retention.** A forward that completed has no body; a discarded message never had one.
-- **The server defaults** the API shows as `effective` values: `Inbound:MaxMessageSize` (default `Smtp:MaxMessageSize`; a domain can lower it, never raise it), `Inbound:MaxMessagesPerMinute`, `Inbound:MaxMessagesPerMinutePerRemote`, `Inbound:MaxStoredBytesPerDomain`. The receive path applies the same ones; a domain's own settings override them.
-- **API.** Scope `inbound` ([api.md](api.md#inbound-mail-inbound-scope)). Create an API key with it (`POST /api-keys` with `"scopes": ["inbound"]`) for the application that reads received mail. Raw messages and attachments are only ever served as downloads (`Content-Disposition: attachment`, `nosniff`, no caching).
-- **Deleting a webhook endpoint** that an inbound route uses is refused with `409` (`webhook_endpoint_in_use`); deleting a domain deletes its inbound settings and routes but not the mail it received (that follows its retention).
-- **Backups and the backend switch.** A SQLite backup or `pg_dump` has all of it. The switch bundle (format 1.3) carries the four tables: settings and routes with the config part, messages and bodies with the queue part (the body in a body pack, like the spool). Pending actions are held on the source until the switch finishes, so none runs twice. `--skip-history` does not skip received mail. A bundle of format 1.2 (without inbound tables) imports into a build that has them and starts with no inbound data; a bundle with the tables is refused by a build that does not know them.
+- **The operator's limits** are ceilings, and the API shows what applies as `effective` values: `Inbound:MaxMessageSize` (default `Smtp:MaxMessageSize`; a domain can lower it, never raise it), `Inbound:MaxMessagesPerMinute`, `Inbound:MaxMessagesPerMinutePerRemote`, `Inbound:MaxStoredBytesPerDomain`. The receive path applies the same ones; a domain's own settings override them.
+- **API.** Scopes `inbound:read` (list, search, show, download, usage) and `inbound:write` (change settings and routes, delete, retry, erase) ([api.md](api.md#inbound-mail-inboundread-and-inboundwrite-scopes)); a key may hold both, and neither implies the other. Create the keys with `POST /api-keys` (`"scopes": ["inbound:read"]`) for the application that reads received mail. Raw messages and attachments are only ever served as downloads (`Content-Disposition: attachment`, `nosniff`, no caching). **A tenant can only lower the limits above, never raise them**; the API refuses a larger value. `DELETE /inbound/messages?sender=...` erases everything of a tenant that matches (a data-subject request); it needs at least one filter.
+- **Deleting a webhook endpoint** that an inbound route uses is refused with `409` (`webhook_endpoint_in_use`, enforced by the storage write itself); deleting a domain deletes its inbound settings and routes but not the mail it received (that follows its retention).
+- **Backups and the backend switch.** A SQLite backup or `pg_dump` has all of it. The switch bundle (format 1.3) carries the four tables: settings and routes with the config part, messages and bodies with the queue part (the body in a body pack, like the spool). Pending actions are held on the source until the switch finishes, so none runs twice. `--skip-history` does not skip received mail (it is not history), so a deployment that keeps a lot of it makes the bundle, the export and the verification that large. A bundle of format 1.2 (without inbound tables) imports into a build that has them and starts with no inbound data; a bundle with the tables is refused by a build that does not know them.
 - **Upgrade note.** Schema version 8 (SQLite files are upgraded at the first start; PostgreSQL `V008`) adds the four tables and an index on `inbound_message`; no existing table changes and nothing is rewritten, so the upgrade is quick on any size of database.
 
 ## Cancelling queued mail

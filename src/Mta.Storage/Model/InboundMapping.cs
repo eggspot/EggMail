@@ -140,6 +140,7 @@ public static class InboundMapping
             Size = d.Raw.Length,
             Spf = d.Auth.Spf,
             SpfDomain = d.Auth.SpfDomain,
+            SpfHelo = d.Auth.SpfHelo,
             Dkim = d.Auth.Dkim,
             DkimDomain = d.Auth.DkimDomain,
             Dmarc = d.Auth.Dmarc,
@@ -159,6 +160,6 @@ public static class InboundMapping
 
     public static InboundMessage ToRecord(this InboundMessageEntity e) => new(
         e.Id, e.TenantId, e.DomainId, e.Domain, e.ReceivedAt, e.RemoteAddress, e.Helo, e.TlsUsed, e.EnvelopeFrom, e.EnvelopeTo, e.Subject, e.Size,
-        new InboundAuthResults(e.Spf, e.SpfDomain, e.Dkim, e.DkimDomain, e.Dmarc, e.DmarcPolicy, e.Arc),
-        e.Disposition, e.RouteId, e.ActionKind, e.ActionState, e.ActionAttempts, e.ActionNextAttemptAt, e.ActionFinishedAt, e.ActionLastError, e.ForwardMessageId, e.HasRaw);
+        new InboundAuthResults(e.Spf, e.SpfDomain, e.SpfHelo, e.Dkim, e.DkimDomain, e.Dmarc, e.DmarcPolicy, e.Arc),
+        e.Disposition, e.RouteId, e.ActionKind, e.ActionState, e.ActionAttempts, e.ActionNextAttemptAt, e.ActionFinishedAt, e.ActionLastError, e.ForwardMessageId, e.HasRaw, e.RetryGeneration);
 }

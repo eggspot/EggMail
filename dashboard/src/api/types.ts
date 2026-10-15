@@ -314,7 +314,7 @@ export interface SmtpCredential {
   password?: string;
 }
 
-export const API_KEY_SCOPES = ['send', 'read', 'domains', 'webhooks', 'suppressions', 'keys', 'inbound'] as const;
+export const API_KEY_SCOPES = ['send', 'read', 'domains', 'webhooks', 'suppressions', 'keys', 'inbound:read', 'inbound:write'] as const;
 
 // ---- statistics ----
 

@@ -209,7 +209,7 @@ internal sealed class MemoryIntake(MemoryState s) : IMessageIntake
                     IdempotencyKey = key,
                     MessageId = message.MessageId,
                     CreatedAt = StorageTime.Normalize(now),
-                    ExpiresAt = StorageTime.Normalize(now + s.Options.Queue.IdempotencyKeyLifetime),
+                    ExpiresAt = StorageTime.Normalize(now + (message.IdempotencyKeyLifetime ?? s.Options.Queue.IdempotencyKeyLifetime)),
                     Fingerprint = message.IdempotencyFingerprint,
                 };
             }
@@ -1316,7 +1316,7 @@ internal sealed class MemoryMaintenance(MemoryState s) : IStorageMaintenance
 
             reports.Add(new MaintenanceReport("idempotency.expired", TimeSpan.Zero, idem, null));
 
-            reports.Add(new MaintenanceReport("inbound_retention", TimeSpan.Zero, s.InboundStore.PurgeExpired(inboundRetention, s.Options.Inbound.RetentionDays, now), null));
+            reports.Add(new MaintenanceReport("inbound_retention", TimeSpan.Zero, s.InboundStore.PurgeExpired(inboundRetention, s.Options.Inbound.RetentionDays, s.Options.Inbound.MaxRetentionDays, now), null));
         }
 
         return ValueTask.FromResult<IReadOnlyList<MaintenanceReport>>(reports);

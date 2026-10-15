@@ -52,7 +52,7 @@ public abstract class InboundConformance : StorageTestBase
             EnvelopeFrom = from,
             EnvelopeTo = to,
             Subject = subject,
-            Auth = auth ?? new InboundAuthResults(InboundVerdict.Pass, "sender.test", InboundVerdict.Pass, "sender.test", InboundVerdict.Pass, "reject", InboundVerdict.None),
+            Auth = auth ?? new InboundAuthResults(InboundVerdict.Pass, "sender.test", InboundVerdict.None, InboundVerdict.Pass, "sender.test", InboundVerdict.Pass, "reject", InboundVerdict.None),
             Disposition = disposition,
             RouteId = routeId,
             ActionKind = kind,
@@ -77,7 +77,7 @@ public abstract class InboundConformance : StorageTestBase
         DomainRecord domain = await AddDomainAsync(TenantA, "example.com");
         Assert.Null(await Inbound.GetSettingsAsync(domain.Id, default));
 
-        var first = new InboundDomainSettings(domain.Id, TenantA, true, InboundDmarcAction.QuarantineFlag, 5_000_000, 100, 10, 1L << 30, 30, Clock.UtcNow);
+        var first = new InboundDomainSettings(domain.Id, TenantA, true, InboundDmarcAction.Flag, 5_000_000, 100, 10, 1L << 30, 30, Clock.UtcNow);
         await Inbound.UpsertSettingsAsync(first, default);
         Assert.Equal(first, await Inbound.GetSettingsAsync(domain.Id, default));
 
@@ -227,8 +227,8 @@ public abstract class InboundConformance : StorageTestBase
     {
         DomainRecord domain = await AddDomainAsync(TenantA, "example.com");
         Guid route = Ids.New();
-        var auth = new InboundAuthResults(InboundVerdict.SoftFail, "sender.test", InboundVerdict.None, null, InboundVerdict.Fail, "quarantine", InboundVerdict.Pass);
-        InboundMessageDraft webhook = Draft(domain, route, InboundActionKind.Webhook, auth: auth, disposition: InboundDmarcDisposition.QuarantineFlagged, subject: "Hel\u0001lo\r\nthere");
+        var auth = new InboundAuthResults(InboundVerdict.SoftFail, "sender.test", InboundVerdict.None, InboundVerdict.None, null, InboundVerdict.Fail, "quarantine", InboundVerdict.Pass);
+        InboundMessageDraft webhook = Draft(domain, route, InboundActionKind.Webhook, auth: auth, disposition: InboundDmarcDisposition.Flagged, subject: "Hel\u0001lo\r\nthere");
         InboundMessageDraft forward = Draft(domain, route, InboundActionKind.Forward, size: 1600);
         InboundMessageDraft store = Draft(domain, route, InboundActionKind.Store, size: 1700);
         InboundMessageDraft discard = Draft(domain, route, InboundActionKind.Discard, size: 1800, subject: null);
@@ -237,8 +237,8 @@ public abstract class InboundConformance : StorageTestBase
         InboundMessage w = (await Inbound.GetAsync(TenantA, webhook.Id, default))!;
         Assert.Equal(("example.com", "support@example.com", "alice@sender.test", "Hello there", 1500L), (w.Domain, w.EnvelopeTo, w.EnvelopeFrom, w.Subject, w.Size));
         Assert.Equal(("203.0.113.9", "mail.sender.test", true, Clock.UtcNow), (w.RemoteAddress, w.Helo, w.TlsUsed, w.ReceivedAt));
-        Assert.Equal(new InboundAuthResults(InboundVerdict.SoftFail, "sender.test", InboundVerdict.None, null, InboundVerdict.Fail, "quarantine", InboundVerdict.Pass), w.Auth);
-        Assert.Equal((InboundDmarcDisposition.QuarantineFlagged, route, InboundActionKind.Webhook), (w.Disposition, w.RouteId, w.ActionKind));
+        Assert.Equal(new InboundAuthResults(InboundVerdict.SoftFail, "sender.test", InboundVerdict.None, InboundVerdict.None, null, InboundVerdict.Fail, "quarantine", InboundVerdict.Pass), w.Auth);
+        Assert.Equal((InboundDmarcDisposition.Flagged, route, InboundActionKind.Webhook), (w.Disposition, w.RouteId, w.ActionKind));
         Assert.Equal((InboundActionState.Pending, 0, Clock.UtcNow, null, null, null, true), (w.ActionState, w.ActionAttempts, w.ActionNextAttemptAt, w.ActionFinishedAt, w.ActionLastError, w.ForwardMessageId, w.HasRaw));
 
         InboundMessage f = (await Inbound.GetAsync(TenantA, forward.Id, default))!;
@@ -309,7 +309,7 @@ public abstract class InboundConformance : StorageTestBase
         DomainRecord other = await AddDomainAsync(TenantB, "other.test");
         Guid routeOne = Ids.New();
         Guid routeTwo = Ids.New();
-        var fail = new InboundAuthResults(InboundVerdict.Fail, "x.test", InboundVerdict.Fail, null, InboundVerdict.Fail, "reject", InboundVerdict.None);
+        var fail = new InboundAuthResults(InboundVerdict.Fail, "x.test", InboundVerdict.None, InboundVerdict.Fail, null, InboundVerdict.Fail, "reject", InboundVerdict.None);
 
         var drafts = new List<InboundMessageDraft>();
         for (int i = 0; i < 6; i++)
@@ -320,7 +320,7 @@ public abstract class InboundConformance : StorageTestBase
         }
 
         Clock.Advance(TimeSpan.FromMinutes(1));
-        InboundMessageDraft quarantined = await StoreAsync(Draft(b, routeOne, auth: fail, disposition: InboundDmarcDisposition.QuarantineFlagged, size: 300));
+        InboundMessageDraft quarantined = await StoreAsync(Draft(b, routeOne, auth: fail, disposition: InboundDmarcDisposition.Flagged, size: 300));
         InboundMessageDraft foreign = await StoreAsync(Draft(other, routeOne, size: 301));
 
         async Task<List<Guid>> Ids_(InboundMessageQuery q) => (await Inbound.SearchAsync(q, default)).Items.Select(m => m.Id).ToList();
@@ -339,8 +339,8 @@ public abstract class InboundConformance : StorageTestBase
         Assert.Equal(3, (await Ids_(new InboundMessageQuery(TenantId: TenantA, ActionKind: InboundActionKind.Store))).Count);
         Assert.Equal(4, (await Ids_(new InboundMessageQuery(TenantId: TenantA, ActionState: InboundActionState.Pending))).Count);
         Assert.Equal([quarantined.Id], await Ids_(new InboundMessageQuery(TenantId: TenantA, Dmarc: InboundVerdict.Fail)));
-        Assert.Equal([quarantined.Id], await Ids_(new InboundMessageQuery(TenantId: TenantA, Quarantined: true)));
-        Assert.Equal(6, (await Ids_(new InboundMessageQuery(TenantId: TenantA, Quarantined: false))).Count);
+        Assert.Equal([quarantined.Id], await Ids_(new InboundMessageQuery(TenantId: TenantA, DmarcFlagged: true)));
+        Assert.Equal(6, (await Ids_(new InboundMessageQuery(TenantId: TenantA, DmarcFlagged: false))).Count);
         Assert.Equal([drafts[2].Id, drafts[3].Id], (await Ids_(new InboundMessageQuery(TenantId: TenantA, From: drafts[2].ReceivedAt, To: drafts[4].ReceivedAt))).AsEnumerable().Reverse());
 
         // Paging by cursor.
@@ -631,5 +631,136 @@ public abstract class InboundConformance : StorageTestBase
 
         StorageHealth health = await Storage.Maintenance.GetHealthAsync(default);
         Assert.Contains("retention_unlimited:Inbound:RetentionDays", health.Warnings);
+    }
+
+    // Operator ceilings, erasure, retry generation, HELO verdict, the implicit postmaster delivery
+
+    [Fact]
+    public async Task The_operators_retention_ceiling_cuts_what_a_domain_chose_and_forever_becomes_the_ceiling()
+    {
+        await OpenAsync(WithInbound(Opts(), 7, maxRetentionDays: 10));
+        DomainRecord longDomain = await AddDomainAsync(TenantA, "long.example");
+        DomainRecord foreverDomain = await AddDomainAsync(TenantA, "forever.example");
+        DomainRecord plain = await AddDomainAsync(TenantB, "plain.example");
+        await Inbound.UpsertSettingsAsync(Settings(longDomain, retentionDays: 90), default);
+        await Inbound.UpsertSettingsAsync(Settings(foreverDomain, retentionDays: 0), default);
+        Guid route = Ids.New();
+
+        InboundMessageDraft longOld = await StoreAsync(Draft(longDomain, route, InboundActionKind.Store, at: Clock.UtcNow.AddDays(-11)));
+        InboundMessageDraft longNew = await StoreAsync(Draft(longDomain, route, InboundActionKind.Store, at: Clock.UtcNow.AddDays(-9)));
+        InboundMessageDraft foreverOld = await StoreAsync(Draft(foreverDomain, route, InboundActionKind.Store, at: Clock.UtcNow.AddDays(-400)));
+        InboundMessageDraft plainOld = await StoreAsync(Draft(plain, route, InboundActionKind.Store, at: Clock.UtcNow.AddDays(-8)));   // the default (7) applies
+        InboundMessageDraft plainNew = await StoreAsync(Draft(plain, route, InboundActionKind.Store, at: Clock.UtcNow.AddDays(-6)));
+
+        MaintenanceReport job = Assert.Single(await Storage.Maintenance.RunAsync(Clock.UtcNow, default), r => r.Job == "inbound_retention");
+        Assert.Equal(3, job.RowsAffected);
+        foreach (InboundMessageDraft gone in new[] { longOld, foreverOld, plainOld })
+        {
+            Assert.Null(await Inbound.GetAsync(gone.TenantId, gone.Id, default));
+        }
+
+        Assert.NotNull(await Inbound.GetAsync(TenantA, longNew.Id, default));
+        Assert.NotNull(await Inbound.GetAsync(TenantB, plainNew.Id, default));
+    }
+
+    [Fact]
+    public async Task An_erasure_deletes_everything_of_the_tenant_that_matches_and_needs_a_filter()
+    {
+        DomainRecord a = await AddDomainAsync(TenantA, "example.com");
+        DomainRecord b = await AddDomainAsync(TenantA, "example.net");
+        DomainRecord other = await AddDomainAsync(TenantB, "other.test");
+        Guid route = Ids.New();
+        var victims = new List<InboundMessageDraft>();
+        for (int i = 0; i < 5; i++)
+        {
+            victims.Add(await StoreAsync(Draft(a, route, i % 2 == 0 ? InboundActionKind.Webhook : InboundActionKind.Store, from: "Victim@Sender.Test", to: "x" + i + "@example.com", size: 300 + i)));
+        }
+
+        InboundMessageDraft bystander = await StoreAsync(Draft(a, route, InboundActionKind.Store, from: "friend@sender.test"));
+        InboundMessageDraft otherDomain = await StoreAsync(Draft(b, route, InboundActionKind.Store, from: "friend@sender.test"));
+        InboundMessageDraft theirs = await StoreAsync(Draft(other, route, InboundActionKind.Store, from: "victim@sender.test"));
+
+        await Assert.ThrowsAsync<ArgumentException>(async () => await Inbound.DeleteMatchingAsync(new InboundMessageQuery(TenantA), default));
+        await Assert.ThrowsAsync<ArgumentException>(async () => await Inbound.DeleteMatchingAsync(new InboundMessageQuery(TenantA, Limit: 5, Cursor: "x"), default));   // paging is not a filter
+
+        Assert.Equal(5, await Inbound.DeleteMatchingAsync(new InboundMessageQuery(TenantA, Sender: "victim@sender.test"), default));
+        Assert.All(victims, v => Assert.Null(Inbound.GetAsync(TenantA, v.Id, default).AsTask().Result));
+        Assert.All(victims, v => Assert.Null(Inbound.GetRawAsync(TenantA, v.Id, default).AsTask().Result));
+        Assert.NotNull(await Inbound.GetAsync(TenantA, bystander.Id, default));
+        Assert.NotNull(await Inbound.GetAsync(TenantA, otherDomain.Id, default));
+        Assert.NotNull(await Inbound.GetRawAsync(TenantB, theirs.Id, default));   // another tenant's mail is never touched, whatever it matches
+
+        Assert.Equal(1, await Inbound.DeleteMatchingAsync(new InboundMessageQuery(TenantA, DomainId: b.Id), default));
+        Assert.Equal(0, await Inbound.DeleteMatchingAsync(new InboundMessageQuery(TenantA, DomainId: b.Id), default));
+        Assert.Equal(new InboundUsage(1, bystander.Raw.Length, 0, 0, null), await Inbound.GetUsageAsync(TenantA, null, default));
+    }
+
+    [Fact]
+    public async Task An_erasure_removes_many_batches_and_pending_actions_too()
+    {
+        DomainRecord a = await AddDomainAsync(TenantA, "example.com");
+        Guid route = Ids.New();
+        for (int i = 0; i < 1100; i++)
+        {
+            await StoreAsync(Draft(a, route, InboundActionKind.Webhook, from: "bulk@sender.test", size: 64, at: Clock.UtcNow.AddMilliseconds(i)));
+        }
+
+        Assert.Equal(1100, await Inbound.DeleteMatchingAsync(new InboundMessageQuery(TenantA, Sender: "bulk@sender.test"), default));
+        Assert.Equal(new InboundUsage(0, 0, 0, 0, null), await Inbound.GetUsageAsync(TenantA, null, default));
+        Assert.Empty(await ClaimActionsAsync(max: 10));
+    }
+
+    [Fact]
+    public async Task Every_retry_is_a_new_generation_and_the_helo_verdict_and_the_implicit_route_are_kept()
+    {
+        DomainRecord domain = await AddDomainAsync(TenantA, "example.com");
+        var auth = new InboundAuthResults(InboundVerdict.Pass, "sender.test", InboundVerdict.SoftFail, InboundVerdict.Pass, "sender.test", InboundVerdict.Pass, "none", InboundVerdict.None);
+        InboundMessageDraft draft = Draft(domain, Ids.New(), InboundActionKind.Webhook, to: "postmaster@example.com", auth: auth);
+        draft.RouteId = null;   // the implicit postmaster delivery has no route
+        await StoreAsync(draft);
+
+        InboundMessage stored = (await Inbound.GetAsync(TenantA, draft.Id, default))!;
+        Assert.Equal((auth, null, 0), (stored.Auth, stored.RouteId, stored.RetryGeneration));
+
+        for (int generation = 1; generation <= 3; generation++)
+        {
+            Assert.Single(await ClaimActionsAsync(now: Clock.UtcNow.AddHours(generation)));
+            await Inbound.CompleteActionAsync(draft.Id, Owner, new InboundActionOutcome(InboundActionState.Failed, Clock.UtcNow, null, "x"), default);
+            Assert.Equal(InboundRetryResult.Queued, await Inbound.RetryActionAsync(TenantA, draft.Id, Clock.UtcNow.AddHours(generation), default));
+            Assert.Equal(generation, (await Inbound.GetAsync(TenantA, draft.Id, default))!.RetryGeneration);
+        }
+    }
+
+    [Fact]
+    public async Task A_webhook_endpoint_that_a_route_uses_cannot_be_deleted_by_the_store_itself()
+    {
+        DomainRecord domain = await AddDomainAsync(TenantA, "example.com");
+        Guid endpoint = await AddEndpointAsync(TenantA, true, "*");
+        InboundRouteRecord route = Route(domain, action: InboundActionKind.Webhook, endpoint: endpoint);
+        await Inbound.UpsertRouteAsync(route, default);
+
+        await Assert.ThrowsAsync<StorageConflictException>(async () => await Storage.Config.DeleteWebhookEndpointAsync(TenantA, endpoint, default));
+        Assert.NotNull(await Storage.Config.GetWebhookEndpointAsync(endpoint, default));
+
+        // Another tenant's delete of the same id does nothing and does not fail; once the route is gone the delete works.
+        await Storage.Config.DeleteWebhookEndpointAsync(TenantB, endpoint, default);
+        await Inbound.DeleteRouteAsync(TenantA, route.Id, default);
+        await Storage.Config.DeleteWebhookEndpointAsync(TenantA, endpoint, default);
+        Assert.Null(await Storage.Config.GetWebhookEndpointAsync(endpoint, default));
+    }
+
+    [Fact]
+    public async Task A_search_needs_the_tenant_and_a_query_of_one_tenant_never_sees_another()
+    {
+        DomainRecord a = await AddDomainAsync(TenantA, "example.com");
+        DomainRecord b = await AddDomainAsync(TenantB, "other.test");
+        InboundMessageDraft mine = await StoreAsync(Draft(a, Ids.New(), InboundActionKind.Store));
+        InboundMessageDraft theirs = await StoreAsync(Draft(b, Ids.New(), InboundActionKind.Store));
+
+        // Naming the other tenant's domain, route, recipient or sender does not reach their mail.
+        var page = await Inbound.SearchAsync(new InboundMessageQuery(TenantA, DomainId: b.Id), default);
+        Assert.Empty(page.Items);
+        Assert.Equal([mine.Id], (await Inbound.SearchAsync(new InboundMessageQuery(TenantA), default)).Items.Select(m => m.Id));
+        Assert.Equal([theirs.Id], (await Inbound.SearchAsync(new InboundMessageQuery(TenantB), default)).Items.Select(m => m.Id));
     }
 }

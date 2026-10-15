@@ -126,7 +126,9 @@ public static class EggMailApiExtensions
         MaxMessagesPerMinute = config.Inbound.MaxMessagesPerMinute,
         MaxMessagesPerMinutePerRemote = config.Inbound.MaxMessagesPerMinutePerRemote,
         MaxStoredBytesPerDomain = config.Inbound.MaxStoredBytesPerDomain,
+        MaxStoredBytesPerTenant = config.Inbound.MaxStoredBytesPerTenant,
         RetentionDays = config.Storage.Inbound.RetentionDays,
+        MaxRetentionDays = config.Storage.Inbound.MaxRetentionDays,
     };
 
     /// <summary>The options of the DNS records suggested for a sending domain: the bounce domain, host name, sending IP and the <c>Domains:*</c> settings.</summary>

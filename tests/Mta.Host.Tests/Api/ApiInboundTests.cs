@@ -2,6 +2,7 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using Mta.Core;
+using Mta.Host.Api;
 using Mta.Storage;
 
 namespace Mta.Host.Tests.Api;
@@ -60,10 +61,10 @@ public class ApiInboundTests : IAsyncLifetime
     [Fact]
     public async Task Settings_are_patched_member_by_member_and_null_resets_a_limit()
     {
-        Reply first = await _a.PatchAsync(_base, new Dictionary<string, object?> { ["enabled"] = true, ["dmarcAction"] = "quarantine_flag", ["maxMessageBytes"] = 1_000_000, ["retentionDays"] = 30, ["maxMessagesPerMinute"] = 5 });
+        Reply first = await _a.PatchAsync(_base, new Dictionary<string, object?> { ["enabled"] = true, ["dmarcAction"] = "flag", ["maxMessageBytes"] = 1_000_000, ["retentionDays"] = 30, ["maxMessagesPerMinute"] = 5 });
         Assert.Equal(HttpStatusCode.OK, first.Status);
         Assert.True(first["enabled"].GetBoolean());
-        Assert.Equal("quarantine_flag", first.Str("dmarcAction"));
+        Assert.Equal("flag", first.Str("dmarcAction"));
         Assert.Equal(1_000_000, first["maxMessageBytes"].GetInt64());
         Assert.Equal(30, first["effective"].GetProperty("retentionDays").GetInt32());
         Assert.Equal(1_000_000, first["effective"].GetProperty("maxMessageBytes").GetInt64());
@@ -92,6 +93,7 @@ public class ApiInboundTests : IAsyncLifetime
 
     [Theory]
     [InlineData("dmarcAction", "burn", "dmarcAction")]
+    [InlineData("dmarcAction", "quarantine_flag", "dmarcAction")]
     [InlineData("maxMessageBytes", 10, "maxMessageBytes")]
     [InlineData("maxMessagesPerMinute", 0, "maxMessagesPerMinute")]
     [InlineData("maxMessagesPerMinutePerRemote", 20000, "maxMessagesPerMinutePerRemote")]
@@ -161,10 +163,10 @@ public class ApiInboundTests : IAsyncLifetime
     public async Task A_key_can_be_created_with_the_inbound_scope()
     {
         ApiClient admin = await _f.SignedInAsync("alice");
-        Reply r = await admin.PostAsync("/api/v1/api-keys", new { name = "inbox reader", scopes = new[] { "inbound" } });
+        Reply r = await admin.PostAsync("/api/v1/api-keys", new { name = "inbox reader", scopes = new[] { "inbound:read" } });
 
         Assert.Equal(HttpStatusCode.Created, r.Status);
-        Assert.Equal("inbound", r["scopes"][0].GetString());
+        Assert.Equal("inbound:read", r["scopes"][0].GetString());
         ApiClient reader = _f.NewClient().WithBearer(r.Str("key"));
         Assert.Equal(HttpStatusCode.OK, (await reader.GetAsync(_base)).Status);
         (await reader.GetAsync("/api/v1/messages")).Problem(HttpStatusCode.Forbidden, "forbidden");
@@ -370,7 +372,7 @@ public class ApiInboundTests : IAsyncLifetime
         var draft = new InboundMessageDraft
         {
             Id = Ids.New(at), TenantId = tenant, DomainId = domain.Id, Domain = domain.Name, ReceivedAt = at, RemoteAddress = "203.0.113.9", Helo = "mail.sender.test", TlsUsed = true, EnvelopeFrom = from, EnvelopeTo = to, Subject = subject,
-            Auth = new InboundAuthResults(InboundVerdict.Pass, "sender.test", InboundVerdict.Pass, "sender.test", InboundVerdict.Fail, "reject", InboundVerdict.None), Disposition = disposition, RouteId = Ids.New(), ActionKind = kind,
+            Auth = new InboundAuthResults(InboundVerdict.Pass, "sender.test", InboundVerdict.None, InboundVerdict.Pass, "sender.test", InboundVerdict.Fail, "reject", InboundVerdict.None), Disposition = disposition, RouteId = Ids.New(), ActionKind = kind,
             Raw = raw ?? Mime(subject, "plain body"),
         };
         await _f.Storage.Inbound.AcceptAsync([draft], default);
@@ -381,7 +383,7 @@ public class ApiInboundTests : IAsyncLifetime
     public async Task A_message_is_listed_and_shown_with_its_verdicts_headers_bodies_and_attachments()
     {
         byte[] raw = Mime("Quarterly report", "Dear team,\nsee attached.", "<p>Dear team</p>", ("report.txt", "text/plain", "numbers"), ("chart.png", "image/png", "PNG"));
-        InboundMessageDraft draft = await StoreAsync(ApiFixture.TenantAId, _domainA, InboundActionKind.Store, raw, subject: "Quarterly report", disposition: InboundDmarcDisposition.QuarantineFlagged);
+        InboundMessageDraft draft = await StoreAsync(ApiFixture.TenantAId, _domainA, InboundActionKind.Store, raw, subject: "Quarterly report", disposition: InboundDmarcDisposition.Flagged);
 
         Reply list = await _a.GetAsync("/api/v1/inbound/messages");
         Assert.Equal(HttpStatusCode.OK, list.Status);
@@ -389,7 +391,7 @@ public class ApiInboundTests : IAsyncLifetime
         Assert.Equal(JsonValueKind.Null, list["next_cursor"].ValueKind);
         Assert.Equal(draft.Id.ToString("N"), item.GetProperty("id").GetString());
         Assert.Equal(("example.com", "alice@sender.test", "support@example.com", "Quarterly report", raw.Length), (item.GetProperty("domain").GetString(), item.GetProperty("from").GetString(), item.GetProperty("to").GetString(), item.GetProperty("subject").GetString(), item.GetProperty("size").GetInt32()));
-        Assert.Equal(("203.0.113.9", "mail.sender.test", true, true), (item.GetProperty("remoteIp").GetString(), item.GetProperty("helo").GetString(), item.GetProperty("tls").GetBoolean(), item.GetProperty("quarantined").GetBoolean()));
+        Assert.Equal(("203.0.113.9", "mail.sender.test", true, true), (item.GetProperty("remoteIp").GetString(), item.GetProperty("helo").GetString(), item.GetProperty("tls").GetBoolean(), item.GetProperty("dmarcFlagged").GetBoolean()));
         JsonElement auth = item.GetProperty("auth");
         Assert.Equal("pass", auth.GetProperty("spf").GetProperty("result").GetString());
         Assert.Equal("sender.test", auth.GetProperty("spf").GetProperty("domain").GetString());
@@ -495,9 +497,9 @@ public class ApiInboundTests : IAsyncLifetime
         Assert.Equal(3, Ids(await _a.GetAsync("/api/v1/inbound/messages?action=webhook")).Length);
         Assert.Equal(3, Ids(await _a.GetAsync("/api/v1/inbound/messages?state=pending")).Length);
         Assert.Equal(5, Ids(await _a.GetAsync("/api/v1/inbound/messages?dmarc=fail")).Length);
-        Assert.Empty(Ids(await _a.GetAsync("/api/v1/inbound/messages?quarantined=true")));
-        Assert.Equal(5, Ids(await _a.GetAsync($"/api/v1/inbound/messages?domain={_domainA.Id:N}")).Length);
-        Assert.Empty(Ids(await _a.GetAsync($"/api/v1/inbound/messages?domain={globex.Id:N}")));   // a foreign domain id finds nothing, it does not fail
+        Assert.Empty(Ids(await _a.GetAsync("/api/v1/inbound/messages?dmarcFlagged=true")));
+        Assert.Equal(5, Ids(await _a.GetAsync($"/api/v1/inbound/messages?domainId={_domainA.Id:N}")).Length);
+        Assert.Empty(Ids(await _a.GetAsync($"/api/v1/inbound/messages?domainId={globex.Id:N}")));   // a foreign domain id finds nothing, it does not fail
         Assert.Equal([N(mine[2]), N(mine[1])], Ids(await _a.GetAsync($"/api/v1/inbound/messages?from={Uri.EscapeDataString(mine[1].ReceivedAt.ToString("O"))}&to={Uri.EscapeDataString(mine[3].ReceivedAt.ToString("O"))}")));
 
         Reply page1 = await _a.GetAsync("/api/v1/inbound/messages?limit=2");
@@ -519,12 +521,12 @@ public class ApiInboundTests : IAsyncLifetime
     [Theory]
     [InlineData("limit=0")]
     [InlineData("limit=500")]
-    [InlineData("domain=zzz")]
+    [InlineData("domainId=zzz")]
     [InlineData("route=zzz")]
     [InlineData("action=teleport")]
     [InlineData("state=stuck")]
     [InlineData("dmarc=maybe")]
-    [InlineData("quarantined=perhaps")]
+    [InlineData("dmarcFlagged=perhaps")]
     [InlineData("from=yesterday")]
     public async Task Invalid_filters_are_refused(string query)
     {
@@ -594,8 +596,8 @@ public class ApiInboundTests : IAsyncLifetime
         Assert.Equal((2, 1, 0), (usage["messages"].GetInt32(), usage["pending"].GetInt32(), usage["failed"].GetInt32()));
         Assert.True(usage["bodyBytes"].GetInt64() > stored.Raw.Length);
         Assert.Equal("2026-10-12T10:30:00.000Z", usage.Str("oldestPendingAt"));
-        Assert.Equal(1, (await _a.GetAsync($"/api/v1/inbound/usage?domain={_domainA.Id:N}"))["pending"].GetInt32());
-        (await _a.GetAsync("/api/v1/inbound/usage?domain=zzz")).Problem(HttpStatusCode.BadRequest, "validation_failed");
+        Assert.Equal(1, (await _a.GetAsync($"/api/v1/inbound/usage?domainId={_domainA.Id:N}"))["pending"].GetInt32());
+        (await _a.GetAsync("/api/v1/inbound/usage?domainId=zzz")).Problem(HttpStatusCode.BadRequest, "validation_failed");
     }
 
     [Fact]
@@ -619,5 +621,185 @@ public class ApiInboundTests : IAsyncLifetime
         alice.SendCsrf = false;
         (await alice.PatchAsync(_base, new { retentionDays = 15 })).Problem(HttpStatusCode.Forbidden, "forbidden");
         Assert.Equal(14, (await _a.GetAsync(_base))["retentionDays"].GetInt32());
+    }
+
+    // Scopes: reading and writing are separate
+
+    [Fact]
+    public async Task Reading_and_writing_need_their_own_scopes_and_one_does_not_imply_the_other()
+    {
+        ApiClient reader = await _f.KeyClientAsync(ApiFixture.TenantAId, "inbound:read");
+        ApiClient writer = await _f.KeyClientAsync(ApiFixture.TenantAId, "inbound:write");
+        InboundMessageDraft draft = await StoreAsync(ApiFixture.TenantAId, _domainA, InboundActionKind.Webhook);
+        string url = "/api/v1/inbound/messages/" + draft.Id.ToString("N");
+
+        Assert.Equal(HttpStatusCode.OK, (await reader.GetAsync(_base)).Status);
+        Assert.Equal(HttpStatusCode.OK, (await reader.GetAsync(url)).Status);
+        Assert.Equal(HttpStatusCode.OK, (await reader.GetAsync(url + "/raw")).Status);
+        (await reader.PatchAsync(_base, new { retentionDays = 3 })).Problem(HttpStatusCode.Forbidden, "forbidden");
+        (await reader.PostAsync(_base + "/routes", CatchAll())).Problem(HttpStatusCode.Forbidden, "forbidden");
+        (await reader.DeleteAsync(url)).Problem(HttpStatusCode.Forbidden, "forbidden");
+        (await reader.PostAsync(url + "/retry")).Problem(HttpStatusCode.Forbidden, "forbidden");
+        (await reader.DeleteAsync("/api/v1/inbound/messages?sender=a@b.test")).Problem(HttpStatusCode.Forbidden, "forbidden");
+
+        (await writer.GetAsync(_base)).Problem(HttpStatusCode.Forbidden, "forbidden");
+        (await writer.GetAsync(url)).Problem(HttpStatusCode.Forbidden, "forbidden");
+        (await writer.GetAsync("/api/v1/inbound/messages")).Problem(HttpStatusCode.Forbidden, "forbidden");
+        Assert.Equal(HttpStatusCode.OK, (await writer.PatchAsync(_base, new { retentionDays = 3 })).Status);
+        Assert.Equal(HttpStatusCode.Created, (await writer.PostAsync(_base + "/routes", CatchAll())).Status);
+        Assert.Equal(HttpStatusCode.NoContent, (await writer.DeleteAsync(url)).Status);
+    }
+
+    // Operator ceilings
+
+    private async Task WithCeilingsAsync(Action<InboundApiDefaults> configure)
+    {
+        await _f.DisposeAsync();
+        _f = await ApiFixture.StartAsync(new ApiFixtureOptions { ConfigureApi = o => configure(o.Inbound) });
+        _a = await _f.KeyClientAsync(ApiFixture.TenantAId);
+        _domainA = (await _f.Storage.Config.GetDomainsAsync(ApiFixture.TenantAId, default)).Single();
+        _base = $"/api/v1/domains/{_domainA.Id:N}/inbound";
+    }
+
+    [Fact]
+    public async Task A_tenant_can_only_lower_the_operators_limits()
+    {
+        await WithCeilingsAsync(d =>
+        {
+            d.MaxMessageBytes = 5_000_000;
+            d.MaxMessagesPerMinute = 100;
+            d.MaxMessagesPerMinutePerRemote = 10;
+            d.MaxStoredBytesPerDomain = 1L << 30;
+            d.MaxRetentionDays = 30;
+            d.RetentionDays = 7;
+        });
+
+        Reply ok = await _a.PatchAsync(_base, new { maxMessageBytes = 5_000_000, maxMessagesPerMinute = 100, maxMessagesPerMinutePerRemote = 10, maxStoredBytes = 1L << 30, retentionDays = 30 });
+        Assert.Equal(HttpStatusCode.OK, ok.Status);
+
+        Reply above = await _a.PatchAsync(_base, new { maxMessageBytes = 5_000_001, maxMessagesPerMinute = 101, maxMessagesPerMinutePerRemote = 11, maxStoredBytes = (1L << 30) + 1, retentionDays = 31 });
+        above.Problem(HttpStatusCode.BadRequest, "validation_failed");
+        Assert.Equal(["maxMessageBytes", "maxMessagesPerMinute", "maxMessagesPerMinutePerRemote", "maxStoredBytes", "retentionDays"], above.ErrorFields);
+        Assert.Contains("Inbound:MaxRetentionDays", above.Json.GetProperty("errors").EnumerateArray().Single(e => e.GetProperty("field").GetString() == "retentionDays").GetProperty("message").GetString());
+
+        Reply forever = await _a.PatchAsync(_base, new { maxStoredBytes = 0, retentionDays = 0 });
+        Assert.Equal(["maxStoredBytes", "retentionDays"], forever.ErrorFields);
+        Assert.Equal(30, (await _a.GetAsync(_base))["retentionDays"].GetInt32());   // nothing of the refused request was stored
+    }
+
+    [Fact]
+    public async Task The_effective_values_follow_the_ceilings_even_for_an_older_larger_setting()
+    {
+        // A setting that was valid when it was stored and is above the ceiling the operator has now.
+        await _f.Storage.Inbound.UpsertSettingsAsync(new InboundDomainSettings(_domainA.Id, ApiFixture.TenantAId, true, InboundDmarcAction.RecordOnly, 20_000_000, 900, 90, 0, 365, _f.Clock.UtcNow), default);
+        await WithCeilingsAsync(d =>
+        {
+            d.MaxMessageBytes = 5_000_000;
+            d.MaxMessagesPerMinute = 100;
+            d.MaxMessagesPerMinutePerRemote = 10;
+            d.MaxStoredBytesPerDomain = 1L << 30;
+            d.MaxRetentionDays = 30;
+        });
+        // (the fixture starts over with empty storage: store it again in the new one)
+        await _f.Storage.Inbound.UpsertSettingsAsync(new InboundDomainSettings(_domainA.Id, ApiFixture.TenantAId, true, InboundDmarcAction.RecordOnly, 20_000_000, 900, 90, 0, 365, _f.Clock.UtcNow), default);
+
+        JsonElement effective = (await _a.GetAsync(_base))["effective"];
+        Assert.Equal((5_000_000L, 100, 10, 1L << 30, 30), (effective.GetProperty("maxMessageBytes").GetInt64(), effective.GetProperty("maxMessagesPerMinute").GetInt32(), effective.GetProperty("maxMessagesPerMinutePerRemote").GetInt32(), effective.GetProperty("maxStoredBytes").GetInt64(), effective.GetProperty("retentionDays").GetInt32()));
+    }
+
+    // Bounce names, forward loops
+
+    [Fact]
+    public async Task The_bounce_domain_and_return_path_hosts_cannot_receive_mail()
+    {
+        // The fixture's bounce domain is bounces.egg.test; a tenant cannot register and enable it, and the return-path host of a domain is such a name too.
+        DomainRecord bounce = await _f.AddVerifiedDomainAsync(ApiFixture.TenantAId, "bounces.egg.test");
+        Reply r = await _a.PatchAsync($"/api/v1/domains/{bounce.Id:N}/inbound", new { enabled = true });
+        r.Problem(HttpStatusCode.BadRequest, "validation_failed");
+        Assert.Equal(["enabled"], r.ErrorFields);
+
+        DomainRecord returnPath = await _f.AddVerifiedDomainAsync(ApiFixture.TenantAId, "bounce.example.com");   // the return-path host of example.com
+        (await _a.PatchAsync($"/api/v1/domains/{returnPath.Id:N}/inbound", new { enabled = true })).Problem(HttpStatusCode.BadRequest, "validation_failed");
+        Assert.Null(await _f.Storage.Inbound.GetSettingsAsync(bounce.Id, default));
+        Assert.Null(await _f.Storage.Inbound.GetSettingsAsync(returnPath.Id, default));
+
+        // Preparing the other settings is fine, and an ordinary domain still enables.
+        Assert.Equal(HttpStatusCode.OK, (await _a.PatchAsync($"/api/v1/domains/{bounce.Id:N}/inbound", new { retentionDays = 3 })).Status);
+        await EnableAsync();
+    }
+
+    [Fact]
+    public async Task A_forward_cannot_target_its_own_domain_or_a_domain_this_server_receives_for()
+    {
+        DomainRecord mine = _domainA;
+        DomainRecord second = await _f.AddVerifiedDomainAsync(ApiFixture.TenantAId, "second.example");
+        DomainRecord others = (await _f.Storage.Config.GetDomainsAsync(ApiFixture.TenantBId, default)).Single();   // globex.test
+        await EnableAsync();
+        Assert.Equal(HttpStatusCode.OK, (await _a.PatchAsync($"/api/v1/domains/{second.Id:N}/inbound", new { enabled = true })).Status);
+
+        async Task<Reply> ForwardAsync(params string[] to) => await _a.PostAsync(_base + "/routes", new { match = new { kind = "catch_all" }, action = new { kind = "forward", forwardTo = to } });
+
+        Reply own = await ForwardAsync("ok@elsewhere.test", "loop@" + mine.Name.ToUpperInvariant());
+        own.Problem(HttpStatusCode.BadRequest, "validation_failed");
+        Assert.Equal(["action.forwardTo[1]"], own.ErrorFields);
+
+        Reply local = await ForwardAsync("someone@" + second.Name);   // another domain of the same server that receives mail
+        Assert.Equal(["action.forwardTo[0]"], local.ErrorFields);
+
+        // A domain of this server that does not receive (globex.test has inbound off) and an outside address are fine.
+        Assert.Equal(HttpStatusCode.Created, (await ForwardAsync("a@" + others.Name, "b@elsewhere.test")).Status);
+        Assert.Empty(await _f.Storage.Inbound.GetRoutesAsync(second.Id, default));
+    }
+
+    // Erasure
+
+    [Fact]
+    public async Task An_erasure_deletes_what_matches_needs_a_filter_and_stays_within_the_tenant()
+    {
+        DomainRecord globex = (await _f.Storage.Config.GetDomainsAsync(ApiFixture.TenantBId, default)).Single();
+        for (int i = 0; i < 3; i++)
+        {
+            await StoreAsync(ApiFixture.TenantAId, _domainA, InboundActionKind.Store, from: "victim@sender.test", to: "u" + i + "@example.com");
+        }
+
+        InboundMessageDraft keep = await StoreAsync(ApiFixture.TenantAId, _domainA, InboundActionKind.Store, from: "friend@sender.test");
+        InboundMessageDraft theirs = await StoreAsync(ApiFixture.TenantBId, globex, InboundActionKind.Store, from: "victim@sender.test", to: "x@globex.test");
+
+        (await _a.DeleteAsync("/api/v1/inbound/messages")).Problem(HttpStatusCode.BadRequest, "validation_failed");
+        Assert.Equal(["filter"], (await _a.DeleteAsync("/api/v1/inbound/messages?limit=5")).ErrorFields);   // paging is not a filter
+        Assert.Equal(4, (await _a.GetAsync("/api/v1/inbound/usage"))["messages"].GetInt32());
+
+        Reply done = await _a.DeleteAsync("/api/v1/inbound/messages?sender=Victim@Sender.test");
+        Assert.Equal(HttpStatusCode.OK, done.Status);
+        Assert.Equal(3, done["deleted"].GetInt64());
+        Assert.Equal([keep.Id.ToString("N")], (await _a.GetAsync("/api/v1/inbound/messages"))["items"].EnumerateArray().Select(m => m.GetProperty("id").GetString()!).ToArray());
+        Assert.NotNull(await _f.Storage.Inbound.GetRawAsync(ApiFixture.TenantBId, theirs.Id, default));
+        Assert.Equal(0, (await _a.DeleteAsync("/api/v1/inbound/messages?sender=victim@sender.test"))["deleted"].GetInt64());
+        (await _a.DeleteAsync("/api/v1/inbound/messages?dmarc=maybe")).Problem(HttpStatusCode.BadRequest, "validation_failed");
+    }
+
+    // Retry generation and the HELO verdict are visible
+
+    [Fact]
+    public async Task The_retry_generation_and_the_helo_verdict_are_shown()
+    {
+        InboundMessageDraft draft = await StoreAsync(ApiFixture.TenantAId, _domainA, InboundActionKind.Webhook);
+        string url = "/api/v1/inbound/messages/" + draft.Id.ToString("N");
+        Assert.Equal(0, (await _a.GetAsync(url))["action"].GetProperty("retryGeneration").GetInt32());
+        Assert.Equal("none", (await _a.GetAsync(url))["auth"].GetProperty("spfHelo").GetProperty("result").GetString());
+
+        await _f.Storage.Inbound.ClaimActionsAsync("w", 5, _f.Clock.UtcNow, TimeSpan.FromMinutes(1), default);
+        await _f.Storage.Inbound.CompleteActionAsync(draft.Id, "w", new InboundActionOutcome(InboundActionState.Failed, _f.Clock.UtcNow, null, "x"), default);
+        Reply retried = await _a.PostAsync(url + "/retry");
+        Assert.Equal(1, retried["action"].GetProperty("retryGeneration").GetInt32());
+    }
+
+    [Fact]
+    public async Task A_webhook_endpoint_that_a_route_gets_between_the_check_and_the_delete_is_still_protected_by_the_store()
+    {
+        Guid endpoint = await EndpointAsync(ApiFixture.TenantAId);
+        // The store refuses even when the API's own check did not see the route (a route written straight to storage, as a concurrent request would).
+        await _f.Storage.Inbound.UpsertRouteAsync(new InboundRouteRecord(Ids.New(), ApiFixture.TenantAId, _domainA.Id, "late", 1, true, InboundMatchKind.CatchAll, null, false, InboundActionKind.Webhook, endpoint, InboundWebhookFormat.Json, [], _f.Clock.UtcNow, _f.Clock.UtcNow), default);
+        await Assert.ThrowsAsync<StorageConflictException>(async () => await _f.Storage.Config.DeleteWebhookEndpointAsync(ApiFixture.TenantAId, endpoint, default));
     }
 }

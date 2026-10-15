@@ -27,6 +27,15 @@ public sealed class InboundApiDefaults
 
     /// <summary>0 keeps forever.</summary>
     public int RetentionDays { get; set; } = 7;
+
+    /// <summary>The longest retention a domain may choose; 0: none.</summary>
+    public int MaxRetentionDays { get; set; }
+
+    /// <summary>Stored bytes for all domains of one tenant together; 0 unlimited.</summary>
+    public long MaxStoredBytesPerTenant { get; set; } = 10L * 1024 * 1024 * 1024;
+
+    /// <summary>The operator's limits as the contract states them: what a domain's own settings may be at most.</summary>
+    public InboundCeilings Ceilings() => new(MaxMessageBytes, MaxMessagesPerMinute, MaxMessagesPerMinutePerRemote, MaxStoredBytesPerDomain, MaxStoredBytesPerTenant, MaxRetentionDays);
 }
 
 public sealed record InboundWarningResponse(string Code, string Message);
@@ -69,9 +78,9 @@ public sealed record InboundRouteMatchResponse(string Address, bool DomainEnable
 
 public sealed record InboundVerdictResponse(string Result, [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Domain = null, [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Policy = null);
 
-public sealed record InboundAuthResponse(InboundVerdictResponse Spf, InboundVerdictResponse Dkim, InboundVerdictResponse Dmarc, InboundVerdictResponse Arc);
+public sealed record InboundAuthResponse(InboundVerdictResponse Spf, InboundVerdictResponse SpfHelo, InboundVerdictResponse Dkim, InboundVerdictResponse Dmarc, InboundVerdictResponse Arc);
 
-public sealed record InboundActionResponse(string Kind, string State, int Attempts, DateTimeOffset? NextAttemptAt, DateTimeOffset? FinishedAt, string? LastError, Guid? ForwardMessageId);
+public sealed record InboundActionResponse(string Kind, string State, int Attempts, int RetryGeneration, DateTimeOffset? NextAttemptAt, DateTimeOffset? FinishedAt, string? LastError, Guid? ForwardMessageId);
 
 public sealed record InboundHeaderResponse(string Name, string Value);
 
@@ -98,13 +107,15 @@ public sealed record InboundMessageResponse(
     string? Subject,
     long Size,
     InboundAuthResponse Auth,
-    bool Quarantined,
+    bool DmarcFlagged,
     Guid? RouteId,
     InboundActionResponse Action,
     bool HasRaw,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] InboundContentResponse? Content = null);
 
 public sealed record InboundUsageResponse(long Messages, long BodyBytes, long Pending, long Failed, DateTimeOffset? OldestPendingAt);
+
+public sealed record InboundErasedResponse(long Deleted);
 
 public sealed record InboundRetryResponse(Guid Id, InboundActionResponse Action);
 
@@ -198,6 +209,7 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
         api.GetRoute("/inbound/messages/{id}/raw", RawAsync);
         api.GetRoute("/inbound/messages/{id}/attachments/{index}", AttachmentAsync);
         api.DeleteRoute("/inbound/messages/{id}", DeleteMessageAsync);
+        api.DeleteRoute("/inbound/messages", EraseMessagesAsync);
         api.PostRoute("/inbound/messages/{id}/retry", RetryAsync);
     }
 
@@ -221,11 +233,15 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
         InboundApiDefaults d = options.Inbound;
         return new InboundEffectiveResponse(
             Math.Min(s.MaxMessageBytes ?? d.MaxMessageBytes, d.MaxMessageBytes),
-            s.MaxMessagesPerMinute ?? d.MaxMessagesPerMinute,
-            s.MaxMessagesPerMinutePerRemote ?? d.MaxMessagesPerMinutePerRemote,
-            s.MaxStoredBytes ?? d.MaxStoredBytesPerDomain,
-            InboundRules.ResolveRetentionDays(s.RetentionDays, d.RetentionDays));
+            Math.Min(s.MaxMessagesPerMinute ?? d.MaxMessagesPerMinute, d.MaxMessagesPerMinute),
+            Math.Min(s.MaxMessagesPerMinutePerRemote ?? d.MaxMessagesPerMinutePerRemote, d.MaxMessagesPerMinutePerRemote),
+            EffectiveStoredBytes(s.MaxStoredBytes, d.MaxStoredBytesPerDomain),
+            InboundRules.ResolveRetentionDays(s.RetentionDays, d.RetentionDays, d.MaxRetentionDays));
     }
+
+    // 0 is unlimited, so "the lower of two limits" must not take the 0.
+    private static long EffectiveStoredBytes(long? domain, long ceiling) =>
+        domain is null ? ceiling : ceiling == 0 ? domain.Value : domain.Value == 0 ? ceiling : Math.Min(domain.Value, ceiling);
 
     private InboundSettingsResponse ToResponse(InboundDomainSettings s, bool stored, IReadOnlyList<InboundWarningResponse>? warnings = null)
     {
@@ -243,7 +259,7 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
 
     private async Task<IResult> GetSettingsAsync(HttpContext context, string id)
     {
-        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.Inbound).ConfigureAwait(false);
+        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.InboundRead).ConfigureAwait(false);
         CancellationToken ct = context.RequestAborted;
         DomainRecord domain = await FindOwnDomainAsync(caller, id, ct).ConfigureAwait(false);
         InboundDomainSettings? stored = await Inbound.GetSettingsAsync(domain.Id, ct).ConfigureAwait(false);
@@ -252,7 +268,7 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
 
     private async Task<IResult> UpdateSettingsAsync(HttpContext context, string id)
     {
-        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.Inbound).ConfigureAwait(false);
+        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.InboundWrite).ConfigureAwait(false);
         CancellationToken ct = context.RequestAborted;
         DomainRecord domain = await FindOwnDomainAsync(caller, id, ct).ConfigureAwait(false);
         UpdateInboundSettingsRequest body = await ApiJson.ReadBodyAsync<UpdateInboundSettingsRequest>(context, options.MaxBodyBytes).ConfigureAwait(false);
@@ -277,7 +293,7 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
             UpdatedAt = clock.UtcNow,
         };
         errors.ThrowIfAny();
-        foreach (InboundValidationError e in InboundRules.ValidateSettings(updated))
+        foreach (InboundValidationError e in InboundRules.ValidateSettings(updated, options.Inbound.Ceilings()))
         {
             errors.Add(e.Field, e.Message);
         }
@@ -292,6 +308,11 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
                 extensions: new Dictionary<string, object?> { ["reason"] = "inbound_domain_not_verified" });
         }
 
+        if (updated.Enabled && !current.Enabled && await IsBounceNameAsync(domain.Name, ct).ConfigureAwait(false))
+        {
+            throw ApiException.Validation("enabled", "This name only receives signed bounces (the bounce domain or a return-path host); it cannot receive other mail.");
+        }
+
         try
         {
             await Inbound.UpsertSettingsAsync(updated, ct).ConfigureAwait(false);
@@ -302,6 +323,18 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
         }
 
         return ApiResults.Ok(ToResponse(updated, stored: true));
+    }
+
+    // Mail for these names has one meaning, signed bounces; the receive path classifies it before any inbound domain (design section 11.4).
+    private async Task<bool> IsBounceNameAsync(string name, CancellationToken ct)
+    {
+        if (options.BounceDomain is { Length: > 0 } bounce && string.Equals(bounce.TrimEnd('.'), name, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var all = await Config.GetDomainsAsync(null, ct).ConfigureAwait(false);
+        return all.Any(d => d.ReturnPathHost is { Length: > 0 } host && string.Equals(host.TrimEnd('.'), name, StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>A PATCH number: absent keeps <paramref name="current"/>, <c>null</c> resets to the server default, a whole number replaces.</summary>
@@ -347,7 +380,7 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
 
     private async Task<IResult> ListRoutesAsync(HttpContext context, string id)
     {
-        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.Inbound).ConfigureAwait(false);
+        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.InboundRead).ConfigureAwait(false);
         CancellationToken ct = context.RequestAborted;
         DomainRecord domain = await FindOwnDomainAsync(caller, id, ct).ConfigureAwait(false);
         var routes = await Inbound.GetRoutesAsync(domain.Id, ct).ConfigureAwait(false);
@@ -356,7 +389,7 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
 
     private async Task<IResult> GetRouteAsync(HttpContext context, string id, string routeId)
     {
-        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.Inbound).ConfigureAwait(false);
+        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.InboundRead).ConfigureAwait(false);
         CancellationToken ct = context.RequestAborted;
         DomainRecord domain = await FindOwnDomainAsync(caller, id, ct).ConfigureAwait(false);
         return ApiResults.Ok(ToResponse(await FindRouteAsync(caller, domain, routeId, ct).ConfigureAwait(false)));
@@ -370,7 +403,7 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
 
     private async Task<IResult> CreateRouteAsync(HttpContext context, string id)
     {
-        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.Inbound).ConfigureAwait(false);
+        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.InboundWrite).ConfigureAwait(false);
         CancellationToken ct = context.RequestAborted;
         DomainRecord domain = await FindOwnDomainAsync(caller, id, ct).ConfigureAwait(false);
         CreateInboundRouteRequest body = await ApiJson.ReadBodyAsync<CreateInboundRouteRequest>(context, options.MaxBodyBytes).ConfigureAwait(false);
@@ -402,7 +435,7 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
 
     private async Task<IResult> UpdateRouteAsync(HttpContext context, string id, string routeId)
     {
-        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.Inbound).ConfigureAwait(false);
+        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.InboundWrite).ConfigureAwait(false);
         CancellationToken ct = context.RequestAborted;
         DomainRecord domain = await FindOwnDomainAsync(caller, id, ct).ConfigureAwait(false);
         InboundRouteRecord current = await FindRouteAsync(caller, domain, routeId, ct).ConfigureAwait(false);
@@ -475,9 +508,23 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
             action.ForwardTo is null ? [] : [.. action.ForwardTo], created, updated);
         if (!errors.Any)
         {
-            foreach (InboundValidationError e in InboundRules.ValidateRoute(route))
+            foreach (InboundValidationError e in InboundRules.ValidateRoute(route, domain.Name))
             {
                 errors.Add(FieldOf(e.Field), e.Message);
+            }
+        }
+
+        if (!errors.Any && actionKind == InboundActionKind.Forward)
+        {
+            // A target that this server receives for would bring the copy straight back (design section 11.6); the signed hop marker is the second line of defense.
+            for (int i = 0; i < route.ForwardTo.Count; i++)
+            {
+                if (EmailAddress.TryParse(route.ForwardTo[i], allowUtf8: true, out EmailAddress target)
+                    && await Config.FindDomainByNameAsync(target.Domain, ct).ConfigureAwait(false) is { } local
+                    && await Inbound.GetSettingsAsync(local.Id, ct).ConfigureAwait(false) is { Enabled: true })
+                {
+                    errors.Add($"action.forwardTo[{i}]", "This server receives mail for that domain: the forward would loop. Use an address at another mail provider.");
+                }
             }
         }
 
@@ -526,7 +573,7 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
 
     private async Task<IResult> DeleteRouteAsync(HttpContext context, string id, string routeId)
     {
-        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.Inbound).ConfigureAwait(false);
+        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.InboundWrite).ConfigureAwait(false);
         CancellationToken ct = context.RequestAborted;
         DomainRecord domain = await FindOwnDomainAsync(caller, id, ct).ConfigureAwait(false);
         InboundRouteRecord route = await FindRouteAsync(caller, domain, routeId, ct).ConfigureAwait(false);
@@ -540,7 +587,7 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
 
     private async Task<IResult> MatchRouteAsync(HttpContext context, string id)
     {
-        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.Inbound).ConfigureAwait(false);
+        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.InboundRead).ConfigureAwait(false);
         CancellationToken ct = context.RequestAborted;
         DomainRecord domain = await FindOwnDomainAsync(caller, id, ct).ConfigureAwait(false);
         string? text = context.Request.Query["address"].ToString();
@@ -568,12 +615,12 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
     private static InboundVerdictResponse Verdict(InboundVerdict v, string? domain = null, string? policy = null) => new(InboundNames.Of(v), domain, policy);
 
     private static InboundActionResponse ActionOf(InboundMessage m) =>
-        new(InboundNames.Of(m.ActionKind), InboundNames.Of(m.ActionState), m.ActionAttempts, m.ActionNextAttemptAt, m.ActionFinishedAt, m.ActionLastError, m.ForwardMessageId);
+        new(InboundNames.Of(m.ActionKind), InboundNames.Of(m.ActionState), m.ActionAttempts, m.RetryGeneration, m.ActionNextAttemptAt, m.ActionFinishedAt, m.ActionLastError, m.ForwardMessageId);
 
     private static InboundMessageResponse ToResponse(InboundMessage m, InboundContentResponse? content = null) => new(
         m.Id, m.DomainId, m.Domain, m.ReceivedAt, m.RemoteAddress, m.Helo, m.TlsUsed, m.EnvelopeFrom, m.EnvelopeTo, m.Subject, m.Size,
-        new InboundAuthResponse(Verdict(m.Auth.Spf, m.Auth.SpfDomain), Verdict(m.Auth.Dkim, m.Auth.DkimDomain), Verdict(m.Auth.Dmarc, policy: m.Auth.DmarcPolicy), Verdict(m.Auth.Arc)),
-        m.Disposition == InboundDmarcDisposition.QuarantineFlagged, m.RouteId, ActionOf(m), m.HasRaw, content);
+        new InboundAuthResponse(Verdict(m.Auth.Spf, m.Auth.SpfDomain), Verdict(m.Auth.SpfHelo), Verdict(m.Auth.Dkim, m.Auth.DkimDomain), Verdict(m.Auth.Dmarc, policy: m.Auth.DmarcPolicy), Verdict(m.Auth.Arc)),
+        m.Disposition == InboundDmarcDisposition.Flagged, m.RouteId, ActionOf(m), m.HasRaw, content);
 
     private async Task<InboundMessage> FindMessageAsync(ApiCaller caller, string id, CancellationToken ct)
     {
@@ -581,12 +628,12 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
         return message ?? throw ApiException.NotFound("Message not found.");
     }
 
-    private async Task<IResult> ListMessagesAsync(HttpContext context)
+    /// <summary>The filters of the message list and of the erasure, read from the query string (the same names and rules).</summary>
+    private static InboundMessageQuery ReadQuery(HttpContext context, Guid tenantId, bool paging)
     {
-        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.Inbound).ConfigureAwait(false);
         var errors = new ValidationErrors();
         var q = new QueryReader(context.Request, errors);
-        Guid? domain = Id(q.String("domain", 64), "domain", errors);
+        Guid? domain = Id(q.String("domainId", 64), "domainId", errors);
         Guid? route = Id(q.String("route", 64), "route", errors);
         InboundActionKind? kind = null;
         if (q.String("action", 16) is { } kindText)
@@ -606,14 +653,14 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
             if (InboundNames.TryParse(dmarcText, out InboundVerdict v)) { dmarc = v; } else { errors.Add("dmarc", "Must be a verdict: none, pass, fail, softfail, neutral, temperror, permerror, policy."); }
         }
 
-        bool? quarantined = null;
-        if (q.OneOf("quarantined", "true", "false") is { } quarantinedText)
+        bool? flagged = null;
+        if (q.OneOf("dmarcFlagged", "true", "false") is { } flaggedText)
         {
-            quarantined = quarantinedText == "true";
+            flagged = flaggedText == "true";
         }
 
         var query = new InboundMessageQuery(
-            TenantId: caller.TenantId,
+            TenantId: tenantId,
             DomainId: domain,
             Recipient: q.String("recipient", 320),
             Sender: q.String("sender", 320),
@@ -622,15 +669,35 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
             ActionKind: kind,
             ActionState: state,
             Dmarc: dmarc,
-            Quarantined: quarantined,
+            DmarcFlagged: flagged,
             From: q.Timestamp("from"),
             To: q.Timestamp("to"),
-            Limit: q.Int("limit", 50, 1, 200),
-            Cursor: q.String("cursor", 512));
+            Limit: paging ? q.Int("limit", 50, 1, 200) : 50,
+            Cursor: paging ? q.String("cursor", 512) : null);
         errors.ThrowIfAny();
+        return query;
+    }
 
+    private async Task<IResult> ListMessagesAsync(HttpContext context)
+    {
+        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.InboundRead).ConfigureAwait(false);
+        InboundMessageQuery query = ReadQuery(context, caller.TenantId, paging: true);
         Page<InboundMessage> page = await Inbound.SearchAsync(query, context.RequestAborted).ConfigureAwait(false);
         return ApiResults.Ok(new ListResponse<InboundMessageResponse>(page.Items.Select(m => ToResponse(m)).ToList(), page.NextCursor));
+    }
+
+    /// <summary>Erasure: everything of the tenant that matches the filters. At least one filter is required so the call can never empty a tenant by accident.</summary>
+    private async Task<IResult> EraseMessagesAsync(HttpContext context)
+    {
+        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.InboundWrite).ConfigureAwait(false);
+        InboundMessageQuery query = ReadQuery(context, caller.TenantId, paging: false);
+        if (!InboundRules.HasFilter(query))
+        {
+            throw ApiException.Validation("filter", "Name at least one filter (domainId, recipient, sender, subject, route, action, state, dmarc, dmarcFlagged, from, to): the call never deletes everything.");
+        }
+
+        long deleted = await Inbound.DeleteMatchingAsync(query, context.RequestAborted).ConfigureAwait(false);
+        return ApiResults.Ok(new InboundErasedResponse(deleted));
     }
 
     private static Guid? Id(string? text, string field, ValidationErrors errors)
@@ -651,9 +718,9 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
 
     private async Task<IResult> UsageAsync(HttpContext context)
     {
-        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.Inbound).ConfigureAwait(false);
+        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.InboundRead).ConfigureAwait(false);
         var errors = new ValidationErrors();
-        Guid? domain = Id(new QueryReader(context.Request, errors).String("domain", 64), "domain", errors);
+        Guid? domain = Id(new QueryReader(context.Request, errors).String("domainId", 64), "domainId", errors);
         errors.ThrowIfAny();
         InboundUsage usage = await Inbound.GetUsageAsync(caller.TenantId, domain, context.RequestAborted).ConfigureAwait(false);
         return ApiResults.Ok(new InboundUsageResponse(usage.Messages, usage.BodyBytes, usage.Pending, usage.Failed, usage.OldestPendingAt));
@@ -661,7 +728,7 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
 
     private async Task<IResult> GetMessageAsync(HttpContext context, string id)
     {
-        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.Inbound).ConfigureAwait(false);
+        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.InboundRead).ConfigureAwait(false);
         CancellationToken ct = context.RequestAborted;
         InboundMessage message = await FindMessageAsync(caller, id, ct).ConfigureAwait(false);
         byte[]? raw = message.HasRaw ? await Inbound.GetRawAsync(caller.TenantId, message.Id, ct).ConfigureAwait(false) : null;
@@ -686,7 +753,7 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
 
     private async Task<IResult> RawAsync(HttpContext context, string id)
     {
-        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.Inbound).ConfigureAwait(false);
+        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.InboundRead).ConfigureAwait(false);
         CancellationToken ct = context.RequestAborted;
         InboundMessage message = await FindMessageAsync(caller, id, ct).ConfigureAwait(false);
         byte[] raw = (message.HasRaw ? await Inbound.GetRawAsync(caller.TenantId, message.Id, ct).ConfigureAwait(false) : null) ?? throw BodyGone();
@@ -695,7 +762,7 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
 
     private async Task<IResult> AttachmentAsync(HttpContext context, string id, string index)
     {
-        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.Inbound).ConfigureAwait(false);
+        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.InboundRead).ConfigureAwait(false);
         CancellationToken ct = context.RequestAborted;
         InboundMessage message = await FindMessageAsync(caller, id, ct).ConfigureAwait(false);
         byte[] raw = (message.HasRaw ? await Inbound.GetRawAsync(caller.TenantId, message.Id, ct).ConfigureAwait(false) : null) ?? throw BodyGone();
@@ -712,7 +779,7 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
 
     private async Task<IResult> DeleteMessageAsync(HttpContext context, string id)
     {
-        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.Inbound).ConfigureAwait(false);
+        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.InboundWrite).ConfigureAwait(false);
         CancellationToken ct = context.RequestAborted;
         InboundMessage message = await FindMessageAsync(caller, id, ct).ConfigureAwait(false);
         if (!await Inbound.DeleteAsync(caller.TenantId, message.Id, ct).ConfigureAwait(false))
@@ -725,7 +792,7 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
 
     private async Task<IResult> RetryAsync(HttpContext context, string id)
     {
-        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.Inbound).ConfigureAwait(false);
+        ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.InboundWrite).ConfigureAwait(false);
         CancellationToken ct = context.RequestAborted;
         InboundMessage message = await FindMessageAsync(caller, id, ct).ConfigureAwait(false);
         InboundRetryResult result = await Inbound.RetryActionAsync(caller.TenantId, message.Id, clock.UtcNow, ct).ConfigureAwait(false);
