@@ -215,7 +215,7 @@ public sealed class DomainRecordCheckEntity
     /// <summary><c>TYPE|host</c>, upper-case type and lower-case host.</summary>
     public string RecordKey { get; set; } = "";
 
-    /// <summary>The record status word of the API: ok, missing, invalid or pending.</summary>
+    /// <summary>The record status word of the API: ok, missing, invalid, mismatch or pending.</summary>
     public string Status { get; set; } = "";
     public string? Found { get; set; }
     public DateTimeOffset CheckedAt { get; set; }

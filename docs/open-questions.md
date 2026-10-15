@@ -55,7 +55,7 @@ Note on the license: the Unlicense / CC0 public-domain dedication is the only mo
 - Who owns deliverability operations (IPs, warm-up, abuse desk)? They sit outside the engineering estimate.
 - Is a time-boxed external security audit funded before first production-critical use?
 - Which deployment targets must work first (single container only, or Kubernetes from day one), and which cloud will host it? That decides whether inbound port 25 and a multi-port LoadBalancer are possible.
-- Is a Cloudflare DNS-01 integration enough for ACME in the first release?
+- Is a Cloudflare DNS-01 integration enough for ACME in the first release? (Answered by decision 87: HTTP-01 on a built-in listener is the default without DNS credentials; Cloudflare stays the only DNS provider.)
 - Should "require TLS" be a tenant-level setting, a per-domain setting, or both?
 - Is DANE needed at launch, or can it wait with TLS-RPT?
 - Domain verification state machine: the consolidated decisions record is truncated at that item; confirm the proposed machine ([design.md §8](design.md#8-domain-verification)).

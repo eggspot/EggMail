@@ -7,8 +7,9 @@ using Certes.Acme.Resource;
 namespace Mta.Host.Tls;
 
 /// <summary>
-/// ACME order through Certes with DNS-01 (the only challenge type the design supports, decision 19). Exercised end to end against the
-/// Pebble test CA (<c>tests/Mta.Integration.Tests/Acme</c>, CI only); not yet against a production CA.
+/// ACME order through Certes with HTTP-01 (answered by the built-in listener through <see cref="IHttpChallengePublisher"/>) or DNS-01 (through
+/// <see cref="IDnsChallengeProvider"/>), decision 87 (which supersedes 19's "DNS-01 only"); external account binding for CAs that need it. Exercised end
+/// to end against the Pebble test CA (<c>tests/Mta.Integration.Tests/Acme</c>, CI); not yet against a production CA.
 /// </summary>
 public sealed class CertesOrderRunner : IAcmeOrderRunner
 {
@@ -117,7 +118,15 @@ public sealed class CertesOrderRunner : IAcmeOrderRunner
         if (account.KeyPem is null)
         {
             acme = new AcmeContext(directory, null, transport, badNonceRetryCount: 3);
-            var registration = acme.NewAccount([$"mailto:{request.Email}"], termsOfServiceAgreed: true);
+            bool eab = !string.IsNullOrEmpty(request.EabKeyId) && !string.IsNullOrEmpty(request.EabHmacKey);
+            if (!eab && (await acme.GetDirectory().ConfigureAwait(false)).Meta?.ExternalAccountRequired == true)
+            {
+                throw new AcmeException("This CA requires external account binding: set Acme:EabKeyId and Acme:EabHmacKey (or Acme:EabHmacKeyFile) to the key identifier and HMAC key its account page gives you.");
+            }
+
+            var registration = eab
+                ? acme.NewAccount(ContactsOf(request), termsOfServiceAgreed: true, request.EabKeyId, request.EabHmacKey, "HS256")
+                : acme.NewAccount(ContactsOf(request), termsOfServiceAgreed: true);
             account.Url = (await registration.Location().ConfigureAwait(false)).ToString();
             account.KeyPem = acme.AccountKey.ToPem();
             if (request.AccountCreated is { } created)
@@ -132,6 +141,9 @@ public sealed class CertesOrderRunner : IAcmeOrderRunner
 
         return await OrderAsync(acme, request, dns, account.Url, ct).ConfigureAwait(false);
     }
+
+    /// <summary>The account contact (RFC 8555 section 7.3): the email address when there is one; some CAs register accounts without.</summary>
+    private static string[] ContactsOf(AcmeOrderRequest request) => string.IsNullOrWhiteSpace(request.Email) ? [] : [$"mailto:{request.Email}"];
 
     /// <summary>The account in use across the attempts of one <see cref="IssueAsync"/>: the stored one, or the one registered by its first attempt.</summary>
     private sealed class AccountState
@@ -205,7 +217,9 @@ public sealed class CertesOrderRunner : IAcmeOrderRunner
         var order = await NewOrderAsync(acme, request).ConfigureAwait(false);
         var authorizations = await order.Authorizations().ConfigureAwait(false);
         var handles = new List<string>();
+        var tokens = new List<string>();
         var challenges = new List<(IAuthorizationContext Authz, IChallengeContext Challenge)>();
+        bool http = request.Challenge == AcmeChallengeType.Http01;
         try
         {
             foreach (var authz in authorizations)
@@ -225,6 +239,22 @@ public sealed class CertesOrderRunner : IAcmeOrderRunner
                     throw new AcmeException($"Authorization for {resource.Identifier.Value} is {resource.Status}, not pending");
                 }
 
+                if (http)
+                {
+                    // Only DNS-01 proves a wildcard (RFC 8555 section 8.3); the order was meant for names HTTP-01 can prove, so say so rather than fail at the CA.
+                    if (resource.Wildcard == true)
+                    {
+                        throw new AcmeException($"The order includes the wildcard name *.{resource.Identifier.Value}, which only DNS-01 can prove: set Acme:CloudflareApiToken (DNS-01 with Cloudflare) or remove the wildcard.");
+                    }
+
+                    var httpChallenge = await authz.Http().ConfigureAwait(false)
+                        ?? throw new AcmeException($"The CA offers no http-01 challenge for {resource.Identifier.Value}; use DNS-01 (Acme:CloudflareApiToken).");
+                    await request.Http!.PublishAsync(request.CertificateName, httpChallenge.Token, acme.AccountKey.KeyAuthorization(httpChallenge.Token), ct).ConfigureAwait(false);
+                    tokens.Add(httpChallenge.Token);
+                    challenges.Add((authz, httpChallenge));
+                    continue;
+                }
+
                 var challenge = await authz.Dns().ConfigureAwait(false);
                 // A wildcard authorization names the base domain (the "*." is a flag), so "*.example.com" and "example.com" share this name
                 // with different values; providers must hold several TXT values at one name.
@@ -233,7 +263,7 @@ public sealed class CertesOrderRunner : IAcmeOrderRunner
                 challenges.Add((authz, challenge));
             }
 
-            if (request.PropagationDelay > TimeSpan.Zero)
+            if (!http && request.PropagationDelay > TimeSpan.Zero)
             {
                 await Task.Delay(request.PropagationDelay, ct).ConfigureAwait(false);
             }
@@ -249,7 +279,7 @@ public sealed class CertesOrderRunner : IAcmeOrderRunner
 
             foreach (var (authz, challenge) in challenges)
             {
-                await WaitUntilValidAsync(authz, challenge, ct).ConfigureAwait(false);
+                await WaitUntilValidAsync(authz, challenge, http, ct).ConfigureAwait(false);
             }
 
             var certKey = KeyFactory.NewKey(KeyAlgorithm.ES256);
@@ -261,6 +291,18 @@ public sealed class CertesOrderRunner : IAcmeOrderRunner
         }
         finally
         {
+            foreach (string token in tokens)
+            {
+                try
+                {
+                    await request.Http!.RemoveAsync(request.CertificateName, token, CancellationToken.None).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // A token left behind is harmless (it expires, and answers only what the CA already got); never hide why the order failed.
+                }
+            }
+
             foreach (string handle in handles)
             {
                 try
@@ -275,7 +317,7 @@ public sealed class CertesOrderRunner : IAcmeOrderRunner
         }
     }
 
-    private static async Task WaitUntilValidAsync(IAuthorizationContext authz, IChallengeContext challenge, CancellationToken ct)
+    private static async Task WaitUntilValidAsync(IAuthorizationContext authz, IChallengeContext challenge, bool http, CancellationToken ct)
     {
         for (int attempt = 0; ; attempt++)
         {
@@ -296,7 +338,8 @@ public sealed class CertesOrderRunner : IAcmeOrderRunner
                 {
                 }
 
-                throw new AcmeException($"Authorization for {res.Identifier.Value} ended as {res.Status}" + (detail is null ? "" : $": {detail}"));
+                throw new AcmeException($"Authorization for {res.Identifier.Value} ended as {res.Status}" + (detail is null ? "" : $": {detail}")
+                    + (http ? $" (HTTP-01: the CA connects to port 80 of {res.Identifier.Value}; check that its DNS record points to this server and that port 80 reaches Acme:Http01ListenPort)" : ""));
             }
 
             if (attempt >= MaxAuthorizationPolls)

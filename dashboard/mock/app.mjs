@@ -81,6 +81,9 @@ export const WARNING_TEXT = {
   sqlite_sync_off: 'SQLite runs with synchronous=OFF: an OS crash or power loss can corrupt the database and lose queued mail.',
   certificate_expiring: 'The TLS certificate for mail.example.com expires in 9 days.',
   self_signed_certificate: 'The server is using a self-signed certificate.',
+  acme_pending: 'The certificate for mail.example.com is being requested from the certificate authority. Until it is issued the server uses a self-signed certificate.',
+  acme_failing:
+    "Getting the certificate 'default' from the certificate authority failed 2 times in a row. Last error: Authorization for mail.example.com ended as Invalid: Timeout during connect (likely firewall problem). Next attempt: 2026-10-15 08:30 UTC. Until one is issued the server uses a self-signed certificate.",
 };
 
 function matcher(pattern) {

@@ -26,6 +26,11 @@ workflow refuses a stable tag without a non-empty section for that exact version
 - Storage backends with the same feature set: SQLite (default, `Sqlite:SyncMode=Off` with a loud warning) and PostgreSQL (EF Core +
   Npgsql, day partitions, `SKIP LOCKED` claims, owner and runtime roles). Shared conformance suites run against both.
 - Replica coordination on PostgreSQL: replicas share the failed-login budget, the per-destination connection and rate ceilings (each takes its share from the live replica set) and, bounded, what remote destinations told a replica (throttling, an unreachable MX host). A delivery whose lease another replica took over is flagged `possible_duplicate` when its first holder reports (schema version 6).
+- Automatic TLS certificates: with `Hostname`, `Acme:Enabled` and `Acme:Email` set the server gets and renews a Let's Encrypt certificate over HTTP-01
+  on a built-in port 80 listener that serves nothing but the challenge; DNS-01 (Cloudflare) for wildcards or when a token is configured; any CA by
+  name or URL (staging, ZeroSSL) with external account binding; the self-signed certificate keeps serving, with a log and dashboard banner
+  (`acme_pending`, `acme_failing`), while issuing is pending or failing; several replicas answer each other's challenges through the config
+  store. Verified against the Pebble test CA (decision 87).
 - Backend switch in both directions (`mta migrate-storage`, `/api/v1/admin/storage/switch/*` and the dashboard wizard): drain or
   quiesce, fence, symmetric bundle, verification, activation, rollback, resumable history migration, secrets re-protected with Data
   Protection.
@@ -56,7 +61,7 @@ workflow refuses a stable tag without a non-empty section for that exact version
 
 ### Security
 
-- A forged bounce or complaint report could get any address suppressed for a tenant: every message carries a valid bounce address in its Return-Path and the report body decided which address was suppressed. Bounce addresses are now bound to the destination domain of the message and reports naming addresses elsewhere are ignored (decision 89). Bounce addresses issued before the change keep their old behaviour until they expire (14 days). Residual risk: the binding is to the destination domain, not the address, so someone who received one message to `gmail.com` can still get another `gmail.com` address suppressed for that tenant. Upgrading: replicas of an older build refuse the new bounce addresses (`550`), so run mixed versions only during a rollout; new builds accept old ones for 14 days.
+- A forged bounce or complaint report could get any address suppressed for a tenant: every message carries a valid bounce address in its Return-Path and the report body decided which address was suppressed. Bounce addresses are now bound to the destination domain of the message and reports naming addresses elsewhere are ignored (decision 90). Bounce addresses issued before the change keep their old behaviour until they expire (14 days). Residual risk: the binding is to the destination domain, not the address, so someone who received one message to `gmail.com` can still get another `gmail.com` address suppressed for that tenant. Upgrading: replicas of an older build refuse the new bounce addresses (`550`), so run mixed versions only during a rollout; new builds accept old ones for 14 days.
 - No known vulnerabilities; no independent security audit has been done yet. Report problems as described in [SECURITY.md](SECURITY.md).
 
 [Unreleased]: https://github.com/eggspot/EggMail/commits/main

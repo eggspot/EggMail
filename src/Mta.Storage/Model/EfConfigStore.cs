@@ -549,6 +549,22 @@ public sealed partial class EfConfigStore<TContext>(IConfigDbAccess<TContext> db
             c.SaveChanges();
         }, ct).ConfigureAwait(false);
 
+    public async ValueTask SetAcmeRenewalChallengeStateAsync(string certificateName, string? challengeStateJson, CancellationToken ct) =>
+        await Write(c =>
+        {
+            var existing = c.Find<AcmeRenewalEntity>(certificateName);
+            if (existing is null)
+            {
+                c.Add(new AcmeRenewalEntity { CertificateName = certificateName, Status = "ordering", ChallengeStateJson = challengeStateJson });
+            }
+            else
+            {
+                existing.ChallengeStateJson = challengeStateJson;
+            }
+
+            c.SaveChanges();
+        }, ct).ConfigureAwait(false);
+
     // Leases
 
     public async ValueTask<LeaseRecord?> TryAcquireLeaseAsync(string name, string owner, TimeSpan duration, DateTimeOffset now, CancellationToken ct) =>
