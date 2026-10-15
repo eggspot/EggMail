@@ -190,16 +190,68 @@ public static class MessageIdKey
             return null;
         }
 
-        string v = headerValue.Trim();
-        int open = v.IndexOf('<', StringComparison.Ordinal);
-        int close = open < 0 ? -1 : v.IndexOf('>', open + 1);
-        if (open >= 0 && close > open)
+        ReadOnlySpan<char> v = headerValue.AsSpan().Trim();
+        int open = v.IndexOf('<');
+        int close = open < 0 ? -1 : v[(open + 1)..].IndexOf('>');
+        if (open >= 0 && close >= 0)
         {
-            v = v[(open + 1)..close];   // the first <id>, without a trailing comment or folding around it
+            v = v.Slice(open + 1, close);   // the first <id>, without a trailing comment or folding around it
         }
 
-        v = string.Concat(v.Where(c => !char.IsWhiteSpace(c)));   // an id has no white space; a folded header may have gained some
-        return v.Length is 0 or > MaxLength ? null : v.ToLowerInvariant();
+        // An id has no white space (a folded header may have gained some) and is compared in lower case: one pass, one string.
+        int kept = 0;
+        bool ascii = true;
+        foreach (char c in v)
+        {
+            if (!char.IsWhiteSpace(c))
+            {
+                kept++;
+                ascii &= c < 0x80;
+            }
+        }
+
+        if (kept is 0 or > MaxLength)
+        {
+            return null;
+        }
+
+        if (!ascii)
+        {
+            // Case mapping outside ASCII (including surrogate pairs) stays with the string method, as before.
+            return string.Create(kept, v, static (destination, source) => CopyWithoutWhiteSpace(source, destination, lowerAscii: false)).ToLowerInvariant();
+        }
+
+        if (kept == headerValue.Length && !HasUpperAscii(v))
+        {
+            return headerValue;   // already in key form (no brackets, white space or capitals): no new string
+        }
+
+        return string.Create(kept, v, static (destination, source) => CopyWithoutWhiteSpace(source, destination, lowerAscii: true));
+    }
+
+    private static bool HasUpperAscii(ReadOnlySpan<char> value)
+    {
+        foreach (char c in value)
+        {
+            if (c is >= 'A' and <= 'Z')
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static void CopyWithoutWhiteSpace(ReadOnlySpan<char> source, Span<char> destination, bool lowerAscii)
+    {
+        int n = 0;
+        foreach (char c in source)
+        {
+            if (!char.IsWhiteSpace(c))
+            {
+                destination[n++] = lowerAscii && c is >= 'A' and <= 'Z' ? (char)(c + 32) : c;
+            }
+        }
     }
 }
 

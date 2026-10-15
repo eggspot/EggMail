@@ -113,9 +113,10 @@ internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore, IMes
             .ExecuteNonQuery();
 
         PreparedCommand rcpt = ctx.Command(HistorySql.RecipientInsert).Set(0, day).Set(1, m.MessageId);
-        foreach (AcceptedRecipient r in m.Recipients)
+        IReadOnlyList<AcceptedRecipient> recipients = m.Recipients;
+        for (int i = 0; i < recipients.Count; i++)
         {
-            rcpt.SetAddress(2, r.Address, lowerCase: true).ExecuteNonQuery();
+            rcpt.SetAddress(2, recipients[i].Address, lowerCase: true).ExecuteNonQuery();
         }
 
         if (s.Content is { } c)

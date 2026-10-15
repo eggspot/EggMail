@@ -30,6 +30,8 @@ internal sealed class SmtpSession
 
     // Open transaction.
     private MailFromInfo? _mail;
+    private readonly MailFromInfo _mailInfo = new();   // reused by every transaction of the session
+    private readonly SmtpMessage _message = new();   // reused by every message of the session
     private readonly List<EmailAddress> _recipients = [];
     private readonly ReceivedHeaderBuilder _received = new();
 
@@ -43,7 +45,7 @@ internal sealed class SmtpSession
         _stopping = stopping;
         _transport = new SocketTransport(socket, startPlain: listener.Mode != ListenerMode.Implicit);
         _readCts = CancellationTokenSource.CreateLinkedTokenSource(stopping);
-        _parseOptions = new SmtpParseOptions { MaxLineLength = _options.MaxLineLength, AllowSmtpUtf8 = _options.SmtpUtf8 };
+        _parseOptions = new SmtpParseOptions { MaxLineLength = _options.MaxLineLength, AllowSmtpUtf8 = _options.SmtpUtf8, AddressCache = new EmailAddressCache() };
         var remote = (IPEndPoint)socket.RemoteEndPoint!;
         var local = (IPEndPoint)socket.LocalEndPoint!;
         _ctx = new SmtpSessionContext
@@ -492,7 +494,9 @@ internal sealed class SmtpSession
             return;
         }
 
-        var info = new MailFromInfo { Sender = cmd.Path, Parameters = cmd.Mail };
+        var info = _mailInfo;
+        info.Sender = cmd.Path;
+        info.Parameters = cmd.Mail;
         var reply = await _handler.OnMailFromAsync(_ctx, info, _stopping).ConfigureAwait(false);
         if (reply.IsPositiveCompletion)
         {
@@ -1006,17 +1010,15 @@ internal sealed class SmtpSession
         var now = _server.Clock.UtcNow;
         Span<byte> compactId = stackalloc byte[32];
         Ids.New().TryFormat(compactId, out _, "N");
-        byte[] received = _received.Build(_ctx, _options.Hostname, _recipients.Count == 1 ? _recipients[0].ToString() : null, compactId[..16], now);
-        var message = new SmtpMessage
-        {
-            Session = _ctx,
-            Sender = mail.Sender,
-            Parameters = mail.Parameters,
-            Recipients = _recipients.ToArray(),
-            Body = body.AsSequence(),
-            ReceivedHeader = received,
-            ReceivedAt = now,
-        };
+        var received = _received.Build(_ctx, _options.Hostname, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_recipients), compactId[..16], now);
+        var message = _message;
+        message.Session = _ctx;
+        message.Sender = mail.Sender;
+        message.Parameters = mail.Parameters;
+        message.Recipients = _recipients;
+        message.Body = body.AsSequence();
+        message.ReceivedHeader = received;
+        message.ReceivedAt = now;
 
         SmtpReply reply;
         try
@@ -1032,6 +1034,10 @@ internal sealed class SmtpSession
         {
             _log.Write(MtaLogLevel.Error, "smtp.server", $"session {_ctx.SessionId}: handler failed for message", ex);
             reply = SmtpReplies.LocalError;
+        }
+        finally
+        {
+            message.Clear();
         }
 
         if (reply.IsPositiveCompletion)

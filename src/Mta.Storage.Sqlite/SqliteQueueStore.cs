@@ -184,9 +184,10 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
         string sending = message.SendingDomain ?? "";
         string? run = null;
         int count = 0;
-        foreach (AcceptedRecipient r in message.Recipients)
+        IReadOnlyList<AcceptedRecipient> recipients = message.Recipients;
+        for (int i = 0; i < recipients.Count; i++)
         {
-            string domain = r.Address.Domain;
+            string domain = recipients[i].Address.Domain;
             if (run is not null && string.Equals(run, domain, StringComparison.Ordinal))
             {
                 count++;
@@ -234,8 +235,10 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
 
         long expires = StorageTime.ToUnixMs(m.ExpiresAt);
         PreparedCommand insert = ctx.Command(QueueSql.DeliveryInsert);
-        foreach (AcceptedRecipient r in m.Recipients)
+        IReadOnlyList<AcceptedRecipient> recipients = m.Recipients;
+        for (int i = 0; i < recipients.Count; i++)
         {
+            AcceptedRecipient r = recipients[i];
             insert.Set(0, r.DeliveryId).Set(1, m.MessageId).Set(2, m.TenantId).SetAddress(3, m.EnvelopeFrom)
                 .SetAddress(4, r.Address).Set(5, r.Address.Domain).Set(6, m.SendingDomain)
                 .Set(7, (long)m.Source).Set(8, received).Set(9, expires).Set(10, m.HeadersUtf8 ? 1 : 0)

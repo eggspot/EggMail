@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Text;
 using System.Text.RegularExpressions;
+using Mta.Smtp.Protocol;
 
 namespace Mta.Smtp.Server.Tests;
 
@@ -159,5 +160,57 @@ public partial class MessagePathTests
         await c.CommandAsync("MAIL FROM:<" + new string('a', 600) + "@example.com>", 501);   // longer than the 512-char stack buffer: still a clean syntax error
         await c.CommandAsync("MAIL FROM:<" + new string('\u00e9', 200) + "@example.com>", 501);
         await c.CommandAsync("MAIL FROM:<sender@example.org>", 250);
+    }
+
+    [Fact]
+    public async Task The_message_object_is_reused_but_every_message_shows_its_own_values_and_is_emptied_after_the_call()
+    {
+        // The server keeps one SmtpMessage and one MailFromInfo per session (no allocation per message); what the handler reads during its call
+        // must be that message's own, and the memory behind the body must not stay reachable through the object once the call has returned.
+        var seen = new List<(SmtpMessage Object, string Sender, string[] Recipients, string Body, string Received)>();
+        var handler = new RecordingHandler
+        {
+            OnMessage = message =>
+            {
+                seen.Add((message, message.Sender.ToString(), message.Recipients.Select(r => r.ToString()).ToArray(),
+                    Encoding.UTF8.GetString(message.Body.ToArray()), Encoding.UTF8.GetString(message.ReceivedHeader.Span)));
+                return SmtpReply.Create(250, "2.0.0", "Queued");
+            },
+        };
+        await using var f = new ServerFixture(handler: handler);
+        using var c = await OpenAsync(f);
+        await c.CommandAsync("EHLO client.test", 250);
+        await SendMessageAsync(c, "one@example.org", ["a@example.com"], "Subject: one\r\n\r\nfirst\r\n");
+        await SendMessageAsync(c, "two@example.org", ["b@example.com", "c@example.com"], "Subject: two\r\n\r\nsecond\r\n");
+        await SendMessageAsync(c, "one@example.org", ["a@example.com"], "Subject: three\r\n\r\nthird\r\n");
+
+        Assert.Equal(3, seen.Count);
+        Assert.Equal(["one@example.org", "two@example.org", "one@example.org"], seen.Select(x => x.Sender));
+        Assert.Equal(["a@example.com"], seen[0].Recipients);
+        Assert.Equal(["b@example.com", "c@example.com"], seen[1].Recipients);
+        Assert.Equal(["a@example.com"], seen[2].Recipients);
+        Assert.Equal(["Subject: one\r\n\r\nfirst\r\n", "Subject: two\r\n\r\nsecond\r\n", "Subject: three\r\n\r\nthird\r\n"], seen.Select(x => x.Body));
+        Assert.Contains("for <a@example.com>", seen[0].Received);
+        Assert.DoesNotContain("for <", seen[1].Received);
+        Assert.Contains("for <a@example.com>", seen[2].Received);
+        Assert.Same(seen[0].Object, seen[1].Object);   // one object per session
+        Assert.True(seen[0].Object.Body.IsEmpty);
+        Assert.True(seen[0].Object.ReceivedHeader.IsEmpty);
+        Assert.Empty(seen[0].Object.Recipients);
+    }
+
+    [Fact]
+    public async Task An_address_seen_before_in_the_session_parses_to_the_same_value()
+    {
+        // The per-session memo of parsed paths must give the result of a fresh parse: same text, same address; a different case of the domain, the lower-case domain.
+        await using var f = new ServerFixture();
+        using var c = await OpenAsync(f);
+        await c.CommandAsync("EHLO client.test", 250);
+        await SendMessageAsync(c, "Sender.One@example.org", ["Rcpt@Example.COM"]);
+        await SendMessageAsync(c, "Sender.One@example.org", ["Rcpt@example.com"]);
+        await SendMessageAsync(c, "Sender.One@EXAMPLE.org", ["rcpt@example.com"]);
+
+        Assert.Equal(["Sender.One@example.org", "Sender.One@example.org", "Sender.One@example.org"], f.Handler.Messages.Select(m => m.Sender.ToString()));
+        Assert.Equal([["Rcpt@example.com"], ["Rcpt@example.com"], ["rcpt@example.com"]], f.Handler.Messages.Select(m => m.Recipients));
     }
 }
