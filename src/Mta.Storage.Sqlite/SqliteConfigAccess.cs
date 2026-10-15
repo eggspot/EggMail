@@ -42,7 +42,7 @@ internal sealed class SqliteConfigAccess(SqliteFile file, IStorageModelHooks hoo
             using var db = new ConfigDbContext(s.Item2._writeOptions, s.Item2.Hooks);
             db.Database.UseTransaction(ctx.Transaction);
             return s.work(db);
-        }, cancellationToken);
+        }, cancellationToken, needsDriverTransaction: true);
 
     private IStorageModelHooks Hooks => hooks;
 }

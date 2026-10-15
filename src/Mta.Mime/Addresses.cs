@@ -361,13 +361,7 @@ public sealed class AddressList : IReadOnlyList<AddressItem>
             chars[i] = (char)address[i];
         }
 
-        if (!EmailAddress.TryParse(chars, allowUtf8: true, out var parsed))
-        {
-            return false;
-        }
-
-        domain = parsed.Domain.ToLowerInvariant();
-        return true;
+        return EmailAddress.TryParseDomain(chars, allowUtf8: true, out domain);
     }
 
     /// <summary>Parses an address header value (the unfolded text; RFC 2047 words in display names are decoded).</summary>

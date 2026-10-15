@@ -2,6 +2,7 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
+using System.Text.RegularExpressions;
 using MailKit.Net.Smtp;
 using MailKit.Security;
 using MimeKit;
@@ -125,6 +126,53 @@ public class IngestTests : IAsyncLifetime
         var detail = await _storage.History.GetAsync(TenantId, claimed[0].MessageId, default);
         Assert.Equal("Hello ü", detail!.Content!.Subject);
         Assert.Contains("Plain body", detail.Content.Text);
+    }
+
+    [Fact]
+    public async Task Messages_of_one_session_are_stored_apart_although_the_session_reuses_its_request_and_message_objects()
+    {
+        // One connection, several messages with different recipient counts, subjects and bodies, and two sessions at the same time: nothing of one message
+        // may show up in another (the session reuses one request object, one message object and one Received buffer).
+        using var first = await ConnectAsync();
+        using var second = await ConnectAsync();
+        for (int i = 0; i < 6; i++)
+        {
+            var a = Message(to: $"a{i}@dest.example", subject: $"First session {i}");
+            if (i % 2 == 1)
+            {
+                a.To.Add(MailboxAddress.Parse($"extra{i}@dest.example"));
+            }
+
+            await first.SendAsync(a);
+            await second.SendAsync(Message(to: $"b{i}@dest.example", subject: $"Second session {i}"));
+        }
+
+        var claimed = await _storage.Deliveries.ClaimAsync("t", 100, DateTimeOffset.UtcNow.AddSeconds(1), TimeSpan.FromMinutes(1), default);
+        Assert.Equal(15, claimed.Count);
+        foreach (var group in claimed.GroupBy(d => d.MessageId))
+        {
+            string raw = Encoding.UTF8.GetString((await _storage.Deliveries.GetRawAsync(group.Key, default))!);
+            var detail = await _storage.History.GetAsync(TenantId, group.Key, default);
+            string subject = detail!.Content!.Subject!;
+            Assert.Contains("Subject: " + subject, raw);
+            string prefix = subject.StartsWith("First", StringComparison.Ordinal) ? "a" : "b";
+            string n = subject[^1..];
+            Assert.Contains(group, d => d.Recipient.ToString() == $"{prefix}{n}@dest.example");
+            Assert.Equal(prefix == "a" && int.Parse(n) % 2 == 1 ? 2 : 1, group.Count());
+            Assert.Single(Regex.Matches(raw, "^Received: ", RegexOptions.Multiline));
+
+            // The "for" clause names the recipient of a single-recipient message, and nobody for several.
+            string received = raw[..raw.IndexOf("\r\n\r\n", StringComparison.Ordinal)];
+            received = received[..received.IndexOf("Date:", StringComparison.Ordinal)];
+            if (group.Count() == 1)
+            {
+                Assert.Contains($"for <{prefix}{n}@dest.example>", received);
+            }
+            else
+            {
+                Assert.DoesNotContain("for <", received);
+            }
+        }
     }
 
     [Fact]

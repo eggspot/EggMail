@@ -11,71 +11,127 @@ public enum MessageSource : byte
     System,
 }
 
-public sealed record AcceptedRecipient(Guid DeliveryId, EmailAddress Address);
+public readonly record struct AcceptedRecipient(Guid DeliveryId, EmailAddress Address);
 
-/// <summary>Content extracted at accept time for history (only recorded when <see cref="HistoryMode.Full"/>).</summary>
-public sealed record MessageContent(
-    string? Subject,
-    string? Text,
-    string? Html,
-    IReadOnlyList<AttachmentInfo> Attachments,
-    bool Truncated);
+/// <summary>
+/// Content extracted at accept time for history (only recorded when <see cref="HistoryMode.Full"/>). A body is either a string or, for the intake path, the UTF-8 bytes
+/// it already is in the message (<see cref="TextUtf8"/>, <see cref="HtmlUtf8"/>): a storage that writes UTF-8 binds those bytes and never builds the string, and
+/// <see cref="Text"/> / <see cref="Html"/> still give the string (made on first use) for every other reader. Equal contents compare equal whichever way they are held.
+/// </summary>
+public sealed class MessageContent : IEquatable<MessageContent>
+{
+    private string? _text;
+    private string? _html;
+
+    public MessageContent(string? subject, string? text, string? html, IReadOnlyList<AttachmentInfo> attachments, bool truncated)
+    {
+        Subject = subject;
+        _text = text;
+        _html = html;
+        Attachments = attachments;
+        Truncated = truncated;
+    }
+
+    /// <summary>A content whose text and/or HTML body is held as UTF-8 bytes (a body given as bytes must be null as a string).</summary>
+    public MessageContent(string? subject, string? text, string? html, ReadOnlyMemory<byte>? textUtf8, ReadOnlyMemory<byte>? htmlUtf8, IReadOnlyList<AttachmentInfo> attachments, bool truncated)
+        : this(subject, text, html, attachments, truncated)
+    {
+        if ((text is not null && textUtf8 is not null) || (html is not null && htmlUtf8 is not null))
+        {
+            throw new ArgumentException("A body is held either as a string or as UTF-8 bytes, not both.");
+        }
+
+        TextUtf8 = textUtf8;
+        HtmlUtf8 = htmlUtf8;
+    }
+
+    public string? Subject { get; }
+
+    /// <summary>The text body as a string (made from <see cref="TextUtf8"/> on first use when it is held as bytes).</summary>
+    public string? Text => _text ?? (TextUtf8 is { } bytes ? _text = System.Text.Encoding.UTF8.GetString(bytes.Span) : null);
+
+    /// <summary>The HTML body as a string (made from <see cref="HtmlUtf8"/> on first use when it is held as bytes).</summary>
+    public string? Html => _html ?? (HtmlUtf8 is { } bytes ? _html = System.Text.Encoding.UTF8.GetString(bytes.Span) : null);
+
+    /// <summary>The text body as UTF-8 when it is held that way (and only then). The memory is stable: it belongs to the stored message.</summary>
+    public ReadOnlyMemory<byte>? TextUtf8 { get; }
+
+    /// <summary>The HTML body as UTF-8 when it is held that way (and only then).</summary>
+    public ReadOnlyMemory<byte>? HtmlUtf8 { get; }
+
+    public IReadOnlyList<AttachmentInfo> Attachments { get; }
+
+    public bool Truncated { get; }
+
+    public bool Equals(MessageContent? other) =>
+        other is not null && Subject == other.Subject && Text == other.Text && Html == other.Html && ReferenceEquals(Attachments, other.Attachments) && Truncated == other.Truncated;
+
+    public override bool Equals(object? obj) => Equals(obj as MessageContent);
+
+    public override int GetHashCode() => HashCode.Combine(Subject, Text, Html, Truncated);
+
+    public override string ToString() => $"MessageContent {{ Subject = {Subject}, Text = {Text}, Html = {Html}, Attachments = {Attachments}, Truncated = {Truncated} }}";
+}
 
 public sealed record AttachmentInfo(string? FileName, string? ContentType, long Size, string? ContentId);
 
-/// <summary>Everything the intake path hands to storage: the verbatim message, the envelope and the recipients to deliver to.</summary>
+/// <summary>
+/// Everything the intake path hands to storage: the verbatim message, the envelope and the recipients to deliver to. The properties can be set again
+/// because the submission service reuses these objects: <see cref="IMessageIntake.AcceptAsync"/> must be completely done with a message (nothing queued
+/// that still reads it) when its task completes, and must not keep the object itself, only values taken from it.
+/// </summary>
 public sealed class AcceptedMessage
 {
-    public required Guid MessageId { get; init; }
-    public required Guid TenantId { get; init; }
-    public required MessageSource Source { get; init; }
-    public required EmailAddress EnvelopeFrom { get; init; }
-    public required IReadOnlyList<AcceptedRecipient> Recipients { get; init; }
+    public required Guid MessageId { get; set; }
+    public required Guid TenantId { get; set; }
+    public required MessageSource Source { get; set; }
+    public required EmailAddress EnvelopeFrom { get; set; }
+    public required IReadOnlyList<AcceptedRecipient> Recipients { get; set; }
 
     /// <summary>The raw message exactly as it will be delivered (including server-added headers), CRLF lines.</summary>
-    public required ReadOnlyMemory<byte> Raw { get; init; }
+    public required ReadOnlyMemory<byte> Raw { get; set; }
 
-    public required DateTimeOffset ReceivedAt { get; init; }
+    public required DateTimeOffset ReceivedAt { get; set; }
 
     /// <summary>When undelivered recipients expire (ReceivedAt + Queue:MaxLifetime unless overridden).</summary>
-    public required DateTimeOffset ExpiresAt { get; init; }
+    public required DateTimeOffset ExpiresAt { get; set; }
 
     /// <summary>API idempotency key, if any (unique per tenant).</summary>
-    public string? IdempotencyKey { get; init; }
+    public string? IdempotencyKey { get; set; }
 
     /// <summary>
     /// Digest of the request that carries <see cref="IdempotencyKey"/> (the API hashes the body). Stored with the key and returned in
     /// <see cref="IntakeResult.IdempotencyFingerprint"/> on a duplicate, so the caller can tell a safe retry from key reuse with another body.
     /// </summary>
-    public string? IdempotencyFingerprint { get; init; }
+    public string? IdempotencyFingerprint { get; set; }
 
-    public string? RemoteAddress { get; init; }
-    public string? Authenticated { get; init; }
+    public string? RemoteAddress { get; set; }
+    public string? Authenticated { get; set; }
 
     /// <summary>
     /// The header section of <see cref="Raw"/> is internationalized (RFC 6532: UTF-8 in header fields), so delivering it needs the SMTPUTF8
     /// extension on every outbound transaction, or fails. Whether an envelope address needs SMTPUTF8 is a per-transaction question that
     /// delivery answers from the addresses themselves. Persisted with each delivery row and returned as <see cref="ClaimedDelivery.HeadersUtf8"/>.
     /// </summary>
-    public bool HeadersUtf8 { get; init; }
+    public bool HeadersUtf8 { get; set; }
 
     /// <summary>Extracted content, or null when not recorded (StatsOnly, Content:Mode=None, or extraction skipped).</summary>
-    public MessageContent? Content { get; init; }
+    public MessageContent? Content { get; set; }
 
     /// <summary>Move the raw message to long-term retention when delivery completes (attachment storage enabled).</summary>
-    public bool RetainRaw { get; init; }
+    public bool RetainRaw { get; set; }
 
     /// <summary>Recipient-domain buckets and sending domain for statistics.</summary>
-    public string? SendingDomain { get; init; }
+    public string? SendingDomain { get; set; }
 
     /// <summary>
     /// The message's <c>Message-ID</c> header, so an asynchronous bounce or complaint that returns the headers can be attached to the message's history
     /// (<see cref="IHistoryStore.AttachReportAsync"/>). Recorded only with <see cref="HistoryMode.Full"/>.
     /// </summary>
-    public string? MessageIdHeader { get; init; }
+    public string? MessageIdHeader { get; set; }
 
     /// <summary>Tags the API caller gave the message. Recorded with the message's history (<see cref="HistoryMode.Full"/> only).</summary>
-    public IReadOnlyList<string>? Tags { get; init; }
+    public IReadOnlyList<string>? Tags { get; set; }
 }
 
 public enum IntakeStatus : byte
@@ -89,7 +145,7 @@ public enum IntakeStatus : byte
 /// <param name="Status">Whether a message was created.</param>
 /// <param name="MessageId">The new message, or the original message for a duplicate idempotency key.</param>
 /// <param name="IdempotencyFingerprint">For <see cref="IntakeStatus.DuplicateIdempotencyKey"/>: the fingerprint stored with the original request (null when it had none).</param>
-public sealed record IntakeResult(IntakeStatus Status, Guid MessageId, string? IdempotencyFingerprint = null);
+public readonly record struct IntakeResult(IntakeStatus Status, Guid MessageId, string? IdempotencyFingerprint = null);
 
 /// <summary>A delivery handed to a worker by <see cref="IDeliveryStore.ClaimAsync"/>.</summary>
 public sealed class ClaimedDelivery

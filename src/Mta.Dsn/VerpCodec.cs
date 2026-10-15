@@ -61,7 +61,16 @@ public sealed class VerpCodec
         _activeKeyId = activeKeyId;
     }
 
+    /// <summary>The id of the key new tokens are signed with.</summary>
+    public int ActiveKeyId => _activeKeyId;
+
     public static byte[] GenerateKey() => RandomNumberGenerator.GetBytes(32);
+
+    /// <summary>
+    /// The hour (counted from the codec's epoch) a token made at <paramref name="now"/> carries. Everything else in an address is fixed for a tenant, sending domain, return-path host and destination domain, so
+    /// the address is the same for every message of the same hour: a caller may keep it per (tenant, domain, host, destination, hour stamp) instead of signing again for every message.
+    /// </summary>
+    public static long HourStamp(DateTimeOffset now) => (long)(now - Epoch).TotalHours;
 
     /// <summary>
     /// Returns the local part, for example <c>b+abc...</c>. With <paramref name="destinationDomain"/> (the domain the message is sent to) the token is
@@ -78,7 +87,7 @@ public sealed class VerpCodec
         Span<byte> dom = stackalloc byte[16];
         domainId.TryWriteBytes(dom, bigEndian: true, out _);
         dom[..8].CopyTo(data[17..25]);
-        long hours = (long)(now - Epoch).TotalHours;
+        long hours = HourStamp(now);
         data[25] = (byte)(hours >> 16);
         data[26] = (byte)(hours >> 8);
         data[27] = (byte)hours;

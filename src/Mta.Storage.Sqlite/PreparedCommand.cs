@@ -153,6 +153,13 @@ internal sealed class PreparedCommand : IDisposable
         return this;
     }
 
+    /// <summary>Binds text that is already UTF-8 (an empty span is the empty string).</summary>
+    public PreparedCommand SetUtf8Text(int index, ReadOnlySpan<byte> utf8)
+    {
+        BindText(index, utf8);
+        return this;
+    }
+
     public PreparedCommand Set(int index, byte[]? value) => value is null ? SetNull(index) : SetBlob(index, value);
 
     public PreparedCommand SetBlob(int index, ReadOnlySpan<byte> value)
@@ -286,6 +293,29 @@ internal sealed class RawReader : IDisposable
             : ordinal;
 
     public string? GetNullableString(int ordinal) => IsDBNull(ordinal) ? null : GetString(ordinal);
+
+    /// <summary>
+    /// <see cref="GetString"/> for a column that repeats from row to row (the sender, the domains of a batch): when the text equals <paramref name="previous"/> that
+    /// string is returned and nothing is allocated; otherwise the new string is made and remembered in <paramref name="previous"/>.
+    /// </summary>
+    public string GetStringReusing(int ordinal, ref string? previous)
+    {
+        if (previous is { } last && last.Length <= 256)
+        {
+            ReadOnlySpan<byte> utf8 = raw.sqlite3_column_blob(_command.Handle, NotNull(ordinal));
+            Span<char> chars = stackalloc char[256];
+            if (System.Text.Unicode.Utf8.ToUtf16(utf8, chars, out _, out int written, replaceInvalidSequences: true) == System.Buffers.OperationStatus.Done
+                && chars[..written].SequenceEqual(last))
+            {
+                return last;
+            }
+        }
+
+        return previous = GetString(ordinal);
+    }
+
+    /// <summary>Like <see cref="GetStringReusing"/> for a column that may be NULL.</summary>
+    public string? GetNullableStringReusing(int ordinal, ref string? previous) => IsDBNull(ordinal) ? null : GetStringReusing(ordinal, ref previous);
 
     public int? GetNullableInt(int ordinal) => IsDBNull(ordinal) ? null : GetInt32(ordinal);
 

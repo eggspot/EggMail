@@ -132,7 +132,7 @@ public static class SmtpReplyParser
                 lineCount++;
                 if (last)
                 {
-                    reply = new SmtpReply(code, enhanced, moreLines is null ? [firstLine!] : moreLines);
+                    reply = moreLines is null ? SmtpReply.FromWire(code, enhanced, firstLine!) : new SmtpReply(code, enhanced, moreLines);
                     consumed = reader.Position;
                     return ReplyParseStatus.Ok;
                 }

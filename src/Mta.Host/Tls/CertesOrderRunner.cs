@@ -157,13 +157,14 @@ public sealed class CertesOrderRunner : IAcmeOrderRunner
         ex.Error is { } error && ((int)error.Status >= 500 || error.Type?.EndsWith(":serverInternal", StringComparison.Ordinal) == true);
 
     /// <summary>
-    /// Refusals of the <c>replaces</c> link itself: the certificate was already replaced by another order, the CA does not know it or the order does not match
-    /// it (malformed, conflict, not found), or it belongs to another account. Rate limits and server errors are not: asking the CA again at once makes
-    /// them worse and the plain order would meet the same.
+    /// Failures of the order that carries <c>replaces</c> for which the plain order is the right next step: the certificate was already replaced by another
+    /// order, the CA does not know it or the order does not match it (malformed, conflict, not found), it belongs to another account, or the CA failed on its side
+    /// (5xx, <c>serverInternal</c>: a CA that has just issued the certificate may not have indexed it yet, as Pebble does not, and a real CA may hiccup). The plain order
+    /// loses only the renewal treatment of the link. Rate limits are not among them: asking the CA again at once makes them worse and the plain order would meet the same.
     /// </summary>
     private static bool IsRefusedReplacement(Certes.AcmeException ex) =>
         ex is not AcmeRequestException request // the certificate id could not even be built (no authority key identifier)
-        || request.Error is { } error && ((int)error.Status == 404 || error.Type is { } type && (type.EndsWith(":alreadyReplaced", StringComparison.Ordinal) || type.EndsWith(":malformed", StringComparison.Ordinal)
+        || request.Error is { } error && ((int)error.Status == 404 || IsServerError(request) || error.Type is { } type && (type.EndsWith(":alreadyReplaced", StringComparison.Ordinal) || type.EndsWith(":malformed", StringComparison.Ordinal)
             || type.EndsWith(":conflict", StringComparison.Ordinal) || type.EndsWith(":unauthorized", StringComparison.Ordinal)));
 
     private static bool IsBadNonce(Exception exception)

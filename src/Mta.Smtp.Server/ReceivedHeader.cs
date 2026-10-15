@@ -1,12 +1,12 @@
-using System.Buffers;
 using System.Globalization;
 using System.Text;
+using Mta.Core;
 
 namespace Mta.Smtp.Server;
 
 /// <summary>
 /// Builds the trace header the server adds to every accepted message (RFC 5321 §4.4). One instance per session: the parts that only change
-/// with the greeting name, the TLS state or the authenticated user are built once and reused, so a message costs one exactly sized array.
+/// with the greeting name, the TLS state or the authenticated user are built once and reused, so a message costs no allocation (it is written into a buffer the builder keeps).
 /// </summary>
 internal sealed class ReceivedHeaderBuilder
 {
@@ -21,7 +21,14 @@ internal sealed class ReceivedHeaderBuilder
     private byte[] _head = [];      // "Received: from helo ([ip])\r\n\tby host with ESMTP id "
     private byte[] _tlsPart = [];   // "\r\n\t(TLSv1.3 cipher)" or empty
 
-    public byte[] Build(SmtpSessionContext s, string serverHostname, string? singleRecipient, ReadOnlySpan<byte> sessionTag, DateTimeOffset now)
+    private byte[] _buffer = new byte[512];
+
+    /// <summary>
+    /// Writes the field for one message into this builder's own buffer and returns it. The memory stays valid until the next call on this
+    /// builder, which is the next message of the session, so the handler that receives it must copy what it keeps
+    /// (see <see cref="SmtpMessage.ReceivedHeader"/>).
+    /// </summary>
+    public ReadOnlyMemory<byte> Build(SmtpSessionContext s, string serverHostname, ReadOnlySpan<EmailAddress> recipients, ReadOnlySpan<byte> sessionTag, DateTimeOffset now)
     {
         if (!_built || !ReferenceEquals(_helo, s.HeloName) || !ReferenceEquals(_authenticatedUser, s.AuthenticatedUser)
             || _tlsActive != s.TlsActive || !ReferenceEquals(_tlsProtocol, s.TlsProtocol) || !ReferenceEquals(_tlsCipherSuite, s.TlsCipherSuite))
@@ -29,42 +36,43 @@ internal sealed class ReceivedHeaderBuilder
             Rebuild(s, serverHostname);
         }
 
-        int recipientBytes = singleRecipient is null ? 0 : Encoding.UTF8.GetMaxByteCount(singleRecipient.Length);
+        // The "for" clause names the recipient only when there is exactly one (RFC 5321 section 4.4: it must not reveal other recipients).
+        bool single = recipients.Length == 1;
+        int recipientBytes = single ? Encoding.UTF8.GetMaxByteCount(recipients[0].LocalPart.Length) + Encoding.UTF8.GetMaxByteCount(recipients[0].Domain.Length) : 0;
         int capacity = _head.Length + sessionTag.Length + _tlsPart.Length + recipientBytes + 64;
-        byte[] rented = ArrayPool<byte>.Shared.Rent(capacity);
-        try
+        if (_buffer.Length < capacity)
         {
-            Span<byte> buffer = rented;
-            int n = 0;
-            _head.CopyTo(buffer[n..]);
-            n += _head.Length;
-            sessionTag.CopyTo(buffer[n..]);
-            n += sessionTag.Length;
-            _tlsPart.CopyTo(buffer[n..]);
-            n += _tlsPart.Length;
-            if (singleRecipient is not null)
-            {
-                ReadOnlySpan<byte> forClause = "\r\n\tfor <"u8;
-                forClause.CopyTo(buffer[n..]);
-                n += forClause.Length;
-                n += WriteSanitized(singleRecipient, buffer[n..]);
-                buffer[n++] = (byte)'>';
-            }
+            _buffer = new byte[Math.Max(capacity, _buffer.Length * 2)];
+        }
 
-            buffer[n++] = (byte)';';
-            buffer[n++] = (byte)'\r';
-            buffer[n++] = (byte)'\n';
-            buffer[n++] = (byte)'\t';
-            now.TryFormat(buffer[n..], out int dateBytes, "ddd, dd MMM yyyy HH:mm:ss '+0000'", CultureInfo.InvariantCulture);
-            n += dateBytes;
-            buffer[n++] = (byte)'\r';
-            buffer[n++] = (byte)'\n';
-            return buffer[..n].ToArray();
-        }
-        finally
+        Span<byte> buffer = _buffer;
+        int n = 0;
+        _head.CopyTo(buffer[n..]);
+        n += _head.Length;
+        sessionTag.CopyTo(buffer[n..]);
+        n += sessionTag.Length;
+        _tlsPart.CopyTo(buffer[n..]);
+        n += _tlsPart.Length;
+        if (single)
         {
-            ArrayPool<byte>.Shared.Return(rented);
+            ReadOnlySpan<byte> forClause = "\r\n\tfor <"u8;
+            forClause.CopyTo(buffer[n..]);
+            n += forClause.Length;
+            n += WriteSanitized(recipients[0].LocalPart, buffer[n..]);
+            buffer[n++] = (byte)'@';
+            n += WriteSanitized(recipients[0].Domain, buffer[n..]);
+            buffer[n++] = (byte)'>';
         }
+
+        buffer[n++] = (byte)';';
+        buffer[n++] = (byte)'\r';
+        buffer[n++] = (byte)'\n';
+        buffer[n++] = (byte)'\t';
+        now.TryFormat(buffer[n..], out int dateBytes, "ddd, dd MMM yyyy HH:mm:ss '+0000'", CultureInfo.InvariantCulture);
+        n += dateBytes;
+        buffer[n++] = (byte)'\r';
+        buffer[n++] = (byte)'\n';
+        return new ReadOnlyMemory<byte>(_buffer, 0, n);
     }
 
     private void Rebuild(SmtpSessionContext s, string serverHostname)
