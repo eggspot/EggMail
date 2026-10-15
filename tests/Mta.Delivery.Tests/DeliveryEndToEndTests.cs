@@ -256,6 +256,23 @@ public class DeliveryDkimAndLimitsTests
     }
 
     [Fact]
+    public async Task A_sending_domain_too_long_for_a_bounce_address_uses_the_shared_bounce_domain()
+    {
+        var verp = new Mta.Dsn.VerpCodec(new Dictionary<int, byte[]> { [1] = Mta.Dsn.VerpCodec.GenerateKey() }, 1);
+        await using var f = new DeliveryFixture(o => new DeliveryOptions { Owner = o.Owner, Hostname = o.Hostname, RemotePort = o.RemotePort, IdlePoll = o.IdlePoll, ExpirySweepInterval = o.ExpirySweepInterval, BounceDomain = "bounces.egg.test" }, verp: verp);
+        var now = DateTimeOffset.UtcNow;
+        string longDomain = string.Join('.', Enumerable.Repeat(new string('a', 60), 3)) + ".example";   // 188 characters: b+<61>@bounce.<188> is 258
+        await f.Storage.Config.UpsertDomainAsync(new DomainRecord(Ids.New(), DeliveryFixture.Tenant, longDomain, DomainStatus.Verified, "bounce." + longDomain, true, now, now, now, 0, null, false, null), default);
+
+        var id = await f.EnqueueAsync(["rcpt@dest.example"], sendingDomain: longDomain);
+        await f.WaitForEventAsync(id, MessageEventType.Delivered);
+
+        string sender = Assert.Single(f.Remote.Messages).Sender;
+        Assert.EndsWith("@bounces.egg.test", sender);   // not the original sender, and not a host that makes the address unparsable
+        Assert.True(verp.TryDecode(sender[..sender.IndexOf('@')], DateTimeOffset.UtcNow, TimeSpan.FromHours(1), out _));
+    }
+
+    [Fact]
     public async Task The_shared_bounce_domain_is_used_while_the_return_path_cname_is_not_verified()
     {
         var verp = new Mta.Dsn.VerpCodec(new Dictionary<int, byte[]> { [1] = Mta.Dsn.VerpCodec.GenerateKey() }, 1);

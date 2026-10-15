@@ -39,7 +39,7 @@ public sealed class DomainRecordOptions
     public string? BounceDomain { get; init; }
 
     /// <summary>Label prepended to the customer's domain for the return-path CNAME (<c>bounce.example.com</c>).</summary>
-    public string ReturnPathLabel { get; init; } = "bounce";
+    public string ReturnPathLabel { get; init; } = Mta.Policy.SenderPolicy.DefaultReturnPathLabel;
 
     /// <summary>Suggested SPF value. Flat and soft-fail by default; the operator can add an <c>include:</c> for outbound IPs.</summary>
     public string? SpfInclude { get; init; }

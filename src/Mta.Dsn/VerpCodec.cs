@@ -93,6 +93,9 @@ public sealed class VerpCodec
         return Prefix + Base32Encode(data);
     }
 
+    /// <summary>Length of the longest bounce address this codec issues at <paramref name="host"/>: <c>b+</c>, a 61 character token, <c>@</c> and the host.</summary>
+    public static int AddressLengthAt(string host) => Prefix.Length + CharsV2 + 1 + host.Length;
+
     /// <summary>The full bounce address for a domain: <c>b+token@domain</c>.</summary>
     public string CreateAddress(Guid tenantId, Guid domainId, string bounceDomain, DateTimeOffset now, string? destinationDomain = null) =>
         CreateLocalPart(tenantId, domainId, now, destinationDomain) + "@" + bounceDomain;

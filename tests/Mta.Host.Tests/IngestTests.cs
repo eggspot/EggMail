@@ -58,7 +58,7 @@ public class IngestTests : IAsyncLifetime
         await _storage.Config.UpsertDomainAsync(new DomainRecord(Ids.New(), TenantId, "unverified-rp.example", DomainStatus.Verified, "bounce.unverified-rp.example", false, now, now, now, 0, null, false, null), default);
         await _storage.Config.UpsertSmtpCredentialAsync(new SmtpCredential(Ids.New(), TenantId, "acme-user", PasswordHasher.Hash("s3cret", 2000), true, now), default);
 
-        _verp =new VerpCodec(new Dictionary<int, byte[]> { [1] = VerpCodec.GenerateKey() }, 1);
+        _verp = new VerpCodec(new Dictionary<int, byte[]> { [1] = VerpCodec.GenerateKey() }, 1);
         var clock = SystemClock.Instance;
         var submission = new SubmissionService(_storage, clock, new SenderPolicy(), new StorageOptions(), new SubmissionOptions { MessageIdDomain = "egg.test" });
         var bounces = new BounceProcessor(_verp, _storage.Config, _storage.Stats, new StorageWebhookPublisher(_storage), clock);

@@ -267,6 +267,8 @@ public sealed class DeliveryProcessor
 
     // ---------------------------------------------------------------- envelope
 
+    private const int MaxAddressLength = 254;   // RFC 5321 4.5.3.1.3: a path is 256 octets with its angle brackets
+
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (Guid Id, string ReturnPathHost, long ExpiresAt)> _domainIds = new(StringComparer.OrdinalIgnoreCase);
 
     private async ValueTask<EmailAddress> ChooseEnvelopeFromAsync(ClaimedDelivery d, DateTimeOffset now, CancellationToken ct)
@@ -304,6 +306,13 @@ public sealed class DeliveryProcessor
         var record = await _s.Storage.Config.FindDomainByNameAsync(sendingDomain, ct).ConfigureAwait(false);
         Guid id = record?.Id ?? Guid.Empty;
         string host = SenderPolicy.SelectReturnPath(record, shared).Host;
+        if (!string.Equals(host, shared, StringComparison.OrdinalIgnoreCase) && VerpCodec.AddressLengthAt(host) > MaxAddressLength)
+        {
+            // b+<token>@bounce.<very long domain> would not fit the 254 characters of an SMTP address; the shared bounce domain always does.
+            _s.Log.Write(MtaLogLevel.Warning, Source, $"The return-path host {host} is too long for a bounce address; mail of {sendingDomain} uses the shared bounce domain");
+            host = shared;
+        }
+
         _domainIds[sendingDomain] = (id, host, now + 60 * Stopwatch.Frequency);
         return (id, host);
     }

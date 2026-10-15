@@ -119,6 +119,7 @@ public sealed class BounceProcessor
 
         if (first is not null)
         {
+            BounceMetrics.ReportsIgnored.Add(1, new KeyValuePair<string, object?>("kind", kind));
             _log.Write(MtaLogLevel.Information, "bounce", $"{kind} ignored: it names an address outside the domain its bounce address was issued for");
         }
 

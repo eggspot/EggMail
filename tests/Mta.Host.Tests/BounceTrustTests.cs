@@ -13,6 +13,11 @@ namespace Mta.Host.Tests;
 /// holds a valid token. What a report that arrives under a token may do must therefore be limited by what the token was issued for: the
 /// destination domain of the message. Otherwise a stranger could get any address suppressed for a tenant (docs/decisions.md 89).
 /// </summary>
+internal static class BounceProcessorMetricsProbe
+{
+    public static void Touch() => System.Runtime.CompilerServices.RuntimeHelpers.RunClassConstructor(typeof(BounceMetrics).TypeHandle);
+}
+
 public class BounceTrustTests : IAsyncLifetime
 {
     private static readonly Guid TenantId = Guid.Parse("a0000000-0000-7000-8000-000000000001");
@@ -78,6 +83,21 @@ public class BounceTrustTests : IAsyncLifetime
 
         Assert.False(await SuppressedAsync("victim@customer.example"));
         Assert.Equal(0, await WebhookItemsAsync());
+    }
+
+    [Fact]
+    public async Task Ignored_reports_are_counted_by_kind()
+    {
+        BounceProcessorMetricsProbe.Touch();
+        using var capture = new MeterCapture("Mta.Bounce");
+        string local = LocalPart("dest.example");
+
+        await _bounces.ProcessAsync(local, Dsn(local + "@" + BounceDomain, "victim@customer.example"), default);
+        await _bounces.ProcessAsync(local, Complaint("victim@customer.example"), default);
+        await _bounces.ProcessAsync(local, Dsn(local + "@" + BounceDomain, "gone@dest.example"), default);   // acted on: not counted
+
+        Assert.Equal(1, capture.Sum("mta.bounce.reports.ignored", ("kind", "bounce")));
+        Assert.Equal(1, capture.Sum("mta.bounce.reports.ignored", ("kind", "complaint")));
     }
 
     [Fact]

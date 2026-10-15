@@ -13,7 +13,7 @@ public sealed class IngestOptions
     public string? BounceDomain { get; init; }
 
     /// <summary>First label of a sending domain's own return-path host (<c>bounce.example.com</c>); the host is accepted on the bounce listener once the domain's return-path CNAME is verified.</summary>
-    public string ReturnPathLabel { get; init; } = "bounce";
+    public string ReturnPathLabel { get; init; } = Mta.Policy.SenderPolicy.DefaultReturnPathLabel;
 
     public int MaxRecipientsPerMessage { get; init; } = 100;
 }
@@ -34,6 +34,11 @@ public sealed class IngestHandler : ISmtpServerHandler
 
     private static readonly SmtpReply AuthUnavailable = SmtpReply.Constant(454, "4.7.0", "Too many failed attempts, try again later");
     private static readonly SmtpReply StorageProblem = SmtpReply.Constant(451, "4.3.0", "Temporary problem accepting the message, try again later");
+
+    // Answers of the return-path host lookup, for a minute: the RCPT of a bounce and its DATA both ask, and a remote server may send many bounces.
+    private static readonly long HostCacheTicks = 60 * System.Diagnostics.Stopwatch.Frequency;
+    private const int MaxCachedHosts = 1024;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (bool Verified, long ExpiresAt)> _returnPathHosts = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly IStorage _storage;
     private readonly SubmissionService _submission;
@@ -267,8 +272,21 @@ public sealed class IngestHandler : ISmtpServerHandler
             return false;
         }
 
+        long now = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (_returnPathHosts.TryGetValue(host, out var cached) && now < cached.ExpiresAt)
+        {
+            return cached.Verified;
+        }
+
         DomainRecord? domain = await _storage.Config.FindDomainByNameAsync(host[prefix.Length..], ct).ConfigureAwait(false);
-        return domain is { ReturnPathVerified: true, ReturnPathHost: { } returnPathHost } && string.Equals(returnPathHost, host, StringComparison.OrdinalIgnoreCase);
+        bool verified = domain is { ReturnPathVerified: true, ReturnPathHost: { } returnPathHost } && string.Equals(returnPathHost, host, StringComparison.OrdinalIgnoreCase);
+        if (_returnPathHosts.Count >= MaxCachedHosts)
+        {
+            _returnPathHosts.Clear();   // only hosts that came with a valid token get this far, but never let a prober grow the table
+        }
+
+        _returnPathHosts[host] = (verified, now + HostCacheTicks);
+        return verified;
     }
 
     public void OnDisconnected(SmtpSessionContext session)
