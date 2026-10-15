@@ -30,9 +30,11 @@ public abstract class ReplicaCoordinationConformance : StorageTestBase
         await Replicas.HeartbeatAsync("a", Forever, default);
         await Replicas.HeartbeatAsync("b", Forever, default);
 
-        await PassTimeAsync(TimeSpan.FromMilliseconds(300));
-        Assert.Equal(["b"], await Replicas.HeartbeatAsync("b", TimeSpan.FromMilliseconds(100), default));   // "a" beat more than 100 ms ago, "b" just now
-        Assert.Equal(["a", "b"], await Replicas.HeartbeatAsync("b", Forever, default));                      // still known, just not live
+        // The margins are seconds, not milliseconds: "b" is live only if the two round trips of its own heartbeat (the insert, then the select) take less
+        // than the window, and on a loaded CI runner 100 ms was not enough (the list came back empty). "a" being too old can only get truer with delay.
+        await PassTimeAsync(TimeSpan.FromMilliseconds(2500));
+        Assert.Equal(["b"], await Replicas.HeartbeatAsync("b", TimeSpan.FromSeconds(2), default));   // "a" beat more than 2 s ago, "b" just now
+        Assert.Equal(["a", "b"], await Replicas.HeartbeatAsync("b", Forever, default));              // still known, just not live
     }
 
     [Fact]
