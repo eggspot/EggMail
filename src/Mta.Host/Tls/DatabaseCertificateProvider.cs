@@ -29,8 +29,15 @@ public sealed class DatabaseCertificateProvider : IServerCertificateProvider
     private long _lastVersion = -1;
     private string? _overrideFingerprint;
 
-    public DatabaseCertificateProvider(IConfigStore config, ISecretProtector protector, string hostname, TlsSection tls, IClock? clock = null, IMtaLog? log = null)
+    private readonly bool _replaceOnHostnameChange;
+
+    /// <param name="replaceOnHostnameChange">
+    /// Replace a self-signed certificate made for another host name by one for <paramref name="hostname"/>. Pass false while nobody chose the host name (a container
+    /// that is recreated gets a new random one every time, and a new certificate for each would only pile up); an expiring self-signed certificate is replaced either way.
+    /// </param>
+    public DatabaseCertificateProvider(IConfigStore config, ISecretProtector protector, string hostname, TlsSection tls, IClock? clock = null, IMtaLog? log = null, bool replaceOnHostnameChange = true)
     {
+        _replaceOnHostnameChange = replaceOnHostnameChange;
         _config = config;
         _protector = protector;
         _hostname = hostname;
@@ -50,7 +57,7 @@ public sealed class DatabaseCertificateProvider : IServerCertificateProvider
 
     /// <summary>
     /// Loads certificates, generating the first-run self-signed certificate if the store is empty. A self-signed certificate made for another host name
-    /// (the container got a new name, or <c>EGGMAIL_HOSTNAME</c> was set later) is replaced by one for the current name as long as nothing but self-signed
+    /// (<c>EGGMAIL_HOSTNAME</c> was set later; see the constructor for when this is on) is replaced by one for the current name as long as nothing but self-signed
     /// certificates exist. While a self-signed certificate is all there is, every start says so in the log.
     /// </summary>
     public async Task InitializeAsync(CancellationToken ct)
@@ -58,7 +65,7 @@ public sealed class DatabaseCertificateProvider : IServerCertificateProvider
         await ReloadAsync(force: true, ct).ConfigureAwait(false);
         bool generate = _snapshot.Entries.Count == 0;
         // A name is unique among certificates, so a replacement gets its own name (CertificateMaterial.CreateSelfSigned adds the thumbprint).
-        bool stale = UsingSelfSignedOnly && (!_snapshot.Entries.Any(e => e.Subjects.Any(s => CertificateMaterial.Matches(s, _hostname)))
+        bool stale = UsingSelfSignedOnly && ((_replaceOnHostnameChange && !_snapshot.Entries.Any(e => e.Subjects.Any(s => CertificateMaterial.Matches(s, _hostname))))
             || _snapshot.Entries.All(e => e.Leaf.NotAfter.ToUniversalTime() < _clock.UtcNow.UtcDateTime + SelfSignedRenewalMargin));
         if (!generate && stale)
         {

@@ -46,7 +46,7 @@ workflow refuses a stable tag without a non-empty section for that exact version
   generated password printed once. A small set of documented `EGGMAIL_*` environment variables maps onto the existing configuration (`EGGMAIL_HOSTNAME`, `EGGMAIL_ACME_EMAIL` with the
   host name turns ACME on, `EGGMAIL_ACME_STAGING`, `EGGMAIL_ACME_DIRECTORY`, `CLOUDFLARE_API_TOKEN`, `EGGMAIL_ADMIN_USER`, `EGGMAIL_ADMIN_PASSWORD(_FILE)`, `EGGMAIL_DOMAINS`, `EGGMAIL_DATABASE`
   for PostgreSQL with one variable, `EGGMAIL_RELAY`); combinations that cannot work stop the start with a message that names the variable. New keys `Dashboard:BootstrapAdminPassword`
-  and `Delivery:Relay:*`. The shipped Compose files use the new variables. A browser-and-SMTP end-to-end test starts the real host with nothing configured, and the release smoke test does
+  and `Delivery:Relay:*`. The generated administrator password is temporary: the dashboard (and the API, with `403 password_change_required`) allows nothing but choosing a new one at the first sign-in. The shipped Compose files use the new variables. A browser-and-SMTP end-to-end test starts the real host with nothing configured, and the release smoke test does
   the same with the pushed image.
 - Cancelling queued mail: `POST /api/v1/messages/{id}/cancel` and a "Cancel delivery" action on the dashboard's message page stop delivery
   to the recipients that are still waiting (all of them, or the ones named); a recipient whose delivery attempt is running is left alone and

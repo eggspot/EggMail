@@ -27,6 +27,22 @@ function httpsGet(url) {
   });
 }
 
+const CHOSEN_PASSWORD = 'my-own-chosen-password-1';
+
+/** Signs in with the generated (temporary) password, proves nothing but the password change works, changes it, and returns the same session, now unrestricted. */
+async function signInAndChoosePassword(baseURL, user, temporary, chosen = CHOSEN_PASSWORD) {
+  const client = await new ApiClient(baseURL).signIn(user, temporary);
+  const me = await client.request('GET', '/api/v1/me');
+  expect(me.body.mustChangePassword).toBe(true);
+  const blocked = await client.request('GET', '/api/v1/admin/tenants');
+  expect(blocked.status).toBe(403);
+  expect(blocked.body.code).toBe('password_change_required');
+  const changed = await client.request('POST', '/api/v1/me/password', { currentPassword: temporary, newPassword: chosen });
+  expect(changed.status).toBe(204);
+  expect((await client.request('GET', '/api/v1/admin/tenants')).status).toBe(200);
+  return client;
+}
+
 function messageText({ from, to, subject }) {
   return `From: ${from}\r\nTo: ${to}\r\nSubject: ${subject}\r\nDate: ${new Date().toUTCString()}\r\nMessage-ID: <${unique('m')}@zero.test>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nSent by the zero-configuration end-to-end test.\r\n`;
 }
@@ -35,11 +51,13 @@ test.describe('a start with nothing configured', () => {
   test.describe.configure({ mode: 'serial' });
   let stack;
   let password;
+  let adminPassword; // the one the person chose at the first sign-in; the generated one is dead after that
 
   test.beforeAll(async () => {
     test.setTimeout(180_000);
     stack = await startZeroConfigStack();
     password = stack.oneTimePassword();
+    adminPassword = password;
   });
 
   test.afterAll(async () => {
@@ -49,7 +67,7 @@ test.describe('a start with nothing configured', () => {
   test('the process is healthy and made everything it needs: data directory, databases, certificate, administrator', async () => {
     expect((await fetch(`${stack.baseURL}/healthz`)).status).toBe(200);
     expect((await fetch(`${stack.baseURL}/readyz`)).status).toBe(200);
-    const check = stack.cli('--healthcheck');
+    const check = stack.cli(['--healthcheck']);
     expect(check.status, check.output).toBe(0);
 
     // The data directory did not exist: the server created it and the databases in it.
@@ -103,11 +121,23 @@ test.describe('a start with nothing configured', () => {
     await page.getByRole('button', { name: 'Sign in' }).click();
     await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
     await expect(page.locator('.user')).toContainText('admin (admin)');
+
+    // The generated password is temporary: the only page is the password change, and there is nothing to navigate to.
+    await expect(page.getByRole('alert').filter({ hasText: 'temporary password' })).toBeVisible();
+    await expect(page.getByRole('navigation', { name: 'Main' })).toHaveCount(0);
+    await page.getByLabel('Current password').fill(password);
+    await page.getByLabel('New password', { exact: true }).fill(CHOSEN_PASSWORD);
+    await page.getByLabel('New password again').fill(CHOSEN_PASSWORD);
+    await page.getByRole('button', { name: 'Change password' }).click();
+    await expect(page.getByRole('navigation', { name: 'Main' })).toBeVisible();   // now the whole dashboard
+    await page.goto(`${stack.httpsURL}/admin/status`);
+    await expect(page.getByRole('heading', { name: 'Server status' })).toBeVisible();
     await expect(page.locator('[data-warning="self_signed_certificate"]')).toBeVisible(); // and on every page after sign-in
+    adminPassword = CHOSEN_PASSWORD;
   });
 
   test('mail submitted over SMTP AUTH (STARTTLS and implicit TLS) and through the API is delivered to the recipients server, DKIM signed', async () => {
-    const admin = await new ApiClient(stack.baseURL).signIn('admin', password);
+    const admin = await new ApiClient(stack.baseURL).signIn('admin', adminPassword);
     const tenant = await admin.ok('POST', '/api/v1/admin/tenants', { name: unique('Zero ') });
     const domain = await createVerifiedDomain(admin, stack, tenant, 'zero');   // the DKIM key was generated when the domain was added
     const recipientDomain = createRecipientDomain(stack);
@@ -138,7 +168,7 @@ test.describe('a start with nothing configured', () => {
   });
 
   test('a restart prints no password again, keeps the account and the data, and the server is healthy again', async () => {
-    const admin = await new ApiClient(stack.baseURL).signIn('admin', password);
+    const admin = await new ApiClient(stack.baseURL).signIn('admin', adminPassword);
     const tenantsBefore = (await admin.ok('GET', '/api/v1/admin/tenants')).map((t) => t.name);
 
     await stack.restart();
@@ -146,9 +176,20 @@ test.describe('a start with nothing configured', () => {
     expect(stack.currentRunLog()).not.toContain(NOTICE_BEGIN);
     expect(stack.oneTimePassword()).toBe(password); // still exactly one notice in the whole log
     expect(stack.currentRunLog()).toMatch(/Serving a SELF-SIGNED certificate/);   // said again at every start while it is all there is
-    const again = await new ApiClient(stack.baseURL).signIn('admin', password);
+    expect((await new ApiClient(stack.baseURL).request('POST', '/api/v1/session', { user: 'admin', password })).status).toBe(401); // the temporary password is gone
+    const again = await new ApiClient(stack.baseURL).signIn('admin', adminPassword);
     expect((await again.ok('GET', '/api/v1/admin/tenants')).map((t) => t.name)).toEqual(tenantsBefore);
-    expect(stack.cli('--healthcheck').status).toBe(0);
+    expect(stack.cli(['--healthcheck']).status).toBe(0);
+  });
+
+  test('a lost password: the documented recovery (admin create with the server stopped) makes another administrator', async () => {
+    // docker stop; docker run --rm -v eggmail-data:/data -e MTA_ADMIN_PASSWORD=... <image> admin create --user rescue; docker start (README, operations guide, the first-start notice)
+    await stack.whileStopped(async () => {
+      const created = stack.cli(['admin', 'create', '--user', 'rescue'], { MTA_ADMIN_PASSWORD: 'rescue-password-123' });
+      expect(created.status, created.output).toBe(0);
+    });
+    const rescue = await new ApiClient(stack.baseURL).signIn('rescue', 'rescue-password-123');
+    expect((await rescue.request('GET', '/api/v1/admin/tenants')).status).toBe(200);   // a chosen password is not a temporary one
   });
 });
 
@@ -215,7 +256,7 @@ test.describe('PostgreSQL with one extra variable', () => {
       expect(capabilities.warnings.map((w) => w.code)).toEqual(expect.arrayContaining(['postgres_single_role', 'self_signed_certificate']));
       expect(fs.existsSync(stack.dataDir) ? fs.readdirSync(stack.dataDir).filter((f) => f.endsWith('.db')) : []).toEqual([]); // no SQLite files: the data is in PostgreSQL
 
-      const admin = await new ApiClient(stack.baseURL).signIn('admin', password);
+      const admin = await signInAndChoosePassword(stack.baseURL, 'admin', password);
       const tenant = await admin.ok('POST', '/api/v1/admin/tenants', { name: unique('Pg ') });
       const domain = await createVerifiedDomain(admin, stack, tenant, 'pg');
       const apiKey = (await admin.ok('POST', '/api/v1/api-keys', { name: 'pg', scopes: ['send'] }, { tenantId: tenant.id })).key;
@@ -232,7 +273,12 @@ test.describe('PostgreSQL with one extra variable', () => {
       await stack.restart();
       expect(stack.currentRunLog()).not.toContain(NOTICE_BEGIN);
       expect(stack.oneTimePassword()).toBe(password);
-      await new ApiClient(stack.baseURL).signIn('admin', password);
+      await new ApiClient(stack.baseURL).signIn('admin', CHOSEN_PASSWORD);
+
+      // The same recovery on PostgreSQL needs no stopped server: the environment (EGGMAIL_DATABASE) tells the command which database.
+      const created = stack.cli(['admin', 'create', '--user', 'rescue'], { MTA_ADMIN_PASSWORD: 'rescue-password-123' });
+      expect(created.status, created.output).toBe(0);
+      await new ApiClient(stack.baseURL).signIn('rescue', 'rescue-password-123');
     } finally {
       await stack.stop();
     }

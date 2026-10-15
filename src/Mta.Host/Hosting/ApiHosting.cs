@@ -76,9 +76,9 @@ public static class ApiHosting
     }
 
     /// <summary>
-    /// Creates the first administrator when no administrator exists yet (<see cref="BootstrapAdmin"/>): from <c>Dashboard:BootstrapAdminPassword</c>, from the file
+    /// Creates the first administrator when no administrator exists yet (<see cref="FirstAdministrator"/>): from <c>Dashboard:BootstrapAdminPassword</c>, from the file
     /// <c>Dashboard:BootstrapAdminPasswordFile</c>, or with a generated password (returned in the result so the caller can print it once; it is never logged).
     /// </summary>
-    public static Task<BootstrapAdminResult> EnsureBootstrapAdminAsync(MtaConfig config, IStorage storage, IClock clock, IMtaLog log, CancellationToken ct) =>
-        BootstrapAdmin.EnsureAsync(config, storage, clock, log, ct);
+    public static Task<FirstAdministratorResult> EnsureFirstAdministratorAsync(MtaConfig config, IStorage storage, IClock clock, IMtaLog log, CancellationToken ct) =>
+        FirstAdministrator.EnsureAsync(config, storage.Config, clock, log, ct);
 }

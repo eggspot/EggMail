@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Text;
 using Microsoft.Extensions.Configuration;
 using Mta.Core;
@@ -62,9 +63,9 @@ public sealed class ZeroConfigStartupTests : IAsyncLifetime
     public async Task A_password_from_the_environment_is_used_and_nothing_is_printed()
     {
         var log = new RecordingLog();
-        BootstrapAdminResult result = await BootstrapAdmin.EnsureAsync(Config(d => { d.User = "owner"; d.Password = "a-long-chosen-password"; }), _storage, SystemClock.Instance, log, default);
+        FirstAdministratorResult result = await FirstAdministrator.EnsureAsync(Config(d => { d.User = "owner"; d.Password = "a-long-chosen-password"; }), _storage.Config, SystemClock.Instance, log, default);
 
-        Assert.Equal(BootstrapAdminOutcome.Created, result.Outcome);
+        Assert.Equal(FirstAdministratorOutcome.Created, result.Outcome);
         Assert.Null(result.GeneratedPassword);
         DashboardUser user = Assert.Single(await _storage.Config.GetDashboardUsersAsync(default));
         Assert.Equal("owner", user.UserName);
@@ -77,9 +78,9 @@ public sealed class ZeroConfigStartupTests : IAsyncLifetime
     public async Task A_generated_password_is_random_hashed_and_never_logged()
     {
         var log = new RecordingLog();
-        BootstrapAdminResult first = await BootstrapAdmin.EnsureAsync(Config(), _storage, SystemClock.Instance, log, default);
+        FirstAdministratorResult first = await FirstAdministrator.EnsureAsync(Config(), _storage.Config, SystemClock.Instance, log, default);
 
-        Assert.Equal(BootstrapAdminOutcome.CreatedWithGeneratedPassword, first.Outcome);
+        Assert.Equal(FirstAdministratorOutcome.CreatedWithGeneratedPassword, first.Outcome);
         string password = first.GeneratedPassword!;
         Assert.True(password.Length >= 20);
         DashboardUser user = Assert.Single(await _storage.Config.GetDashboardUsersAsync(default));
@@ -91,18 +92,18 @@ public sealed class ZeroConfigStartupTests : IAsyncLifetime
         // A second installation gets another password.
         await using var other = new InMemoryStorage(new StorageOptions(), SystemClock.Instance);
         await other.InitializeAsync(default);
-        BootstrapAdminResult second = await BootstrapAdmin.EnsureAsync(Config(), other, SystemClock.Instance, log, default);
+        FirstAdministratorResult second = await FirstAdministrator.EnsureAsync(Config(), other.Config, SystemClock.Instance, log, default);
         Assert.NotEqual(password, second.GeneratedPassword);
     }
 
     [Fact]
     public async Task The_next_start_with_an_administrator_creates_and_prints_nothing()
     {
-        await BootstrapAdmin.EnsureAsync(Config(), _storage, SystemClock.Instance, NullMtaLog.Instance, default);
+        await FirstAdministrator.EnsureAsync(Config(), _storage.Config, SystemClock.Instance, NullMtaLog.Instance, default);
 
-        BootstrapAdminResult again = await BootstrapAdmin.EnsureAsync(Config(), _storage, SystemClock.Instance, NullMtaLog.Instance, default);
+        FirstAdministratorResult again = await FirstAdministrator.EnsureAsync(Config(), _storage.Config, SystemClock.Instance, NullMtaLog.Instance, default);
 
-        Assert.Equal(BootstrapAdminOutcome.AlreadyExists, again.Outcome);
+        Assert.Equal(FirstAdministratorOutcome.AlreadyExists, again.Outcome);
         Assert.Null(again.GeneratedPassword);
         Assert.Single(await _storage.Config.GetDashboardUsersAsync(default));
     }
@@ -113,9 +114,9 @@ public sealed class ZeroConfigStartupTests : IAsyncLifetime
         Tenant tenant = await MakeTenantAsync();
         await DashboardAccounts.CreateAsync(_storage.Config, SystemClock.Instance, "admin", "some-long-password", DashboardRole.Tenant, tenant.Id, default);
 
-        BootstrapAdminResult result = await BootstrapAdmin.EnsureAsync(Config(), _storage, SystemClock.Instance, NullMtaLog.Instance, default);
+        FirstAdministratorResult result = await FirstAdministrator.EnsureAsync(Config(), _storage.Config, SystemClock.Instance, NullMtaLog.Instance, default);
 
-        Assert.Equal(BootstrapAdminOutcome.Problem, result.Outcome);
+        Assert.Equal(FirstAdministratorOutcome.Problem, result.Outcome);
         Assert.Contains("EGGMAIL_ADMIN_USER", result.Problem, StringComparison.Ordinal);
     }
 
@@ -131,35 +132,119 @@ public sealed class ZeroConfigStartupTests : IAsyncLifetime
     {
         var output = new StringWriter();
 
-        BootstrapAdmin.WriteGeneratedPasswordNotice(output, "admin", "s3cret-generated-value", 8443);
+        FirstAdministrator.WriteGeneratedPasswordNotice(output, "admin", "s3cret-generated-value", 8443);
 
         string text = output.ToString();
-        Assert.Contains(BootstrapAdmin.NoticeBegin, text, StringComparison.Ordinal);
-        Assert.Contains(BootstrapAdmin.NoticeEnd, text, StringComparison.Ordinal);
+        Assert.Contains(FirstAdministrator.NoticeBegin, text, StringComparison.Ordinal);
+        Assert.Contains(FirstAdministrator.NoticeEnd, text, StringComparison.Ordinal);
         Assert.Equal(1, text.Split("s3cret-generated-value").Length - 1);
         Assert.Contains("ONLY THIS ONCE", text, StringComparison.Ordinal);
     }
 
-    [Theory]
-    [InlineData("Dashboard:BootstrapAdminPassword", "short", "at least 10")]
-    public void A_short_configured_password_stops_the_start_in_validation(string key, string value, string expected)
+    [Fact]
+    public async Task A_generated_password_is_temporary_and_a_chosen_one_is_not()
     {
-        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { [key] = value }).Build();
+        await FirstAdministrator.EnsureAsync(Config(), _storage.Config, SystemClock.Instance, NullMtaLog.Instance, default);
+        DashboardUser generated = Assert.Single(await _storage.Config.GetDashboardUsersAsync(default));
+        Assert.True(Mta.Host.Security.PasswordHasher.MustChange(generated.PasswordHash));
 
-        LoadedConfig loaded = ConfigLoader.Load(config);
-
-        Assert.Contains(loaded.Errors, e => e.Contains(expected, StringComparison.Ordinal));
+        await using var other = new InMemoryStorage(new StorageOptions(), SystemClock.Instance);
+        await other.InitializeAsync(default);
+        await FirstAdministrator.EnsureAsync(Config(d => d.Password = "a-long-chosen-password"), other.Config, SystemClock.Instance, NullMtaLog.Instance, default);
+        Assert.False(Mta.Host.Security.PasswordHasher.MustChange(Assert.Single(await other.Config.GetDashboardUsersAsync(default)).PasswordHash));
     }
 
     [Fact]
-    public void A_password_and_a_password_file_together_stop_the_start()
+    public async Task A_password_file_is_read_trimmed_and_checked()
     {
-        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
-        {
-            ["Dashboard:BootstrapAdminPassword"] = "a-long-chosen-password", ["Dashboard:BootstrapAdminPasswordFile"] = "/run/secrets/pw",
-        }).Build();
+        string good = Path.Combine(_dir, "good");
+        await File.WriteAllTextAsync(good, "  a-long-file-password \r\n");
+        FirstAdministratorResult created = await FirstAdministrator.EnsureAsync(Config(d => d.PasswordFile = good), _storage.Config, SystemClock.Instance, NullMtaLog.Instance, default);
+        DashboardUser user = Assert.Single(await _storage.Config.GetDashboardUsersAsync(default));
+        Assert.Equal(FirstAdministratorOutcome.Created, created.Outcome);
+        Assert.True(Mta.Host.Security.PasswordHasher.Verify("a-long-file-password", user.PasswordHash));
+        Assert.False(Mta.Host.Security.PasswordHasher.MustChange(user.PasswordHash));
 
-        Assert.Contains(ConfigLoader.Load(config).Errors, e => e.Contains("both set", StringComparison.Ordinal));
+        await using var empty = new InMemoryStorage(new StorageOptions(), SystemClock.Instance);
+        await empty.InitializeAsync(default);
+        string blank = Path.Combine(_dir, "blank");
+        await File.WriteAllTextAsync(blank, " \n");
+        FirstAdministratorResult problem = await FirstAdministrator.EnsureAsync(Config(d => d.PasswordFile = blank), empty.Config, SystemClock.Instance, NullMtaLog.Instance, default);
+        Assert.Equal(FirstAdministratorOutcome.Problem, problem.Outcome);
+        Assert.Contains("at least 10", problem.Problem, StringComparison.Ordinal);
+        Assert.Empty(await empty.Config.GetDashboardUsersAsync(default));
+    }
+
+    [Fact]
+    public async Task A_directory_as_the_password_file_is_a_problem_and_a_file_is_not_read_when_an_administrator_exists()
+    {
+        FirstAdministratorResult directory = await FirstAdministrator.EnsureAsync(Config(d => d.PasswordFile = _dir), _storage.Config, SystemClock.Instance, NullMtaLog.Instance, default);
+        Assert.Equal(FirstAdministratorOutcome.Problem, directory.Outcome);
+        Assert.Contains("cannot be read", directory.Problem, StringComparison.Ordinal);
+
+        await FirstAdministrator.EnsureAsync(Config(d => d.Password = "a-long-chosen-password"), _storage.Config, SystemClock.Instance, NullMtaLog.Instance, default);
+        FirstAdministratorResult later = await FirstAdministrator.EnsureAsync(Config(d => d.PasswordFile = Path.Combine(_dir, "missing")), _storage.Config, SystemClock.Instance, NullMtaLog.Instance, default);
+        Assert.Equal(FirstAdministratorOutcome.AlreadyExists, later.Outcome);   // a leftover variable does not stop a server that has its administrator
+    }
+
+    [Fact]
+    public async Task A_password_and_a_password_file_together_or_a_short_password_are_problems_of_the_first_start_only()
+    {
+        FirstAdministratorResult both = await FirstAdministrator.EnsureAsync(Config(d => { d.Password = "a-long-chosen-password"; d.PasswordFile = "/run/secrets/pw"; }), _storage.Config, SystemClock.Instance, NullMtaLog.Instance, default);
+        Assert.Equal(FirstAdministratorOutcome.Problem, both.Outcome);
+        Assert.Contains("both set", both.Problem, StringComparison.Ordinal);
+
+        FirstAdministratorResult weak = await FirstAdministrator.EnsureAsync(Config(d => d.Password = "short"), _storage.Config, SystemClock.Instance, NullMtaLog.Instance, default);
+        Assert.Equal(FirstAdministratorOutcome.Problem, weak.Outcome);
+        Assert.Contains("EGGMAIL_ADMIN_PASSWORD", weak.Problem, StringComparison.Ordinal);
+        Assert.DoesNotContain("short", weak.Problem!.Replace("shorter", "", StringComparison.Ordinal), StringComparison.Ordinal);   // the value is not repeated
+        Assert.Empty(await _storage.Config.GetDashboardUsersAsync(default));
+
+        FirstAdministratorResult badName = await FirstAdministrator.EnsureAsync(Config(d => { d.User = "  "; d.Password = "a-long-chosen-password"; }), _storage.Config, SystemClock.Instance, NullMtaLog.Instance, default);
+        Assert.Equal(FirstAdministratorOutcome.Problem, badName.Outcome);
+    }
+
+    /// <summary>An <see cref="IConfigStore"/> whose first write of a dashboard user loses a race: another replica's administrator is stored first and the write is refused as a name conflict.</summary>
+    public class LosesTheAdminRace : DispatchProxy
+    {
+        public IConfigStore Target { get; set; } = null!;
+        public string OtherAdminName { get; set; } = "";
+        private bool _raced;
+
+        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+        {
+            if (targetMethod!.Name == nameof(IConfigStore.UpsertDashboardUserAsync) && !_raced)
+            {
+                _raced = true;
+                var mine = (DashboardUser)args![0]!;
+                Target.UpsertDashboardUserAsync(mine with { Id = Ids.New(), UserName = OtherAdminName }, default).AsTask().GetAwaiter().GetResult();
+                throw new StorageConflictException("name taken");
+            }
+
+            try
+            {
+                return targetMethod.Invoke(Target, args);
+            }
+            catch (TargetInvocationException ex) when (ex.InnerException is not null)
+            {
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex.InnerException).Throw();
+                throw;
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Losing_the_race_to_another_replica_is_not_an_error_and_prints_no_password()
+    {
+        IConfigStore racing = DispatchProxy.Create<IConfigStore, LosesTheAdminRace>();
+        ((LosesTheAdminRace)racing).Target = _storage.Config;
+        ((LosesTheAdminRace)racing).OtherAdminName = "admin";   // the other replica made 'admin' first, with the password it printed
+
+        FirstAdministratorResult result = await FirstAdministrator.EnsureAsync(Config(), racing, SystemClock.Instance, NullMtaLog.Instance, default);
+
+        Assert.Equal(FirstAdministratorOutcome.AlreadyExists, result.Outcome);
+        Assert.Null(result.GeneratedPassword);   // the loser must not print a password that does not work
+        Assert.Single(await _storage.Config.GetDashboardUsersAsync(default));
     }
 
     // The relay from configuration
@@ -218,6 +303,26 @@ public sealed class ZeroConfigStartupTests : IAsyncLifetime
         Assert.Equal(7, updated.Priority);
     }
 
+    private static void AssertUntouched(RelayRouteRecord expected, RelayRouteRecord actual)
+    {
+        Assert.Equal((expected.Id, expected.Name, expected.Host, expected.Port, expected.TlsMode, expected.Priority, expected.Enabled), (actual.Id, actual.Name, actual.Host, actual.Port, actual.TlsMode, actual.Priority, actual.Enabled));
+        Assert.Equal(expected.Domains, actual.Domains);
+    }
+
+    [Fact]
+    public async Task A_route_an_administrator_made_with_the_same_name_is_never_changed_or_deleted()
+    {
+        var handMade = new RelayRouteRecord(Ids.New(), RelaySection.RouteName, "relay.office.example", 587, "verify", null, null, 50, true, ["example.org"]);
+        await _storage.Config.UpsertRelayRouteAsync(handMade, default);
+
+        string? clash = await RelayBootstrap.ApplyAsync(Config(relay: Relay()), _storage.Config, new TestProtector(), NullMtaLog.Instance, default);
+        Assert.Contains("did not create", clash, StringComparison.Ordinal);
+        AssertUntouched(handMade, Assert.Single(await _storage.Config.GetRelayRoutesAsync(default)));
+
+        Assert.Null(await RelayBootstrap.ApplyAsync(Config(), _storage.Config, new TestProtector(), NullMtaLog.Instance, default));   // the configuration is gone: still not deleted
+        AssertUntouched(handMade, Assert.Single(await _storage.Config.GetRelayRoutesAsync(default)));
+    }
+
     [Fact]
     public async Task Removing_the_configuration_removes_only_the_route_it_made()
     {
@@ -267,8 +372,8 @@ public sealed class ZeroConfigStartupTests : IAsyncLifetime
 
     // The self-signed certificate
 
-    private DatabaseCertificateProvider Provider(string hostname, IClock? clock = null, RecordingLog? log = null) =>
-        new(_storage.Config, new TestProtector(), hostname, new TlsSection(), clock ?? SystemClock.Instance, log);
+    private DatabaseCertificateProvider Provider(string hostname, IClock? clock = null, RecordingLog? log = null, bool replaceOnHostnameChange = true) =>
+        new(_storage.Config, new TestProtector(), hostname, new TlsSection(), clock ?? SystemClock.Instance, log, replaceOnHostnameChange);
 
     [Fact]
     public async Task The_first_start_makes_a_self_signed_certificate_and_says_so_in_the_log_at_every_start()
@@ -286,6 +391,22 @@ public sealed class ZeroConfigStartupTests : IAsyncLifetime
 
         Assert.Single(await _storage.Config.GetCertificatesAsync(default), c => c.Active);   // nothing was generated again
         Assert.Contains(second.Lines, l => l.Contains("SELF-SIGNED", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task A_host_name_nobody_chose_does_not_replace_the_certificate_each_time_but_expiry_always_does()
+    {
+        // A recreated container gets a new random host name every time: a certificate each time would only pile up.
+        await Provider("3f2a1b9c", replaceOnHostnameChange: false).InitializeAsync(default);
+        var recreated = Provider("77aa00bb", replaceOnHostnameChange: false);
+        await recreated.InitializeAsync(default);
+
+        Assert.Single(await _storage.Config.GetCertificatesAsync(default));
+        Assert.Contains("3f2a1b9c", recreated.Describe().Single().Subjects);
+
+        await Provider("77aa00bb", clock: new ShiftedClock(TimeSpan.FromDays(340)), replaceOnHostnameChange: false).InitializeAsync(default);   // 25 days left
+        Assert.Equal(2, (await _storage.Config.GetCertificatesAsync(default)).Count);
+        Assert.Single(await _storage.Config.GetCertificatesAsync(default), c => c.Active);
     }
 
     [Fact]
@@ -356,17 +477,77 @@ public sealed class ZeroConfigStartupTests : IAsyncLifetime
     }
 
     [Fact]
-    public void Advice_is_given_when_no_host_name_is_configured()
+    public void Advice_is_given_when_nothing_names_the_server_even_though_the_container_runtime_set_HOSTNAME()
     {
-        var log = new RecordingLog();
         var unset = ConfigLoader.Load(new ConfigurationBuilder().Build());
-        StartupChecks.LogAdvice(unset.Config, log);
+        // What a container has: HOSTNAME is the machine name, and that is all.
+        Func<string, string?> container = name => name == "HOSTNAME" ? unset.Config.Hostname : null;
+        var log = new RecordingLog();
 
-        Assert.Contains(log.Lines, l => l.Contains("EGGMAIL_HOSTNAME", StringComparison.Ordinal));
+        StartupChecks.LogAdvice(unset.Config, log, container);
 
-        var set = ConfigLoader.Load(new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Hostname"] = "mail.example.com" }).Build());
+        Assert.Contains(log.Lines, l => l.Contains("No host name is configured", StringComparison.Ordinal) && l.Contains("EGGMAIL_HOSTNAME", StringComparison.Ordinal));
+        Assert.False(StartupChecks.HostnameConfigured(unset.Config, container));
+    }
+
+    [Fact]
+    public void No_advice_when_the_server_is_named_by_any_means()
+    {
+        var named = ConfigLoader.Load(new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Hostname"] = "mail.example.com" }).Build());
+        var viaAlias = ConfigLoader.Load(new ConfigurationBuilder().Build());
+
         var quiet = new RecordingLog();
-        StartupChecks.LogAdvice(set.Config, quiet);
+        StartupChecks.LogAdvice(named.Config, quiet, _ => null);
         Assert.DoesNotContain(quiet.Lines, l => l.Contains("No host name is configured", StringComparison.Ordinal));
+        Assert.True(StartupChecks.HostnameConfigured(viaAlias.Config, name => name == "EGGMAIL_HOSTNAME" ? "x.example.com" : null));
+        Assert.True(StartupChecks.HostnameConfigured(viaAlias.Config, name => name == "Hostname" ? viaAlias.Config.Hostname : null));
+    }
+
+    [Theory]
+    [InlineData("mail.example.com", 0)]
+    [InlineData("mail_01.example.com", 1)]
+    [InlineData("mail", 1)]
+    [InlineData("my_mail", 2)]
+    public void A_host_name_that_receiving_servers_dislike_is_warned_about(string name, int warnings)
+    {
+        Assert.Equal(warnings, StartupChecks.HeloNameWarnings(name).Count);
+    }
+
+    [Fact]
+    public void The_helo_warnings_are_logged_for_a_configured_but_odd_name()
+    {
+        var config = ConfigLoader.Load(new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Hostname"] = "my_mail" }).Build());
+        var log = new RecordingLog();
+
+        StartupChecks.LogAdvice(config.Config, log, _ => null);
+
+        Assert.Contains(log.Lines, l => l.Contains("underscore", StringComparison.Ordinal));
+        Assert.Contains(log.Lines, l => l.Contains("single label", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void PostgreSQL_selected_next_to_the_sqlite_files_of_an_earlier_run_is_a_loud_warning()
+    {
+        string data = Path.Combine(_dir, "earlier");
+        Directory.CreateDirectory(data);
+        File.WriteAllText(Path.Combine(data, "config.db"), "x");
+        MtaConfig postgres = ConfigLoader.Load(new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Storage:Backend"] = "Postgres", ["Sqlite:DataDirectory"] = data, ["Storage:Postgres:RuntimeConnectionString"] = "Host=db;Username=u",
+        }).Build()).Config;
+
+        string? warning = StartupChecks.AbandonedSqliteDataWarning(postgres);
+
+        Assert.Contains("NOT used", warning, StringComparison.Ordinal);
+        Assert.Contains("migrate-storage", warning, StringComparison.Ordinal);
+        var log = new RecordingLog();
+        StartupChecks.LogAdvice(postgres, log, _ => null);
+        Assert.Contains(log.Lines, l => l.StartsWith("Warning ", StringComparison.Ordinal) && l.Contains("NOT used", StringComparison.Ordinal));
+
+        // A deliberate switch writes the bootstrap file: then the old files are the rollback copy, not a mistake.
+        File.WriteAllText(Path.Combine(data, ConfigLoader.BootstrapFileName), "{}");
+        Assert.Null(StartupChecks.AbandonedSqliteDataWarning(postgres));
+        // And SQLite next to its own files is normal.
+        Assert.Null(StartupChecks.AbandonedSqliteDataWarning(ConfigLoader.Load(new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Sqlite:DataDirectory"] = data }).Build()).Config));
     }
 }

@@ -5,7 +5,9 @@ namespace Mta.Host.Security;
 /// <summary>
 /// PBKDF2-HMAC-SHA256 password hashing for SMTP credentials and dashboard users (BCL only). Format:
 /// <c>pbkdf2-sha256$iterations$base64(salt)$base64(hash)</c>. The default iteration count follows OWASP's 2023 guidance (600,000);
-/// <see cref="NeedsRehash"/> lets the caller upgrade hashes at the next successful login.
+/// <see cref="NeedsRehash"/> lets the caller upgrade hashes at the next successful login. A hash can carry a fifth part, <c>$change</c>
+/// (<see cref="MarkMustChange"/>): the password is a temporary one (the one the server generated for the first administrator and printed once), and the
+/// dashboard user has to choose another before anything else. Setting a new password stores a new hash without the part, which is how the mark ends.
 /// </summary>
 public static class PasswordHasher
 {
@@ -13,6 +15,13 @@ public static class PasswordHasher
     private const int SaltBytes = 16;
     private const int HashBytes = 32;
     private const string Scheme = "pbkdf2-sha256";
+    private const string ChangeMark = "change";
+
+    /// <summary>The same hash, marked as that of a temporary password.</summary>
+    public static string MarkMustChange(string stored) => MustChange(stored) ? stored : stored + "$" + ChangeMark;
+
+    /// <summary>Is the password this hash belongs to a temporary one that has to be changed?</summary>
+    public static bool MustChange(string stored) => stored.EndsWith("$" + ChangeMark, StringComparison.Ordinal);
 
     public static string Hash(string password, int iterations = DefaultIterations)
     {
@@ -51,7 +60,7 @@ public static class PasswordHasher
         iterations = 0;
         salt = hash = [];
         string[] parts = stored.Split('$');
-        if (parts.Length != 4 || parts[0] != Scheme || !int.TryParse(parts[1], out iterations) || iterations is < 1000 or > 10_000_000)
+        if (parts.Length is not (4 or 5) || (parts.Length == 5 && parts[4] != ChangeMark) || parts[0] != Scheme || !int.TryParse(parts[1], out iterations) || iterations is < 1000 or > 10_000_000)
         {
             return false;
         }

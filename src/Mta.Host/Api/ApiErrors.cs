@@ -27,6 +27,7 @@ public static class ApiCodes
     public const string UnsupportedMediaType = "unsupported_media_type";
     public const string ServerError = "server_error";
     public const string TenantDisabled = "tenant_disabled";
+    public const string PasswordChangeRequired = "password_change_required";
 
     /// <summary>Short human title per code (RFC 9457 <c>title</c>).</summary>
     public static string TitleOf(string code, int status) => code switch
@@ -50,6 +51,7 @@ public static class ApiCodes
         Conflict => "Conflict",
         UnsupportedMediaType => "Unsupported media type",
         TenantDisabled => "Account disabled",
+        PasswordChangeRequired => "Password change required",
         _ => status >= 500 ? "Internal server error" : "Request failed",
     };
 }
@@ -85,6 +87,10 @@ public sealed class ApiException : Exception
         new(StatusCodes.Status401Unauthorized, ApiCodes.Unauthorized, detail, headers: new Dictionary<string, string> { ["WWW-Authenticate"] = "Bearer" });
 
     public static ApiException Forbidden(string detail) => new(StatusCodes.Status403Forbidden, ApiCodes.Forbidden, detail);
+
+    /// <summary>The signed-in user has a temporary password and may do nothing but change it (and sign out).</summary>
+    public static ApiException PasswordChangeRequired() =>
+        new(StatusCodes.Status403Forbidden, ApiCodes.PasswordChangeRequired, "This account has a temporary password. Change it first (POST /me/password); until then only GET /me, POST /me/password and DELETE /session are allowed.");
 
     public static ApiException NotFound(string detail = "The resource was not found.") => new(StatusCodes.Status404NotFound, ApiCodes.NotFound, detail);
 

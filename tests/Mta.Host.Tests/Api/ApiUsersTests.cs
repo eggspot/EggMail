@@ -319,6 +319,55 @@ public class ApiUsersTests : IAsyncLifetime
         Assert.Equal(["password"], weak.ErrorFields);
     }
 
+    // A temporary password (the generated one of the first administrator)
+
+    private async Task<ApiClient> SignedInWithTemporaryPasswordAsync(string name)
+    {
+        await DashboardAccounts.CreateAsync(_f.Storage.Config, _f.Clock, name, "temporary password 1", DashboardRole.Admin, null, default, hashIterations: 1000, mustChangePassword: true);
+        ApiClient client = _f.NewClient();
+        Assert.Equal(HttpStatusCode.OK, (await client.SignInAsync(name, "temporary password 1")).Status);
+        return client;
+    }
+
+    [Fact]
+    public async Task A_temporary_password_may_only_read_me_change_the_password_and_sign_out()
+    {
+        ApiClient temp = await SignedInWithTemporaryPasswordAsync("firstadmin");
+
+        Reply me = await temp.GetAsync("/api/v1/me");
+        Assert.Equal(HttpStatusCode.OK, me.Status);
+        Assert.True(me.Json.GetProperty("mustChangePassword").GetBoolean());
+        (await temp.GetAsync("/api/v1/admin/users")).Problem(HttpStatusCode.Forbidden, "password_change_required");
+        (await temp.GetAsync("/api/v1/admin/tenants")).Problem(HttpStatusCode.Forbidden, "password_change_required");
+        (await temp.PostAsync("/api/v1/admin/users", new { userName = "sneaky", role = "admin" })).Problem(HttpStatusCode.Forbidden, "password_change_required");
+        Assert.DoesNotContain(await _f.Storage.Config.GetDashboardUsersAsync(default), u => u.UserName == "sneaky");
+
+        // Choosing a new password lifts it, in the same session, and nothing of the temporary mark is left in the stored hash.
+        Assert.Equal(HttpStatusCode.NoContent, (await temp.PostAsync("/api/v1/me/password", new { currentPassword = "temporary password 1", newPassword = NewPassword })).Status);
+        Assert.False((await temp.GetAsync("/api/v1/me")).Json.GetProperty("mustChangePassword").GetBoolean());
+        Assert.Equal(HttpStatusCode.OK, (await temp.GetAsync("/api/v1/admin/users")).Status);
+        Assert.False(PasswordHasher.MustChange((await _f.Storage.Config.FindDashboardUserAsync("firstadmin", default))!.PasswordHash));
+    }
+
+    [Fact]
+    public async Task Signing_out_works_with_a_temporary_password_and_the_mark_survives_the_hash_upgrade_at_sign_in()
+    {
+        ApiClient temp = await SignedInWithTemporaryPasswordAsync("firstadmin");   // 1000 iterations: signing in upgrades the hash, which must stay temporary
+        Assert.True(PasswordHasher.MustChange((await _f.Storage.Config.FindDashboardUserAsync("firstadmin", default))!.PasswordHash));
+        Assert.True(PasswordHasher.Verify("temporary password 1", (await _f.Storage.Config.FindDashboardUserAsync("firstadmin", default))!.PasswordHash));
+
+        Assert.Equal(HttpStatusCode.NoContent, (await temp.DeleteAsync("/api/v1/session")).Status);
+        (await temp.GetAsync("/api/v1/me")).Problem(HttpStatusCode.Unauthorized, "unauthorized");
+    }
+
+    [Fact]
+    public async Task A_temporary_password_does_not_restrict_api_keys_or_other_users()
+    {
+        await SignedInWithTemporaryPasswordAsync("firstadmin");
+        Assert.Equal(HttpStatusCode.OK, (await _admin.GetAsync("/api/v1/admin/users")).Status);   // another administrator is unaffected
+        Assert.False((await _admin.GetAsync("/api/v1/me")).Json.GetProperty("mustChangePassword").GetBoolean());
+    }
+
     // Own password
 
     [Fact]

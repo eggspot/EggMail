@@ -10,7 +10,8 @@ import { MIN_PASSWORD, passwordProblem } from '../lib/passwords';
 /** The signed-in user's own account: who they are and a password change. */
 export default function Account(_props: Record<string, unknown>) {
   useDocumentTitle('Account');
-  const { me } = useApp();
+  const { me, refreshMe } = useApp();
+  const forced = me?.mustChangePassword === true;
   const [current, setCurrent] = useState('');
   const [next, setNext] = useState('');
   const [again, setAgain] = useState('');
@@ -23,6 +24,7 @@ export default function Account(_props: Record<string, unknown>) {
     setNext('');
     setAgain('');
     setDone(true);
+    if (forced) await refreshMe();   // the temporary mark is gone: the full dashboard opens
   });
   const serverErrors = fieldErrors(change.error);
   const errs = { ...serverErrors, ...clientErrors };
@@ -44,6 +46,13 @@ export default function Account(_props: Record<string, unknown>) {
   return (
     <>
       <PageHeader title="Account" subtitle="Your own sign-in." />
+      {forced && (
+        <Notice tone="warn">
+          <span role="alert">
+            You signed in with a temporary password (the one the server printed once in its log). Choose your own now: the rest of the dashboard opens after that.
+          </span>
+        </Notice>
+      )}
       <Card title="Signed in as">
         <KeyValue
           items={[

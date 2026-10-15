@@ -8,12 +8,12 @@ namespace Mta.Host.Tests;
 /// The simple EGGMAIL_* environment variables: what each one stands for, what is refused (with a message that names the variable), and that the long-form
 /// configuration always wins over them.
 /// </summary>
-public class EggMailEnvironmentTests
+public class EnvironmentAliasesTests
 {
     private static EnvironmentAliasResult Translate(params (string Name, string Value)[] variables)
     {
         var map = variables.ToDictionary(v => v.Name, v => v.Value);
-        return EggMailEnvironment.Translate(name => map.GetValueOrDefault(name));
+        return EnvironmentAliases.Translate(name => map.GetValueOrDefault(name));
     }
 
     private static Dictionary<string, string?> Values(EnvironmentAliasResult result) =>
@@ -126,7 +126,19 @@ public class EggMailEnvironmentTests
         Assert.Contains("two different CAs", Assert.Single(Translate(("EGGMAIL_HOSTNAME", "mail.example.com"), ("EGGMAIL_ACME_EMAIL", "ops@example.com"), ("EGGMAIL_ACME_STAGING", "true"), ("EGGMAIL_ACME_DIRECTORY", "https://ca/dir")).Errors), StringComparison.Ordinal);
         Assert.Contains("EGGMAIL_ACME_DIRECTORY", Assert.Single(Translate(("EGGMAIL_HOSTNAME", "mail.example.com"), ("EGGMAIL_ACME_EMAIL", "ops@example.com"), ("EGGMAIL_ACME_DIRECTORY", "ca.internal/dir")).Errors), StringComparison.Ordinal);
         Assert.Contains("EGGMAIL_ACME_STAGING", Assert.Single(Translate(("EGGMAIL_HOSTNAME", "mail.example.com"), ("EGGMAIL_ACME_EMAIL", "ops@example.com"), ("EGGMAIL_ACME_STAGING", "yes")).Errors), StringComparison.Ordinal);
-        Assert.Contains("ACME stays off", Assert.Single(Translate(("EGGMAIL_HOSTNAME", "mail.example.com"), ("EGGMAIL_ACME_STAGING", "true")).Errors), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_ca_choice_without_acme_is_refused_unless_acme_is_switched_on_some_other_way()
+    {
+        // Whether ACME is on is decided by the whole configuration, not by the aliases alone.
+        LoadedConfig alone = Load([], ("EGGMAIL_ACME_STAGING", "true"));
+        Assert.False(alone.IsValid);
+        Assert.Contains(alone.Errors, e => e.Contains("ACME stays off", StringComparison.Ordinal));
+
+        LoadedConfig enabledElsewhere = Load(["--Acme:Enabled=true", "--Acme:CloudflareApiToken=x"], ("EGGMAIL_ACME_STAGING", "true"));
+        Assert.DoesNotContain(enabledElsewhere.Errors, e => e.Contains("ACME stays off", StringComparison.Ordinal));
+        Assert.Equal(EnvironmentAliases.AcmeStagingDirectory, enabledElsewhere.Config.Acme.DirectoryUrl);
     }
 
     [Fact]
@@ -143,22 +155,24 @@ public class EggMailEnvironmentTests
     }
 
     [Fact]
-    public void The_administrator_user_and_password_forms()
+    public void The_administrator_user_and_password_forms_are_only_mapped_and_trimmed()
     {
-        var plain = Values(Translate(("EGGMAIL_ADMIN_USER", "owner"), ("EGGMAIL_ADMIN_PASSWORD", "correct horse battery")));
+        var plain = Values(Translate(("EGGMAIL_ADMIN_USER", "owner"), ("EGGMAIL_ADMIN_PASSWORD", "  correct horse battery\n")));
         var file = Values(Translate(("EGGMAIL_ADMIN_PASSWORD_FILE", "/run/secrets/pw")));
 
         Assert.Equal("owner", plain["Dashboard:BootstrapAdminUser"]);
-        Assert.Equal("correct horse battery", plain["Dashboard:BootstrapAdminPassword"]);
+        Assert.Equal("correct horse battery", plain["Dashboard:BootstrapAdminPassword"]);   // trimmed, like the contents of the password file
         Assert.Equal("/run/secrets/pw", file["Dashboard:BootstrapAdminPasswordFile"]);
-        Assert.Contains("both set", Assert.Single(Translate(("EGGMAIL_ADMIN_PASSWORD", "correct horse battery"), ("EGGMAIL_ADMIN_PASSWORD_FILE", "/x")).Errors), StringComparison.Ordinal);
-        Assert.Contains("at least 10", Assert.Single(Translate(("EGGMAIL_ADMIN_PASSWORD", "short")).Errors), StringComparison.Ordinal);
     }
 
     [Fact]
-    public void A_password_keeps_its_spaces()
+    public void A_weak_or_doubled_administrator_password_does_not_block_commands_that_never_create_the_administrator()
     {
-        Assert.Equal(" leading and trailing ", Values(Translate(("EGGMAIL_ADMIN_PASSWORD", " leading and trailing ")))["Dashboard:BootstrapAdminPassword"]);
+        // `mta --healthcheck` and `mta admin create` read the same environment as the server: whether the password is usable matters only when the first
+        // administrator is created (FirstAdministrator), so the alias layer and the configuration are valid here.
+        LoadedConfig loaded = Load([], ("EGGMAIL_ADMIN_PASSWORD", "short"), ("EGGMAIL_ADMIN_PASSWORD_FILE", "/x"), ("EGGMAIL_ADMIN_USER", "a b\tc"));
+
+        Assert.True(loaded.IsValid, string.Join("; ", loaded.Errors));
     }
 
     [Fact]
@@ -253,6 +267,49 @@ public class EggMailEnvironmentTests
         Assert.Empty(result.Errors);
     }
 
+    [Theory]
+    [InlineData("EGGMAIL_RELAY", "relayuser:SECRETPW@smtp.relay.example:587")]
+    [InlineData("EGGMAIL_RELAY", "smtp://relayuser:SECRETPW@smtp.relay.example:587")]
+    [InlineData("EGGMAIL_RELAY", "SECRETPW")]
+    [InlineData("EGGMAIL_DATABASE", "SECRETPW")]
+    [InlineData("EGGMAIL_DATABASE", "Host=db;Password=SECRETPW;Bogus=1")]
+    [InlineData("EGGMAIL_DATABASE", "Host=db;Password=SECRETPW;Port=notanumber;Username=u")]
+    [InlineData("EGGMAIL_DATABASE", "Host=db;Password=SECRETPW")]
+    [InlineData("EGGMAIL_DATABASE", "Password=SECRETPW;Username=u")]
+    [InlineData("EGGMAIL_DATABASE", "postgres://u:SECRETPW@/db")]
+    [InlineData("EGGMAIL_DATABASE", "postgres://u:SECRETPW@db/x?sslmode=SECRETPW")]
+    [InlineData("EGGMAIL_DATABASE", "postgres://u:SECRETPW@db/x?target_session_attrs=SECRETPW")]
+    [InlineData("EGGMAIL_DATABASE", "postgres://u:SECRETPW@[::bad")]
+    [InlineData("EGGMAIL_DATABASE", "Host=db;Password=SECRETPW;Username=u;Ssl Mode=SECRETPW")]
+    [InlineData("EGGMAIL_HOSTNAME", "https://user:SECRETPW@mail.example.com")]
+    [InlineData("EGGMAIL_ACME_EMAIL", "SECRETPW")]
+    [InlineData("EGGMAIL_ACME_DIRECTORY", "ca.example/SECRETPW")]
+    [InlineData("EGGMAIL_DOMAINS", "https://user:SECRETPW@example.com")]
+    public void An_error_names_the_variable_and_never_repeats_the_value(string variable, string value)
+    {
+        // The value of these variables can carry a password (a login in a relay address, a connection string); a log line or a terminal must never show it.
+        var variables = new List<(string, string)> { (variable, value) };
+        if (variable == "EGGMAIL_ACME_EMAIL" || variable == "EGGMAIL_ACME_DIRECTORY")
+        {
+            variables.Add(("EGGMAIL_HOSTNAME", "mail.example.com"));
+        }
+
+        LoadedConfig loaded = Load([], [.. variables]);
+
+        Assert.False(loaded.IsValid, $"{variable}={value} was accepted");
+        Assert.All(loaded.Errors, e => Assert.DoesNotContain("SECRETPW", e, StringComparison.Ordinal));
+        Assert.Contains(loaded.Errors, e => e.Contains(variable, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_relay_login_in_the_address_is_explained_without_being_shown()
+    {
+        string error = Assert.Single(Translate(("EGGMAIL_RELAY", "relayuser:SECRETPW@smtp.relay.example:587")).Errors);
+
+        Assert.Contains("EGGMAIL_RELAY_USER", error, StringComparison.Ordinal);
+        Assert.DoesNotContain("SECRETPW", error, StringComparison.Ordinal);
+    }
+
     // The layering
 
     [Fact]
@@ -295,9 +352,9 @@ public class EggMailEnvironmentTests
             environment: name => name == "EGGMAIL_HOSTNAME" ? "mail.example.com" : name == "EGGMAIL_ADMIN_USER" ? "owner" : null);
 
         List<IConfigurationProvider> providers = root.Providers.ToList();
-        int below = providers.FindIndex(p => p is EggMailEnvironmentProvider);
+        int below = providers.FindIndex(p => p is EnvironmentAliasesProvider);
         int environment = providers.FindIndex(p => p is Microsoft.Extensions.Configuration.EnvironmentVariables.EnvironmentVariablesConfigurationProvider);
-        int above = providers.FindLastIndex(p => p is EggMailEnvironmentProvider);
+        int above = providers.FindLastIndex(p => p is EnvironmentAliasesProvider);
         int commandLine = providers.FindIndex(p => p is Microsoft.Extensions.Configuration.CommandLine.CommandLineConfigurationProvider);
         Assert.True(below >= 0 && below < environment && environment < above && above < commandLine, string.Join(", ", providers.Select(p => p.GetType().Name)));
 
@@ -308,6 +365,97 @@ public class EggMailEnvironmentTests
         Assert.False(providers[below].TryGet("Hostname", out _));
         Assert.True(providers[below].TryGet("Dashboard:BootstrapAdminUser", out _));
         Assert.False(providers[above].TryGet("Dashboard:BootstrapAdminUser", out _));
+    }
+
+    private static string TemporaryDirectory()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "eggmail-alias-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        return directory;
+    }
+
+    [Fact]
+    public void The_simple_variables_win_over_appsettings_and_the_bootstrap_file_and_lose_to_the_command_line()
+    {
+        string directory = TemporaryDirectory();
+        try
+        {
+            string appSettings = Path.Combine(directory, "appsettings.json");
+            File.WriteAllText(appSettings, """{ "Hostname": "from-appsettings.example.com", "Acme": { "Email": "settings@example.com" }, "Delivery": { "Relay": { "Address": "settings.relay.example:587" } } }""");
+            File.WriteAllText(Path.Combine(directory, ConfigLoader.BootstrapFileName), """{ "Storage": { "Backend": "Sqlite" }, "Delivery": { "Relay": { "Address": "bootstrap.relay.example:587" } } }""");
+            Func<string, string?> env = name => name switch
+            {
+                "EGGMAIL_HOSTNAME" => "alias.example.com", "EGGMAIL_ACME_EMAIL" => "alias@example.com", "EGGMAIL_RELAY" => "alias.relay.example:587",
+                "EGGMAIL_DATABASE" => "Host=db;Database=eggmail;Username=eggmail", _ => null,
+            };
+
+            MtaConfig plain = ConfigLoader.Load(ConfigLoader.Build([], dataDirectoryHint: directory, appSettingsPath: appSettings, environment: env)).Config;
+            Assert.Equal("alias.example.com", plain.Hostname);
+            Assert.Equal("alias@example.com", plain.Acme.Email);
+            Assert.Equal("alias.relay.example:587", plain.Delivery.Relay.Address);
+            Assert.Equal(StorageBackend.Postgres, plain.Storage.Backend);   // the bootstrap file says Sqlite; the environment alias is above it
+
+            MtaConfig overridden = ConfigLoader.Load(ConfigLoader.Build(["--Hostname=cli.example.com", "--Acme:Email=cli@example.com", "--Storage:Backend=Sqlite"], dataDirectoryHint: directory, appSettingsPath: appSettings, environment: env)).Config;
+            Assert.Equal("cli.example.com", overridden.Hostname);
+            Assert.Equal("cli@example.com", overridden.Acme.Email);
+            Assert.Equal(StorageBackend.Sqlite, overridden.Storage.Backend);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);   // created by this test
+        }
+    }
+
+    [Fact]
+    public void The_stored_settings_layer_is_below_the_simple_variables()
+    {
+        var stored = new[] { new KeyValuePair<string, string?>("Acme:Email", "stored@example.com"), new KeyValuePair<string, string?>("Sending:GlobalPerHour", "10") };
+        string directory = Path.Combine(Path.GetTempPath(), "eggmail-alias-" + Guid.NewGuid().ToString("N"));
+
+        MtaConfig c = ConfigLoader.Load(ConfigLoader.Build([], dataDirectoryHint: directory, appSettingsPath: Path.Combine(directory, "appsettings.json"), storedSettings: stored,
+            environment: name => name switch { "EGGMAIL_HOSTNAME" => "mail.example.com", "EGGMAIL_ACME_EMAIL" => "alias@example.com", _ => null })).Config;
+
+        Assert.Equal("alias@example.com", c.Acme.Email);
+        Assert.Equal(10, c.Sending.GlobalPerHour);
+    }
+
+    [Fact]
+    public void A_list_from_a_variable_replaces_the_list_of_a_lower_layer_instead_of_merging_by_index()
+    {
+        string directory = TemporaryDirectory();
+        try
+        {
+            string appSettings = Path.Combine(directory, "appsettings.json");
+            File.WriteAllText(appSettings, """{ "Acme": { "Domains": ["old-one.example.com", "old-two.example.com"] }, "Api": { "MetricsAllowedNetworks": ["10.0.0.0/8", "192.168.0.0/16"] } }""");
+
+            MtaConfig c = ConfigLoader.Load(ConfigLoader.Build(["--Api:MetricsAllowedNetworks:0=172.16.0.0/12"], dataDirectoryHint: directory, appSettingsPath: appSettings,
+                environment: name => name switch { "EGGMAIL_HOSTNAME" => "mail.example.com", "EGGMAIL_ACME_EMAIL" => "ops@example.com", "CLOUDFLARE_API_TOKEN" => "x", _ => null })).Config;
+
+            Assert.Equal(["mail.example.com"], c.Acme.Domains);                        // not [mail.example.com, old-two.example.com]
+            Assert.Equal(["172.16.0.0/12"], c.Api.MetricsAllowedNetworks);             // the command line owns this list too
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void A_list_in_the_same_layer_keeps_all_its_entries_and_a_separated_value_is_split()
+    {
+        string directory = TemporaryDirectory();
+        try
+        {
+            string appSettings = Path.Combine(directory, "appsettings.json");
+            File.WriteAllText(appSettings, """{ "Acme": { "Domains": ["a.example.com", "b.example.com"] } }""");
+
+            Assert.Equal(["a.example.com", "b.example.com"], ConfigLoader.Load(ConfigLoader.Build([], dataDirectoryHint: directory, appSettingsPath: appSettings, environment: _ => null)).Config.Acme.Domains);
+            Assert.Equal(["x.example.com", "y.example.com"], ConfigLoader.Load(ConfigLoader.Build(["--Acme:Domains=x.example.com, y.example.com"], dataDirectoryHint: directory, appSettingsPath: appSettings, environment: _ => null)).Config.Acme.Domains);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
     }
 
     [Fact]
@@ -323,14 +471,14 @@ public class EggMailEnvironmentTests
     public void The_variables_are_identical_in_the_code_and_the_operations_guide()
     {
         string guide = File.ReadAllText(ConfigurationDocumentationTests.DocumentationPath());
-        foreach (EnvironmentAlias alias in EggMailEnvironment.Aliases)
+        foreach (EnvironmentAlias alias in EnvironmentAliases.Aliases)
         {
             Assert.True(guide.Contains($"| `{alias.Name}` |", StringComparison.Ordinal), $"docs/operations.md has no table row for {alias.Name}");
         }
 
         // Every variable the table in the guide lists is one the code reads (a row for a variable nothing reads is a lie).
         var listed = System.Text.RegularExpressions.Regex.Matches(guide, @"^\| `((?:EGGMAIL_|CLOUDFLARE_)[A-Z_]+)` \|", System.Text.RegularExpressions.RegexOptions.Multiline).Select(m => m.Groups[1].Value);
-        Assert.All(listed, name => Assert.Contains(EggMailEnvironment.Aliases, a => a.Name == name));
+        Assert.All(listed, name => Assert.Contains(EnvironmentAliases.Aliases, a => a.Name == name));
     }
 
     /// <summary>EGGMAIL_ names in the documents and deployment files that are not configuration aliases (compose substitution variables, scripts, tests).</summary>
@@ -342,7 +490,7 @@ public class EggMailEnvironmentTests
         // A typo such as EGGMAIL_HOST in the quick start would be copied by every reader, and nothing else would notice.
         string root = Path.GetDirectoryName(Path.GetDirectoryName(ConfigurationDocumentationTests.DocumentationPath()))!;
         string[] files = ["README.md", "docs/operations.md", "docs/release.md", "deploy/compose/compose.yaml", "deploy/compose/compose.postgres.yaml", "deploy/compose/.env.example"];
-        string[] known = [.. EggMailEnvironment.Aliases.Select(a => a.Name), .. NotAliases];
+        string[] known = [.. EnvironmentAliases.Aliases.Select(a => a.Name), .. NotAliases];
         foreach (string file in files)
         {
             foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(File.ReadAllText(Path.Combine(root, file)), @"\b(?:EGGMAIL|CLOUDFLARE)_[A-Z0-9_]+"))
@@ -353,10 +501,18 @@ public class EggMailEnvironmentTests
     }
 
     [Fact]
+    public void Keys_exempted_because_another_change_adds_them_are_not_read_yet()
+    {
+        // When the change that reads such a key lands, this fails: delete the entry from KeysFromOtherChanges, it then has to be documented and read like every key.
+        SortedSet<string> read = ConfigurationDocumentationTests.KeysReadByCodeForTests();
+        Assert.All(ConfigurationDocumentationTests.KeysFromOtherChanges, key => Assert.DoesNotContain(key, read));
+    }
+
+    [Fact]
     public void Every_key_an_alias_stands_for_is_a_key_the_code_reads()
     {
         SortedSet<string> read = ConfigurationDocumentationTests.KeysReadByCodeForTests();
-        foreach (string key in EggMailEnvironment.Aliases.SelectMany(a => a.Keys).Distinct())
+        foreach (string key in EnvironmentAliases.Aliases.SelectMany(a => a.Keys).Distinct())
         {
             if (ConfigurationDocumentationTests.KeysFromOtherChanges.Contains(key, StringComparer.OrdinalIgnoreCase))
             {

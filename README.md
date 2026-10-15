@@ -47,15 +47,15 @@ docker run -d --name eggmail -p 587:5587 -p 465:4465 -p 2525:2525 -p 8443:8443 \
 docker logs eggmail    # the dashboard administrator password, printed ONCE, between two marker lines
 ```
 
-Open `https://localhost:8443` (the certificate is self-signed until you set up a real one, and the dashboard says so), sign in as `admin` with the printed password and change it on the **Account** page. SMTP submission with AUTH works on 587 (STARTTLS), 465 (implicit TLS) and 2525. The first start creates the data directory and SQLite files, the key ring, the VERP key, the administrator and the certificate; a DKIM key is generated for every sending domain you add.
+Open `https://localhost:8443` (the certificate is self-signed until you set up a real one, and the dashboard says so), sign in as `admin` with the printed password and choose your own when the dashboard asks (the printed one is temporary, and it stays readable in the container log until you do). SMTP submission with AUTH works on 587 (STARTTLS), 465 (implicit TLS) and 2525. The first start creates the data directory and SQLite files, the key ring, the VERP key, the administrator and the certificate; a DKIM key is generated for every sending domain you add.
 
 Then, in the dashboard: add your sending domain (it shows the DNS records to publish; the domain is usable once its DKIM record verifies), create an **SMTP credential** or an **API key** under Credentials, and point your application at port 587 (or `POST /api/v1/messages`).
 
 **For a real server** add three or four variables (the complete list, with what each one maps to, is [The simple environment variables](docs/operations.md#the-simple-environment-variables); the long configuration keys keep working and win):
 
 ```sh
-docker run -d --name eggmail \
-  -p 587:5587 -p 465:4465 -p 2525:2525 -p 8443:8443 -v eggmail-data:/data \
+docker run -d --name eggmail-prod \
+  -p 587:5587 -p 465:4465 -p 2525:2525 -p 8443:8443 -v eggmail-prod-data:/data \
   -e EGGMAIL_HOSTNAME=mail.example.com \
   -e EGGMAIL_ACME_EMAIL=admin@example.com \
   -e EGGMAIL_DOMAINS=example.com \
@@ -63,6 +63,14 @@ docker run -d --name eggmail \
 ```
 
 `EGGMAIL_HOSTNAME` is the name in SMTP greetings, the certificate and the dashboard; together with `EGGMAIL_ACME_EMAIL` it turns on a free, automatically renewed certificate. `EGGMAIL_DOMAINS` registers your sending domains at the start, `CLOUDFLARE_API_TOKEN` selects the DNS-01 challenge instead of port 80, `EGGMAIL_ADMIN_PASSWORD_FILE` lets you choose the administrator password instead of having one generated, `EGGMAIL_RELAY=host:port` adds a smarthost fallback. What you must still do outside the container (DNS records, reverse DNS, outbound port 25, firewall) is [listed in the operations guide](docs/operations.md#what-only-you-can-do-outside-the-container); port 25 is not a submission port ([ports](docs/operations.md#ports)).
+
+**Lost the administrator password?** (Use your own container and volume names.) Create another administrator (SQLite: the server container must be stopped; PostgreSQL: it can run, add your `-e EGGMAIL_DATABASE=...`), then reset or delete the old account in the dashboard:
+
+```sh
+docker stop eggmail
+docker run --rm -v eggmail-data:/data -e MTA_ADMIN_PASSWORD='a-new-password-1' ghcr.io/eggspot/eggmail:nightly admin create --user rescue
+docker start eggmail
+```
 
 **With Docker Compose** (the tested file is [`deploy/compose/compose.yaml`](deploy/compose/compose.yaml)):
 

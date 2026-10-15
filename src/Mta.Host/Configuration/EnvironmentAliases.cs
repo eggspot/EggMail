@@ -20,7 +20,7 @@ public sealed record EnvironmentAliasResult(IReadOnlyList<KeyValuePair<string, s
 /// (<c>Hostname</c>, <c>Acme__Email</c>, ...) and the command line, so anything set the long way always wins. A combination that cannot work is an
 /// error that names the variable and says what to set instead (the server then refuses to start rather than start in a state nobody asked for).
 /// </summary>
-public static partial class EggMailEnvironment
+public static partial class EnvironmentAliases
 {
     public const string AcmeStagingDirectory = "https://acme-staging-v02.api.letsencrypt.org/directory";
 
@@ -68,7 +68,7 @@ public static partial class EggMailEnvironment
             }
             else
             {
-                errors.Add($"EGGMAIL_HOSTNAME '{hostname}' is not a host name. Use the DNS name of this server, for example mail.example.com (no http://, no port, no IP address).");
+                errors.Add("EGGMAIL_HOSTNAME is not a host name. Use the DNS name of this server, for example mail.example.com (no http://, no port, no IP address).");
                 hostname = null;
             }
         }
@@ -77,7 +77,7 @@ public static partial class EggMailEnvironment
         {
             if (!IsEmailAddress(acmeEmail))
             {
-                errors.Add($"EGGMAIL_ACME_EMAIL '{acmeEmail}' is not an email address. Use the contact address for the certificate account, for example admin@example.com.");
+                errors.Add("EGGMAIL_ACME_EMAIL is not an email address. Use the contact address for the certificate account, for example admin@example.com.");
             }
             else if (Read("EGGMAIL_HOSTNAME") is null)
             {
@@ -87,7 +87,7 @@ public static partial class EggMailEnvironment
             {
                 if (!hostname.Contains('.', StringComparison.Ordinal))
                 {
-                    errors.Add($"EGGMAIL_HOSTNAME '{hostname}' has no dot: a certificate authority only issues for a fully qualified name such as mail.example.com.");
+                    errors.Add("EGGMAIL_HOSTNAME has no dot: a certificate authority only issues for a fully qualified name such as mail.example.com.");
                 }
                 else
                 {
@@ -101,7 +101,7 @@ public static partial class EggMailEnvironment
         bool useStaging = false;
         if (staging is not null && !bool.TryParse(staging, out useStaging))
         {
-            errors.Add($"EGGMAIL_ACME_STAGING '{staging}' must be true or false.");
+            errors.Add("EGGMAIL_ACME_STAGING must be true or false.");
         }
 
         if (useStaging && directory is not null)
@@ -116,17 +116,12 @@ public static partial class EggMailEnvironment
         {
             if (!Uri.TryCreate(directory, UriKind.Absolute, out Uri? uri) || uri.Scheme is not ("https" or "http"))
             {
-                errors.Add($"EGGMAIL_ACME_DIRECTORY '{directory}' is not an http(s) URL. Use the directory URL of your CA, for example https://acme-v02.api.letsencrypt.org/directory.");
+                errors.Add("EGGMAIL_ACME_DIRECTORY is not an http(s) URL. Use the directory URL of your CA, for example https://acme-v02.api.letsencrypt.org/directory.");
             }
             else
             {
                 Set("Acme:DirectoryUrl", directory);
             }
-        }
-
-        if ((useStaging || directory is not null) && acmeEmail is null)
-        {
-            errors.Add("EGGMAIL_ACME_STAGING / EGGMAIL_ACME_DIRECTORY only choose the CA; ACME stays off until both EGGMAIL_HOSTNAME and EGGMAIL_ACME_EMAIL are set. Set them, or remove the CA variable.");
         }
 
         if (cloudflareToken is not null && cloudflareTokenFile is not null)
@@ -139,36 +134,19 @@ public static partial class EggMailEnvironment
             Set("Acme:Challenge", "Dns01");
         }
 
+        // The administrator variables are only mapped. Whether the user name and the password are usable matters when the first administrator is created
+        // (FirstAdministrator), not for `--healthcheck` or `mta admin create`, which read the same environment.
         if (Read("EGGMAIL_ADMIN_USER") is { } adminUser)
         {
-            if (Mta.Host.Api.DashboardAccounts.UserNameProblem(adminUser) is { } problem)
-            {
-                errors.Add("EGGMAIL_ADMIN_USER: " + problem);
-            }
-            else
-            {
-                Set("Dashboard:BootstrapAdminUser", adminUser);
-            }
+            Set("Dashboard:BootstrapAdminUser", adminUser);
         }
 
-        string? adminPassword = get("EGGMAIL_ADMIN_PASSWORD") is { Length: > 0 } rawPassword ? rawPassword : null;   // not trimmed: a password may begin or end with a space
-        string? adminPasswordFile = Read("EGGMAIL_ADMIN_PASSWORD_FILE");
-        if (adminPassword is not null && adminPasswordFile is not null)
+        if (Read("EGGMAIL_ADMIN_PASSWORD") is { } adminPassword)   // trimmed like the contents of the password file
         {
-            errors.Add("EGGMAIL_ADMIN_PASSWORD and EGGMAIL_ADMIN_PASSWORD_FILE are both set. Set only one (the file form keeps the password out of the environment).");
+            Set("Dashboard:BootstrapAdminPassword", adminPassword);
         }
-        else if (adminPassword is not null)
-        {
-            if (Mta.Host.Api.DashboardAccounts.PasswordProblem(adminPassword) is { } problem)
-            {
-                errors.Add("EGGMAIL_ADMIN_PASSWORD: " + problem + " Choose a longer one, or leave it unset and the server generates a password and prints it once.");
-            }
-            else
-            {
-                Set("Dashboard:BootstrapAdminPassword", adminPassword);
-            }
-        }
-        else if (adminPasswordFile is not null)
+
+        if (Read("EGGMAIL_ADMIN_PASSWORD_FILE") is { } adminPasswordFile)
         {
             Set("Dashboard:BootstrapAdminPasswordFile", adminPasswordFile);
         }
@@ -177,10 +155,10 @@ public static partial class EggMailEnvironment
         {
             string[] names = domains.Split([',', ';', ' ', '\t', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                 .Select(d => d.TrimEnd('.').ToLowerInvariant()).Distinct().ToArray();
-            string? bad = names.FirstOrDefault(d => d.Contains("://", StringComparison.Ordinal) || d.Contains('@') || d.Contains('/') || d.Contains(':') || !d.Contains('.', StringComparison.Ordinal));
-            if (names.Length == 0 || bad is not null)
+            int bad = Array.FindIndex(names, d => d.Contains("://", StringComparison.Ordinal) || d.Contains('@') || d.Contains('/') || d.Contains(':') || !d.Contains('.', StringComparison.Ordinal));
+            if (names.Length == 0 || bad >= 0)
             {
-                errors.Add($"EGGMAIL_DOMAINS '{domains}' must list sending domains such as example.com, separated by commas (not addresses or URLs{(bad is null ? "" : $"; check '{bad}'")}).");
+                errors.Add("EGGMAIL_DOMAINS must list sending domains such as example.com, separated by commas (not addresses or URLs)" + (bad < 0 ? "." : $"; check entry {bad + 1}."));
             }
             else
             {
@@ -206,7 +184,7 @@ public static partial class EggMailEnvironment
 
         string? relay = Read("EGGMAIL_RELAY");
         string? relayUser = Read("EGGMAIL_RELAY_USER");
-        string? relayPassword = get("EGGMAIL_RELAY_PASSWORD") is { Length: > 0 } rawRelayPassword ? rawRelayPassword : null;
+        string? relayPassword = Read("EGGMAIL_RELAY_PASSWORD");
         string? relayPasswordFile = Read("EGGMAIL_RELAY_PASSWORD_FILE");
         if (relay is null)
         {
@@ -290,19 +268,19 @@ public static partial class EggMailEnvironment
         return at > 0 && at == value.LastIndexOf('@') && at < value.Length - 1 && !value.Any(char.IsWhiteSpace) && value[(at + 1)..].Contains('.', StringComparison.Ordinal);
     }
 
-    /// <summary>Why <paramref name="value"/> is not <c>host:port</c> of a relay, or null.</summary>
+    /// <summary>Why a value is not <c>host:port</c> of a relay, or null. The text never repeats the value: it may carry a login (<c>user:password@host:587</c>).</summary>
     public static string? RelayProblem(string value)
     {
         int colon = value.LastIndexOf(':');
         if (colon <= 0 || colon == value.Length - 1 || !int.TryParse(value[(colon + 1)..], NumberStyles.None, CultureInfo.InvariantCulture, out int port) || port is < 1 or > 65535)
         {
-            return $"'{value}' is not host:port. Use for example smtp.relay.example:587.";
+            return "not host:port. Use for example smtp.relay.example:587 (the login goes in EGGMAIL_RELAY_USER and EGGMAIL_RELAY_PASSWORD_FILE, not in this value).";
         }
 
         string host = value[..colon];
         if (NormalizeHostname(host) is not { } name || name.Split('.')[^1].All(char.IsAsciiDigit))
         {
-            return $"'{host}' is not a host name. Use a name such as smtp.relay.example, not an IP address: the name is looked up in DNS and its certificate is checked.";
+            return "the host is not a host name. Use a name such as smtp.relay.example, not an IP address or a URL (a login goes in EGGMAIL_RELAY_USER and EGGMAIL_RELAY_PASSWORD_FILE): the name is looked up in DNS and its certificate is checked.";
         }
 
         return null;
@@ -310,10 +288,12 @@ public static partial class EggMailEnvironment
 
     /// <summary>
     /// Accepts an Npgsql connection string or a <c>postgres://user:password@host:port/database?sslmode=require</c> URL and returns the Npgsql form in
-    /// <paramref name="connectionString"/>. Returns the problem (and an empty string) when it cannot work.
+    /// <paramref name="connectionString"/>. Returns the problem (and an empty string) when it cannot work. A problem text never repeats the value or the
+    /// parser's own message (both can contain the password): it says which part is wrong.
     /// </summary>
     public static string? NormalizeDatabase(string value, out string connectionString)
     {
+        const string Form = " Use Host=db.example.com;Database=eggmail;Username=eggmail;Password=... or postgres://user:password@db.example.com/eggmail (percent-encode special characters in the password of a URL).";
         connectionString = "";
         try
         {
@@ -322,7 +302,7 @@ public static partial class EggMailEnvironment
             {
                 if (!Uri.TryCreate(value, UriKind.Absolute, out Uri? uri) || string.IsNullOrEmpty(uri.Host))
                 {
-                    return "the URL is not valid. Use postgres://user:password@host:5432/database (a password with special characters must be percent-encoded).";
+                    return "the URL is not valid." + Form;
                 }
 
                 builder = new NpgsqlConnectionStringBuilder { Host = uri.Host.Trim('[', ']'), Port = uri.Port > 0 ? uri.Port : 5432 };
@@ -347,22 +327,26 @@ public static partial class EggMailEnvironment
                     int eq = pair.IndexOf('=', StringComparison.Ordinal);
                     string key = Uri.UnescapeDataString(eq < 0 ? pair : pair[..eq]);
                     string val = eq < 0 ? "" : Uri.UnescapeDataString(pair[(eq + 1)..]);
-                    if (key.Equals("sslmode", StringComparison.OrdinalIgnoreCase))
+                    if (!key.Equals("sslmode", StringComparison.OrdinalIgnoreCase))
                     {
-                        builder.SslMode = val.ToLowerInvariant() switch
-                        {
-                            "disable" => SslMode.Disable,
-                            "prefer" => SslMode.Prefer,
-                            "require" => SslMode.Require,
-                            "verify-ca" => SslMode.VerifyCA,
-                            "verify-full" => SslMode.VerifyFull,
-                            _ => throw new ArgumentException($"sslmode '{val}' is not one of disable, prefer, require, verify-ca, verify-full."),
-                        };
+                        return "the URL has a parameter other than sslmode, which a URL cannot carry. Use the Npgsql form (Host=...;Database=...;Username=...;Password=...) for other options.";
                     }
-                    else
+
+                    SslMode? mode = val.ToLowerInvariant() switch
                     {
-                        throw new ArgumentException($"the URL parameter '{key}' is not supported. Use the Npgsql form (Host=...;Database=...;Username=...;Password=...) for other options.");
+                        "disable" => SslMode.Disable,
+                        "prefer" => SslMode.Prefer,
+                        "require" => SslMode.Require,
+                        "verify-ca" => SslMode.VerifyCA,
+                        "verify-full" => SslMode.VerifyFull,
+                        _ => null,
+                    };
+                    if (mode is null)
+                    {
+                        return "sslmode is not one of disable, prefer, require, verify-ca, verify-full.";
                     }
+
+                    builder.SslMode = mode.Value;
                 }
             }
             else
@@ -372,7 +356,7 @@ public static partial class EggMailEnvironment
 
             if (string.IsNullOrWhiteSpace(builder.Host))
             {
-                return "no host. Use Host=db.example.com;Database=eggmail;Username=eggmail;Password=... or postgres://user:password@db.example.com/eggmail.";
+                return "no host." + Form;
             }
 
             if (string.IsNullOrWhiteSpace(builder.Username))
@@ -383,21 +367,21 @@ public static partial class EggMailEnvironment
             connectionString = builder.ConnectionString;
             return null;
         }
-        catch (ArgumentException ex)
+        catch (Exception ex) when (ex is ArgumentException or FormatException or UriFormatException or InvalidOperationException)
         {
-            return "not a valid PostgreSQL connection string (" + ex.Message + ") Use Host=db.example.com;Database=eggmail;Username=eggmail;Password=... or postgres://user:password@db.example.com/eggmail.";
+            return "not a valid PostgreSQL connection string." + Form;
         }
     }
 }
 
 /// <summary>Configuration source of the simple environment variables; a distinct provider type so the backend switch can tell where a value came from.</summary>
-public sealed class EggMailEnvironmentSource(EnvironmentAliasResult result) : IConfigurationSource
+public sealed class EnvironmentAliasesSource(EnvironmentAliasResult result) : IConfigurationSource
 {
-    public IConfigurationProvider Build(IConfigurationBuilder builder) => new EggMailEnvironmentProvider(new MemoryConfigurationSource { InitialData = result.Values }, result.Errors);
+    public IConfigurationProvider Build(IConfigurationBuilder builder) => new EnvironmentAliasesProvider(new MemoryConfigurationSource { InitialData = result.Values }, result.Errors);
 }
 
-/// <summary>Provider of <see cref="EggMailEnvironmentSource"/>; carries the problems found while reading the variables so <see cref="ConfigLoader.Load"/> can report them.</summary>
-public sealed class EggMailEnvironmentProvider(MemoryConfigurationSource source, IReadOnlyList<string> errors) : MemoryConfigurationProvider(source)
+/// <summary>Provider of <see cref="EnvironmentAliasesSource"/>; carries the problems found while reading the variables so <see cref="ConfigLoader.Load"/> can report them.</summary>
+public sealed class EnvironmentAliasesProvider(MemoryConfigurationSource source, IReadOnlyList<string> errors) : MemoryConfigurationProvider(source)
 {
     public IReadOnlyList<string> Errors { get; } = errors;
 }

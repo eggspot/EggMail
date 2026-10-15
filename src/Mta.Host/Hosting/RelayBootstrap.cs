@@ -11,7 +11,8 @@ namespace Mta.Host.Hosting;
 /// <see cref="RelaySection.RouteName"/>, so the delivery engine, the dashboard and a backend switch see it like any other route. It is a fallback after
 /// direct delivery, for every recipient domain, as relay routes always are. At every start the configuration is authoritative for host, port, TLS mode and
 /// login of that route; priority, the domains it carries and its enabled flag stay as an administrator set them in the dashboard. Removing the configuration
-/// removes the route. A route with another name is never touched.
+/// removes the route. The route is recognised by its fixed id, not by its name: a route an administrator made with the same name is never changed or deleted
+/// (the start is refused with the reason instead), and neither is any other route.
 /// </summary>
 public static class RelayBootstrap
 {
@@ -25,7 +26,8 @@ public static class RelayBootstrap
     public static async Task<string?> ApplyAsync(MtaConfig config, IConfigStore store, ISecretProtector protector, IMtaLog log, CancellationToken ct)
     {
         RelaySection relay = config.Delivery.Relay;
-        RelayRouteRecord? existing = (await store.GetRelayRoutesAsync(ct).ConfigureAwait(false)).FirstOrDefault(r => string.Equals(r.Name, RelaySection.RouteName, StringComparison.OrdinalIgnoreCase));
+        IReadOnlyList<RelayRouteRecord> routes = await store.GetRelayRoutesAsync(ct).ConfigureAwait(false);
+        RelayRouteRecord? existing = routes.FirstOrDefault(r => r.Id == RouteId);
         if (string.IsNullOrWhiteSpace(relay.Address))
         {
             if (existing is not null)
@@ -37,9 +39,14 @@ public static class RelayBootstrap
             return null;
         }
 
+        if (routes.Any(r => r.Id != RouteId && string.Equals(r.Name, RelaySection.RouteName, StringComparison.OrdinalIgnoreCase)))
+        {
+            return $"A relay route named '{RelaySection.RouteName}' exists that this server did not create from EGGMAIL_RELAY. Rename it in the dashboard (Relay routes) or remove EGGMAIL_RELAY.";
+        }
+
         string address = relay.Address.Trim();
         int colon = address.LastIndexOf(':');
-        string host = EggMailEnvironment.NormalizeHostname(address[..colon])!;
+        string host = EnvironmentAliases.NormalizeHostname(address[..colon])!;
         int port = int.Parse(address[(colon + 1)..], System.Globalization.CultureInfo.InvariantCulture);
         string mode = string.IsNullOrWhiteSpace(relay.TlsMode) ? (port == 465 ? "implicit" : "verify") : relay.TlsMode.Trim().ToLowerInvariant();
 

@@ -20,7 +20,10 @@
 #   7. deploy/smoke/smoke.py signs in with that generated password and checks: domain verification (DKIM key generated on demand), STARTTLS and implicit TLS
 #      with the self-signed certificate, a message submitted with AUTH over each and one sent through the API with a key, all delivered (DKIM signed)
 #      to a sink, the dashboard over HTTPS with the self-signed warning
-#   8. a restart prints no password again, the same password still signs in and the data (the tenant made in step 7) is still there
+#   8. a restart prints no password again, the password chosen at the first sign-in (the generated one is temporary) still signs in and the data (the tenant made
+#      in step 7) is still there
+#   9. the documented lost-password recovery: with the container stopped, `docker run --rm -v <volume>:/data -e MTA_ADMIN_PASSWORD=... <image> admin create --user rescue`
+#      makes another administrator, who signs in after the container is started again
 # Linux only: the instance reaches the DNS stub and the SMTP sink of smoke.py at the address of this host, found with `ip route`
 # (set SMOKE_HOST_IP to override).
 set -euo pipefail
@@ -151,10 +154,19 @@ echo "-- end to end (sign in with the generated password; STARTTLS, implicit TLS
 python3 "$here/smoke.py" --api "http://127.0.0.1:${http_port}" --smtp-host 127.0.0.1 --smtp-port "$smtp_port" --smtps-port "$smtps_port" --https-port "$https_port" \
   --api-send --expect-self-signed --tenant-marker create --admin-user admin --admin-password "$password" --expect-backend sqlite --host-ip "$host_ip" --timeout 90
 
-echo "-- restart: no second password, the same one signs in, the data is still there"
+echo "-- restart: no second password, the changed password signs in (the generated one is gone), the data is still there"
 docker restart "$name" >/dev/null
 wait_healthy
 again=$(docker logs "$name" 2>&1 | python3 "$here/smoke.py" --print-generated-password)   # fails if the notice was printed a second time
 [ "$again" = "$password" ] || { echo "::error::the password in the log changed across a restart"; exit 1; }
-python3 "$here/smoke.py" --api "http://127.0.0.1:$(docker port "$name" 8080/tcp | head -n 1 | sed 's/.*://')" --admin-user admin --admin-password "$password" --expect-backend sqlite \
+changed="${password}-Changed-1"   # smoke.py chose this when it had to replace the temporary password
+python3 "$here/smoke.py" --api "http://127.0.0.1:$(docker port "$name" 8080/tcp | head -n 1 | sed 's/.*://')" --admin-user admin --admin-password "$changed" --expect-backend sqlite \
+  --tenant-marker assert --stop-after signin
+
+echo "-- lost password: the documented recovery command (the notice and the README print it) makes another administrator on the stopped container's volume"
+docker stop "$name" >/dev/null
+docker run --rm -v "$volume:/data" -e MTA_ADMIN_PASSWORD="$admin_password" "$ref" admin create --user rescue
+docker start "$name" >/dev/null
+wait_healthy
+python3 "$here/smoke.py" --api "http://127.0.0.1:$(docker port "$name" 8080/tcp | head -n 1 | sed 's/.*://')" --admin-user rescue --admin-password "$admin_password" --expect-backend sqlite \
   --tenant-marker assert --stop-after signin

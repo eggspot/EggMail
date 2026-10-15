@@ -273,6 +273,8 @@ def wait_for(description, probe, timeout, interval=1.0):
     fail("timed out after %ds waiting for %s" % (timeout, description))
 
 
+# What smoke.py appends to a temporary (generated) administrator password when it has to choose a new one: the scripts that sign in again afterwards add it too.
+CHANGED_SUFFIX = "-Changed-1"
 NOTICE_BEGIN = "EGGMAIL FIRST START: DASHBOARD ADMINISTRATOR"
 NOTICE_END = "END OF THE ONE-TIME PASSWORD"
 
@@ -357,6 +359,15 @@ def main():
     api.cookie = session
     _, me, _ = api.call("GET", "/api/v1/me")
     api.csrf = me["csrfToken"]
+    if me.get("mustChangePassword"):
+        # The generated first-administrator password is temporary: everything but the password change is refused until it is replaced.
+        step("the temporary password has to be changed first (everything else is refused with password_change_required)")
+        _, refused, _ = api.call("GET", "/api/v1/admin/tenants", expect=(403,))
+        if refused.get("code") != "password_change_required":
+            fail("a temporary password was not refused with password_change_required: %s" % refused)
+        temporary, args.admin_password = args.admin_password, args.admin_password + CHANGED_SUFFIX
+        api.call("POST", "/api/v1/me/password", {"currentPassword": temporary, "newPassword": args.admin_password}, expect=(204,))
+        print("   changed (a later sign-in uses the password with the suffix %s)" % CHANGED_SUFFIX, flush=True)
     if me.get("role") != "admin":
         fail("signed in as %r, expected role admin" % me.get("role"))
     if args.tenant_marker == "create":

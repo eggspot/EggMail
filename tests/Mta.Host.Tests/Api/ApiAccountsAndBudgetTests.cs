@@ -105,28 +105,28 @@ public class ApiHostingTests : IAsyncLifetime
     {
         string file = Path.Combine(_dir, "pw");
         await File.WriteAllTextAsync(file, "first-run-password\n");
-        await Mta.Host.Hosting.ApiHosting.EnsureBootstrapAdminAsync(Config(file, "boss"), _f.Storage, _f.Clock, Mta.Core.NullMtaLog.Instance, default);
+        await Mta.Host.Hosting.ApiHosting.EnsureFirstAdministratorAsync(Config(file, "boss"), _f.Storage, _f.Clock, Mta.Core.NullMtaLog.Instance, default);
 
         Reply login = await _f.NewClient().PostAsync("/api/v1/session", new { user = "boss", password = "first-run-password" });
         Assert.Equal(HttpStatusCode.OK, login.Status);
         Assert.Equal("admin", login.Str("role"));
 
         await File.WriteAllTextAsync(file, "a-different-password\n");
-        await Mta.Host.Hosting.ApiHosting.EnsureBootstrapAdminAsync(Config(file, "second"), _f.Storage, _f.Clock, Mta.Core.NullMtaLog.Instance, default);
+        await Mta.Host.Hosting.ApiHosting.EnsureFirstAdministratorAsync(Config(file, "second"), _f.Storage, _f.Clock, Mta.Core.NullMtaLog.Instance, default);
         Assert.Single(await _f.Storage.Config.GetDashboardUsersAsync(default)); // an admin exists: nothing more is created
     }
 
     [Fact]
     public async Task A_missing_or_weak_password_file_is_a_problem_to_report_and_creates_nobody()
     {
-        var missing = await Mta.Host.Hosting.ApiHosting.EnsureBootstrapAdminAsync(Config(Path.Combine(_dir, "missing")), _f.Storage, _f.Clock, Mta.Core.NullMtaLog.Instance, default);
+        var missing = await Mta.Host.Hosting.ApiHosting.EnsureFirstAdministratorAsync(Config(Path.Combine(_dir, "missing")), _f.Storage, _f.Clock, Mta.Core.NullMtaLog.Instance, default);
         string weak = Path.Combine(_dir, "weak");
         await File.WriteAllTextAsync(weak, "short");
-        var tooShort = await Mta.Host.Hosting.ApiHosting.EnsureBootstrapAdminAsync(Config(weak), _f.Storage, _f.Clock, Mta.Core.NullMtaLog.Instance, default);
+        var tooShort = await Mta.Host.Hosting.ApiHosting.EnsureFirstAdministratorAsync(Config(weak), _f.Storage, _f.Clock, Mta.Core.NullMtaLog.Instance, default);
 
-        Assert.Equal(Mta.Host.Hosting.BootstrapAdminOutcome.Problem, missing.Outcome);
+        Assert.Equal(Mta.Host.Hosting.FirstAdministratorOutcome.Problem, missing.Outcome);
         Assert.Contains("cannot be read", missing.Problem, StringComparison.Ordinal);
-        Assert.Equal(Mta.Host.Hosting.BootstrapAdminOutcome.Problem, tooShort.Outcome);
+        Assert.Equal(Mta.Host.Hosting.FirstAdministratorOutcome.Problem, tooShort.Outcome);
         Assert.Contains("at least 10", tooShort.Problem, StringComparison.Ordinal);
         Assert.Empty(await _f.Storage.Config.GetDashboardUsersAsync(default));
     }
@@ -134,12 +134,12 @@ public class ApiHostingTests : IAsyncLifetime
     [Fact]
     public async Task Without_any_configured_password_one_is_generated_returned_once_and_works()
     {
-        var first = await Mta.Host.Hosting.ApiHosting.EnsureBootstrapAdminAsync(Config(null), _f.Storage, _f.Clock, Mta.Core.NullMtaLog.Instance, default);
-        var again = await Mta.Host.Hosting.ApiHosting.EnsureBootstrapAdminAsync(Config(null), _f.Storage, _f.Clock, Mta.Core.NullMtaLog.Instance, default);
+        var first = await Mta.Host.Hosting.ApiHosting.EnsureFirstAdministratorAsync(Config(null), _f.Storage, _f.Clock, Mta.Core.NullMtaLog.Instance, default);
+        var again = await Mta.Host.Hosting.ApiHosting.EnsureFirstAdministratorAsync(Config(null), _f.Storage, _f.Clock, Mta.Core.NullMtaLog.Instance, default);
 
-        Assert.Equal(Mta.Host.Hosting.BootstrapAdminOutcome.CreatedWithGeneratedPassword, first.Outcome);
+        Assert.Equal(Mta.Host.Hosting.FirstAdministratorOutcome.CreatedWithGeneratedPassword, first.Outcome);
         Assert.Equal(24, first.GeneratedPassword!.Length);
-        Assert.Equal(Mta.Host.Hosting.BootstrapAdminOutcome.AlreadyExists, again.Outcome);   // the next start creates and prints nothing
+        Assert.Equal(Mta.Host.Hosting.FirstAdministratorOutcome.AlreadyExists, again.Outcome);   // the next start creates and prints nothing
         Assert.Null(again.GeneratedPassword);
         Reply login = await _f.NewClient().PostAsync("/api/v1/session", new { user = "admin", password = first.GeneratedPassword });
         Assert.Equal(HttpStatusCode.OK, login.Status);

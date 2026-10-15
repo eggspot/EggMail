@@ -52,7 +52,19 @@ function cleanEnvironment() {
  * `Delivery__RemotePort`, `Delivery__AllowPrivateMxAddresses`). The Docker release smoke test (deploy/smoke/image.sh) uses the same assertions
  * against the published image with the same lab settings and nothing else.
  */
-export async function startZeroConfigStack({ variables = {}, name = 'zero' } = {}) {
+export async function startZeroConfigStack(options = {}) {
+  // A free port is only free until the server binds it: another process on a busy machine can take one in between. That failure is the machine's,
+  // not the server's, so it is retried with new ports; any other failure (a refused configuration, a crash) is returned at once.
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await startOnce(options);
+    } catch (error) {
+      if (attempt >= 3 || !/address already in use|EADDRINUSE|AddressInUse|use the same port/i.test(String(error?.message))) throw error;
+    }
+  }
+}
+
+async function startOnce({ variables = {}, name = 'zero' } = {}) {
   const appDir = process.env.EGGMAIL_E2E_APP_DIR;
   if (!appDir) throw new Error('EGGMAIL_E2E_APP_DIR is not set: the Playwright global setup publishes the host.');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), `eggmail-${name}-`));
@@ -140,9 +152,18 @@ export async function startZeroConfigStack({ variables = {}, name = 'zero' } = {
       return /^\s*password:\s+(\S+)\s*$/m.exec(blocks[0])?.[1] ?? null;
     },
     /** Runs `mta <args>` with the server's environment (for example `--healthcheck`) and returns its exit status and output. */
-    cli(...args) {
-      const result = spawnSync('dotnet', [path.join(appDir, 'mta.dll'), ...args], { cwd: appDir, env, encoding: 'utf8', timeout: 60_000 });
+    cli(args, extraEnv = {}) {
+      const result = spawnSync('dotnet', [path.join(appDir, 'mta.dll'), ...(Array.isArray(args) ? args : [args])], { cwd: appDir, env: { ...env, ...extraEnv }, encoding: 'utf8', timeout: 60_000 });
       return { status: result.status, output: (result.stdout ?? '') + (result.stderr ?? '') };
+    },
+    /** Runs `fn` with the server stopped and starts it again: what the lost-password recovery of the README does with a SQLite volume (one process owns the data directory). */
+    async whileStopped(fn) {
+      await stop();
+      try {
+        await fn();
+      } finally {
+        await start();
+      }
     },
     async restart() {
       await stop();

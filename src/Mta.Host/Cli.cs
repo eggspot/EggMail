@@ -216,7 +216,7 @@ internal static class Cli
         EggMailRuntime createdRuntime;
         try
         {
-            createdRuntime = await EggMailRuntime.CreateAsync(config, storage, clock, startupLog, CancellationToken.None).ConfigureAwait(false);
+            createdRuntime = await EggMailRuntime.CreateAsync(config, storage, clock, startupLog, CancellationToken.None, hostnameConfigured: StartupChecks.HostnameConfigured(config, Environment.GetEnvironmentVariable)).ConfigureAwait(false);
         }
         catch (Mta.Host.Secrets.SecretsConfigurationException ex)
         {
@@ -226,8 +226,8 @@ internal static class Cli
         }
 
         await using var runtime = createdRuntime;
-        BootstrapAdminResult admin = await ApiHosting.EnsureBootstrapAdminAsync(config, storage, clock, startupLog, CancellationToken.None).ConfigureAwait(false);
-        if (admin.Outcome == BootstrapAdminOutcome.Problem)
+        FirstAdministratorResult admin = await ApiHosting.EnsureFirstAdministratorAsync(config, storage, clock, startupLog, CancellationToken.None).ConfigureAwait(false);
+        if (admin.Outcome == FirstAdministratorOutcome.Problem)
         {
             Console.Error.WriteLine("configuration error: " + admin.Problem);
             return 2;
@@ -235,7 +235,7 @@ internal static class Cli
 
         if (admin.GeneratedPassword is { } generatedPassword)
         {
-            BootstrapAdmin.WriteGeneratedPasswordNotice(Console.Out, admin.UserName, generatedPassword, config.Dashboard.HttpsPort);
+            FirstAdministrator.WriteGeneratedPasswordNotice(Console.Out, admin.UserName, generatedPassword, config.Dashboard.HttpsPort);
         }
 
         if (gate.Mode == StartupMode.Normal && await RelayBootstrap.ApplyAsync(config, storage.Config, runtime.Secrets, startupLog, CancellationToken.None).ConfigureAwait(false) is { } relayProblem)

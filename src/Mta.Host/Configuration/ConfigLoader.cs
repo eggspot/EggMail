@@ -63,7 +63,7 @@ public static class ConfigLoader
 
     /// <summary>
     /// Builds the layered configuration for the process: appsettings (<paramref name="appSettingsPath"/>, default <see cref="DefaultAppSettingsPath"/>, if present), the bootstrap file in the data directory
-    /// (storage pointer written by the backend switch), the simple <c>EGGMAIL_*</c> variables (<see cref="EggMailEnvironment"/>; read through <paramref name="environment"/>,
+    /// (storage pointer written by the backend switch), the simple <c>EGGMAIL_*</c> variables (<see cref="EnvironmentAliases"/>; read through <paramref name="environment"/>,
     /// the process environment by default), the long-form environment variables, then the command line (highest precedence).
     /// <paramref name="storedSettings"/> (the global settings kept in the config store) form the lowest layer, above the built-in defaults.
     /// </summary>
@@ -94,10 +94,10 @@ public static class ConfigLoader
         // The one exception is Hostname: configuration keys are case-insensitive, so the HOSTNAME variable that Docker and Kubernetes set in every container
         // (the container id or pod name) IS the key "Hostname" and would silently outrank EGGMAIL_HOSTNAME. The host name alias therefore sits just above the
         // environment (and still below the command line).
-        EnvironmentAliasResult aliases = EggMailEnvironment.Translate(environment ?? Environment.GetEnvironmentVariable);
-        builder.Add(new EggMailEnvironmentSource(new EnvironmentAliasResult(aliases.Values.Where(v => v.Key != "Hostname").ToList(), aliases.Errors)));
+        EnvironmentAliasResult aliases = EnvironmentAliases.Translate(environment ?? Environment.GetEnvironmentVariable);
+        builder.Add(new EnvironmentAliasesSource(new EnvironmentAliasResult(aliases.Values.Where(v => v.Key != "Hostname").ToList(), aliases.Errors)));
         builder.AddEnvironmentVariables();
-        builder.Add(new EggMailEnvironmentSource(new EnvironmentAliasResult(aliases.Values.Where(v => v.Key == "Hostname").ToList(), [])));
+        builder.Add(new EnvironmentAliasesSource(new EnvironmentAliasResult(aliases.Values.Where(v => v.Key == "Hostname").ToList(), [])));
         builder.AddCommandLine(args);
         return builder.Build();
     }
@@ -120,7 +120,14 @@ public static class ConfigLoader
 
         if (configuration is IConfigurationRoot root)
         {
-            errors.AddRange(root.Providers.OfType<EggMailEnvironmentProvider>().SelectMany(p => p.Errors));
+            errors.AddRange(root.Providers.OfType<EnvironmentAliasesProvider>().SelectMany(p => p.Errors));
+
+            // EGGMAIL_ACME_STAGING / EGGMAIL_ACME_DIRECTORY only choose the CA. They are an error only when nothing, by whatever layer, turns ACME on:
+            // Acme__Enabled=true in the environment or a mounted file is as good as EGGMAIL_ACME_EMAIL.
+            if (!cfg.Acme.Enabled && root.Providers.OfType<EnvironmentAliasesProvider>().Any(p => p.TryGet("Acme:DirectoryUrl", out _)))
+            {
+                errors.Add("EGGMAIL_ACME_STAGING / EGGMAIL_ACME_DIRECTORY only choose the CA; ACME stays off until both EGGMAIL_HOSTNAME and EGGMAIL_ACME_EMAIL are set (or Acme:Enabled is true). Set them, or remove the CA variable.");
+            }
         }
 
         var locked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -163,8 +170,8 @@ public static class ConfigLoader
 
         var acme = Bind<AcmeSection>(configuration, "Acme");
         var api = Bind<ApiSection>(configuration, "Api");
-        SplitEntries(acme.Domains, configuration["Acme:Domains"]);
-        SplitEntries(api.MetricsAllowedNetworks, configuration["Api:MetricsAllowedNetworks"]);
+        ApplyList(configuration, "Acme:Domains", acme.Domains);
+        ApplyList(configuration, "Api:MetricsAllowedNetworks", api.MetricsAllowedNetworks);
 
         return new MtaConfig
         {
@@ -190,6 +197,46 @@ public static class ConfigLoader
             Acme = acme,
             Api = api,
         };
+    }
+
+    /// <summary>
+    /// A list setting is owned by the highest layer that mentions it: configuration layers merge lists by index (<c>:0</c>, <c>:1</c>), which would leave the
+    /// stale entries of a lower layer behind a shorter list from a higher one (<c>appsettings.json</c> with two domains, <c>EGGMAIL_HOSTNAME</c> with one: two
+    /// domains, one of them stale). The list is the one entry set of the highest layer that has any, indexed or as one separated value.
+    /// </summary>
+    internal static void ApplyList(IConfiguration configuration, string key, List<string> list)
+    {
+        if (configuration is IConfigurationRoot root)
+        {
+            foreach (IConfigurationProvider provider in root.Providers.Reverse())
+            {
+                var indexes = provider.GetChildKeys([], key).Where(k => int.TryParse(k, out _)).Select(int.Parse).Order().ToList();
+                bool scalar = provider.TryGet(key, out string? value) && !string.IsNullOrWhiteSpace(value);
+                if (indexes.Count == 0 && !scalar)
+                {
+                    continue;
+                }
+
+                list.Clear();
+                if (scalar)
+                {
+                    list.Add(value!);
+                }
+
+                foreach (int index in indexes)
+                {
+                    if (provider.TryGet($"{key}:{index}", out string? entry) && !string.IsNullOrWhiteSpace(entry))
+                    {
+                        list.Add(entry);
+                    }
+                }
+
+                SplitEntries(list, null);
+                return;
+            }
+        }
+
+        SplitEntries(list, configuration[key]);
     }
 
     /// <summary>
@@ -444,7 +491,7 @@ public static class ConfigLoader
         }
 
         ValidateStorageTuning(c.Storage, errors);
-        ValidateFirstRun(c, errors);
+        ValidateRelay(c, errors);
         ValidateTlsAndAcme(c, errors);
         ValidateApi(c.Api, errors);
     }
@@ -463,24 +510,9 @@ public static class ConfigLoader
         Require(s.Sqlite.RetentionDeletePause >= TimeSpan.Zero, "Sqlite:RetentionDeletePause must not be negative.", errors);
     }
 
-    /// <summary>The first administrator and the relay from configuration: a combination that cannot work stops the start with a message that says what to set.</summary>
-    private static void ValidateFirstRun(MtaConfig c, List<string> errors)
+    /// <summary>The relay from configuration: a combination that cannot work stops the start with a message that says what to set. (The first administrator's name and password are checked when the account is created, see <see cref="Mta.Host.Hosting.FirstAdministrator"/>.)</summary>
+    private static void ValidateRelay(MtaConfig c, List<string> errors)
     {
-        DashboardSection dashboard = c.Dashboard;
-        if (Mta.Host.Api.DashboardAccounts.UserNameProblem(dashboard.BootstrapAdminUser) is { } userProblem)
-        {
-            errors.Add("Dashboard:BootstrapAdminUser: " + userProblem);
-        }
-
-        if (!string.IsNullOrEmpty(dashboard.BootstrapAdminPassword) && !string.IsNullOrWhiteSpace(dashboard.BootstrapAdminPasswordFile))
-        {
-            errors.Add("Dashboard:BootstrapAdminPassword and Dashboard:BootstrapAdminPasswordFile are both set. Set only one (EGGMAIL_ADMIN_PASSWORD / EGGMAIL_ADMIN_PASSWORD_FILE).");
-        }
-        else if (!string.IsNullOrEmpty(dashboard.BootstrapAdminPassword) && Mta.Host.Api.DashboardAccounts.PasswordProblem(dashboard.BootstrapAdminPassword) is { } passwordProblem)
-        {
-            errors.Add("Dashboard:BootstrapAdminPassword: " + passwordProblem);
-        }
-
         RelaySection relay = c.Delivery.Relay;
         if (string.IsNullOrWhiteSpace(relay.Address))
         {
@@ -489,7 +521,7 @@ public static class ConfigLoader
             return;
         }
 
-        if (EggMailEnvironment.RelayProblem(relay.Address.Trim()) is { } relayProblem)
+        if (EnvironmentAliases.RelayProblem(relay.Address.Trim()) is { } relayProblem)
         {
             errors.Add("Delivery:Relay:Address: " + relayProblem);
         }
