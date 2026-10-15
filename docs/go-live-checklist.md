@@ -127,9 +127,10 @@ Ports (container port to published port, from [design.md §7.1](design.md#71-lis
 | 2525 | in | Alternate submission | optional; close it if unused |
 | 8443 | in | Dashboard and API over HTTPS | **your own IPs only** |
 | 25 (container 2526) | in | **Bounce listener** (receives bounces/DSNs/complaints for the signed bounce addresses) | the internet (it must be reachable by every mail server) |
+| 80 | in | **ACME HTTP-01** challenge listener (only while ACME with HTTP-01 is on; step 4.0) | the internet (the CA validates from several places) |
 | 8080 | loopback only | health probes | never published beyond `127.0.0.1` (the compose file already does that) |
 | 25 | **out** | Delivery to recipient MX servers | the internet |
-| 443 and 80 out, 53 out | out | ACME, Cloudflare API, webhooks, DNS | |
+| 443 out, 53 out | out | ACME, Cloudflare API, webhooks, DNS | |
 
 The bounce listener on 25 is what turns `550 user unknown` replies that arrive later (asynchronous bounces) into suppressions and webhooks. Open it, but see the warning in [security.md](security.md): it is the one unauthenticated surface on the internet (it accepts only signed bounce addresses plus `postmaster` and `abuse`).
 
@@ -501,9 +502,40 @@ $ TO=test-xxxx@srv1.mail-tester.com python3 send_test.py      # or the API call 
 
 ## 4. ACME with a real certificate authority
 
-Until now the server uses a self-signed certificate (the dashboard and `/readyz` say so). Built-in ACME orders one certificate for the names in `Acme:Domains` with the **DNS-01** challenge through Cloudflare. It is verified in CI against the Pebble test CA only ([components/acme.md](components/acme.md)); this is its first run against a real CA and the real Cloudflare API.
+Until now the server uses a self-signed certificate (the dashboard and `/readyz` say so). Built-in ACME orders one certificate for the names in `Acme:Domains` (default: the `Hostname`) from Let's Encrypt (or another CA: `Acme:Directory`), renews it by itself and swaps it into SMTP and HTTPS without a restart ([operations.md](operations.md#tls-certificates-and-acme)). Two ways to prove the name:
 
-### 4.1 Cloudflare token
+| | **HTTP-01** (default; the quick path) | **DNS-01** through Cloudflare |
+|---|---|---|
+| Needs | port 80 of `mail.example.com` reachable from the internet and published to the container; an `A` record | the zone in Cloudflare and an API token (4.1); no inbound port |
+| Wildcards | no | yes |
+| Selected by | `Acme__Enabled` and `Acme__Email`, no token | the presence of `Acme__CloudflareApiToken(File)` (or `Acme__Challenge: Dns01`) |
+
+It is verified in CI against the Pebble test CA (both challenge types and external account binding); this is its first run against a real CA, and for DNS-01 the first against the real Cloudflare API. **Do the staging run first**: production Let's Encrypt rate-limits failed validations and new accounts.
+
+### 4.0 HTTP-01 (skip to 4.1 if you use DNS-01)
+
+Publish port 80 and allow it in the cloud firewall (it must be open to the whole internet: the CA validates from several places). In `deploy/compose/compose.yaml` add `- "80:80"` under `ports:` (the listener binds port 80 inside the container; Docker allows the non-root user to; under Kubernetes or rootless Podman set `Acme__Http01ListenPort: "8081"` and map 80 to 8081). Create `deploy/compose/compose.acme.yaml`:
+
+```yaml
+services:
+  eggmail:
+    environment:
+      Acme__Enabled: "true"
+      Acme__Email: you@example.com
+      Acme__Directory: LetsEncryptStaging      # staging first; remove this line for production (4.3)
+```
+
+```sh
+docker compose -f compose.yaml -f compose.acme.yaml up -d
+docker compose logs -f eggmail | grep -i acme          # Ctrl-C when it settles
+curl -sk -b jar $API/admin/certificates/acme | jq .
+curl -sk -b jar $API/admin/certificates | jq '.[] | {name, subject, issuer, source, active, notAfter}'
+```
+
+- **Expect**: within about a minute the log says the certificate was issued; `/api/v1/capabilities` stops showing the `acme_pending` warning; the certificate list has `source: "acme"`, `active: true`, issuer starting `(STAGING)`.
+- **If not**: the dashboard banner and `GET /admin/certificates/acme` give a category and the last error: "the port for the HTTP-01 challenge could not be bound" (something else uses port 80: stop it, or move `Acme__Http01ListenPort` and forward port 80); "the CA could not validate the challenge" (port 80 is not reachable from outside: test with `curl -v http://mail.example.com/.well-known/acme-challenge/x` from another network, expect `404`; check the cloud firewall and that an `AAAA` record, if any, works too); "the CA could not be reached" (outbound HTTPS). Failed orders retry after 10 minutes, then 20, 40, up to 6 hours; the self-signed certificate keeps serving meanwhile.
+
+### 4.1 DNS-01: the Cloudflare token (skip if you use HTTP-01)
 
 Cloudflare dashboard, My Profile, **API Tokens**, **Create Token**, "Create Custom Token":
 
@@ -532,16 +564,16 @@ Store it as a file secret readable by uid 1654, next to the admin password:
 printf '%s' "$CF_TOKEN" > secrets/cloudflare_token.txt && chmod 644 secrets/cloudflare_token.txt
 ```
 
-### 4.2 Staging first
+### 4.2 Staging first (DNS-01)
 
-Production Let's Encrypt rate-limits failed validations and new accounts; use the staging directory until the flow works. Create `deploy/compose/compose.acme.yaml`:
+Create `deploy/compose/compose.acme.yaml` (this replaces the file of 4.0 if you use DNS-01):
 
 ```yaml
 services:
   eggmail:
     environment:
       Acme__Enabled: "true"
-      Acme__DirectoryUrl: https://acme-staging-v02.api.letsencrypt.org/directory
+      Acme__Directory: LetsEncryptStaging
       Acme__Email: you@example.com
       Acme__Domains__0: mail.example.com
       Acme__CloudflareApiTokenFile: /run/secrets/cloudflare_token
@@ -569,8 +601,7 @@ curl -sk -b jar $API/admin/certificates | jq '.[] | {name, subject, issuer, sour
 ### 4.3 Production
 
 ```sh
-# change Acme__DirectoryUrl in compose.acme.yaml to
-#   https://acme-v02.api.letsencrypt.org/directory
+# remove the line  Acme__Directory: LetsEncryptStaging  from compose.acme.yaml (production Let's Encrypt is the default)
 docker compose -f compose.yaml -f compose.acme.yaml up -d
 curl -sk -b jar -H "X-CSRF-Token: $CSRF" -H 'content-type: application/json' -d "{\"domains\":[\"$HOST\"]}" $API/admin/certificates/acme
 # {"status":"pending", ...}   (202)  -- a second account is created for the production directory; the staging certificate is not re-ordered by itself
