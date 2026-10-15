@@ -517,7 +517,7 @@ Preact + Vite recommended. Build in a Node stage of the Dockerfile and copy only
 
 ## 11. Inbound mail
 
-EggMail started outbound-only: port 25 accepted bounce traffic and nothing else. The owner asked for inbound mail too. This section is the design of that feature. Everything in it is **DESIGN-DECIDED** (decision 92) unless marked otherwise; the coordinator fixed the shape (the authentication libraries are wired in, a per-domain flag, per-domain routes with four actions, no mailbox server) and this section decides the rest, with the reasons. Config key names marked *proposed* are final only when the pull request that reads them documents them in [operations.md](operations.md).
+EggMail started outbound-only: port 25 accepted bounce traffic and nothing else. The owner asked for inbound mail too. This section is the design of that feature. Everything in it is **DESIGN-DECIDED** (decision 91) unless marked otherwise; the coordinator fixed the shape (the authentication libraries are wired in, a per-domain flag, per-domain routes with four actions, no mailbox server) and this section decides the rest, with the reasons. Config key names marked *proposed* are final only when the pull request that reads them documents them in [operations.md](operations.md).
 
 ### 11.1 Scope and non-goals
 

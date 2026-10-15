@@ -3,7 +3,7 @@ using Mta.Core;
 namespace Mta.Storage.Tests;
 
 /// <summary>
-/// Inbound mail (<see cref="IStorage.Inbound"/>, decision 92): per-domain settings and routes, received messages, route action claims and the retention job.
+/// Inbound mail (<see cref="IStorage.Inbound"/>, decision 91): per-domain settings and routes, received messages, route action claims and the retention job.
 /// Identical on every backend and in both history modes; the backends' own tests cover restarts, the schema upgrade and the backend switch.
 /// </summary>
 public abstract class InboundConformance : StorageTestBase
