@@ -93,12 +93,12 @@ internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore, IMes
 
     // Writes
 
-    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
-    internal async ValueTask RecordAcceptedAsync(AcceptedMessage message, CancellationToken cancellationToken)
+    /// <summary>Queues the history rows of an accepted message. Not an asynchronous method: it hands the writer's task straight to the caller, so it is no state machine of its own while the write is pending.</summary>
+    internal ValueTask<int> RecordAcceptedAsync(AcceptedMessage message, CancellationToken cancellationToken)
     {
         MessageContent? content = ContentRules.ShouldRecord(rt.Options, message) ? ContentRules.Prepare(rt.Options, message.Content!) : null;
         string? subject = rt.Options.Content.StoreSubject ? message.Content?.Subject : null;
-        await rt.HistoryWriter!.SubmitAsync(new AcceptHistoryState(message, content, subject, EventIds.Next(message.ReceivedAt)), RecordAccepted, cancellationToken).ConfigureAwait(false);
+        return rt.HistoryWriter!.SubmitAsync(new AcceptHistoryState(message, content, subject, EventIds.Next(message.ReceivedAt)), RecordAccepted, cancellationToken);
     }
 
     private static readonly Func<WriterContext, AcceptHistoryState, int> RecordAccepted = static (ctx, s) =>

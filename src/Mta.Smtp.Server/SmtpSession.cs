@@ -309,8 +309,11 @@ internal sealed class SmtpSession
         return false;
     }
 
-    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
-    private async ValueTask DispatchAsync(SmtpCommand cmd)
+    /// <summary>
+    /// Runs one command. Not itself asynchronous: a command that has to wait returns the task of its own handler, so a message in flight holds
+    /// one suspended frame less (every suspended frame is a heap-allocated state machine unless the pool of boxes happens to have one).
+    /// </summary>
+    private ValueTask DispatchAsync(SmtpCommand cmd)
     {
         switch (cmd.Verb)
         {
@@ -324,10 +327,7 @@ internal sealed class SmtpSession
                 break;
 
             case SmtpVerb.Quit:
-                Write(SmtpReplies.Bye);
-                await FlushAsync().ConfigureAwait(false);
-                _close = true;
-                break;
+                return QuitAsync();
 
             case SmtpVerb.Rset:
                 ResetTransaction();
@@ -347,29 +347,33 @@ internal sealed class SmtpSession
                 break;
 
             case SmtpVerb.StartTls:
-                await HandleStartTlsAsync().ConfigureAwait(false);
-                break;
+                return HandleStartTlsAsync();
 
             case SmtpVerb.Auth:
-                await HandleAuthAsync(cmd).ConfigureAwait(false);
-                break;
+                return HandleAuthAsync(cmd);
 
             case SmtpVerb.Mail:
-                await HandleMailAsync(cmd).ConfigureAwait(false);
-                break;
+                return HandleMailAsync(cmd);
 
             case SmtpVerb.Rcpt:
-                await HandleRcptAsync(cmd).ConfigureAwait(false);
-                break;
+                return HandleRcptAsync(cmd);
 
             case SmtpVerb.Data:
-                await HandleDataAsync().ConfigureAwait(false);
-                break;
+                return HandleDataAsync();
 
             case SmtpVerb.Bdat:
-                await HandleBdatAsync(cmd).ConfigureAwait(false);
-                break;
+                return HandleBdatAsync(cmd);
         }
+
+        return ValueTask.CompletedTask;
+    }
+
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
+    private async ValueTask QuitAsync()
+    {
+        Write(SmtpReplies.Bye);
+        await FlushAsync().ConfigureAwait(false);
+        _close = true;
     }
 
     // ---------------------------------------------------------------- verbs
@@ -801,7 +805,30 @@ internal sealed class SmtpSession
                 return;
             }
 
-            await CompleteMessageAsync(message).ConfigureAwait(false);
+            long t0 = _server.Clock.Timestamp;
+            var handed = BeginMessage(message, _server.Clock.UtcNow);
+            SmtpReply reply;
+            try
+            {
+                reply = await _handler.OnMessageAsync(handed, _stopping).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (_stopping.IsCancellationRequested)
+            {
+                reply = SmtpReplies.ShuttingDown;
+                _close = true;
+            }
+            catch (Exception ex)
+            {
+                reply = HandlerFailed(ex);
+            }
+            finally
+            {
+                handed.Clear();
+            }
+
+            EndMessage(reply, message.Length);
+            await FlushAsync().ConfigureAwait(false);
+            SmtpMetrics.TransactionSeconds.Record(_server.Clock.GetElapsedTime(t0).TotalSeconds);
         }
         finally
         {
@@ -909,7 +936,30 @@ internal sealed class SmtpSession
                 }
                 else if (chunk.LastChunk)
                 {
-                    await CompleteMessageAsync(message).ConfigureAwait(false);
+                    long t0 = _server.Clock.Timestamp;
+                    var handed = BeginMessage(message, _server.Clock.UtcNow);
+                    SmtpReply reply;
+                    try
+                    {
+                        reply = await _handler.OnMessageAsync(handed, _stopping).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (_stopping.IsCancellationRequested)
+                    {
+                        reply = SmtpReplies.ShuttingDown;
+                        _close = true;
+                    }
+                    catch (Exception ex)
+                    {
+                        reply = HandlerFailed(ex);
+                    }
+                    finally
+                    {
+                        handed.Clear();
+                    }
+
+                    EndMessage(reply, message.Length);
+                    await FlushAsync().ConfigureAwait(false);
+                    SmtpMetrics.TransactionSeconds.Record(_server.Clock.GetElapsedTime(t0).TotalSeconds);
                     return;
                 }
                 else
@@ -1002,12 +1052,14 @@ internal sealed class SmtpSession
         }
     }
 
-    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
-    private async ValueTask CompleteMessageAsync(MessageBuffer body)
+    /// <summary>
+    /// The end of a DATA or BDAT transaction is written out in both callers (reading the message, handing it to the handler, answering) instead of
+    /// being one more asynchronous method between them and the handler: a frame that waits for the handler is a state machine on the heap for as long as
+    /// the handler takes. This is the first half: the message object the handler receives.
+    /// </summary>
+    private SmtpMessage BeginMessage(MessageBuffer body, DateTimeOffset now)
     {
-        long t0 = _server.Clock.Timestamp;
         var mail = _mail!;
-        var now = _server.Clock.UtcNow;
         Span<byte> compactId = stackalloc byte[32];
         Ids.New().TryFormat(compactId, out _, "N");
         var received = _received.Build(_ctx, _options.Hostname, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_recipients), compactId[..16], now);
@@ -1019,31 +1071,23 @@ internal sealed class SmtpSession
         message.Body = body.AsSequence();
         message.ReceivedHeader = received;
         message.ReceivedAt = now;
+        return message;
+    }
 
-        SmtpReply reply;
-        try
-        {
-            reply = await _handler.OnMessageAsync(message, _stopping).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (_stopping.IsCancellationRequested)
-        {
-            reply = SmtpReplies.ShuttingDown;
-            _close = true;
-        }
-        catch (Exception ex)
-        {
-            _log.Write(MtaLogLevel.Error, "smtp.server", $"session {_ctx.SessionId}: handler failed for message", ex);
-            reply = SmtpReplies.LocalError;
-        }
-        finally
-        {
-            message.Clear();
-        }
+    /// <summary>The reply for a handler that threw (called from the catch block of the callers).</summary>
+    private SmtpReply HandlerFailed(Exception ex)
+    {
+        _log.Write(MtaLogLevel.Error, "smtp.server", $"session {_ctx.SessionId}: handler failed for message", ex);
+        return SmtpReplies.LocalError;
+    }
 
+    /// <summary>The second half: counts the message, ends the transaction and queues the reply (the caller flushes it).</summary>
+    private void EndMessage(SmtpReply reply, long bodyLength)
+    {
         if (reply.IsPositiveCompletion)
         {
             SmtpMetrics.Messages.Add(1);
-            SmtpMetrics.Bytes.Add(body.Length);
+            SmtpMetrics.Bytes.Add(bodyLength);
             _messages++;
         }
         else
@@ -1053,8 +1097,6 @@ internal sealed class SmtpSession
 
         ResetTransaction();
         Write(reply);
-        await FlushAsync().ConfigureAwait(false);
-        SmtpMetrics.TransactionSeconds.Record(_server.Clock.GetElapsedTime(t0).TotalSeconds);
     }
 
     private sealed class CountingNullWriter : IBufferWriter<byte>

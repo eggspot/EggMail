@@ -117,10 +117,26 @@ public sealed class WriterMetrics
     internal void RecordIndividual() => Interlocked.Increment(ref _commands);
 }
 
+/// <summary>The statements that open and end a batch, run through the native API like the commands themselves (no driver transaction object per batch).</summary>
+internal static class BatchSql
+{
+    public static readonly Stmt Begin = new("BEGIN IMMEDIATE");
+
+    public static readonly Stmt Commit = new("COMMIT");
+
+    public static readonly Stmt Rollback = new("ROLLBACK");
+}
+
 internal abstract class WriterCommand
 {
     /// <summary>Runs alone, outside any transaction (checkpoint, incremental_vacuum).</summary>
     internal bool Exclusive;
+
+    /// <summary>
+    /// The command hands <see cref="WriterContext.Transaction"/> to a library (Entity Framework) and so needs the batch to run in a driver
+    /// transaction. Every other command only uses the native statements, which take part in whatever transaction is open on the connection.
+    /// </summary>
+    internal bool NeedsDriverTransaction;
 
     internal abstract void Execute(WriterContext context);
 
@@ -211,9 +227,9 @@ internal sealed class SqliteFileWriter : IAsyncDisposable
     /// Queues <paramref name="work"/> and returns when its batch has committed. The token only cancels the wait for queue
     /// space (back-pressure); a command already queued is always executed.
     /// </summary>
-    public ValueTask<TResult> SubmitAsync<TState, TResult>(TState state, Func<WriterContext, TState, TResult> work, CancellationToken cancellationToken = default, bool exclusive = false)
+    public ValueTask<TResult> SubmitAsync<TState, TResult>(TState state, Func<WriterContext, TState, TResult> work, CancellationToken cancellationToken = default, bool exclusive = false, bool needsDriverTransaction = false)
     {
-        var command = new WriterCommand<TState, TResult>(state, work) { Exclusive = exclusive };
+        var command = new WriterCommand<TState, TResult>(state, work) { Exclusive = exclusive, NeedsDriverTransaction = needsDriverTransaction };
         ValueTask<TResult> awaitable = new(command, command.Version);
         if (_channel.Writer.TryWrite(command))
         {
@@ -333,13 +349,22 @@ internal sealed class SqliteFileWriter : IAsyncDisposable
 
     private void ExecuteBatch(WriterContext context, List<WriterCommand> batch)
     {
-        SqliteConnection connection = context.Connection;
+        bool driverTransaction = false;
+        for (int i = 0; i < batch.Count; i++)
+        {
+            if (batch[i].NeedsDriverTransaction)
+            {
+                driverTransaction = true;
+                break;
+            }
+        }
+
         bool failed = false;
         long commitStart = 0;
         long commitTicks = 0;
         try
         {
-            using SqliteTransaction tx = connection.BeginTransaction(deferred: false);
+            using SqliteTransaction? tx = Begin(context, driverTransaction);
             context.Transaction = tx;
             try
             {
@@ -349,13 +374,13 @@ internal sealed class SqliteFileWriter : IAsyncDisposable
                 }
 
                 commitStart = Stopwatch.GetTimestamp();
-                tx.Commit();
+                Commit(context, tx);
                 commitTicks = Stopwatch.GetTimestamp() - commitStart;
             }
             catch
             {
                 failed = true;
-                TryRollback(tx);
+                TryRollback(context, tx);
             }
             finally
             {
@@ -386,22 +411,49 @@ internal sealed class SqliteFileWriter : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Opens the batch transaction (<c>BEGIN IMMEDIATE</c>). A batch of native commands uses the prepared statements <see cref="BatchSql"/> and allocates
+    /// nothing; only a batch that holds a command for a library that wants a transaction object (<see cref="WriterCommand.NeedsDriverTransaction"/>)
+    /// goes through the driver's <c>BeginTransaction</c>, which builds a command, a reader and a rollback hook for it.
+    /// </summary>
+    private static SqliteTransaction? Begin(WriterContext context, bool driverTransaction)
+    {
+        if (driverTransaction)
+        {
+            return context.Connection.BeginTransaction(deferred: false);
+        }
+
+        context.Command(BatchSql.Begin).ExecuteNonQuery();
+        return null;
+    }
+
+    private static void Commit(WriterContext context, SqliteTransaction? tx)
+    {
+        if (tx is not null)
+        {
+            tx.Commit();
+            return;
+        }
+
+        context.Command(BatchSql.Commit).ExecuteNonQuery();
+    }
+
     private void RunIndividually(WriterContext context, WriterCommand command)
     {
         try
         {
-            using SqliteTransaction tx = context.Connection.BeginTransaction(deferred: false);
+            using SqliteTransaction? tx = Begin(context, command.NeedsDriverTransaction);
             context.Transaction = tx;
             try
             {
                 command.Execute(context);
                 long start = Stopwatch.GetTimestamp();
-                tx.Commit();
+                Commit(context, tx);
                 Metrics.RecordBatch(1, Stopwatch.GetTimestamp() - start);
             }
             catch
             {
-                TryRollback(tx);
+                TryRollback(context, tx);
                 throw;
             }
             finally
@@ -438,11 +490,18 @@ internal sealed class SqliteFileWriter : IAsyncDisposable
         command.Succeed();
     }
 
-    private static void TryRollback(SqliteTransaction tx)
+    private static void TryRollback(WriterContext context, SqliteTransaction? tx)
     {
         try
         {
-            tx.Rollback();
+            if (tx is not null)
+            {
+                tx.Rollback();
+            }
+            else
+            {
+                context.Command(BatchSql.Rollback).ExecuteNonQuery();
+            }
         }
         catch (Exception)
         {
