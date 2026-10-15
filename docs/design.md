@@ -4,7 +4,7 @@ Status: design phase, no code. Source of truth for individual choices is [decisi
 
 ## 1. Goals and scope
 
-EggMail is an open-source, self-hosted outbound email server: SMTP ingress, HTTP API, delivery tracking, webhooks and a dashboard. Primary goal: the fastest SMTP server, claimed only after reproducible measurement ([benchmarks.md](benchmarks.md)). Target runtime: .NET 10 LTS (supported to 2028-11-14), deployed as a Docker image.
+EggMail is an open-source, self-hosted outbound email server: SMTP ingress, HTTP API, delivery tracking, webhooks and a dashboard. It also receives mail for domains its tenants enable, routes it to webhooks, forwards, storage or the bin, and verifies it with SPF, DKIM, DMARC and ARC ([section 11](#11-inbound-mail)). Primary goal: the fastest SMTP server, claimed only after reproducible measurement ([benchmarks.md](benchmarks.md)). Target runtime: .NET 10 LTS (supported to 2028-11-14), deployed as a Docker image.
 
 "Fastest" is scoped to **SMTP ingest** (accept) throughput and latency, reported separately from outbound delivery.
 
@@ -456,7 +456,7 @@ For `body_expired`, add `"expired_at"` and `"retention_days"`. The `type` URI is
 | 465 | 4465 | Implicit TLS (RFC 8314) | on |
 | 2525 | 2525 | STARTTLS (last-resort for networks blocking 587/465) | on |
 | 2587 / 2465 | 2587 / 2465 | STARTTLS / implicit | off |
-| 25 | 2526 | **Bounce/DSN role only** (unauthenticated, bounce domain only; STARTTLS offered, not required) | bounce role |
+| 25 | 2526 | **Bounce/DSN role**: unauthenticated, bounce domain only; STARTTLS offered, not required. With `Inbound:Enabled` the role is `Inbound`: the same, plus the recipients of inbound-enabled domains that have a route ([section 11](#11-inbound-mail)) | bounce role |
 | any | any | Plain, loopback or internal network only, no AUTH | off |
 | 8080 | 8080 | Dashboard/API HTTP (probes, internal, not published) | on |
 | 8443 (optionally 443) | 8443 | Dashboard/API HTTPS | on |
@@ -514,3 +514,199 @@ Preact + Vite recommended. Build in a Node stage of the Dockerfile and copy only
 - **Observability:** `System.Diagnostics.Metrics` and `ActivitySource` (BCL, so even the SMTP stack emits metrics), OpenTelemetry with OTLP, JSON console logs. The OTel Prometheus exporter was still beta and prometheus-net had no release since January 2024, so a hand-rolled `/metrics` endpoint (about 150 lines) was suggested as the alternative.
 - **Limits (settings with identical defaults on both backends):** `Smtp:MaxMessageSize` 25 MiB, 50 recipients, `Queue:MaxLifetime` 5 days.
 - **Deliverability operations** (IP reputation, warm-up, PTR/EHLO, port-25 blocking, abuse desk) are operational, not code, and sit outside the engineering estimate.
+
+## 11. Inbound mail
+
+EggMail started outbound-only: port 25 accepted bounce traffic and nothing else. The owner asked for inbound mail too. This section is the design of that feature. Everything in it is **DESIGN-DECIDED** (decision 92) unless marked otherwise; the coordinator fixed the shape (the authentication libraries are wired in, a per-domain flag, per-domain routes with four actions, no mailbox server) and this section decides the rest, with the reasons. Config key names marked *proposed* are final only when the pull request that reads them documents them in [operations.md](operations.md).
+
+### 11.1 Scope and non-goals
+
+**In:** accept mail on port 25 for domains a tenant enabled; verify SPF, DKIM, DMARC and ARC; add `Received` and `Authentication-Results`; route each recipient to one action (webhook, forward, store, discard); store, search, download and delete received mail through the API and the dashboard; retention; metrics; both backends; the backend switch.
+
+**Out (this step):** an IMAP or POP3 mailbox server (a stored message is read through the API and dashboard, not with a mail client: **open question for the owner**, [open-questions.md](open-questions.md)); sending DMARC aggregate reports about received mail (`Mta.Auth.Reports` can write them; not wired); automatic replies of any kind; content filtering and spam scoring beyond the optional DNSBL hook; per-user mailboxes and quotas.
+
+### 11.2 How a message flows
+
+```
+ sender's MTA --25--> RCPT: domain inbound-enabled and a route matches?   no: 550, nothing stored, nothing sent
+                      DATA: size, smuggling and time limits (existing)     over a limit: 552 / 554
+                      verify: SPF, DKIM, DMARC, ARC (bounded time)         DMARC reject policy and the domain asks for it: 550
+                      stamp:  Received + Authentication-Results            (foreign Authentication-Results of ours removed)
+                      store:  one row + one body per recipient, one atomic write      250 only after the commit
+                              |
+        route action (after 250, by a worker): webhook | forward (outbound queue, SRS) | store (done) | discard (no body)
+```
+
+Nothing after the `250` can produce a message to the sender: a failed action is visible to the tenant (state, webhook event), never to the sender (§11.12).
+
+### 11.3 Enabling a domain
+
+- **A domain is inbound-enabled** when its `inbound_domain_settings` row says `enabled` (no row means off, which is the default). The flag is per domain, not per tenant, so a tenant can send from `example.com` without receiving for it.
+- **The domain must be one of the tenant's registered domains and be `verified`** (or `temporary_failure`, as for sending) to be enabled; the API refuses `enabled: true` otherwise (`403 domain_not_verified`, reason `inbound_domain_not_verified`), and the receive path re-checks the status it cached. *Reason:* an MX record pointing at EggMail proves nothing about who owns the domain, while the DKIM TXT record that verification looks for does. Without this check the first tenant to register `victim.com` could read the mail of its real owner as soon as the owner points an MX at the shared server. A domain name is unique across the server (existing rule), so the real owner cannot register it later either: verification is the only ownership proof there is.
+- **Master switch:** `Inbound:Enabled` (default `false`, *proposed*). Off, the server behaves exactly as before. On, the port-25 listener (listener name `bounce`, container port 2526) gets the new listener role `Inbound`, a superset of `Bounce`: it still accepts signed bounce addresses and now also the recipients of §11.4. Submission listeners are never affected: they accept no inbound mail.
+- **DNS:** the customer publishes `MX 10 <Hostname>` for the domain (an `A`/`AAAA` for `Hostname` already exists for TLS). The domain's record list gets one advisory record, purpose `inbound_mx` ([api.md](api.md#inbound-mail-inbound-scope)), only when inbound is enabled for it. Replicas on PostgreSQL may all receive; the load balancer decides.
+- **Tenant suspended:** the receive path answers `450 4.2.1` (try again later) for its domains, so senders keep the mail instead of bouncing it.
+
+### 11.4 Listener behaviour (RCPT, DATA, limits)
+
+Everything that can refuse a message does it **in the SMTP dialog**, before a `250`. Nothing is accepted and then bounced (no backscatter), and an address that no route handles is never accepted (no open relay).
+
+| Situation | Reply | When |
+|---|---|---|
+| Recipient domain is not inbound-enabled (unknown domain, inbound off, `Inbound:Enabled` off) and is not the bounce domain | `550 5.7.1 Relaying denied` | RCPT |
+| Domain enabled but no enabled route matches the local part | `550 5.1.1 Mailbox unavailable` | RCPT |
+| Tenant suspended | `450 4.2.1 Mailbox disabled, try again later` | RCPT |
+| Domain or remote address over its rate limit (§11.9) | `450 4.7.1 Too many messages, try again later` | RCPT |
+| More recipients than `Inbound:MaxRecipients` (*proposed*, default 20) in the transaction | `452 4.5.3 Too many recipients` | RCPT |
+| Stored bytes of the domain at `MaxStoredBytes` | `452 4.2.2 Mailbox full, try again later` | RCPT |
+| `SIZE=` over the limit, or the body grows over it | `552 5.3.4 Message too big` | MAIL, DATA |
+| DMARC fails under `p=reject` and the domain's action is `reject` | `550 5.7.1 Rejected by the DMARC policy of <domain>` | end of DATA |
+| DNSBL hit with `Inbound:Dnsbl:Action=Reject` (*proposed*, off) | `554 5.7.1 Listed by <zone>` | RCPT (client address) |
+| Storage unavailable, configuration not loaded yet, disk full | `451 4.3.0` / `452 4.3.1` | any |
+| Bare LF/CR, NUL, STARTTLS injection, line limits | existing `500`/`421` replies | any |
+
+- **The decision uses a cache.** The receive path loads `LoadEnabledDomainsAsync()` (domains, status, settings, enabled routes in evaluation order) and refreshes it every 30 s and immediately after an API change on the same process; a replica that did not make the change sees it within 30 s. A cold or failed load answers `451 4.3.0`, never "unknown domain".
+- **Normalization:** the domain is lower-cased and in A-label form; the local part is matched as received, ignoring case. `InboundRules.MatchRoute` (in `Mta.Storage`) is the one implementation of "which route handles this recipient", used by the receive path, the API's test endpoint and the tests.
+- **STARTTLS is offered, never required.** A public MX that refuses plaintext loses mail (RFC 3207); `TlsUsed` is recorded on the message and the version in `Received`. Operators who want to force TLS from capable senders publish MTA-STS (decision 88), which is how that is done on the Internet.
+- **Limits that already exist and apply:** line length, message size (`Inbound:MaxMessageSize`, *proposed*, default `Smtp:MaxMessageSize`, a lower per-domain value in the settings), errors per session, per-IP and global connection caps, the global in-flight bytes budget (`452`), read and total DATA timeouts, smuggling and STARTTLS-injection defenses. Inbound adds the recipient cap, the rate limits and the stored-bytes limit above.
+- **Several recipients:** one transaction can name recipients of several domains and tenants. Each accepted recipient gets its own row and its own copy of the body (§11.6).
+- **Null sender** (`MAIL FROM:<>`) is accepted for inbound recipients, as for any mail system that must receive the bounces of its customers' mail.
+
+### 11.5 Verification
+
+The libraries in `Mta.Auth` and `Mta.Dkim` (SPF, DKIM verify, DMARC, ARC validation, Authentication-Results builder) are wired into the receive path; nothing is re-implemented. All DNS goes through the existing resolver and its caches.
+
+- **When:** after the end of DATA, before the commit, because DKIM and DMARC need the headers. SPF is evaluated for the MAIL FROM domain (HELO when the reverse-path is null), with the client address the TCP connection shows.
+- **Budget:** one total timeout (`Inbound:Verification:Timeout`, *proposed*, default 20 s) and a concurrency limit (`Inbound:Verification:MaxConcurrency`, *proposed*, default 32) so a flood of messages cannot turn the receiver into a DNS load generator; the libraries bound lookups per check (SPF: 10 terms, 2 voids; DKIM: signatures per message). A result that could not be obtained is `temperror`, and **a temporary error never rejects** (the mail is accepted and the verdict recorded).
+- **SPF fail or DKIM fail alone never rejects.** DMARC decides (RFC 7489 §10.1: receivers should not reject on SPF or DKIM alone). The verdicts are recorded and shown.
+- **DMARC action per domain** (`dmarcAction`): `record_only` (default: record, never act), `quarantine_flag` (a message that fails DMARC where the sender's policy is `quarantine` or `reject` is stored with `disposition = quarantine_flagged`, gets the header `X-EggMail-Quarantine: dmarc`, and the webhook payload says `quarantined: true`; the mail is **not** moved anywhere or dropped and the route's action still runs, so the consumer of the action decides), `reject` (`p=reject` failures get `550 5.7.1` in the dialog, `p=quarantine` failures are flagged as above). The policy used is the one the evaluator returns (`pct` and the subdomain policy are honored by it).
+- **ARC:** the chain is validated, the verdict recorded and written to `Authentication-Results`. It does **not** change the DMARC outcome unless the sealing domain is listed in `Inbound:Arc:TrustedSealers` (*proposed*, empty by default), in which case a failing DMARC verdict with a passing chain from a trusted sealer is treated as a pass for the action decision (the original verdicts stay recorded). Trusting a sealer is an operator decision about someone else's reputation, so nothing is trusted by default.
+- **Headers added** (prepended, in this order): `Received` (the server-generated header the SMTP layer builds), then `Authentication-Results: <authserv-id>; spf=...; dkim=...; dmarc=...; arc=...` (authserv-id: `Inbound:AuthenticationResultsId`, *proposed*, default `Hostname`). **Headers removed first:** every `Authentication-Results` whose authserv-id is ours (RFC 8601 §5, so a sender cannot present forged verdicts) and every `X-EggMail-*` header (the namespace is ours: the quarantine marker must come only from us).
+- **Where the results live:** (1) the stored message carries the `Authentication-Results` header, the durable human-readable record, and it travels with a forward and with the raw download; (2) `inbound_message` has the structured verdicts (`spf`, `spf_domain`, `dkim`, `dkim_domain`, `dmarc`, `dmarc_policy`, `arc`, `disposition`) for search, the API and the dashboard; (3) the webhook payload carries them (§11.7). The history store is deliberately not used: it is about outbound mail.
+- **Reputation hook (optional, off by default):** `Inbound:Dnsbl:Zones` (*proposed*, empty = off) lists DNS blocklists queried for the client address at RCPT time with the existing resolver and a short timeout; `Inbound:Dnsbl:Action` is `Flag` (header `X-EggMail-Reputation: dnsbl=<zone>`, default) or `Reject`. A lookup failure never blocks. EggMail ships no list and endorses none; listing policies differ and a wrong list rejects legitimate mail.
+
+### 11.6 Data model
+
+Two groups, in two parts of the storage model (§4.1): configuration in the **config** part and received mail in the **queue** part. All of it exists on both backends, in both history modes (`History:Mode` is about outbound history and does not matter here), and moves in a backend switch (§11.10). Contracts: `Mta.Storage/Contracts.Inbound.cs` (`IInboundStore` = `IInboundConfigStore` + `IInboundMessageStore`, reached as `IStorage.Inbound`).
+
+**Per-domain settings** (`inbound_domain_settings`, one row per domain, deleted with the domain):
+
+| Member | Meaning | Default when null |
+|---|---|---|
+| `enabled` | the domain accepts mail (§11.3) | off |
+| `dmarcAction` | `record_only` \| `quarantine_flag` \| `reject` (§11.5) | `record_only` |
+| `maxMessageBytes` | largest message, capped by the server limit | `Inbound:MaxMessageSize` |
+| `maxMessagesPerMinute`, `maxMessagesPerMinutePerRemote` | accepted messages per minute for the domain, and per client address for the domain | `Inbound:MaxMessagesPerMinute` (600), `Inbound:MaxMessagesPerMinutePerRemote` (60) (*proposed*) |
+| `maxStoredBytes` | total body bytes kept for the domain; at the limit RCPT answers `452 4.2.2` | `Inbound:MaxStoredBytesPerDomain` (*proposed*, 2 GiB; `0` = unlimited) |
+| `retentionDays` | how long a message is kept, from receipt; **`0` = keep forever** | `Inbound:RetentionDays` (7; `0` = unlimited) |
+
+**Routes** (`inbound_route`; at most 100 per domain): `{ id, domainId, name, order, enabled, match: { kind: catch_all | address | wildcard, localPart, plusAddressing }, action: { kind: webhook | forward | store | discard, webhookEndpointId, webhookFormat: json | raw_mime, forwardTo: [..] } }`.
+
+- **The first enabled route that matches wins** (lowest `order`, then lowest id). There is no specificity ranking: it is predictable and the same rule everywhere; a catch-all belongs last.
+- `address`: the whole local part, ignoring case. `wildcard`: a pattern in which `*` matches any run of characters including none (`billing-*`, at most 3 stars, not only stars). `plusAddressing`: the local part is also compared without everything from the first `+` (`support+billing` reaches the route for `support`); an exact route for `support+billing` still wins by its `order`. Local parts are compared ignoring case: RFC 5321 allows case-sensitive local parts, but no mail system relies on two mailboxes that differ only in case, and treating them as equal avoids losing mail to `Support@`.
+- A webhook route names one of the tenant's webhook endpoints (the endpoint is reused as the registered, SSRF-checked, signed target; the route does not carry a URL). Deleting an endpoint that a route uses is `409 conflict`. A forward route has 1 to 10 addresses.
+- **The action that runs is the route's current one, read when the action runs** (by `routeId`), not a copy taken at receipt: an operator who fixes a wrong webhook endpoint and retries wants the fix to apply. A deleted route fails a pending action with `route_deleted`.
+
+**Inbound messages** (`inbound_message` + `inbound_message_raw`, one pair of rows **per accepted recipient**): `{ id (UUIDv7), tenantId, domainId, domain, receivedAt, remoteAddress, helo, tlsUsed, envelopeFrom, envelopeTo, subject, size, auth: { spf, spfDomain, dkim, dkimDomain, dmarc, dmarcPolicy, arc }, disposition, routeId, actionKind, actionState: pending | done | failed, actionAttempts, actionNextAttemptAt, actionFinishedAt, actionLastError, forwardMessageId, hasRaw }`. The body (`inbound_message_raw`, the stamped message, CRLF lines) is a separate row so list and claim queries never read it, as with the spool.
+
+- **One row and one body per recipient, not one shared body.** A transaction to two recipients of two tenants must not leave a shared object that one tenant's delete or retention touches and the other's still needs; the stamped copy also differs per recipient (the quarantine marker depends on the domain's settings). The cost is `size x recipients`, bounded by `Inbound:MaxRecipients` and the size limit. Typical inbound mail has one recipient.
+- `subject` is the decoded Subject, control characters removed, at most 256 characters, kept for the list view and search (it follows the message's retention, which already covers the body that contains it).
+- **Initial state** (`InboundRules.InitialActionState`): webhook and forward start `pending`, due at `receivedAt`; store starts `done` with its body; discard starts `done`, **stores no body**, and the metadata row stays for the retention so the dashboard can show that something arrived and was dropped.
+- **Search** is by tenant (always), domain, recipient and sender (exact, case-insensitive), subject substring, route, action kind and state, DMARC verdict, quarantined, and a time range; newest first (UUIDv7 order); cursor paging. Same on both backends.
+
+### 11.7 Route actions (executed by a worker after the `250`)
+
+A worker pool claims pending actions (`ClaimActionsAsync`: `FOR UPDATE SKIP LOCKED` on PostgreSQL so several replicas split the work, the queue writer on SQLite), runs them with a lease, and records the result with `CompleteActionAsync`, which only succeeds for the lease holder. Attempts and retry follow the webhook ladder by default (`Inbound:Action:RetrySchedule`, *proposed*) and end in `failed` with `actionLastError`; `retry` in the API puts a failed (or finished) webhook or forward action back to pending with its attempts reset. Delivery is at-least-once.
+
+- **Webhook.** Signed with the endpoint's secret exactly like every other event (Standard Webhooks headers `webhook-id` = `evt_` + the inbound id, so the receiver's idempotency key is stable across retries, `webhook-timestamp`, `webhook-signature`), through the same SSRF-guarded sender; sent whatever event types the endpoint subscribes to (the route is the subscription). Success is a 2xx within the webhook timeout; the existing disable-on-410 and continuous-failure rules apply to the endpoint. Two formats:
+  - `json` (default): the standard envelope `{ id, type: "inbound.message.received", timestamp, data }` with `data` =
+
+    ```json
+    { "inbound_id": "…", "domain": "example.com", "route_id": "…", "received_at": "…", "size": 12345, "quarantined": false,
+      "connection": { "remote_ip": "203.0.113.9", "helo": "mail.sender.test", "tls": true },
+      "envelope": { "from": "alice@sender.test", "to": "support@example.com" },
+      "auth": { "spf": { "result": "pass", "domain": "sender.test" }, "dkim": { "result": "pass", "domain": "sender.test" },
+                "dmarc": { "result": "pass", "policy": "reject" }, "arc": { "result": "none" } },
+      "message": { "message_id": "<…>", "subject": "…", "from": "…", "to": ["…"], "cc": [], "reply_to": null, "date": "…",
+                   "in_reply_to": null, "references": [], "text": "…", "html": "…", "truncated": false,
+                   "headers": [ { "name": "…", "value": "…" } ] },
+      "attachments": [ { "index": 0, "filename": "a.pdf", "content_type": "application/pdf", "size": 1234, "content_id": null,
+                         "disposition": "attachment", "url": "/api/v1/inbound/messages/<id>/attachments/0" } ],
+      "raw_url": "/api/v1/inbound/messages/<id>/raw" }
+    ```
+
+    Text and HTML are each cut at `Inbound:Webhook:MaxBodyBytes` (*proposed*, 256 KiB; `truncated: true`), headers are all unfolded and decoded header fields up to a total cap, **attachments are never inlined**: the payload lists them with a path (`Inbound:ApiBaseUrl`, *proposed*, is prefixed when set, otherwise the receiver knows its server) and the receiver fetches them with an API key that has the `inbound` scope. *Reason:* a webhook body of tens of megabytes would break receivers, retries and the signature window, and a pre-signed public URL would make a leaked payload equal to leaked mail (open question: signed expiring URLs).
+  - `raw_mime`: the body is the stored message as is, `Content-Type: message/rfc822`, signed over those bytes; the envelope and verdicts travel in headers (`EggMail-Inbound-Id`, `EggMail-Envelope-From`, `EggMail-Envelope-To`, `EggMail-Remote-Ip`, `EggMail-Spf`, `EggMail-Dkim`, `EggMail-Dmarc`, `EggMail-Arc`, `EggMail-Quarantined`). Bounded by the message size, so it is for receivers that want the bytes (a mail parser, an archive).
+  - A final failure also publishes `inbound.action.failed` (`data`: `inbound_id`, `route_id`, `action`, `error`) to the tenant's endpoints that subscribe to it.
+- **Forward** goes **through the outbound queue**, so it gets the delivery engine's retries, TLS policy, throttling, suppression list and sending caps, and appears in the outbound message history with source `Forward`. It is queued with `IMessageIntake.AcceptAsync`, using the idempotency key `inbound:<inbound id>` so a retry after a crash between "queued" and "done" returns the same outbound message instead of a second one; the id is stored as `forwardMessageId`, and the body is freed when the action is `done`.
+  - **Envelope:** `MAIL FROM` is an **SRS0** address at the recipient domain: `SRS0=<hash>=<timestamp>=<original domain>=<original local part>@<domain>`; the null reverse-path stays null (a bounce is never forwarded as a message from us, and never gets an SRS address). The recipients are `forwardTo`. *Why SRS:* the final receiver checks SPF against the envelope sender, and our address is not in the original sender's SPF record; with the envelope at our domain SPF passes for it and DMARC alignment is carried by the original DKIM signature, which stays valid because the forward adds headers only on top (`Received`, `Authentication-Results`, `X-EggMail-Forwarded`) and never changes the body or signed headers.
+  - **Hash and key:** the first 8 characters (40 bits) of Base32 of HMAC-SHA256 over `lower-case(timestamp + original domain + original local part)`, key derived by HKDF from the bounce-token key with the purpose `EggMail.Srs.v1` (so no new secret to deploy or back up); the timestamp is the day number modulo 1024 in two Base32 characters; verification is constant time and accepts the current and previous 20 days (`Inbound:Srs:MaxAgeDays`, *proposed*, 21).
+  - **Long local parts:** the SMTP local part is limited to 64 octets. When the canonical form is longer, the original local part is replaced by the first 16 hex digits of its SHA-256 (still covered by the hash). This is safe because **we never reverse an SRS address** (next bullet).
+  - **SRS bounces are not relayed (DESIGN-DECIDED, owner-level, see open questions).** A DSN for a forwarded message returns to the SRS address on port 25. The receive path accepts it (verifying the hash and age, only from the null sender, size-limited), appends a `forward_bounced` note to the inbound message's `actionLastError`, publishes `inbound.action.failed`, and **drops the DSN**. Classic forwarders relay it to the original sender; that is backscatter to what is usually a forged sender, and it makes a forged SRS address an open relay. Not relaying removes both, and the tenant, who owns the route, is the one who can fix a dead forward target.
+  - **Loops:** a message with more than 25 `Received` headers or with three `X-EggMail-Forwarded` headers naming this server's `Hostname` is not forwarded (`failed`, `loop_detected`); every forward adds `X-EggMail-Forwarded: <Hostname>`.
+  - **Abuse limits:** forwarded mail is outbound mail of the tenant: the tenant's `Sending:PerHour`/`PerDay` caps and warm-up apply and a suppressed target is skipped (the action is `done` with a note). ARC: when the domain has an active DKIM key, the forward is ARC-sealed (continuing the chain we validated) so the next receiver can see the verdicts we recorded.
+- **Store** keeps the message (`done` at once) for `retentionDays`, readable through the API and the dashboard (§11.9). **Discard** keeps only the metadata row.
+
+### 11.8 Retention
+
+- A message (row and body) is deleted when `receivedAt` is older than its domain's retention (`retentionDays`, else `Inbound:RetentionDays`, default 7; **`0` keeps forever**, with the usual warning and health entry, §5.1). The convention is the one of every other retention knob.
+- **The cutoff is read from the current settings when the job runs, not stored on the message.** Shortening a domain's retention frees old mail at the next run and lengthening keeps it, which is what an operator changing the setting expects. A domain with no settings row any more (deleted) uses the server default.
+- **A message whose action is `pending` is never deleted by retention.** Pending is bounded by the retry ladder (about 27 hours), so this cannot keep mail forever, and it prevents silently losing mail that was never delivered to a webhook.
+- A completed forward and a discard have no body to expire; their rows follow the same cutoff. The API's `DELETE` removes one message at once.
+- **Mechanism:** the job `inbound_retention` of `IStorageMaintenance.RunAsync` (idempotent, safe on several replicas): per domain with a finite retention, delete in batches ordered by `(domain_id, received_at)` with the same batch size and pauses as the other retention jobs, bodies first then rows, then `incremental_vacuum` on SQLite. **Batched deletes on both backends; PostgreSQL does not use partition drops for inbound (DESIGN-DECIDED).** *Reason:* retention differs per domain and can be unlimited for one domain, while a partition holds mail of all domains of a day: dropping a partition is only correct when every row in it has expired, which with mixed retention would need a per-partition scan anyway; inbound volume is far below the history volume the partitions were designed for; the batched delete is the same code path on both backends. Revisit if inbound volume is large (§4.3's thresholds).
+- Unlimited retention with the `store` action grows the database without bound; `maxStoredBytes` (default 2 GiB per domain) is the guard, and a domain at its limit refuses new mail with `452 4.2.2` instead of filling the disk.
+
+### 11.9 Retrieval API, dashboard and rate limits
+
+- **API** ([api.md](api.md#inbound-mail-inbound-scope)), scope `inbound` for everything below (one new scope: reading received mail is more sensitive than `read`): inbound settings and routes under `/domains/{id}/inbound`, a route test (`GET .../routes/match?address=`), and `/inbound/messages` (list and search, one message, the raw message as `message/rfc822`, an attachment, delete, retry). Tenant isolation as everywhere: a message of another tenant is a `404`. Raw and attachment downloads are served as `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`, with a sanitized file name; nothing received is ever served inline.
+- **Dashboard:** inbound messages (list, search, view with verdicts, sandboxed HTML rendering as in §5, headers, attachments, raw download, retry/delete), routes per domain, inbound settings, and the MX record in domain onboarding. Same pages on both backends.
+- **Rate limits** (per process, not shared between replicas, like the other in-memory limits of decision 82): domain-wide and per-remote-address messages per minute from the settings, counted at RCPT; at the limit the reply is `450 4.7.1`, which well-behaved senders retry. A shared exact count would need a database round trip per RCPT for little gain.
+
+### 11.10 Storage layout, switch and operations
+
+- **Config part** (`config.db` on SQLite): `inbound_domain_settings`, `inbound_route`. **Queue part** (`queue.db`): `inbound_message`, `inbound_message_raw`. *Reason for the queue part:* a forward is queued in the same file in the same transaction as it is marked done (no second ordering story), the claim is the same single-writer / `SKIP LOCKED` machinery as deliveries and webhook outbox rows, and the switch holds these rows with `transfer_switch_id` exactly like deliveries. The cost is that stored mail grows `queue.db`, the hot file, the same trade-off the webhook outbox documents (§5.1); the per-domain `maxStoredBytes` and a finite retention keep it bounded, and a deployment that stores a lot of mail should use PostgreSQL.
+- **Schema versions:** a new SQLite schema version (next free at merge time) and a PostgreSQL migration. Four new tables, no change to existing ones.
+- **Switch bundle:** the four tables are transfer tables (bundle format minor bump; an importer that knows the older minor imports a bundle without them and starts with no inbound data). Settings and routes move with config; messages and bodies move with the queue part, with the body streamed like spool bodies; pending actions are held on the source until the switch finishes, so no message is acted on twice. The history flag `--skip-history` does **not** skip inbound mail: it is data the tenant keeps, not history.
+- **Backup/restore and quarantine** need no change: they work per file.
+- **Health:** a warning entry for `Inbound:RetentionDays` = 0 and gauges of pending and failed actions (§11.11).
+
+### 11.11 Metrics (names proposed; defined where the code is, documented in [operations.md](operations.md))
+
+| Metric | Type | Labels |
+|---|---|---|
+| `mta_inbound_recipients_total` | counter | `outcome` (`accepted`, `relay_denied`, `unknown_mailbox`, `rate_limited`, `too_many`, `mailbox_full`, `tenant_disabled`, `dnsbl`, `unavailable`) |
+| `mta_inbound_messages_total` | counter | `outcome` (`accepted`, `rejected_dmarc`, `rejected_size`, `rejected_other`) |
+| `mta_inbound_bytes_total` | counter | none |
+| `mta_inbound_auth_total` | counter | `mechanism` (`spf`, `dkim`, `dmarc`, `arc`), `result` (`pass`, `fail`, `softfail`, `neutral`, `none`, `temperror`, `permerror`, `policy`) |
+| `mta_inbound_verification_duration_seconds` | histogram | none |
+| `mta_inbound_actions_total` | counter | `kind`, `outcome` (`done`, `retry`, `failed`) |
+| `mta_inbound_action_duration_seconds` | histogram | `kind` |
+| `mta_inbound_actions` | gauge | `state` (`pending`, `failed`) (sampled with the queue gauges) |
+| `mta_inbound_stored_bytes` | gauge | none (sampled) |
+| `mta_inbound_retention_deleted_total` | counter | none |
+
+Labels are small fixed sets: never a domain, address or tenant.
+
+### 11.12 Security considerations
+
+- **Open relay.** Three independent layers: (1) the listener role `Inbound` accepts a recipient only for an inbound-enabled domain **with a matching enabled route**, the bounce domain's signed addresses and SRS addresses (§11.7); everything else is `550 5.7.1` at RCPT; (2) inbound-listener sessions can never authenticate or send, and the only path from inbound to outbound is a forward route that an authenticated tenant created, to targets fixed in the route (never taken from the message); (3) the outbound queue applies the tenant's sending caps and suppression list to forwards. Regression tests: unknown domain, enabled domain with no route, disabled route, `RCPT` to an external address after a valid one, `MAIL FROM` of a local domain without authentication, and a forward whose target the message tries to change.
+- **Backscatter.** No bounce, auto-reply, vacation reply, read receipt or "forward failed" mail is ever generated for inbound mail. Refusals happen in the dialog; a failed action is recorded and published to the tenant only; SRS bounces are dropped (§11.7). The existing rule that an outbound bounce goes only to a verified sender is unchanged.
+- **SRS forging.** An attacker who guesses an SRS address gains nothing, because an SRS address is accepted only from the null sender, is only verified-then-dropped, and is never mapped to a destination. The 40-bit hash and 21-day window still stop noise; the key is derived (no extra secret) and compared in constant time.
+- **Spam and abuse.** The server is a receiver for customer domains, so it receives spam. Recorded SPF/DKIM/DMARC verdicts and the DMARC action are the first defense; per-domain and per-remote rate limits and connection caps bound the load; the DNSBL hook is optional; greylisting is not built in. Forwarding multiplies abuse into outbound reputation, which is why forwards are subject to the sending caps, warm-up and the suppression list, are ARC-sealed and SRS-rewritten, and why a tenant that forwards spam can be suspended (a suspended tenant's inbound answers `450`, its forwards stop). Operators should publish an abuse contact (§10).
+- **Denial of service.** Existing connection caps, per-IP caps, the in-flight bytes budget, timeouts and the errors-per-session limit; plus the recipient cap, the rate limits, the per-domain size and stored-bytes limits, a bounded verification time and concurrency (so DNS cost per message is bounded), and bounded MIME work (the extraction used for `subject` and the webhook payload runs with the parser's part, depth and header limits, and a message that exceeds them is stored without extracted fields rather than rejected). A full disk answers `452 4.3.1` as for submission.
+- **Storing hostile content.** The body is untrusted bytes and is never interpreted by the server beyond headers and bounded extraction. The API serves raw mail and attachments only as downloads with `nosniff`; the dashboard renders HTML only in a sandboxed iframe under the strict CSP with remote content blocked (a tracking pixel would tell the sender when the tenant read the mail) and plain text as the default; file names are sanitized for download headers; webhook receivers are told in the documentation that every field is attacker-controlled. Control characters are stripped from the stored subject. Header injection is not possible through the extraction (values are JSON strings).
+- **Attachments by reference.** The webhook payload names attachments and gives an authenticated path; it carries no credential and no pre-signed URL, so a leaked payload does not leak the attachment.
+- **Tenant isolation.** Every inbound query takes the tenant; a recipient domain belongs to exactly one tenant; bodies are not shared between recipients; the `inbound` scope is separate from `read`.
+- **Domain squatting.** Enabling needs a verified domain (§11.3).
+- **Recipient enumeration.** `550 5.1.1` reveals which local parts have a route, as every MX does; a catch-all route removes the signal, and the errors-per-session limit and connection caps slow harvesting.
+- **Header spoofing.** Our `Authentication-Results` and `X-EggMail-*` headers are removed from the incoming message before ours are added (§11.5).
+- **Privacy.** Received mail is personal data kept for 7 days by default; `0` (forever) shows the warning; `DELETE` and retention remove body and metadata. A domain's mail goes to its tenant only.
+- **Inherited:** smuggling defenses, STARTTLS-injection defense, SSRF guard on webhook endpoints, Data Protection for secrets (nothing new is stored encrypted: the webhook secret stays with the endpoint).
+
+### 11.13 Configuration (proposed names; the pull request that reads a key documents it)
+
+`Inbound:Enabled` (false), `Inbound:MaxMessageSize`, `Inbound:MaxRecipients` (20), `Inbound:MaxMessagesPerMinute` (600), `Inbound:MaxMessagesPerMinutePerRemote` (60), `Inbound:MaxStoredBytesPerDomain` (2 GiB), `Inbound:RetentionDays` (7), `Inbound:AuthenticationResultsId` (`Hostname`), `Inbound:Verification:Timeout` (20 s), `Inbound:Verification:MaxConcurrency` (32), `Inbound:Arc:TrustedSealers` (none), `Inbound:Dnsbl:Zones` (none), `Inbound:Dnsbl:Action` (`Flag`), `Inbound:Action:RetrySchedule`, `Inbound:Action:Concurrency` (4), `Inbound:Webhook:MaxBodyBytes` (256 KiB), `Inbound:ApiBaseUrl` (none), `Inbound:Srs:MaxAgeDays` (21), `Api:MaxInboundRoutesPerDomain` (100).
+
+### 11.14 Open questions for the owner
+
+Recorded in [open-questions.md](open-questions.md): IMAP/POP3 mailbox serving; whether SRS bounces should be relayed to the original sender after all; pre-signed attachment URLs; whether inbound mail should get its own database file instead of `queue.db`; sending DMARC aggregate reports about received mail.
