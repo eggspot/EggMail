@@ -11,7 +11,7 @@ using Mta.Storage.Sqlite;
 namespace Mta.Host.Tests;
 
 /// <summary>
-/// <c>Domains:Bootstrap</c> (EGGMAIL_DOMAINS): the listed domains are registered once for the first tenant, the DNS records to create are logged, and running it
+/// <c>Domains:Bootstrap</c>: the listed domains are registered once for the first tenant, the DNS records to create are logged, and running it
 /// again, or on several replicas at the same moment, changes nothing.
 /// </summary>
 public class DomainBootstrapTests : IAsyncLifetime
@@ -44,6 +44,9 @@ public class DomainBootstrapTests : IAsyncLifetime
         private readonly object _gate = new();
         private readonly List<string> _lines = [];
 
+        /// <summary>Completes when the first domain has been registered: from then on the run that did it holds the lease and still has work to do.</summary>
+        public TaskCompletionSource FirstDomainRegistered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
         public IReadOnlyList<string> Lines
         {
             get
@@ -62,6 +65,11 @@ public class DomainBootstrapTests : IAsyncLifetime
             lock (_gate)
             {
                 _lines.Add($"{level} {source}: {message}");
+            }
+
+            if (message.StartsWith("Registered ", StringComparison.Ordinal))
+            {
+                FirstDomainRegistered.TrySetResult();
             }
         }
     }
@@ -106,7 +114,7 @@ public class DomainBootstrapTests : IAsyncLifetime
         Assert.Contains("_dmarc.example.com. 3600 IN TXT \"v=DMARC1; p=none; rua=mailto:dmarc@example.com\"", log);
         Assert.Contains("bounce.example.com. 3600 IN CNAME bounces.mail.test.", log);
         Assert.Contains("; MX bounces.mail.test -> 10 mta.mail.test (published once by whoever runs EggMail, not in this zone)", log);
-        Assert.Contains("_smtp._tls.example.com. 3600 IN TXT \"v=TLSRPTv1; rua=mailto:tls-rpt@example.com\"", log);
+        Assert.DoesNotContain("_smtp._tls", log);   // TLS-RPT concerns mail received by the domain: only with Domains:MtaStsMode
         Assert.Contains("DNS records to create for mail.example.org", log);
         Assert.All(_log.Lines, line => Assert.DoesNotContain('\n', line));
         // The private key never reaches the log.
@@ -215,6 +223,67 @@ public class DomainBootstrapTests : IAsyncLifetime
         {
             Assert.Single(_log.Lines, l => l.Contains("DNS records to create for " + name + ".", StringComparison.Ordinal));
         }
+    }
+
+    [Fact]
+    public async Task A_replica_that_starts_while_another_is_registering_observes_the_lease_and_leaves_the_work_to_it()
+    {
+        string[] names = Enumerable.Range(1, 8).Select(i => $"c{i}.example.com").ToArray();
+        MtaConfig config = ConfigFor(names);
+
+        Task<DomainBootstrapResult> first = Task.Run(() => RunAsync(config));
+        await _log.FirstDomainRegistered.Task.WaitAsync(TimeSpan.FromMinutes(1));   // the first run is part-way through its domains and holds the lease
+        DomainBootstrapResult second = await RunAsync(config);
+
+        Assert.True(second.LeaseHeldElsewhere);
+        Assert.Empty(second.Registered);
+        Assert.Contains(_log.Lines, l => l.StartsWith("Warning domains:", StringComparison.Ordinal) && l.Contains(DomainBootstrap.LeaseName, StringComparison.Ordinal));
+        DomainBootstrapResult done = await first;
+        Assert.False(done.LeaseHeldElsewhere);
+        Assert.Equal(names.Order(), done.Registered.Select(r => r.Domain).Order());
+        Assert.Equal(names.Length, (await _storage.Config.GetDomainsAsync(null, default)).Count);
+    }
+
+    [Fact]
+    public async Task A_suspended_oldest_tenant_is_not_chosen()
+    {
+        var suspended = new Tenant(Guid.NewGuid(), "Old and suspended", "old", Enabled: false, ApiFixture.Start.AddDays(-30), false);
+        var active = new Tenant(Guid.NewGuid(), "Newer and active", "newer", Enabled: true, ApiFixture.Start.AddDays(-2), false);
+        await _storage.Config.UpsertTenantAsync(suspended, default);
+        await _storage.Config.UpsertTenantAsync(active, default);
+
+        await RunAsync(ConfigFor("example.com"));
+
+        Assert.Equal(active.Id, (await _storage.Config.FindDomainByNameAsync("example.com", default))!.TenantId);
+        Assert.Equal(2, (await _storage.Config.GetTenantsAsync(default)).Count);
+    }
+
+    [Fact]
+    public async Task When_every_tenant_is_suspended_a_default_tenant_is_created()
+    {
+        await _storage.Config.UpsertTenantAsync(new Tenant(Guid.NewGuid(), "Suspended", "suspended", Enabled: false, ApiFixture.Start.AddDays(-30), false), default);
+
+        DomainBootstrapResult result = await RunAsync(ConfigFor("example.com"));
+
+        Assert.Equal(["example.com"], result.Registered.Select(r => r.Domain));
+        Tenant owner = (await _storage.Config.GetTenantAsync((await _storage.Config.FindDomainByNameAsync("example.com", default))!.TenantId, default))!;
+        Assert.Equal(("Default", true), (owner.Name, owner.Enabled));
+    }
+
+    [Fact]
+    public async Task When_the_only_tenants_are_suspended_and_the_default_name_is_taken_the_domains_are_skipped_with_a_clear_message_not_a_crash()
+    {
+        await _storage.Config.UpsertTenantAsync(new Tenant(Guid.NewGuid(), DomainBootstrap.DefaultTenantName, DomainBootstrap.DefaultTenantSlug, Enabled: false, ApiFixture.Start.AddDays(-30), false), default);
+
+        DomainBootstrapResult result = await RunAsync(ConfigFor("example.com", "second.example.com"));
+
+        Assert.Empty(result.Registered);
+        Assert.Equal(2, result.Skipped.Count);
+        Assert.All(result.Skipped, s => Assert.Contains("every tenant is suspended", s.Reason, StringComparison.Ordinal));
+        Assert.Contains(_log.Lines, l => l.StartsWith("Error domains:", StringComparison.Ordinal) && l.Contains("activate a tenant", StringComparison.Ordinal));
+        Assert.Empty(await _storage.Config.GetDomainsAsync(null, default));
+        // The lease was released: a later start, with a tenant activated, works.
+        Assert.NotNull(await _storage.Config.TryAcquireLeaseAsync(DomainBootstrap.LeaseName, "next-start", TimeSpan.FromMinutes(2), _clock.UtcNow, default));
     }
 
     [Fact]

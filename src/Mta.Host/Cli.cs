@@ -226,7 +226,7 @@ internal static class Cli
         await ApiHosting.EnsureBootstrapAdminAsync(config, storage, clock, startupLog, CancellationToken.None).ConfigureAwait(false);
         if (gate.Mode == StartupMode.Normal && config.Domains.Bootstrap.Count > 0)
         {
-            await DomainBootstrap.RunAsync(config, storage, runtime.Secrets, clock, startupLog, CancellationToken.None).ConfigureAwait(false);   // Domains:Bootstrap (EGGMAIL_DOMAINS)
+            await DomainBootstrap.RunAsync(config, storage, runtime.Secrets, clock, startupLog, CancellationToken.None).ConfigureAwait(false);   // Domains:Bootstrap
         }
 
         builder.Services.AddSingleton(loaded);

@@ -131,7 +131,7 @@ export function DnsRecordsTable({ records }: { records: DnsRecord[] }) {
 /** How far the domain's records are: the required ones decide whether mail can be sent. */
 export function recordProgress(records: DnsRecord[]) {
   const required = records.filter((r) => r.required);
-  const recommended = records.filter((r) => !r.required);
+  const recommended = records.filter((r) => !r.required && r.publishable);   // advice the customer cannot publish is not counted
   return {
     requiredOk: required.filter((r) => r.status === 'ok').length,
     requiredTotal: required.length,

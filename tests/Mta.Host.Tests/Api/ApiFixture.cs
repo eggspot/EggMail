@@ -213,6 +213,7 @@ internal sealed class ApiFixture : IAsyncDisposable
         Options = new ApiOptions
         {
             BounceDomain = "bounces.egg.test",
+            SpfInclude = "spf.egg.test",
             MessageIdDomain = "egg.test",
             VerificationPollInterval = TimeSpan.FromHours(1),
             MetricsAllowedNetworks = ApiOptions.DefaultMetricsNetworks(),

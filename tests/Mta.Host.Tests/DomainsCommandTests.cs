@@ -74,6 +74,31 @@ public class DomainsCommandTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task An_option_may_give_its_value_as_the_next_argument_and_the_domain_may_come_first_or_last()
+    {
+        var spaced = new StringWriter();
+        int code = await DomainsCommand.RunAsync(["records", "--Sqlite:DataDirectory", _directory, "--Hostname=mta.mail.test", "example.com"], spaced, new StringWriter());
+        Assert.Equal(0, code);
+        Assert.Contains("._domainkey.example.com. 3600 IN TXT", spaced.ToString());
+        Assert.Equal(64, (await RunAsync(null, "records", "example.com", "second.example.com")).Code);   // two domains are a usage error, not a silent pick
+    }
+
+    [Fact]
+    public async Task Settings_saved_in_the_dashboard_apply_like_they_do_in_the_server()
+    {
+        var storage = SqliteStorage.Create(new StorageOptions { Sqlite = new SqliteOptions { DataDirectory = _directory } }, SystemClock.Instance);
+        await storage.InitializeAsync(default);
+        await storage.Config.SetSettingAsync(new SettingRecord("Domains:DmarcPolicy", null, "\"quarantine\"", DateTimeOffset.UtcNow), default);
+        await storage.DisposeAsync();
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+
+        var result = await RunAsync(null, "records", "example.com");
+
+        Assert.Equal(0, result.Code);
+        Assert.Contains("v=DMARC1; p=quarantine; rua=mailto:dmarc@example.com", result.Out);
+    }
+
+    [Fact]
     public async Task Bad_usage_and_bad_names_are_refused()
     {
         Assert.Equal(64, (await RunAsync(null)).Code);

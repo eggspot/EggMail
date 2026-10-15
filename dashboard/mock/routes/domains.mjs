@@ -29,7 +29,8 @@ function makeRecords(name, selector, key, statuses = {}) {
   const state = (purpose) => statuses[purpose] || 'ok';
   const rec = (type, host, value, purpose, required, note) => {
     const status = state(purpose);
-    return { type, host, value, ttl: 3600, purpose, required, note, status, expected: value, found: status === 'ok' ? value : null };
+    const publishable = type !== 'PTR' && (type !== 'MX' || host === name || host.endsWith(`.${name}`));   // the reverse DNS and the operator's bounce MX are not the customer's to publish
+    return { type, host, value, ttl: 3600, purpose, required, publishable, note, status, expected: value, found: status === 'ok' ? value : null };
   };
   const dkim = rec('TXT', `${selector}._domainkey.${name}`, dkimValue, 'dkim', true, 'Lets receivers verify that mail from this domain is signed by EggMail.');
   if (statuses.dkimFound !== undefined) dkim.found = statuses.dkimFound;
@@ -244,7 +245,7 @@ export function register(r) {
       d.dkimKeys.push(created);
       d.dkim = created;
       const note = 'Lets receivers verify that mail from this domain is signed by EggMail.';
-      d.records.splice(1, 0, { type: 'TXT', host: `${selector}._domainkey.${d.name}`, value, ttl: 3600, purpose: 'dkim', required: false, note, status: 'pending', expected: value, found: null });
+      d.records.splice(1, 0, { type: 'TXT', host: `${selector}._domainkey.${d.name}`, value, ttl: 3600, purpose: 'dkim', required: false, publishable: true, note, status: 'pending', expected: value, found: null });
       return view(d);
     },
     { tenant: true },

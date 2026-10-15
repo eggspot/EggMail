@@ -55,7 +55,7 @@ function getWithHost(stack, host, path) {
 test.describe('adding a domain: the records, the check and the ready-to-send state', () => {
   test('every record published: each one is OK and the domain is ready to send', async ({ adminPage: page, admin, tenant, stack }) => {
     const domain = await admin.ok('POST', '/api/v1/domains', { name: `${unique('full')}.mail.test` }, { tenantId: tenant.id });
-    expect(domain.records.map((r) => r.purpose)).toEqual(['dkim', 'return_path', 'spf', 'dmarc', 'tls_rpt', 'bounce_mx', 'ptr']);
+    expect(domain.records.map((r) => r.purpose)).toEqual(['dkim', 'return_path', 'spf', 'dmarc', 'bounce_mx', 'ptr']); // no TLS-RPT or MTA-STS: Domains:MtaStsMode is Off here
     publishDomainRecords(stack.dns, domain);
     await page.goto(`/domains/${domain.id}`);
     await expect(page.getByTestId('ready-state')).toHaveText('Not ready to send');
@@ -63,12 +63,12 @@ test.describe('adding a domain: the records, the check and the ready-to-send sta
     await page.getByRole('button', { name: 'Check DNS' }).click();
 
     await expect(page.getByTestId('ready-state')).toHaveText('Ready to send');
-    for (const purpose of ['DKIM', 'Return-path', 'SPF', 'DMARC', 'TLS-RPT', 'Bounce MX', 'Reverse DNS']) await expect(chip(page, purpose, 'OK')).toBeVisible();
-    await expect(page.getByTestId('record-progress')).toContainText('Required records: 2 of 2 published. Recommended records: 5 of 5 published.');
+    for (const purpose of ['DKIM', 'Return-path', 'SPF', 'DMARC', 'Bounce MX', 'Reverse DNS']) await expect(chip(page, purpose, 'OK')).toBeVisible();
+    await expect(page.getByTestId('record-progress')).toContainText('Required records: 2 of 2 published. Recommended records: 2 of 2 published.'); // the bounce MX and the reverse DNS are not the customer's to publish: not counted
     await expect(page.getByRole('heading', { name: domain.name, exact: true }).locator('xpath=ancestor::header')).toContainText('Verified');
     // Each row says whether the record is required or only recommended.
     await expect(recordRow(page, 'DKIM').getByTestId('dns-level')).toHaveText('Required');
-    await expect(recordRow(page, 'TLS-RPT').getByTestId('dns-level')).toHaveText('Recommended');
+    await expect(recordRow(page, 'DMARC').getByTestId('dns-level')).toHaveText('Recommended');
   });
 
   test('a record with another value shows mismatch, a malformed one invalid, with found next to expected', async ({ adminPage: page, admin, tenant, stack }) => {
@@ -84,7 +84,6 @@ test.describe('adding a domain: the records, the check and the ready-to-send sta
     await expect(chip(page, 'DKIM', 'Mismatch')).toBeVisible();
     await expect(chip(page, 'SPF', 'Mismatch')).toBeVisible();
     await expect(chip(page, 'DMARC', 'Invalid')).toBeVisible();
-    await expect(chip(page, 'TLS-RPT', 'Missing')).toBeVisible();
     await expect(chip(page, 'Return-path', 'OK')).toBeVisible();
     await expect(chip(page, 'Bounce MX', 'OK')).toBeVisible();
     await expect(page.getByTestId('ready-state')).toHaveText('Not ready to send'); // the DKIM key is not ours: sending stays blocked
@@ -125,12 +124,12 @@ test.describe('adding a domain: the records, the check and the ready-to-send sta
     // Per-record copy buttons copy the exact host and value.
     await recordRow(page, 'SPF').getByRole('button', { name: /Copy SPF host/ }).click();
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(domain.name);
-    await recordRow(page, 'TLS-RPT').getByRole('button', { name: /Copy TLS-RPT value/ }).click();
-    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(`v=TLSRPTv1; rua=mailto:tls-rpt@${domain.name}`);
+    await recordRow(page, 'DMARC').getByRole('button', { name: /Copy DMARC value/ }).click();
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(`v=DMARC1; p=none; rua=mailto:dmarc@${domain.name}`);
   });
 });
 
-test.describe('domains from Domains:Bootstrap (EGGMAIL_DOMAINS) and the MTA-STS policy file', () => {
+test.describe('domains from Domains:Bootstrap and the MTA-STS policy file', () => {
   test('the listed domains exist for a Default tenant, pending, and their records were printed to the log once', async ({ boot }) => {
     const admin = await new ApiClient(boot.baseURL).signIn(ADMIN_USER, ADMIN_PASSWORD);
     const tenants = await admin.ok('GET', '/api/v1/admin/tenants');
@@ -201,7 +200,7 @@ test.describe('domains from Domains:Bootstrap (EGGMAIL_DOMAINS) and the MTA-STS 
 
     await expect(page.getByTestId('ready-state')).toHaveText('Ready to send');
     for (const purpose of ['DKIM', 'Return-path', 'SPF', 'DMARC', 'TLS-RPT', 'MTA-STS', 'MTA-STS host', 'Bounce MX', 'Reverse DNS']) await expect(chip(page, purpose, 'OK')).toBeVisible();
-    await expect(page.getByTestId('record-progress')).toContainText('Required records: 2 of 2 published. Recommended records: 7 of 7 published.');
+    await expect(page.getByTestId('record-progress')).toContainText('Required records: 2 of 2 published. Recommended records: 5 of 5 published.');
   });
 
   test('a restart registers nothing twice and prints nothing again', async ({ boot }) => {

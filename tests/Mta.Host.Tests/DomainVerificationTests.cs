@@ -31,13 +31,13 @@ public class DomainVerificationTests
     public void Plan_lists_dkim_return_path_and_advisory_records()
     {
         var (plan, _) = PlanFor("Example.COM.");
-        Assert.Equal(5, plan.Count);   // no host name configured: no bounce MX, MTA-STS or reverse-DNS advice
+        Assert.Equal(3, plan.Count);   // no host name, include or sending IP: nothing to authorize in SPF; no bounce MX, MTA-STS, TLS-RPT or reverse-DNS advice
         Assert.Equal("egg202610._domainkey.example.com", plan[0].Host);
         Assert.StartsWith("v=DKIM1; k=rsa; p=", plan[0].Value);
         Assert.Equal(("CNAME", "bounce.example.com", "bounces.mail.test"), (plan[1].Type, plan[1].Host, plan[1].Value));
         Assert.All(plan.Where(p => p.Purpose is DomainRecordPurpose.Spf or DomainRecordPurpose.Dmarc), p => Assert.False(p.Required));
-        Assert.Equal("_dmarc.example.com", plan[3].Host);
-        Assert.Equal(("_smtp._tls.example.com", DomainRecordPurpose.TlsRpt), (plan[4].Host, plan[4].Purpose));
+        Assert.Equal("_dmarc.example.com", plan[2].Host);
+        Assert.DoesNotContain(plan, p => p.Purpose == DomainRecordPurpose.Spf);
     }
 
     [Fact]

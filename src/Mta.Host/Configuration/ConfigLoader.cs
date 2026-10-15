@@ -440,6 +440,25 @@ public static class ConfigLoader
         ValidateDomains(c, errors);
     }
 
+    /// <summary>One destination for the <c>rua</c> tag of a DMARC or TLS-RPT record: it must not be able to end the tag or add a second one.</summary>
+    private static bool ValidReportDestination(string value, bool allowHttps)
+    {
+        string v = value.Trim();
+        if (v.Length == 0 || v.Length > 200 || v.Any(ch => char.IsWhiteSpace(ch) || char.IsControl(ch) || ch is ';' or ',' or '"' or '\\'))
+        {
+            return false;
+        }
+
+        if (allowHttps && v.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            return v.Length > "https://".Length;
+        }
+
+        string address = v.StartsWith("mailto:", StringComparison.OrdinalIgnoreCase) ? v["mailto:".Length..] : v;
+        int at = address.IndexOf('@', StringComparison.Ordinal);
+        return at > 0 && at == address.LastIndexOf('@') && at < address.Length - 1;
+    }
+
     private static void ValidateDomains(MtaConfig c, List<string> errors)
     {
         DomainsSection d = c.Domains;
@@ -463,15 +482,25 @@ public static class ConfigLoader
 
         foreach (string mx in d.MtaStsMx)
         {
-            if (Mta.Host.Domains.DomainRecordOptions.UsableHostname(mx.StartsWith("*.", StringComparison.Ordinal) ? mx[2..] : mx) is null)
+            if (Mta.Host.Domains.DomainRecordOptions.NormalizeMtaStsMx(mx) is null)
             {
-                errors.Add($"Domains:MtaStsMx entry '{mx}' is not a host name (a leading '*.' is allowed).");
+                errors.Add($"Domains:MtaStsMx entry '{mx}' is not a fully qualified host name without a trailing dot (a single leading '*.' is allowed).");
             }
+        }
+
+        if (d.DmarcReportAddress is { Length: > 0 } dmarc && !ValidReportDestination(dmarc, allowHttps: false))
+        {
+            errors.Add("Domains:DmarcReportAddress must be one e-mail address (it is written into the rua tag of a DNS record; no ';', ',' or white space). {domain} stands for the sending domain.");
+        }
+
+        if (d.TlsReportAddress is { Length: > 0 } tls && !ValidReportDestination(tls, allowHttps: true))
+        {
+            errors.Add("Domains:TlsReportAddress must be one e-mail address or one https:// URL (it is written into the rua tag of a DNS record; no ';', ',' or white space). {domain} stands for the sending domain.");
         }
 
         if (d.MtaStsMode != Mta.Host.Domains.MtaStsServingMode.Off && Mta.Host.Domains.DomainRecordOptions.UsableHostname(c.Hostname) is null)
         {
-            errors.Add("Domains:MtaStsMode needs a fully qualified Hostname (EGGMAIL_HOSTNAME): mta-sts.<domain> has to point at it and it is the default mx: line of the policy.");
+            errors.Add("Domains:MtaStsMode needs a fully qualified Hostname: mta-sts.<domain> has to point at it and it is the default mx: line of the policy.");
         }
     }
 

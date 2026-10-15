@@ -19,7 +19,7 @@ Things that are easy to get wrong:
 
 - **Healthcheck command.** The chiseled image has no shell and `/app` is not on `PATH`: use `["CMD", "/app/mta", "--healthcheck"]` (the `HEALTHCHECK` of the image does). `["CMD", "mta", "--healthcheck"]` fails with "executable file not found in $PATH". The release workflow checks this on every build (`deploy/smoke/image.sh` prints the image's `PATH` and tries `mta`).
 - **First administrator.** Compose: a file secret read through `Dashboard__BootstrapAdminPasswordFile` (the file must be readable by uid 1654: Compose does not apply `uid` or `mode` to file secrets outside Swarm). Kubernetes: a Secret mounted at `/run/secrets/eggmail`. Or `mta admin create` while the SQLite server is stopped. Further users are made in the dashboard or the API while the server runs (see "Users while the server runs").
-- **First sending domain.** Set `EGGMAIL_DOMAINS=example.com` (`Domains__Bootstrap`): the first start registers the domain, generates its DKIM key and writes the DNS records to create into the log (one JSON line per line of the zone file, category `Mta.domains`: `docker compose logs eggmail | grep Mta.domains`); the dashboard shows them with a **Check DNS** button (see "Adding a sending domain and its DNS records").
+- **First sending domain.** Set `Domains__Bootstrap=example.com`: the first start registers the domain, generates its DKIM key and writes the DNS records to create into the log (one JSON line per line of the zone file, category `Mta.domains`: `docker compose logs eggmail | grep Mta.domains`); the dashboard shows them with a **Check DNS** button (see "Adding a sending domain and its DNS records").
 - **Volume ownership.** The image prepares `/data` for uid 1654; a new Kubernetes volume is owned by root, hence `fsGroup: 1654` in the StatefulSet.
 - **Inbound port 25 for bounces** needs a public MX record and a platform that offers inbound 25 (many load balancers do not).
 - **Kubernetes NetworkPolicy** is enforced only by a CNI that implements it; the smoke test applies the policy on kind but does not test enforcement.
@@ -202,13 +202,13 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 
 | Key | Default | Meaning |
 |---|---|---|
-| `Domains:Bootstrap` | none | *List* of domain names to register at start for the first tenant (the environment alias `EGGMAIL_DOMAINS` sets it; commas, semicolons or spaces separate several). Idempotent and safe with several replicas; a new domain gets its DKIM key and the DNS records to create are written to the log ([below](#adding-a-sending-domain-and-its-dns-records)). An entry that is not a domain name stops the start |
+| `Domains:Bootstrap` | none | *List* of domain names to register at start for the first tenant (in an environment variable `Domains__Bootstrap`; commas, semicolons or spaces separate several). Idempotent and safe with several replicas; a new domain gets its DKIM key and the DNS records to create are written to the log ([below](#adding-a-sending-domain-and-its-dns-records)). An entry that is not a domain name stops the start |
 | `Domains:DmarcPolicy` | `none` | Policy of the suggested DMARC record: `none` (monitor only), `quarantine` or `reject` |
-| `Domains:DmarcReportAddress` | `dmarc@{domain}` | E-mail address in the `rua` of the suggested DMARC record; `{domain}` stands for the sending domain. The address has to receive mail |
-| `Domains:TlsReportAddress` | `tls-rpt@{domain}` | Destination in the `rua` of the suggested TLS-RPT record: an e-mail address or an `https://` URL |
-| `Domains:MtaStsMode` | `Off` | `Testing` or `Enforce`: EggMail serves the MTA-STS policy file of every registered domain and suggests the two MTA-STS records. Needs a fully qualified `Hostname`. Read the warning [below](#mta-sts) first |
+| `Domains:DmarcReportAddress` | `dmarc@{domain}` | E-mail address in the `rua` of the suggested DMARC record; `{domain}` stands for the sending domain. The address has to receive mail, and reports for a domain whose `rua` is on another domain are only sent if that domain publishes an authorization record (below). One address; `;`, `,`, white space and control characters stop the start, because the value is written into a DNS record |
+| `Domains:TlsReportAddress` | `tls-rpt@{domain}` | Destination in the `rua` of the suggested TLS-RPT record: one e-mail address or one `https://` URL (same rules as above) |
+| `Domains:MtaStsMode` | `Off` | `None`, `Testing` or `Enforce`: EggMail serves the MTA-STS policy file (`mode: none`, `testing` or `enforce`) of every registered domain and suggests the MTA-STS and TLS-RPT records. Global, not per domain. Needs a fully qualified `Hostname`. Read the warning [below](#mta-sts) first |
 | `Domains:MtaStsMaxAge` | `7.00:00:00` | `max_age` of the served policy (1 minute to 31557600 seconds) |
-| `Domains:MtaStsMx` | `Hostname` | *List.* The `mx:` lines of the served policy (`*.example.net` patterns allowed) |
+| `Domains:MtaStsMx` | `Hostname` | *List.* The `mx:` lines of the served policy: fully qualified host names in lower case with no trailing dot; `*.example.net` is allowed, `*.*.example.net` is not. Anything else stops the start |
 
 ### Backups and backend switch
 
@@ -254,7 +254,7 @@ Once one administrator exists, the others are made in the dashboard (**Users**, 
 
 A domain can send once EggMail has found its **required** records in DNS. There are three ways to add one, and each ends at the same list of exact records to create:
 
-1. **At start**, for a new installation: `EGGMAIL_DOMAINS=example.com` (or `Domains__Bootstrap=example.com`; several names separated by commas). EggMail creates a tenant named `Default` when there is none, registers each domain that is missing in the oldest tenant, generates its DKIM key and **writes the DNS records to the log, once, when the domain is registered** (one log line per line of the zone file). Starting again changes nothing and prints nothing new; several replicas starting together register each domain once (a lease in the database, `domains-bootstrap`). A name another tenant has registered is left alone with a warning.
+1. **At start**, for a new installation: `Domains__Bootstrap=example.com` (or `--Domains:Bootstrap=example.com`; several names separated by commas). EggMail creates a tenant named `Default` when there is none, registers each domain that is missing in the oldest tenant, generates its DKIM key and **writes the DNS records to the log, once, when the domain is registered** (one log line per line of the zone file). Starting again changes nothing and prints nothing new; several replicas starting together register each domain once (a lease in the database, `domains-bootstrap`). A name another tenant has registered is left alone with a warning.
 2. **In the dashboard**: Domains, enter the name, Add domain. The page of the domain shows everything below.
 3. **With the API**: `POST /api/v1/domains` `{ "name": "example.com" }`; `GET /api/v1/domains/{id}/records` returns the records and the same text as a zone file ([api.md](api.md#domains-domains-scope)).
 
@@ -267,6 +267,7 @@ For `example.com`, with `Hostname=mta.example.net`, `Delivery:BounceDomain=bounc
 ```
 ; DNS records for example.com
 ; Required records decide whether the domain can send; recommended ones improve delivery and give you reports.
+; SPF and DMARC are shown as comments: add them only if the domain has none, otherwise merge them into the record that exists (two SPF records break SPF).
 
 ; DKIM (required): Lets receivers verify that mail from this domain is signed by EggMail.
 egg202610._domainkey.example.com. 3600 IN TXT "v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA..." "...IDAQAB"
@@ -275,15 +276,15 @@ egg202610._domainkey.example.com. 3600 IN TXT "v=DKIM1; k=rsa; p=MIIBIjANBgkqhki
 bounce.example.com. 3600 IN CNAME bounces.example.net.
 
 ; SPF (recommended): Authorizes this server to send for the domain. Keep a single SPF record per domain: merge this into an existing one.
-example.com. 3600 IN TXT "v=spf1 ip4:203.0.113.25 ~all"
+; example.com. 3600 IN TXT "v=spf1 ip4:203.0.113.25 ~all"
 
 ; DMARC (recommended): Tells receivers what to do with mail that fails authentication and where to send reports. The default only monitors (p=none).
-_dmarc.example.com. 3600 IN TXT "v=DMARC1; p=none; rua=mailto:dmarc@example.com"
+; _dmarc.example.com. 3600 IN TXT "v=DMARC1; p=none; rua=mailto:dmarc@example.com"
 
-; TLS-RPT (recommended): Asks receivers to send daily TLS reports (RFC 8460) to the address in rua.
+; TLS-RPT (recommended): Asks receivers to send daily TLS reports (RFC 8460) to the address in rua. Publish it only if this server receives the domain's mail.
 _smtp._tls.example.com. 3600 IN TXT "v=TLSRPTv1; rua=mailto:tls-rpt@example.com"
 
-; MTA-STS (recommended): Announces the MTA-STS policy that EggMail serves at https://mta-sts.example.com/.well-known/mta-sts.txt. The id changes when the policy changes.
+; MTA-STS (recommended): Announces the MTA-STS policy that EggMail serves at https://mta-sts.example.com/.well-known/mta-sts.txt. The id changes when the policy changes. Publish it only if this server receives the domain's mail.
 _mta-sts.example.com. 3600 IN TXT "v=STSv1; id=3f6c1d0a9b2e4f57"
 
 ; MTA-STS host (recommended): Must lead to this server (mta.example.net) so it can serve the policy over HTTPS; its certificate has to cover mta-sts.example.com.
@@ -300,42 +301,48 @@ mta-sts.example.com. 3600 IN CNAME mta.example.net.
 |---|---|---|
 | **DKIM** TXT `<selector>._domainkey.<domain>` (required) | receivers verify the signature EggMail adds | the domain's RSA-2048 key, generated when the domain is added; the selector is `egg<YYYYMM>` |
 | **Return-path** CNAME `bounce.<domain>` (required when `Delivery:BounceDomain` is set) | bounces for the domain reach EggMail | `Delivery:BounceDomain` |
-| **SPF** TXT on the domain | authorizes this server | `include:` of `Api:SpfInclude`, `ip4:`/`ip6:` of `Delivery:PublicSendingIp`, or else `a:` of `Hostname`; then `~all` |
+| **SPF** TXT on the domain | authorizes this server | `include:` of `Api:SpfInclude`, `ip4:`/`ip6:` of `Delivery:PublicSendingIp`, or else `a:` of `Hostname`; then `~all`. Nothing of these configured: no SPF record |
 | **DMARC** TXT `_dmarc.<domain>` | policy and report address | `Domains:DmarcPolicy` (default `p=none`, monitoring only), `Domains:DmarcReportAddress` |
-| **TLS-RPT** TXT `_smtp._tls.<domain>` | where receivers send TLS reports about mail to this domain | `Domains:TlsReportAddress` |
+| **TLS-RPT** TXT `_smtp._tls.<domain>` | where receivers send TLS reports about mail to this domain (only with `Domains:MtaStsMode`) | `Domains:TlsReportAddress` |
 | **MTA-STS** TXT `_mta-sts.<domain>` and CNAME `mta-sts.<domain>` | announce and locate the policy file (only with `Domains:MtaStsMode`) | the id is a hash of the policy file, so it changes exactly when the policy does; the CNAME points at `Hostname` |
 | **Bounce MX** MX on the bounce domain | the receiving side of the return-path CNAME: bounces are delivered to this server | `Hostname`; one record for all domains, published once by whoever runs EggMail, not by each customer |
 | **Reverse DNS** PTR | receivers compare the sending IP's reverse name with the EHLO name | advice only: it is set at whoever owns the IP address, so it is a comment in the zone file, not a line |
 
-A record that cannot be created in the customer's zone is a comment in the zone file instead of a line: the reverse DNS, and the bounce MX when the bounce domain is not inside the domain (with `Delivery:BounceDomain=bounces.example.com` the MX for `example.com` is a real line). Only the two required records decide whether the domain can send; everything else is recommended and never blocks sending. When `Hostname` is not a fully qualified name (the machine-name default), the bounce MX, the MTA-STS records and the reverse-DNS advice are left out because they would name a host nobody can reach.
+A record that cannot be created in the customer's zone is a comment in the zone file instead of a line: the reverse DNS, and the bounce MX when the bounce domain is not inside the domain (with `Delivery:BounceDomain=bounces.example.com` the MX for `example.com` is a real line). **SPF and DMARC are comments in the zone file.** Most domains have both already, and a second record of either kind breaks it (two SPF records are a permanent error, two DMARC records are ignored), so importing the file must never add one: copy the value into the record that exists, or uncomment the line when the domain has none. When there is nothing to authorize (no `Api:SpfInclude`, no `Delivery:PublicSendingIp`, no fully qualified `Hostname`) no SPF record is suggested at all, because `v=spf1 ~all` authorizes nothing, and the file says so. **TLS-RPT and the two MTA-STS records appear only with `Domains:MtaStsMode`** (they concern mail the domain *receives*); their notes and the zone-file comments repeat that they are to be published only if this server receives the domain's mail.
 
-**The bounce path.** Port 25 of the host (`Hostname`) has to reach the bounce listener (the listener named `bounce`, container port 2526 by default, `Smtp:Listeners:<name>:Port`), and the bounce domain's MX record has to name that host. Without the MX record no bounce, complaint report or delayed-delivery notice ever arrives. Today the envelope sender of outgoing mail always uses the shared bounce domain (`bounces+<token>@<Delivery:BounceDomain>`), so that is the name whose MX matters; the per-domain `bounce.<domain>` CNAME is verified and shown as `returnPathVerified`, and will carry the envelope sender once delivery switches to it (the choice already exists in `SenderPolicy.SelectReturnPath`, but delivery does not call it yet).
+Only the two required records decide whether the domain can send; everything else is recommended and never blocks sending. When `Hostname` is not a fully qualified name (the machine-name default), the bounce MX, the MTA-STS records and the reverse-DNS advice are left out because they would name a host nobody can reach.
+
+**The bounce path.** Port 25 of the host (`Hostname`) has to reach the bounce listener (the listener named `bounce`, container port 2526 by default, `Smtp:Listeners:<name>:Port`), and the bounce domain's MX record has to name that host. Without the MX record no bounce, complaint report or delayed-delivery notice ever arrives. Which of the two names carries the envelope sender of outgoing mail (the shared bounce domain, or the verified `bounce.<domain>` of the sending domain) is a delivery matter, described in [components/delivery.md](components/delivery.md); the MX of the bounce domain is needed either way, because the per-domain CNAME leads to it.
 
 **Reverse DNS.** Your sending IP needs a PTR record that matches `Hostname`, and outbound port 25 must not be blocked by your provider. `Delivery:PublicSendingIp` makes the check look at exactly that IP; without it EggMail looks up the addresses of `Hostname` and reverses each one. Deliverability work (IP reputation, warm-up, abuse handling) is operational and not done by the software.
 
 ### Check DNS and what the statuses mean
 
-The **Check DNS** button of the domain page (`POST /api/v1/domains/{id}/verify`) looks every record up at once, stores the result, and shows for each record its status and, when it is not OK, what was found next to what is expected. At most one check per 30 seconds per domain; EggMail also re-checks on its own (every 90 seconds at first, then less often, daily once verified). The top of the page says **Ready to send** or **Not ready to send** and counts the published records ("Required records: 2 of 2 published. Recommended records: 5 of 7 published.").
+The **Check DNS** button of the domain page (`POST /api/v1/domains/{id}/verify`) looks every record up at once, stores the result, and shows for each record its status and, when it is not OK, what was found next to what is expected. At most one check per 30 seconds per domain; EggMail also re-checks on its own (every 90 seconds at first, then less often, daily once verified). The top of the page says **Ready to send** or **Not ready to send** and counts the published records ("Required records: 2 of 2 published. Recommended records: 3 of 4 published."). The count leaves out what the customer cannot publish in the domain's zone: the reverse DNS, and the operator's bounce MX when the bounce domain is outside the domain; those rows are still checked and shown.
 
 | Status | Meaning |
 |---|---|
-| OK | found as expected |
+| OK | found as expected. SPF is judged by what the record authorizes (RFC 7208 evaluation of the sending address: CIDR ranges, `include:`, `a:` and `mx` count), DMARC also by the record of the organizational domain for a subdomain, and a CNAME may lead through other names |
 | Missing | nothing of that kind at the name |
 | Invalid | a record exists but is malformed, or there are several where one is allowed (two SPF records make SPF fail; two DMARC records are ignored) |
 | Mismatch | a well-formed record with another value: another DKIM key, another CNAME target, an SPF record without our mechanism, an older MTA-STS id, an MX or PTR naming another host |
 | Pending | not looked up yet, or the DNS server did not answer (a DNS outage never changes a domain's state) |
 
-DMARC and TLS-RPT accept any valid record: the policy and report address are the customer's to choose, so a stricter DMARC policy is OK. An SPF record that holds other senders is OK as long as it contains the mechanism EggMail asked for. DNS changes can take a while to spread; a record that was just published may show as missing for the length of its previous TTL.
+DMARC and TLS-RPT accept any valid record: the policy and report address are the customer's to choose, so a stricter DMARC policy is OK. An SPF record that holds other senders is OK as long as it contains the mechanism EggMail asked for. DNS changes can take a while to spread; a record that was just published may show as missing for the length of its previous TTL. A check looks records up four at a time and gives each record 20 seconds; a record that does not answer in time is Pending. What DNS returned is kept per record up to 2,048 characters.
+
+**Reports sent to another domain (RFC 7489 section 7.1).** If the `rua` address of the DMARC record is on a different domain than the sending domain (for example `Domains:DmarcReportAddress=reports@ops.example.net` for `example.com`), receivers send the reports only if `ops.example.net` publishes an authorization record: a TXT record `example.com._report._dmarc.ops.example.net` with the value `v=DMARC1`. EggMail does not create or check that record, because it belongs to the zone of the report address; without it the reports are silently dropped. TLS-RPT has no such rule.
 
 ### MTA-STS
 
-MTA-STS (RFC 8461) protects mail **sent to** a domain: it tells other servers to deliver to your MX hosts only over verified TLS. EggMail is an outbound server, so this only makes sense for a domain whose MX records point at this server (for example a domain used only for sending and bounces). **Do not turn it on for a domain whose mail is received somewhere else** (Google Workspace, Microsoft 365, another MTA): in `Enforce` mode senders would refuse to deliver to your real MX hosts, and even in `Testing` the policy is wrong for that domain. Use `Domains:MtaStsMx` for the hosts that do receive the domain's mail, and `Testing` first.
+MTA-STS (RFC 8461) protects mail **sent to** a domain: it tells other servers to deliver to your MX hosts only over verified TLS. EggMail is an outbound server, so this only makes sense for a domain whose MX records point at this server (for example a domain used only for sending and bounces). **Do not turn it on for a domain whose mail is received somewhere else** (Google Workspace, Microsoft 365, another MTA): in `Enforce` mode senders would refuse to deliver to your real MX hosts, and even in `Testing` the policy is wrong for that domain. Use `Domains:MtaStsMx` for the hosts that do receive the domain's mail, and `Testing` first. The switch is global: all registered domains get the policy.
 
 With `Domains:MtaStsMode=Testing` or `Enforce`:
 
 - EggMail answers `GET https://mta-sts.<domain>/.well-known/mta-sts.txt` itself, on the dashboard listeners, for every registered domain, with `version: STSv1`, the mode, one `mx:` line per `Domains:MtaStsMx` entry (default: `Hostname`) and `max_age:`. Any other path on a `mta-sts.<domain>` host, and the policy path of a domain that is not registered, is 404; the dashboard is not offered under that name.
 - **`mta-sts.<domain>` must point at this server** (the CNAME shown on the domain page, to `Hostname`), and the HTTPS port 443 of that name must reach the HTTPS listener (container port 8443, `Dashboard:HttpsPort`).
 - **The certificate must cover `mta-sts.<domain>`**: senders refuse a policy served with a certificate for another name. The listener presents the stored certificate that matches the requested name (or the default one); list `mta-sts.<domain>` (or `*.<domain>`) in `Acme:Domains`, or upload a certificate that has it ([TLS certificates and ACME](#tls-certificates-and-acme)). Until it does, the page shows the records as OK and senders still ignore the policy.
+- **Turning it off properly.** Senders keep a policy until its `max_age` runs out (7 days by default; it can be up to a year), and an `enforce` policy keeps blocking delivery for that long if the file simply disappears. To retire MTA-STS, first set `Domains:MtaStsMode=None`: the served file says `mode: none`, the `_mta-sts` id changes (update the TXT record), senders fetch it and forget the old policy; keep it for at least the old `max_age`, and only then set `Off` and remove the records.
+- Probes and the CA's HTTP-01 challenge (`/healthz`, `/readyz`, `/.well-known/acme-challenge/`) are answered on every host name, also on `mta-sts.<domain>`; nothing else of the dashboard is.
 - The `id` in the `_mta-sts` TXT record is a hash of the policy file. When you change the mode, the max age or the `mx:` lines the id changes, and the domain page shows the record as **Mismatch** until the TXT record is updated to the new value.
 
 ## TLS certificates and ACME

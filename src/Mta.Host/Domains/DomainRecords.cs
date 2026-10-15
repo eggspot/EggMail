@@ -63,6 +63,12 @@ public enum MtaStsServingMode
     /// <summary>No policy is served and no MTA-STS record is suggested.</summary>
     Off = 0,
 
+    /// <summary>
+    /// The policy is served with <c>mode: none</c>: how to retire MTA-STS properly. Senders that cached an <c>enforce</c> policy only forget it when they fetch a
+    /// newer one, so serve <c>none</c> for at least the old <c>max_age</c> before switching serving <c>Off</c>.
+    /// </summary>
+    None,
+
     /// <summary>Senders report TLS problems but still deliver (the safe way to start).</summary>
     Testing,
 
@@ -86,7 +92,7 @@ public sealed class DomainRecordOptions
     public int Ttl { get; init; } = 3600;
 
     /// <summary>
-    /// This server's public host name (<c>Hostname</c>, the <c>EGGMAIL_HOSTNAME</c> alias): the target of the bounce MX, the MTA-STS <c>mx:</c> line, the
+    /// This server's public host name (<c>Hostname</c>): the target of the bounce MX, the MTA-STS <c>mx:</c> line, the
     /// name <c>mta-sts.&lt;domain&gt;</c> must point at, and the name whose reverse DNS is checked. Null when it is not a fully qualified name (the
     /// machine name default), in which case none of those records is suggested.
     /// </summary>
@@ -104,7 +110,10 @@ public sealed class DomainRecordOptions
     /// <summary>Where TLS-RPT reports go: an e-mail address or an <c>https://</c> URL, <c>{domain}</c> stands for the customer's domain. Null: <c>tls-rpt@{domain}</c>.</summary>
     public string? TlsReportAddress { get; init; }
 
-    /// <summary>Serve the MTA-STS policy file of every registered domain and suggest its records. Only right when this server receives mail for the domain (see docs/operations.md).</summary>
+    /// <summary>
+    /// Serve the MTA-STS policy file of every registered domain and suggest the MTA-STS and TLS-RPT records (both protect mail <i>received</i> by the domain). Global, not per domain:
+    /// only right when this server receives the mail of the domains (see docs/operations.md).
+    /// </summary>
     public MtaStsServingMode MtaStsMode { get; init; }
 
     /// <summary>The <c>max_age</c> of the served policy.</summary>
@@ -119,7 +128,7 @@ public sealed class DomainRecordOptions
     /// <summary>The <c>mx:</c> patterns of the policy.</summary>
     public IReadOnlyList<string> EffectiveMtaStsMx => MtaStsMx.Count > 0 ? MtaStsMx : ServerHostname is { } host ? [host] : [];
 
-    /// <summary>A host name usable in DNS records: fully qualified (has a dot), not an IP address; lower-case without a trailing dot. Null otherwise.</summary>
+    /// <summary>A host name usable in DNS records: a valid host name, fully qualified (has a dot), not an IP address; lower-case without a trailing dot. Null otherwise.</summary>
     public static string? UsableHostname(string? hostname)
     {
         if (string.IsNullOrWhiteSpace(hostname))
@@ -128,7 +137,28 @@ public sealed class DomainRecordOptions
         }
 
         string name = hostname.Trim().TrimEnd('.').ToLowerInvariant();
-        return name.Contains('.') && !IPAddress.TryParse(name, out _) && !name.Any(char.IsWhiteSpace) ? name : null;
+        return name.Contains('.') && !name.Contains('_') && !IPAddress.TryParse(name, out _) && Mta.Core.EmailAddress.IsValidHostName(name) ? name : null;
+    }
+
+    /// <summary>
+    /// An <c>mx:</c> entry of the MTA-STS policy: a fully qualified host name in lower case with no trailing dot, or <c>*.</c> followed by one (RFC 8461 section 3.2).
+    /// Null when it is none of these (a trailing dot, <c>*.*.x</c>, a bare label, an address).
+    /// </summary>
+    public static string? NormalizeMtaStsMx(string? entry)
+    {
+        if (string.IsNullOrWhiteSpace(entry))
+        {
+            return null;
+        }
+
+        string name = entry.Trim().ToLowerInvariant();
+        if (name.EndsWith('.'))
+        {
+            return null;
+        }
+
+        string host = name.StartsWith("*.", StringComparison.Ordinal) ? name[2..] : name;
+        return UsableHostname(host) == host ? name : null;
     }
 }
 
@@ -143,7 +173,7 @@ public static class MtaStsPolicyDocument
         ArgumentNullException.ThrowIfNull(options);
         var text = new StringBuilder();
         text.Append("version: STSv1\r\n");
-        text.Append("mode: ").Append(options.MtaStsMode == MtaStsServingMode.Enforce ? "enforce" : "testing").Append("\r\n");
+        text.Append("mode: ").Append(options.MtaStsMode switch { MtaStsServingMode.Enforce => "enforce", MtaStsServingMode.None => "none", _ => "testing" }).Append("\r\n");
         foreach (string mx in options.EffectiveMtaStsMx)
         {
             text.Append("mx: ").Append(mx).Append("\r\n");
@@ -219,17 +249,21 @@ public static class DomainRecordPlanner
                 "Makes bounce messages for this domain reach EggMail."));
         }
 
-        records.Add(new ExpectedDomainRecord("TXT", name, SpfValue(options), options.Ttl, DomainRecordPurpose.Spf, false,
-            "Authorizes this server to send for the domain. Keep a single SPF record per domain: merge this into an existing one."));
+        if (SpfValue(options) is { } spf)
+        {
+            records.Add(new ExpectedDomainRecord("TXT", name, spf, options.Ttl, DomainRecordPurpose.Spf, false,
+                "Authorizes this server to send for the domain. Keep a single SPF record per domain: merge this into an existing one."));
+        }
+
         records.Add(new ExpectedDomainRecord("TXT", "_dmarc." + name, DmarcValue(name, options), options.Ttl, DomainRecordPurpose.Dmarc, false,
             "Tells receivers what to do with mail that fails authentication and where to send reports. The default only monitors (p=none)."));
-        records.Add(new ExpectedDomainRecord("TXT", "_smtp._tls." + name, TlsRptValue(name, options), options.Ttl, DomainRecordPurpose.TlsRpt, false,
-            "Asks receivers to send daily TLS reports (RFC 8460) to the address in rua."));
-
         if (options.MtaStsEnabled && options.ServerHostname is { } server)
         {
+            // TLS-RPT and MTA-STS both concern mail received by the domain: suggested only where the operator says this server receives it (Domains:MtaStsMode).
+            records.Add(new ExpectedDomainRecord("TXT", "_smtp._tls." + name, TlsRptValue(name, options), options.Ttl, DomainRecordPurpose.TlsRpt, false,
+                "Asks receivers to send daily TLS reports (RFC 8460) to the address in rua. Publish it only if this server receives the domain's mail."));
             records.Add(new ExpectedDomainRecord("TXT", "_mta-sts." + name, $"v=STSv1; id={MtaStsPolicyDocument.PolicyId(options)}", options.Ttl, DomainRecordPurpose.MtaSts, false,
-                $"Announces the MTA-STS policy that EggMail serves at {MtaStsPolicyDocument.UrlFor(name)}. The id changes when the policy changes."));
+                $"Announces the MTA-STS policy that EggMail serves at {MtaStsPolicyDocument.UrlFor(name)}. The id changes when the policy changes. Publish it only if this server receives the domain's mail."));
             records.Add(new ExpectedDomainRecord("CNAME", MtaStsPolicyDocument.HostFor(name), server, options.Ttl, DomainRecordPurpose.MtaStsHost, false,
                 $"Must lead to this server ({server}) so it can serve the policy over HTTPS; its certificate has to cover mta-sts.{name}."));
         }
@@ -252,10 +286,11 @@ public static class DomainRecordPlanner
 
     /// <summary>
     /// The suggested SPF record. It authorizes what the operator configured: an <c>include:</c> host, the sending IP, and otherwise the server's own host
-    /// name (<c>a:</c>); with none of them the record is only <c>v=spf1 ~all</c>. (SPF is evaluated for the return-path domain, which is the operator's bounce
+    /// name (<c>a:</c>). With none of them there is nothing to authorize and null is returned: <c>v=spf1 ~all</c> would authorize nothing and soft-fail every
+    /// sender, so no SPF record is suggested. (SPF is evaluated for the return-path domain, which is the operator's bounce
     /// domain, so DMARC passes through DKIM; this record still matters for the HELO name and for receivers that check the From domain.)
     /// </summary>
-    public static string SpfValue(DomainRecordOptions options)
+    public static string? SpfValue(DomainRecordOptions options)
     {
         var mechanisms = new List<string> { "v=spf1" };
         if (!string.IsNullOrWhiteSpace(options.SpfInclude))
@@ -272,6 +307,11 @@ public static class DomainRecordPlanner
             mechanisms.Add("a:" + host);
         }
 
+        if (mechanisms.Count == 1)
+        {
+            return null;
+        }
+
         mechanisms.Add("~all");
         return string.Join(' ', mechanisms);
     }
@@ -279,7 +319,7 @@ public static class DomainRecordPlanner
     public static string DmarcValue(string domain, DomainRecordOptions options)
     {
         string policy = options.DmarcPolicy.Trim().ToLowerInvariant();
-        return $"v=DMARC1; p={policy}; rua=mailto:{ReportAddress(options.DmarcReportAddress, "dmarc@{domain}", domain)}";
+        return $"v=DMARC1; p={policy}; rua=mailto:{ReportAddress(options.DmarcReportAddress, "dmarc@{domain}", domain).RemovePrefix("mailto:")}";
     }
 
     public static string TlsRptValue(string domain, DomainRecordOptions options)
@@ -287,6 +327,8 @@ public static class DomainRecordPlanner
         string address = ReportAddress(options.TlsReportAddress, "tls-rpt@{domain}", domain);
         return "v=TLSRPTv1; rua=" + (address.StartsWith("https://", StringComparison.OrdinalIgnoreCase) || address.StartsWith("mailto:", StringComparison.OrdinalIgnoreCase) ? address : "mailto:" + address);
     }
+
+    private static string RemovePrefix(this string value, string prefix) => value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ? value[prefix.Length..] : value;
 
     private static string ReportAddress(string? configured, string fallback, string domain) =>
         (string.IsNullOrWhiteSpace(configured) ? fallback : configured.Trim()).Replace("{domain}", domain, StringComparison.OrdinalIgnoreCase);
@@ -300,9 +342,10 @@ public static class ZoneFile
     private const int MaxCharacterString = 255;
 
     /// <summary>
-    /// The zone-file text for <paramref name="domain"/>: one comment line and one record per entry. A record that does not belong in the domain's zone is
-    /// written as a comment: the reverse DNS (set where the IP address is managed) and the bounce MX when the bounce domain is not inside the domain
-    /// (the operator publishes it once for all domains).
+    /// The zone-file text for <paramref name="domain"/>: one comment line and one record per entry. Lines that would do harm or cannot work when the file is imported
+    /// are written as comments: SPF and DMARC (a domain usually has them, and a second record of either kind breaks it: merge instead), the reverse DNS (set where the IP
+    /// address is managed) and the bounce MX when the bounce domain is not inside the domain (the operator publishes it once for all domains). When there is nothing to
+    /// authorize in SPF no record is suggested, and the file says so.
     /// </summary>
     public static string Render(string domain, IReadOnlyList<ExpectedDomainRecord> records)
     {
@@ -310,6 +353,7 @@ public static class ZoneFile
         var text = new StringBuilder();
         text.Append("; DNS records for ").Append(DomainRecordPlanner.Normalize(domain)).Append('\n');
         text.Append("; Required records decide whether the domain can send; recommended ones improve delivery and give you reports.\n");
+        text.Append("; SPF and DMARC are shown as comments: add them only if the domain has none, otherwise merge them into the record that exists (two SPF records break SPF).\n");
         foreach (ExpectedDomainRecord record in records)
         {
             text.Append('\n');
@@ -323,22 +367,39 @@ public static class ZoneFile
             text.Append(Line(record, domain)).Append('\n');
         }
 
+        if (!records.Any(r => r.Purpose == DomainRecordPurpose.Spf))
+        {
+            text.Append("\n; SPF: nothing to authorize, so no record is suggested. Set Api:SpfInclude, Delivery:PublicSendingIp or a fully qualified Hostname to get one.\n");
+        }
+
         return text.ToString();
     }
 
-    /// <summary>One record as a zone-file line, or a comment line for a record that cannot be created in the zone of <paramref name="zoneDomain"/>.</summary>
-    public static string Line(ExpectedDomainRecord record, string zoneDomain)
+    /// <summary>
+    /// Whether the customer can create the record in the zone of <paramref name="zoneDomain"/>: not the reverse DNS (set where the IP address is managed) and not an MX of
+    /// the operator's bounce domain outside the domain. Such records are advice and do not count in "published" totals.
+    /// </summary>
+    public static bool BelongsInZone(ExpectedDomainRecord record, string zoneDomain)
     {
         ArgumentNullException.ThrowIfNull(record);
         string zone = DomainRecordPlanner.Normalize(zoneDomain);
         bool inZone = record.Host == zone || record.Host.EndsWith("." + zone, StringComparison.Ordinal);
+        return record.Type != "PTR" && (record.Type != "MX" || inZone);
+    }
+
+    /// <summary>One record as a zone-file line, or a comment line for a record that should not or cannot be created in the zone of <paramref name="zoneDomain"/>.</summary>
+    public static string Line(ExpectedDomainRecord record, string zoneDomain)
+    {
+        ArgumentNullException.ThrowIfNull(record);
         switch (record.Type)
         {
+            case "TXT" when record.Purpose is DomainRecordPurpose.Spf or DomainRecordPurpose.Dmarc:
+                return "; " + $"{Fqdn(record.Host)} {record.Ttl} IN TXT {QuotedStrings(record.Value)}";
             case "TXT":
                 return $"{Fqdn(record.Host)} {record.Ttl} IN TXT {QuotedStrings(record.Value)}";
             case "CNAME":
                 return $"{Fqdn(record.Host)} {record.Ttl} IN CNAME {Fqdn(record.Value)}";
-            case "MX" when !inZone:
+            case "MX" when !BelongsInZone(record, zoneDomain):
                 return $"; MX {record.Host} -> {record.Value} (published once by whoever runs EggMail, not in this zone)";
             case "MX":
             {

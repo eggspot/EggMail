@@ -19,7 +19,7 @@ public sealed record DomainBootstrapResult(
     bool LeaseHeldElsewhere);
 
 /// <summary>
-/// <c>Domains:Bootstrap</c> (<c>EGGMAIL_DOMAINS</c>): registers the listed sending domains at start for the first tenant, so a new installation only has to name its
+/// <c>Domains:Bootstrap</c>: registers the listed sending domains at start for the first tenant, so a new installation only has to name its
 /// domain. Each new domain gets its DKIM key generated and the exact DNS records to create are written to the log, once, when it is registered; the same text is
 /// available on demand (<c>mta domains records &lt;domain&gt;</c>, the dashboard, <c>GET /api/v1/domains/{id}/records</c>).
 /// <para>The first tenant is the oldest one; when there is none, a tenant named <c>Default</c> is created (so the first administrator finds it when signing in). The
@@ -46,19 +46,40 @@ public static class DomainBootstrap
 
         IConfigStore store = storage.Config;
         string owner = "domains-bootstrap-" + Guid.NewGuid().ToString("N");
-        if (await store.TryAcquireLeaseAsync(LeaseName, owner, LeaseDuration, clock.UtcNow, ct).ConfigureAwait(false) is null)
+        LeaseRecord? lease = await store.TryAcquireLeaseAsync(LeaseName, owner, LeaseDuration, clock.UtcNow, ct).ConfigureAwait(false);
+        if (lease is null)
         {
-            log.Write(MtaLogLevel.Information, "domains", "Domains:Bootstrap is being applied by another replica; nothing to do here.");
+            log.Write(MtaLogLevel.Warning, "domains", $"Domains:Bootstrap was not applied by this replica: another replica holds the lease '{LeaseName}' (it is applying it, or died while doing so and the lease runs out within {LeaseDuration.TotalMinutes:0} minutes; then restart this replica or add the domains in the dashboard).");
             return new DomainBootstrapResult(registered, already, skipped, true);
         }
 
         try
         {
-            Tenant tenant = await EnsureTenantAsync(store, clock, log, ct).ConfigureAwait(false);
+            Tenant tenant;
+            try
+            {
+                tenant = await EnsureTenantAsync(store, clock, log, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                string reason = "no tenant to register the domains for: " + ex.Message;
+                log.Write(MtaLogLevel.Error, "domains", $"Domains:Bootstrap could not start: {reason}");
+                skipped.AddRange(names.Select(n => (n, reason)));
+                return new DomainBootstrapResult(registered, already, skipped, false);
+            }
+
             DomainRecordOptions recordOptions = EggMailApiExtensions.DomainRecordOptionsFrom(config);
             var schedule = new VerificationSchedule();
             foreach (string name in names)
             {
+                // Generating a key takes a moment per domain: keep the lease for as long as the work lasts, and stop if it was lost (another replica would then do the rest).
+                if (!await store.RenewLeaseAsync(LeaseName, owner, lease.FencingToken, LeaseDuration, clock.UtcNow, ct).ConfigureAwait(false))
+                {
+                    log.Write(MtaLogLevel.Warning, "domains", "Domains:Bootstrap lost its lease while registering domains; the rest is left to the replica that holds it now.");
+                    skipped.AddRange(names.SkipWhile(n => n != name).Select(n => (n, "lease lost")));
+                    break;
+                }
+
                 try
                 {
                     if (!DomainNames.TryNormalize(name, out _))
@@ -121,10 +142,10 @@ public static class DomainBootstrap
         return new DomainBootstrapResult(registered, already, skipped, false);
     }
 
-    /// <summary>The oldest tenant, or a new tenant named <c>Default</c> when there is none.</summary>
+    /// <summary>The oldest enabled tenant (a suspended tenant cannot send, so domains registered for it would never work), or a new tenant named <c>Default</c> when there is none.</summary>
     private static async Task<Tenant> EnsureTenantAsync(IConfigStore store, IClock clock, IMtaLog log, CancellationToken ct)
     {
-        Tenant? first = (await store.GetTenantsAsync(ct).ConfigureAwait(false)).OrderBy(t => t.CreatedAt).ThenBy(t => t.Id).FirstOrDefault();
+        Tenant? first = await OldestEnabledAsync(store, ct).ConfigureAwait(false);
         if (first is not null)
         {
             return first;
@@ -134,15 +155,19 @@ public static class DomainBootstrap
         try
         {
             await store.UpsertTenantAsync(tenant, ct).ConfigureAwait(false);
-            log.Write(MtaLogLevel.Information, "domains", $"Created the tenant '{DefaultTenantName}' for the domains of Domains:Bootstrap (there was no tenant yet).");
+            log.Write(MtaLogLevel.Information, "domains", $"Created the tenant '{DefaultTenantName}' for the domains of Domains:Bootstrap (there was no enabled tenant yet).");
             return tenant;
         }
         catch (StorageConflictException)
         {
-            // Someone created a tenant with that slug between the read and the write (the lease only covers this feature): use theirs.
-            return (await store.GetTenantsAsync(ct).ConfigureAwait(false)).OrderBy(t => t.CreatedAt).ThenBy(t => t.Id).First();
+            // The name or slug is taken: by a tenant created at this very moment (use it), or by a suspended one (then there is nothing to register for).
+            return await OldestEnabledAsync(store, ct).ConfigureAwait(false)
+                ?? throw new InvalidOperationException($"every tenant is suspended and the tenant name or slug '{DefaultTenantName}' is taken; activate a tenant in the dashboard or add the domains there.");
         }
     }
+
+    private static async Task<Tenant?> OldestEnabledAsync(IConfigStore store, CancellationToken ct) =>
+        (await store.GetTenantsAsync(ct).ConfigureAwait(false)).Where(t => t.Enabled).OrderBy(t => t.CreatedAt).ThenBy(t => t.Id).FirstOrDefault();
 }
 
 /// <summary>The text that tells an operator which DNS records to create for a domain: what the log, the <c>mta domains records</c> command and the API show.</summary>

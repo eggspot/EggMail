@@ -357,8 +357,8 @@ public sealed class ApiSection
 }
 
 /// <summary>
-/// Sending domains and the DNS records they need (docs/operations.md, "Adding a sending domain"). The environment alias <c>EGGMAIL_DOMAINS</c> sets
-/// <see cref="Bootstrap"/>.
+/// Sending domains and the DNS records they need (docs/operations.md, "Adding a sending domain"). In an environment variable <see cref="Bootstrap"/>
+/// is <c>Domains__Bootstrap</c>.
 /// </summary>
 public sealed class DomainsSection
 {
@@ -379,7 +379,7 @@ public sealed class DomainsSection
     public string? TlsReportAddress { get; init; }
 
     /// <summary>
-    /// <c>Off</c> (default), <c>Testing</c> or <c>Enforce</c>: serve the MTA-STS policy file at <c>https://mta-sts.&lt;domain&gt;/.well-known/mta-sts.txt</c> for every registered
+    /// <c>Off</c> (default), <c>None</c>, <c>Testing</c> or <c>Enforce</c>: serve the MTA-STS policy file at <c>https://mta-sts.&lt;domain&gt;/.well-known/mta-sts.txt</c> for every registered
     /// domain and suggest its DNS records. Only right when this server receives the mail of those domains.
     /// </summary>
     public MtaStsServingMode MtaStsMode { get; init; } = MtaStsServingMode.Off;

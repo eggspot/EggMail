@@ -206,6 +206,8 @@ export interface DnsRecord {
   expected?: string;
   /** Required records decide whether the domain can send; the others are recommended. */
   required: boolean;
+  /** False for advice the customer cannot act on in the domain's zone (the reverse DNS of the sending IP, the operator's bounce MX): it does not count in "published" totals. */
+  publishable: boolean;
   /** One sentence saying what the record is for. */
   note?: string | null;
 }

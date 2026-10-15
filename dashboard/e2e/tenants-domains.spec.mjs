@@ -78,7 +78,6 @@ test.describe('domains and DNS verification', () => {
     await expect(recordRow(page, 'Return-path')).toContainText('bounces.eggmail.test');
     await expect(recordRow(page, 'SPF')).toContainText('v=spf1');
     await expect(recordRow(page, 'DMARC')).toContainText(`_dmarc.${domain}`);
-    await expect(recordRow(page, 'TLS-RPT')).toContainText(`_smtp._tls.${domain}`);
     await expect(recordRow(page, 'Bounce MX')).toContainText('10 mta.eggmail.test');
     await expect(recordRow(page, 'Reverse DNS')).toContainText('mta.eggmail.test');
     await expect(page.getByTestId('dkim-public-key')).not.toBeEmpty();

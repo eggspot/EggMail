@@ -1,4 +1,6 @@
 using System.Net;
+using Mta.Auth.Domains;
+using Mta.Auth.Spf;
 using Mta.Dkim;
 using Mta.Dns;
 using Mta.Policy;
@@ -17,35 +19,55 @@ public sealed record DomainCheckResult(IReadOnlyList<DomainRecordCheck> Records,
 /// </summary>
 public sealed class DomainChecker
 {
-    private readonly IDnsResolver _dns;
+    /// <summary>Lookups of one check that run at the same time.</summary>
+    public const int MaxParallelRecords = 4;
 
-    public DomainChecker(IDnsResolver dns) => _dns = dns ?? throw new ArgumentNullException(nameof(dns));
+    private readonly IDnsResolver _dns;
+    private readonly TimeSpan _recordTimeout;
+
+    /// <param name="dns">The resolver.</param>
+    /// <param name="recordTimeout">The longest one record may take (all its lookups together); a record that takes longer is <c>Pending</c> like a DNS failure. Default 20 seconds.</param>
+    public DomainChecker(IDnsResolver dns, TimeSpan? recordTimeout = null)
+    {
+        _dns = dns ?? throw new ArgumentNullException(nameof(dns));
+        _recordTimeout = recordTimeout ?? TimeSpan.FromSeconds(20);
+    }
 
     public async Task<DomainCheckResult> CheckAsync(IReadOnlyList<ExpectedDomainRecord> expected, CancellationToken cancellationToken)
     {
-        var checks = new List<DomainRecordCheck>(expected.Count);
-        bool dnsFailed = false;
-        string? firstProblem = null;
-        foreach (var record in expected)
+        var checks = new DomainRecordCheck[expected.Count];
+        var dnsFailed = new bool[expected.Count];
+        using var gate = new SemaphoreSlim(MaxParallelRecords);
+        await Task.WhenAll(expected.Select(async (record, i) =>
         {
-            DomainRecordCheck check;
+            await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                check = await CheckOneAsync(record, cancellationToken).ConfigureAwait(false);
-            }
-            catch (DnsException)
-            {
-                check = new DomainRecordCheck(record, DomainRecordStatus.Pending, null);
-                if (record.Required)
+                using var limit = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                limit.CancelAfter(_recordTimeout);
+                try
                 {
-                    dnsFailed = true;
+                    checks[i] = await CheckOneAsync(record, limit.Token).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is DnsException || ex is OperationCanceledException && !cancellationToken.IsCancellationRequested)
+                {
+                    checks[i] = new DomainRecordCheck(record, DomainRecordStatus.Pending, null);
+                    dnsFailed[i] = record.Required;
                 }
             }
-
-            checks.Add(check);
-            if (record.Required && check.Status is DomainRecordStatus.Missing or DomainRecordStatus.Invalid or DomainRecordStatus.Mismatch)
+            finally
             {
-                firstProblem ??= $"{record.Purpose} record {record.Host} " + check.Status switch
+                gate.Release();
+            }
+        })).ConfigureAwait(false);
+
+        string? firstProblem = null;
+        for (int i = 0; i < checks.Length; i++)
+        {
+            ExpectedDomainRecord record = expected[i];
+            if (record.Required && checks[i].Status is DomainRecordStatus.Missing or DomainRecordStatus.Invalid or DomainRecordStatus.Mismatch)
+            {
+                firstProblem ??= $"{record.Purpose} record {record.Host} " + checks[i].Status switch
                 {
                     DomainRecordStatus.Missing => "is missing",
                     DomainRecordStatus.Invalid => "is invalid",
@@ -60,7 +82,7 @@ public sealed class DomainChecker
             return new DomainCheckResult(checks, VerificationCheckResult.RecordsNotOk, firstProblem);
         }
 
-        return dnsFailed
+        return dnsFailed.Any(f => f)
             ? new DomainCheckResult(checks, VerificationCheckResult.DnsTemporaryFailure, "DNS lookup failed")
             : new DomainCheckResult(checks, VerificationCheckResult.AllRecordsOk, null);
     }
@@ -109,13 +131,34 @@ public sealed class DomainChecker
 
     private async Task<DomainRecordCheck> CheckCnameAsync(ExpectedDomainRecord record, CancellationToken ct)
     {
-        string? target = await GetCnameTargetAsync(record.Host, ct).ConfigureAwait(false);
-        if (target is null)
+        var chain = await GetCnameChainAsync(record.Host, ct).ConfigureAwait(false);
+        if (chain.Count == 0)
         {
             return new DomainRecordCheck(record, DomainRecordStatus.Missing, null);
         }
 
-        return new DomainRecordCheck(record, target == DomainRecordPlanner.Normalize(record.Value) ? DomainRecordStatus.Ok : DomainRecordStatus.Mismatch, target);
+        // The expected target may be reached through other names (the customer's DNS provider aliasing it): any link of the chain counts.
+        return new DomainRecordCheck(record, chain.Contains(DomainRecordPlanner.Normalize(record.Value)) ? DomainRecordStatus.Ok : DomainRecordStatus.Mismatch, string.Join(" -> ", chain));
+    }
+
+    /// <summary>The names a CNAME chain leads through, starting at the target of <paramref name="host"/> (empty when there is no CNAME); at most 8 links.</summary>
+    private async Task<List<string>> GetCnameChainAsync(string host, CancellationToken ct)
+    {
+        var chain = new List<string>();
+        string current = host;
+        for (int i = 0; i < 8; i++)
+        {
+            string? target = await GetCnameTargetAsync(current, ct).ConfigureAwait(false);
+            if (target is null || chain.Contains(target))
+            {
+                break;
+            }
+
+            chain.Add(target);
+            current = target;
+        }
+
+        return chain;
     }
 
     private async Task<string?> GetCnameTargetAsync(string host, CancellationToken ct)
@@ -128,8 +171,9 @@ public sealed class DomainChecker
     }
 
     /// <summary>
-    /// SPF: exactly one <c>v=spf1</c> record must exist (two are a permanent error for receivers) and it must contain every mechanism of the expected value
-    /// (an <c>include:</c>, an <c>ip4:</c>, an <c>a:</c>); anything else in it, such as the customer's other senders, is theirs to keep.
+    /// SPF (advice): exactly one <c>v=spf1</c> record must exist (two are a permanent error for receivers). It must authorize this server: when the expected value names
+    /// addresses (<c>ip4:</c>, <c>ip6:</c>, or <c>a:</c> of our host name) the record is evaluated as RFC 7208 does for each of them (CIDR ranges, <c>include:</c>,
+    /// <c>mx</c> and the rest count); when it only names an <c>include:</c> host, that mechanism must be in the record. Anything else in it is the customer's to keep.
     /// </summary>
     private async Task<DomainRecordCheck> CheckSpfAsync(ExpectedDomainRecord record, CancellationToken ct)
     {
@@ -144,22 +188,73 @@ public sealed class DomainChecker
             return new DomainRecordCheck(record, DomainRecordStatus.Invalid, string.Join(" | ", records));
         }
 
-        var found = SpfTokens(records[0]);
-        bool allPresent = SpfTokens(record.Value).Where(t => !IsAllMechanism(t)).All(found.Contains);
-        return new DomainRecordCheck(record, allPresent ? DomainRecordStatus.Ok : DomainRecordStatus.Mismatch, records[0]);
+        var wanted = SpfTokens(record.Value).Where(t => !IsAllMechanism(t)).ToList();
+        var addresses = new List<IPAddress>();
+        foreach (string token in wanted)
+        {
+            string body = token.TrimStart('+');
+            if ((body.StartsWith("ip4:", StringComparison.Ordinal) || body.StartsWith("ip6:", StringComparison.Ordinal)) && IPAddress.TryParse(body[4..].Split('/')[0], out IPAddress? ip))
+            {
+                addresses.Add(ip);
+            }
+            else if (body.StartsWith("a:", StringComparison.Ordinal))
+            {
+                addresses.AddRange((await GetAddressesAsync(body[2..], ct).ConfigureAwait(false)).Select(IPAddress.Parse));
+            }
+        }
+
+        bool authorized;
+        if (addresses.Count > 0)
+        {
+            var spf = new SpfEvaluator(_dns);
+            authorized = true;
+            foreach (IPAddress ip in addresses)
+            {
+                SpfCheckResult result = await spf.CheckHostAsync(new SpfCheckRequest(ip, record.Host, "postmaster@" + record.Host, record.Host), ct).ConfigureAwait(false);
+                if (result.Result == SpfResult.TempError)
+                {
+                    throw new DnsException("SPF evaluation did not finish: " + result.Reason);
+                }
+
+                authorized &= result.Result == SpfResult.Pass;
+            }
+        }
+        else
+        {
+            var found = SpfTokens(records[0]);
+            authorized = wanted.All(found.Contains);
+        }
+
+        return new DomainRecordCheck(record, authorized ? DomainRecordStatus.Ok : DomainRecordStatus.Mismatch, records[0]);
     }
 
-    /// <summary>DMARC: one record with a valid policy. The policy and report address are the customer's to choose, so a different one is not a mismatch.</summary>
+    /// <summary>
+    /// DMARC: one record with a valid policy. The policy and report address are the customer's to choose, so a different one is not a mismatch. A subdomain without
+    /// a record of its own inherits the one of its organizational domain (RFC 7489 section 6.6.3), which counts.
+    /// </summary>
     private async Task<DomainRecordCheck> CheckDmarcAsync(ExpectedDomainRecord record, CancellationToken ct)
     {
         var records = (await GetTxtAsync(record.Host, ct).ConfigureAwait(false)).Where(t => HasVersion(t, "v=DMARC1")).ToList();
+        string prefix = "";
+        string name = record.Host.StartsWith("_dmarc.", StringComparison.Ordinal) ? record.Host["_dmarc.".Length..] : record.Host;
+        if (records.Count == 0)
+        {
+            string organizational = PublicSuffixList.Default.GetOrganizationalDomain(name);
+            if (organizational != name)
+            {
+                string parentHost = "_dmarc." + organizational;
+                records = (await GetTxtAsync(parentHost, ct).ConfigureAwait(false)).Where(t => HasVersion(t, "v=DMARC1")).ToList();
+                prefix = $"inherited from {parentHost}: ";
+            }
+        }
+
         if (records.Count == 0)
         {
             return new DomainRecordCheck(record, DomainRecordStatus.Missing, null);
         }
 
         bool valid = records.Count == 1 && Tag(records[0], "p")?.ToLowerInvariant() is "none" or "quarantine" or "reject";
-        return new DomainRecordCheck(record, valid ? DomainRecordStatus.Ok : DomainRecordStatus.Invalid, string.Join(" | ", records));
+        return new DomainRecordCheck(record, valid ? DomainRecordStatus.Ok : DomainRecordStatus.Invalid, prefix + string.Join(" | ", records));
     }
 
     /// <summary>TLS-RPT: one <c>v=TLSRPTv1</c> record with a <c>rua</c> destination.</summary>
@@ -194,21 +289,22 @@ public sealed class DomainChecker
         return new DomainRecordCheck(record, string.Equals(id, Tag(record.Value, "id"), StringComparison.Ordinal) ? DomainRecordStatus.Ok : DomainRecordStatus.Mismatch, records[0]);
     }
 
-    /// <summary>The MTA-STS web name: a CNAME to this server's host name, or A/AAAA records that are the host name's own addresses.</summary>
+    /// <summary>The MTA-STS web name: a CNAME (chain) to this server's host name, or to a name with the same addresses, or A/AAAA records that are the host name's own addresses.</summary>
     private async Task<DomainRecordCheck> CheckMtaStsHostAsync(ExpectedDomainRecord record, CancellationToken ct)
     {
-        string? target = await GetCnameTargetAsync(record.Host, ct).ConfigureAwait(false);
-        if (target is not null)
+        var chain = await GetCnameChainAsync(record.Host, ct).ConfigureAwait(false);
+        if (chain.Count > 0)
         {
-            if (target == DomainRecordPlanner.Normalize(record.Value))
+            string found = string.Join(" -> ", chain);
+            if (chain.Contains(DomainRecordPlanner.Normalize(record.Value)))
             {
-                return new DomainRecordCheck(record, DomainRecordStatus.Ok, target);
+                return new DomainRecordCheck(record, DomainRecordStatus.Ok, found);
             }
 
             // Another name for the same server (an alias of the host name) is fine when it leads to the same addresses.
-            var viaTarget = await GetAddressesAsync(target, ct).ConfigureAwait(false);
+            var viaTarget = await GetAddressesAsync(chain[^1], ct).ConfigureAwait(false);
             var server = await GetAddressesAsync(record.Value, ct).ConfigureAwait(false);
-            return new DomainRecordCheck(record, viaTarget.Overlaps(server) ? DomainRecordStatus.Ok : DomainRecordStatus.Mismatch, target);
+            return new DomainRecordCheck(record, viaTarget.Overlaps(server) ? DomainRecordStatus.Ok : DomainRecordStatus.Mismatch, found);
         }
 
         var own = await GetAddressesAsync(record.Host, ct).ConfigureAwait(false);

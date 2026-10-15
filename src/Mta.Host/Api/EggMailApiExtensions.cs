@@ -83,11 +83,12 @@ public static class EggMailApiExtensions
     public static ApiOptions ApiOptionsFrom(MtaConfig config, IReadOnlySet<string> lockedKeys)
     {
         ApiSection api = config.Api;
+        DomainRecordOptions domainRecords = DomainRecordOptionsFrom(config);
         return new ApiOptions
         {
             MaxMessageBytes = config.Smtp.MaxMessageSize,
             MaxRecipients = config.Smtp.MaxRecipients,
-            BounceDomain = config.Delivery.BounceDomain,
+            BounceDomain = domainRecords.BounceDomain,
             MessageIdDomain = config.Hostname,
             Webhooks = config.Webhooks,
             LockedKeys = lockedKeys,
@@ -107,8 +108,8 @@ public static class EggMailApiExtensions
             MaxSmtpCredentialsPerTenant = api.MaxSmtpCredentialsPerTenant,
             MaxWebhooksPerTenant = api.MaxWebhooksPerTenant,
             MaxStatsRows = api.MaxStatsRows,
-            SpfInclude = api.SpfInclude,
-            DomainRecords = DomainRecordOptionsFrom(config),
+            SpfInclude = domainRecords.SpfInclude,
+            DomainRecords = domainRecords,   // the one source of the bounce domain and the SPF include for the suggested records (the two properties above are copies)
             MetricsAllowedNetworks = api.MetricsAllowedNetworks.Count == 0
                 ? ApiOptions.DefaultMetricsNetworks()
                 : api.MetricsAllowedNetworks.Select(Mta.Webhooks.IpNetwork.Parse).ToList(),
@@ -130,7 +131,7 @@ public static class EggMailApiExtensions
             TlsReportAddress = d.TlsReportAddress,
             MtaStsMode = d.MtaStsMode,
             MtaStsMaxAge = d.MtaStsMaxAge,
-            MtaStsMx = d.MtaStsMx.Select(m => m.Trim().ToLowerInvariant()).ToList(),
+            MtaStsMx = d.MtaStsMx.Select(m => DomainRecordOptions.NormalizeMtaStsMx(m) ?? m.Trim().ToLowerInvariant()).ToList(),
         };
     }
 

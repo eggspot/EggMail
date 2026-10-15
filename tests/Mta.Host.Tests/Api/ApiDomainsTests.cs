@@ -85,10 +85,8 @@ public class ApiDomainsTests : IAsyncLifetime
         Assert.Equal("2026-10-12T12:31:30.000Z", r.Str("nextCheckAt")); // first check after the 90 s initial interval
 
         JsonElement[] records = r["records"].EnumerateArray().ToArray();
-        Assert.Equal(["dkim", "return_path", "spf", "dmarc", "tls_rpt"], records.Select(x => x.GetProperty("purpose").GetString()!));
+        Assert.Equal(["dkim", "return_path", "spf", "dmarc"], records.Select(x => x.GetProperty("purpose").GetString()!));
         Assert.False(r["readyToSend"].GetBoolean());   // pending: sending is blocked until the required records are found
-        Assert.Equal("_smtp._tls.mail.example.com", records[4].GetProperty("host").GetString());
-        Assert.Equal("v=TLSRPTv1; rua=mailto:tls-rpt@mail.example.com", records[4].GetProperty("value").GetString());
         Assert.All(records, rec => Assert.False(string.IsNullOrWhiteSpace(rec.GetProperty("note").GetString())));
         JsonElement dkim = records[0];
         Assert.Equal("TXT", dkim.GetProperty("type").GetString());
@@ -100,7 +98,7 @@ public class ApiDomainsTests : IAsyncLifetime
         Assert.Equal(JsonValueKind.Null, dkim.GetProperty("found").ValueKind);
         Assert.True(dkim.GetProperty("required").GetBoolean());
         Assert.Equal(("CNAME", "bounce.mail.example.com", "bounces.egg.test"), (records[1].GetProperty("type").GetString()!, records[1].GetProperty("host").GetString()!, records[1].GetProperty("value").GetString()!));
-        Assert.Equal("v=spf1 ~all", records[2].GetProperty("value").GetString());
+        Assert.Equal("v=spf1 include:spf.egg.test ~all", records[2].GetProperty("value").GetString());
         Assert.Equal("_dmarc.mail.example.com", records[3].GetProperty("host").GetString());
         Assert.False(records[2].GetProperty("required").GetBoolean());
         Assert.False(records[3].GetProperty("required").GetBoolean());

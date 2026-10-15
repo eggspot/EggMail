@@ -319,11 +319,17 @@ public sealed class DomainVerificationService : BackgroundService
             string key = DomainCheckSnapshot.KeyOf(r.Expected.Type, r.Expected.Host);
             rows.Add(r.Status == DomainRecordStatus.Pending && previous.TryGetValue(key, out DomainRecordCheckRecord? known)
                 ? known
-                : new DomainRecordCheckRecord(domainId, key, StatusWord(r.Status), r.Found, now));
+                : new DomainRecordCheckRecord(domainId, key, StatusWord(r.Status), TruncateFound(r.Found), now));
         }
 
         await Config.ReplaceDomainRecordChecksAsync(domainId, rows, ct).ConfigureAwait(false);
     }
+
+    /// <summary>The most of what DNS returned that is kept per record: a hostile zone can publish a record of any size, and the text is only shown next to the expected value.</summary>
+    public const int MaxFoundLength = 2048;
+
+    private static string? TruncateFound(string? found) =>
+        found is null || found.Length <= MaxFoundLength ? found : string.Concat(found.AsSpan(0, MaxFoundLength), "... (truncated)");
 
     /// <summary>Switches signing to the newest rotated-in key whose DNS record was found (design section 8: publish N+1, verify, switch, keep N for 7 days).</summary>
     private async Task ActivateRotatedKeyAsync(DomainRecord domain, IReadOnlyList<StoredDkimKey> keys, DomainCheckResult result, DateTimeOffset now, CancellationToken ct)

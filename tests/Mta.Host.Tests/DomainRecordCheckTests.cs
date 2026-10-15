@@ -96,8 +96,8 @@ public class DomainRecordCheckTests
         Assert.Null(DomainRecordOptions.UsableHostname("192.0.2.1"));
         Assert.Equal("mta.example.net", DomainRecordOptions.UsableHostname(" MTA.Example.NET. "));
         var plan = PlanFor(new DomainRecordOptions { BounceDomain = "bounces.mail.test", MtaStsMode = MtaStsServingMode.Enforce });
-        Assert.Equal([DomainRecordPurpose.Dkim, DomainRecordPurpose.ReturnPath, DomainRecordPurpose.Spf, DomainRecordPurpose.Dmarc, DomainRecordPurpose.TlsRpt], plan.Select(r => r.Purpose));
-        Assert.Equal("v=spf1 ~all", Of(plan, DomainRecordPurpose.Spf).Value);
+        // Nothing to authorize, nothing about mail the domain receives: no SPF (v=spf1 ~all would authorize nothing), no TLS-RPT, no MTA-STS.
+        Assert.Equal([DomainRecordPurpose.Dkim, DomainRecordPurpose.ReturnPath, DomainRecordPurpose.Dmarc], plan.Select(r => r.Purpose));
     }
 
     [Fact]
@@ -107,7 +107,7 @@ public class DomainRecordCheckTests
         Assert.Equal("v=spf1 include:spf.mail.test ip4:192.0.2.10 ~all", DomainRecordPlanner.SpfValue(new DomainRecordOptions { SpfInclude = "spf.mail.test", PublicSendingIp = "192.0.2.10" }));
         Assert.Equal("v=spf1 ip6:2001:db8::1 ~all", DomainRecordPlanner.SpfValue(new DomainRecordOptions { PublicSendingIp = "2001:db8::1" }));
         Assert.Equal("v=spf1 a:mta.mail.test ~all", DomainRecordPlanner.SpfValue(new DomainRecordOptions { ServerHostname = Server }));
-        Assert.Equal("v=spf1 ~all", DomainRecordPlanner.SpfValue(new DomainRecordOptions()));
+        Assert.Null(DomainRecordPlanner.SpfValue(new DomainRecordOptions()));   // nothing to authorize: "v=spf1 ~all" would soft-fail every sender
     }
 
     [Fact]
@@ -229,7 +229,7 @@ public class DomainRecordCheckTests
         var plan = PlanFor();
         var exact = await CheckAsync(new StaticDnsResolver().AddTxt(Domain, "v=spf1 ip4:192.0.2.10 ~all"), plan, DomainRecordPurpose.Spf);
         Assert.Equal(DomainRecordStatus.Ok, exact.Status);
-        var merged = await CheckAsync(new StaticDnsResolver().AddTxt(Domain, "v=spf1 include:_spf.google.com IP4:192.0.2.10 -all").AddTxt(Domain, "google-site-verification=abc"), plan, DomainRecordPurpose.Spf);
+        var merged = await CheckAsync(new StaticDnsResolver().AddTxt(Domain, "v=spf1 IP4:192.0.2.10 include:_spf.google.com -all").AddTxt(Domain, "google-site-verification=abc"), plan, DomainRecordPurpose.Spf);
         Assert.Equal(DomainRecordStatus.Ok, merged.Status);
     }
 
@@ -251,12 +251,10 @@ public class DomainRecordCheckTests
     }
 
     [Fact]
-    public async Task Spf_without_mechanisms_to_demand_accepts_any_spf_record()
+    public async Task A_record_that_only_starts_like_spf_is_not_spf()
     {
-        var plan = PlanFor(new DomainRecordOptions());
-        Assert.Equal("v=spf1 ~all", Of(plan, DomainRecordPurpose.Spf).Value);
-        Assert.Equal(DomainRecordStatus.Ok, (await CheckAsync(new StaticDnsResolver().AddTxt(Domain, "v=spf1 mx -all"), plan, DomainRecordPurpose.Spf)).Status);
-        Assert.Equal(DomainRecordStatus.Missing, (await CheckAsync(new StaticDnsResolver().AddTxt(Domain, "v=spf10 mx"), plan, DomainRecordPurpose.Spf)).Status);
+        var plan = PlanFor();
+        Assert.Equal(DomainRecordStatus.Missing, (await CheckAsync(new StaticDnsResolver().AddTxt(Domain, "v=spf10 ip4:192.0.2.10"), plan, DomainRecordPurpose.Spf)).Status);
     }
 
     // DMARC

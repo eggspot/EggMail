@@ -16,7 +16,7 @@ public sealed class CreateDomainRequest
     public string? Name { get; set; }
 }
 
-public sealed record DnsRecordResponse(string Type, string Host, string Value, int Ttl, string Purpose, string Status, string? Found, string Expected, bool Required, string? Note);
+public sealed record DnsRecordResponse(string Type, string Host, string Value, int Ttl, string Purpose, string Status, string? Found, string Expected, bool Required, string? Note, bool Publishable);
 
 /// <summary>The MTA-STS policy file EggMail serves for a domain (<see cref="Url"/> is where receivers fetch it, <see cref="Content"/> is what they get).</summary>
 public sealed record MtaStsPolicyResponse(string Url, string Host, string Content);
@@ -271,7 +271,7 @@ public sealed class DomainsApi(ApiAuthenticator auth, IStorage storage, ISecretP
             status = record.Required && domain.Status == DomainStatus.Verified ? "ok" : "pending";
         }
 
-        return new DnsRecordResponse(record.Type, record.Host, record.Value, record.Ttl, DomainRecordPurposes.ApiWord(record.Purpose), status, found, record.Value, record.Required, record.Note);
+        return new DnsRecordResponse(record.Type, record.Host, record.Value, record.Ttl, DomainRecordPurposes.ApiWord(record.Purpose), status, found, record.Value, record.Required, record.Note, ZoneFile.BelongsInZone(record, domain.Name));
     }
 
     /// <summary>Whether mail can be sent from the domain now: verified, or in the grace period of a temporary failure, and not paused (design §8).</summary>

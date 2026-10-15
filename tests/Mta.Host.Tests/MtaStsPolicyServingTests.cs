@@ -55,6 +55,15 @@ public class MtaStsPolicyServingTests : IAsyncLifetime
         builder.Services.AddSingleton<IClock>(_clock);
         builder.Services.AddSingleton(options);
         WebApplication app = builder.Build();
+        app.Use((context, next) =>
+        {
+            if (context.Request.Headers.TryGetValue("X-Test-Scheme", out var scheme))
+            {
+                context.Request.Scheme = scheme.ToString();   // the tests choose http or https per request
+            }
+
+            return next();
+        });
         app.UseMtaStsPolicy();
         app.Run(context => context.Response.WriteAsync("the dashboard"));   // stands for the dashboard behind the middleware
         await app.StartAsync();
@@ -136,6 +145,57 @@ public class MtaStsPolicyServingTests : IAsyncLifetime
         Assert.Equal("", headBody);
         Assert.True(head.Content.Headers.ContentLength > 0);
         Assert.Equal(HttpStatusCode.MethodNotAllowed, (await GetAsync(http, "mta-sts.example.com", method: HttpMethod.Post)).Response.StatusCode);
+    }
+
+    [Fact]
+    public async Task The_policy_response_carries_nosniff_a_short_cache_time_and_no_dashboard_content_security_policy()
+    {
+        HttpClient http = await StartAsync(Options());
+        var (response, _) = await GetAsync(http, "mta-sts.example.com");
+        Assert.Equal("nosniff", Assert.Single(response.Headers.GetValues("X-Content-Type-Options")));
+        Assert.Equal("public, max-age=300", response.Headers.CacheControl?.ToString());
+        Assert.False(response.Headers.Contains("Content-Security-Policy"));   // a plain text file for machines: the dashboard's page policy does not belong on it
+        Assert.False(response.Headers.Contains("Strict-Transport-Security")); // plain http in this test
+    }
+
+    [Fact]
+    public async Task Over_https_the_response_carries_strict_transport_security_like_the_dashboard()
+    {
+        HttpClient http = await StartAsync(Options());
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/.well-known/mta-sts.txt");
+        request.Headers.Host = "mta-sts.example.com";
+        request.Headers.Add("X-Test-Scheme", "https");
+        using HttpResponseMessage response = await http.SendAsync(request);
+        Assert.Equal("max-age=31536000", Assert.Single(response.Headers.GetValues("Strict-Transport-Security")));
+    }
+
+    [Fact]
+    public async Task A_wrong_method_is_405_and_names_the_allowed_ones()
+    {
+        HttpClient http = await StartAsync(Options());
+        var (response, _) = await GetAsync(http, "mta-sts.example.com", method: HttpMethod.Put);
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, response.StatusCode);
+        Assert.Equal(["GET", "HEAD"], response.Content.Headers.Allow);
+    }
+
+    [Theory]
+    [InlineData("/.well-known/acme-challenge/some-token")]
+    [InlineData("/healthz")]
+    [InlineData("/readyz")]
+    public async Task Probes_and_the_acme_challenge_are_answered_by_the_rest_of_the_server_on_a_policy_host(string path)
+    {
+        HttpClient http = await StartAsync(Options());
+        Assert.Equal("the dashboard", (await GetAsync(http, "mta-sts.example.com", path)).Body);   // a registered domain
+        Assert.Equal("the dashboard", (await GetAsync(http, "mta-sts.stranger.test", path)).Body);   // and one that is not ours
+    }
+
+    [Fact]
+    public async Task Mode_none_serves_a_none_policy_so_senders_forget_an_enforced_one()
+    {
+        HttpClient http = await StartAsync(Options(MtaStsServingMode.None));
+        var (response, body) = await GetAsync(http, "mta-sts.example.com");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("mode: none\r\n", body);
     }
 
     [Fact]

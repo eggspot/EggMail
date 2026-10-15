@@ -60,8 +60,8 @@ const ZONE = '; DNS records for mail.example.com\n\nmail.example.com. 3600 IN TX
 function extraRecords() {
   return [
     ...records(),
-    { type: 'TXT', host: '_smtp._tls.mail.example.com', value: 'v=TLSRPTv1; rua=mailto:tls-rpt@mail.example.com', ttl: 3600, purpose: 'tls_rpt' as const, required: false, status: 'mismatch' as const, found: 'v=TLSRPTv1; rua=mailto:other@x.test', expected: 'v=TLSRPTv1; rua=mailto:tls-rpt@mail.example.com', note: 'Asks receivers to send daily TLS reports.' },
-    { type: 'MX', host: 'bounces.example.net', value: '10 mta.example.net', ttl: 3600, purpose: 'bounce_mx' as const, required: false, status: 'missing' as const, found: null, expected: '10 mta.example.net', note: 'Published once by the operator.' },
+    { type: 'TXT', host: '_smtp._tls.mail.example.com', value: 'v=TLSRPTv1; rua=mailto:tls-rpt@mail.example.com', ttl: 3600, purpose: 'tls_rpt' as const, required: false, publishable: true, status: 'mismatch' as const, found: 'v=TLSRPTv1; rua=mailto:other@x.test', expected: 'v=TLSRPTv1; rua=mailto:tls-rpt@mail.example.com', note: 'Asks receivers to send daily TLS reports.' },
+    { type: 'MX', host: 'bounces.example.net', value: '10 mta.example.net', ttl: 3600, purpose: 'bounce_mx' as const, required: false, publishable: false, status: 'missing' as const, found: null, expected: '10 mta.example.net', note: 'Published once by the operator.' },
   ];
 }
 
@@ -71,7 +71,7 @@ describe('DomainDetail: setup, ready to send and the zone file', () => {
     renderWithApp(<DomainDetail id="d1" />);
     expect((await screen.findByTestId('ready-state')).textContent).toBe('Ready to send');
     expect(screen.getByTestId('record-progress').textContent).toContain('Required records: 2 of 2 published.');
-    expect(screen.getByTestId('record-progress').textContent).toContain('Recommended records: 1 of 4 published.');
+    expect(screen.getByTestId('record-progress').textContent).toContain('Recommended records: 1 of 3 published.');
     expect(screen.getAllByRole('button', { name: 'Check DNS' })).toHaveLength(1);
   });
 
@@ -89,7 +89,7 @@ describe('DomainDetail: setup, ready to send and the zone file', () => {
     expect(within(table).getByText('TLS-RPT')).toBeTruthy();
     expect(within(table).getByText('Bounce MX')).toBeTruthy();
     expect(within(table).getAllByTestId('dns-level').map((e) => e.textContent).filter((t) => t === 'Required')).toHaveLength(2);
-    expect(within(table).getAllByTestId('dns-level').map((e) => e.textContent).filter((t) => t === 'Recommended')).toHaveLength(4);
+    expect(within(table).getAllByTestId('dns-level').map((e) => e.textContent).filter((t) => t === 'Recommended')).toHaveLength(4); // the bounce MX is advice the customer cannot publish: shown, not counted
     // Found vs expected for the mismatch and the missing row.
     expect(within(table).getByText('v=TLSRPTv1; rua=mailto:other@x.test')).toBeTruthy();
     expect(within(table).getAllByText('Found in DNS')).toHaveLength(2);
@@ -128,6 +128,26 @@ describe('DomainDetail: setup, ready to send and the zone file', () => {
     expect((await screen.findByTestId('mta-sts-url')).textContent).toBe('https://mta-sts.mail.example.com/.well-known/mta-sts.txt');
     expect(screen.getByTestId('mta-sts-policy').textContent).toContain('mx: mta.example.net');
     expect(screen.getByText(/must point at this server/)).toBeTruthy();
+  });
+
+  it('loads the zone file again after a DKIM rotation, which adds a record to it', async () => {
+    const key = { selector: 'eggmail1', publicKey: 'OLDKEY', active: true, createdAt: '2026-09-01T00:00:00.000Z', retiredAt: null };
+    const next = { selector: 'eggmail2', publicKey: 'NEWKEY', active: false, createdAt: '2026-10-12T08:00:00.000Z', retiredAt: null };
+    let zone = 'ZONE BEFORE';
+    const m = mockFetch({
+      'GET /api/v1/domains/:id': makeDomain({ dkimKeys: [key] }),
+      'POST /api/v1/domains/:id/dkim/rotate': () => {
+        zone = 'ZONE AFTER';
+        return makeDomain({ dkim: next, dkimKeys: [key, next] });
+      },
+      'GET /api/v1/domains/:id/records': () => ({ id: 'd1', name: 'mail.example.com', readyToSend: true, checkedAt: null, records: [], zoneFile: zone, mtaStsPolicy: null }),
+    });
+    renderWithApp(<DomainDetail id="d1" />);
+    expect((await screen.findByTestId('zone-file')).textContent).toBe('ZONE BEFORE');
+    fireEvent.click(screen.getByRole('button', { name: 'Rotate DKIM key' }));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Rotate key' }));
+    await waitFor(() => expect(screen.getByTestId('zone-file').textContent).toBe('ZONE AFTER'));
+    expect(m.callsTo('GET', '/api/v1/domains/d1/records').length).toBeGreaterThan(1);
   });
 
   it('still works when the records endpoint fails: the table is there, the zone file is not', async () => {

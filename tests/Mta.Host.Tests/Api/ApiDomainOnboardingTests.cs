@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text.Json;
+using Mta.Host.Api;
 using Mta.Host.Domains;
 
 namespace Mta.Host.Tests.Api;
@@ -138,6 +139,30 @@ public class ApiDomainOnboardingTests : IAsyncLifetime
         Assert.Equal("https://mta-sts.onboard.example/.well-known/mta-sts.txt", policy.GetProperty("url").GetString());
         Assert.Equal("mta-sts.onboard.example", policy.GetProperty("host").GetString());
         Assert.Equal("version: STSv1\r\nmode: testing\r\nmx: mta.egg.test\r\nmax_age: 604800\r\n", policy.GetProperty("content").GetString());
+    }
+
+    [Fact]
+    public async Task Records_the_customer_cannot_publish_in_the_zone_are_marked_so()
+    {
+        JsonElement d = await CreateAsync("onboard.example");
+        Assert.All(d.GetProperty("records").EnumerateArray(), rec =>
+        {
+            string purpose = rec.GetProperty("purpose").GetString()!;
+            Assert.Equal(purpose is not ("bounce_mx" or "ptr"), rec.GetProperty("publishable").GetBoolean());   // the operator's bounce MX and the reverse DNS are advice
+        });
+    }
+
+    [Fact]
+    public async Task A_huge_record_found_in_dns_is_stored_and_shown_truncated()
+    {
+        JsonElement d = await CreateAsync("onboard.example");
+        _f.Dns.AddTxt("_dmarc.onboard.example", "v=DMARC1; p=none; rua=mailto:" + new string('a', 6000) + "@x.test");
+        JsonElement c = await CheckAsync(d);
+        string found = Record(c, "dmarc").GetProperty("found").GetString()!;
+        Assert.Equal("ok", StatusOf(c, "dmarc"));
+        Assert.True(found.Length <= DomainVerificationService.MaxFoundLength + 32, found.Length.ToString());
+        Assert.EndsWith("... (truncated)", found);
+        Assert.StartsWith("v=DMARC1; p=none; rua=mailto:aaaa", found);
     }
 
     [Fact]

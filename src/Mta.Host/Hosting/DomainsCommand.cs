@@ -20,8 +20,7 @@ public static class DomainsCommand
     public static async Task<int> RunAsync(string[] args, TextWriter output, TextWriter error, Mta.Dns.IDnsResolver? dnsOverride = null)
     {
         string? verb = args.FirstOrDefault();
-        string? domainArgument = args.Skip(1).FirstOrDefault(a => !a.StartsWith("--", StringComparison.Ordinal));
-        if (verb is not ("records" or "check") || domainArgument is null)
+        if (verb is not ("records" or "check") || !TrySplit(args.Skip(1), out string? domainArgument, out string[] configArguments))
         {
             error.WriteLine(Usage);
             return 64;
@@ -33,7 +32,7 @@ public static class DomainsCommand
             return 64;
         }
 
-        var loaded = ConfigLoader.Load(ConfigLoader.Build(args.Skip(1).Where(a => a != domainArgument).ToArray()));
+        var loaded = ConfigLoader.Load(ConfigLoader.Build(configArguments));
         if (!loaded.IsValid)
         {
             foreach (string e in loaded.Errors)
@@ -57,44 +56,90 @@ public static class DomainsCommand
 
         using (directoryLock)
         {
-            await using var storage = StorageFactory.Create(loaded.Config.Storage, SystemClock.Instance, NullMtaLog.Instance);
-            await storage.InitializeAsync(CancellationToken.None).ConfigureAwait(false);
-            DomainRecord? domain = await storage.Config.FindDomainByNameAsync(name, CancellationToken.None).ConfigureAwait(false);
-            if (domain is null)
+            IStorage storage = StorageFactory.Create(loaded.Config.Storage, SystemClock.Instance, NullMtaLog.Instance);
+            try
             {
-                error.WriteLine($"{name} is not registered. Add it in the dashboard, with POST /api/v1/domains, or list it in Domains:Bootstrap (EGGMAIL_DOMAINS).");
-                return 1;
+                await storage.InitializeAsync(CancellationToken.None).ConfigureAwait(false);
+                // The settings saved in the dashboard (Domains:*, Hostname, Delivery:*) apply here as they do in the server.
+                (loaded, storage) = await SettingsLayering.ApplyAsync(configArguments, loaded, storage, SystemClock.Instance, NullMtaLog.Instance, CancellationToken.None).ConfigureAwait(false);
+                return await RunAsync(verb, name, loaded, storage, output, error, dnsOverride).ConfigureAwait(false);
             }
-
-            var keys = await storage.Config.GetDkimKeysAsync(domain.Id, CancellationToken.None).ConfigureAwait(false);
-            DomainRecordOptions recordOptions = EggMailApiExtensions.DomainRecordOptionsFrom(loaded.Config);
-            var plan = DomainVerificationService.PlanRecords(domain, keys, SystemClock.Instance.UtcNow, recordOptions, new ApiOptions().DkimRetirementGrace);
-            if (verb == "records")
+            finally
             {
-                output.Write(DomainRecordsReport.Render(name, plan));
-                return 0;
+                await storage.DisposeAsync().ConfigureAwait(false);
             }
+        }
+    }
 
-            var dns = dnsOverride ?? EggMailRuntime.CreateDns(loaded.Config);
-            DomainCheckResult result = await new DomainChecker(dns).CheckAsync(plan, CancellationToken.None).ConfigureAwait(false);
-            foreach (DomainRecordCheck check in result.Records)
+    /// <summary>The domain argument is the one argument that is not an option or the value of one (<c>--Key=value</c> or <c>--Key value</c>); two of them are a usage error.</summary>
+    private static bool TrySplit(IEnumerable<string> args, out string? domain, out string[] configuration)
+    {
+        domain = null;
+        var options = new List<string>();
+        var list = args.ToList();
+        for (int i = 0; i < list.Count; i++)
+        {
+            string a = list[i];
+            if (a.StartsWith("--", StringComparison.Ordinal))
             {
-                string word = DomainVerificationService.StatusWord(check.Status).ToUpperInvariant();
-                output.WriteLine($"{word,-9} {DomainRecordPurposes.Label(check.Expected.Purpose),-13} {(check.Expected.Required ? "required   " : "recommended")} {check.Expected.Type} {check.Expected.Host}");
-                if (check.Status is not (DomainRecordStatus.Ok or DomainRecordStatus.Pending))
+                options.Add(a);
+                if (!a.Contains('=') && i + 1 < list.Count && !list[i + 1].StartsWith("--", StringComparison.Ordinal))
                 {
-                    output.WriteLine($"          expected: {check.Expected.Value}");
-                    output.WriteLine($"          found:    {check.Found ?? "(nothing)"}");
+                    options.Add(list[++i]);
                 }
             }
-
-            output.WriteLine(result.Result switch
+            else if (domain is null)
             {
-                Mta.Policy.VerificationCheckResult.AllRecordsOk => $"{name}: every required record is published; the domain can send once the server has verified it.",
-                Mta.Policy.VerificationCheckResult.DnsTemporaryFailure => $"{name}: DNS did not answer; try again.",
-                _ => $"{name}: {result.Error}.",
-            });
-            return result.Result == Mta.Policy.VerificationCheckResult.AllRecordsOk ? 0 : 1;
+                domain = a;
+            }
+            else
+            {
+                configuration = [];
+                return false;
+            }
         }
+
+        configuration = [.. options];
+        return domain is not null;
+    }
+
+    private static async Task<int> RunAsync(string verb, string name, LoadedConfig loaded, IStorage storage, TextWriter output, TextWriter error, Mta.Dns.IDnsResolver? dnsOverride)
+    {
+        DomainRecord? domain = await storage.Config.FindDomainByNameAsync(name, CancellationToken.None).ConfigureAwait(false);
+        if (domain is null)
+        {
+            error.WriteLine($"{name} is not registered. Add it in the dashboard, with POST /api/v1/domains, or list it in Domains:Bootstrap (Domains__Bootstrap).");
+            return 1;
+        }
+
+        var keys = await storage.Config.GetDkimKeysAsync(domain.Id, CancellationToken.None).ConfigureAwait(false);
+        DomainRecordOptions recordOptions = EggMailApiExtensions.DomainRecordOptionsFrom(loaded.Config);
+        var plan = DomainVerificationService.PlanRecords(domain, keys, SystemClock.Instance.UtcNow, recordOptions, new ApiOptions().DkimRetirementGrace);
+        if (verb == "records")
+        {
+            output.Write(DomainRecordsReport.Render(name, plan));
+            return 0;
+        }
+
+        var dns = dnsOverride ?? EggMailRuntime.CreateDns(loaded.Config);
+        DomainCheckResult result = await new DomainChecker(dns).CheckAsync(plan, CancellationToken.None).ConfigureAwait(false);
+        foreach (DomainRecordCheck check in result.Records)
+        {
+            string word = DomainVerificationService.StatusWord(check.Status).ToUpperInvariant();
+            output.WriteLine($"{word,-9} {DomainRecordPurposes.Label(check.Expected.Purpose),-13} {(check.Expected.Required ? "required   " : "recommended")} {check.Expected.Type} {check.Expected.Host}");
+            if (check.Status is not (DomainRecordStatus.Ok or DomainRecordStatus.Pending))
+            {
+                output.WriteLine($"          expected: {check.Expected.Value}");
+                output.WriteLine($"          found:    {check.Found ?? "(nothing)"}");
+            }
+        }
+
+        output.WriteLine(result.Result switch
+        {
+            Mta.Policy.VerificationCheckResult.AllRecordsOk => $"{name}: every required record is published; the domain can send once the server has verified it.",
+            Mta.Policy.VerificationCheckResult.DnsTemporaryFailure => $"{name}: DNS did not answer; try again.",
+            _ => $"{name}: {result.Error}.",
+        });
+        return result.Result == Mta.Policy.VerificationCheckResult.AllRecordsOk ? 0 : 1;
     }
 }

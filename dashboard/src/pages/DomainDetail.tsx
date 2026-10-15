@@ -15,7 +15,7 @@ export default function DomainDetail({ id }: { id?: string }) {
   const domainId = id ?? '';
   const { data: domain, error, loading, reload, setData } = useApi(() => api.domain(domainId), [domainId]);
   // The text to publish (zone file, MTA-STS policy file) is loaded again whenever the domain changed: a check, a DKIM rotation.
-  const recordsState = useApi(async () => (domain ? api.domainRecords(domainId) : undefined), [domainId, domain?.lastCheckedAt, domain?.dkimKeys?.length, domain?.status]);
+  const recordsState = useApi(async () => (domain ? api.domainRecords(domainId) : undefined), [domainId, domain?.lastCheckedAt, domain?.dkimKeys?.length, domain?.dkim?.selector, domain?.status]);
   // Only the text of this domain (the previous one stays in the state while another is loading).
   const publishing = recordsState.data?.id === domainId ? recordsState.data : undefined;
   useDocumentTitle(domain ? domain.name : 'Domain');
