@@ -556,6 +556,8 @@ and set `Storage:Postgres:ReadOnlyConnectionString` to a connection string for i
 | `mta_storage_sqlite_wal_size_bytes` | gauge | `file` | Size of the write-ahead log |
 | `mta_storage_sqlite_sync_off` | gauge | `file` | 1 for a file running with `synchronous=OFF`, else 0 (`sqlite_sync_off`) |
 | `mta_storage_sqlite_quarantined` | gauge | `file` | 1 for a file that failed its start-up integrity check and was moved aside when this process started, else 0 |
+| `mta_process_open_fds` | gauge | none | Open file descriptors (sockets and files), Linux only (no series elsewhere). Returns to its idle value when load stops; a climb is a leak |
+| `mta_process_threads` | gauge | none | Operating-system threads of the process (not only the thread pool's) |
 | `mta_tls_certificate_expiry_seconds` | gauge | `name`, `source` | Seconds until each served certificate expires |
 | `mta_tls_certificates` | gauge | none | Certificates served; an expired one is no longer served, so alert on 0 as well |
 | `mta_backup_runs_total` | counter | `outcome` (`success`, `failed`) | Scheduled backup runs |
@@ -596,6 +598,7 @@ The .NET runtime's own meter (`System.Runtime`) is exported unchanged too, so me
 - Queue backlog: `mta_delivery_queue_oldest_due_age_seconds` above a few minutes for more than a few scrapes, or `mta_delivery_queue_depth{state="queued"}` growing steadily. `mta_delivery_queue_sample_age_seconds` above a minute means both are stale.
 - Repeated deferrals to one domain: the metrics carry no domain label (it is unbounded); the dashboard's per-domain statistics and the message events show which one. Alert on the `deferred` share of `mta_delivery_attempts_total`.
 - Certificates: `mta_tls_certificate_expiry_seconds` below 14 days (ACME renews with a third of the lifetime left) or `mta_tls_certificates == 0`.
+- Leaks over days: `mta_process_open_fds` and `mta_process_threads` should settle under constant load and return to their idle values when it stops; alert on a slope (for example `deriv(mta_process_open_fds[6h]) > 0` for a day). Memory comes from the platform (`docker stats`, the cgroup) or from the .NET runtime meter where the host exports it.
 - Durability warnings: `mta_storage_sqlite_sync_off == 1` when you did not choose `Sqlite:SyncMode=Off`, and `mta_storage_sqlite_quarantined == 1` (a file was found corrupt and replaced by an empty one; the evidence is in `<data>/quarantine/`).
 - Backups: `mta_backup_runs_total{outcome="failed"}` increasing, or `time() - mta_backup_last_success_timestamp_seconds` above two backup intervals. The gauge exists from start when a backup is already on disk, and is absent on a fresh install until the first one: with backups enabled on SQLite also alert on `absent(mta_backup_last_success_timestamp_seconds)` for longer than the interval (a PostgreSQL deployment has no such series, since backups are the database's own).
 - SQLite write pressure (advisory; switching backends is manual): `mta_storage_sqlite_writer_queue_depth{file="queue.db"}` high for minutes, or the p99 of `mta_storage_sqlite_commit_duration_seconds` above about 100 ms.
