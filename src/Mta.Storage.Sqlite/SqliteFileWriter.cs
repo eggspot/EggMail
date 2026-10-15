@@ -21,6 +21,9 @@ internal sealed class WriterContext(SqliteConnection connection)
 
     public SqliteConnection Connection { get; } = connection;
 
+    /// <summary>True while a transaction is open on the connection (SQLite's own answer: the connection is not in autocommit mode).</summary>
+    public bool InTransaction => SQLitePCL.raw.sqlite3_get_autocommit(Connection.Handle) == 0;
+
     /// <summary>The open batch transaction, or null for an exclusive (non-transactional) command.</summary>
     public SqliteTransaction? Transaction { get; set; }
 
@@ -495,6 +498,12 @@ internal sealed class SqliteFileWriter : IAsyncDisposable
             return context.Connection.BeginTransaction(deferred: false);
         }
 
+        if (context.InTransaction)
+        {
+            // A transaction left open by a rollback that did not take (it must not be, but a BEGIN inside it would fail every batch from here on): end it first.
+            TryRollback(context, null);
+        }
+
         context.Command(BatchSql.Begin).ExecuteNonQuery();
         return null;
     }
@@ -578,6 +587,19 @@ internal sealed class SqliteFileWriter : IAsyncDisposable
         catch (Exception)
         {
             // The connection may already have rolled back (for example after SQLITE_FULL); the batch is replayed anyway.
+        }
+
+        if (tx is null && context.InTransaction)
+        {
+            // A native ROLLBACK that failed while the transaction is still open (a statement of the batch had not finished, say): once more, so no batch ever starts inside it.
+            try
+            {
+                context.Command(BatchSql.Rollback).ExecuteNonQuery();
+            }
+            catch (Exception)
+            {
+                // Nothing more can be done here; the next Begin tries again before it opens a transaction.
+            }
         }
     }
 

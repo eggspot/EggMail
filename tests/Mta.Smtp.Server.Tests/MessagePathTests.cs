@@ -18,7 +18,7 @@ public partial class MessagePathTests
         return c;
     }
 
-    private static async Task SendMessageAsync(RawClient c, string from, string[] recipients, string body = "Subject: s\r\n\r\nbody\r\n")
+    private static async Task SendMessageAsync(RawClient c, string from, string[] recipients, string body = "Subject: s\r\n\r\nbody\r\n", int expect = 250)
     {
         await c.CommandAsync($"MAIL FROM:<{from}>", 250);
         foreach (string r in recipients)
@@ -28,7 +28,7 @@ public partial class MessagePathTests
 
         await c.CommandAsync("DATA", 354);
         await c.SendAsync(body + ".\r\n");
-        await c.ExpectAsync(250);
+        await c.ExpectAsync(expect);
     }
 
     [Fact]
@@ -132,6 +132,97 @@ public partial class MessagePathTests
         Assert.False(chain.AsSequence().IsSingleSegment);
         Assert.Equal(big, chain.AsSequence().ToArray());
         Assert.Equal(big.Length, chain.Length);
+    }
+
+    [Fact]
+    public void A_message_buffer_that_is_disposed_reset_and_used_again_never_shows_an_earlier_message()
+    {
+        // The session keeps one buffer (and the object of its first segment) for all its messages: sizes from one byte to several segments, many cycles.
+        var buffer = new MessageBuffer();
+        var random = new Random(7);
+        var sizes = new[] { 5, MessageBuffer.SegmentSize * 3 + 11, 1, MessageBuffer.SegmentSize, 70_000, 0, 3, MessageBuffer.SegmentSize * 2, 12 };
+        for (int round = 0; round < 40; round++)
+        {
+            int size = sizes[round % sizes.Length];
+            byte[] data = new byte[size];
+            random.NextBytes(data);
+            buffer.Write(data);
+            var sequence = buffer.AsSequence();
+            Assert.Equal(size, sequence.Length);
+            Assert.Equal(data, sequence.ToArray());
+            Assert.Equal(size <= MessageBuffer.SegmentSize, sequence.IsSingleSegment);
+            Assert.Equal(size, buffer.Length);
+
+            buffer.Dispose();
+            Assert.Equal(0, buffer.Length);
+            Assert.Equal(0, buffer.Capacity);
+            Assert.True(buffer.AsSequence().IsEmpty);
+            Assert.Throws<ObjectDisposedException>(() => buffer.GetSpan(1));
+            buffer.Dispose();   // twice is harmless
+            buffer.Reset();
+            Assert.True(buffer.AsSequence().IsEmpty);   // nothing of the last message is visible through the reset buffer
+        }
+
+        Assert.Throws<InvalidOperationException>(() => buffer.Reset());   // only a disposed buffer can be reset
+        buffer.Dispose();
+    }
+
+    [Fact]
+    public async Task The_in_flight_budget_is_back_to_zero_after_oversize_and_memory_refusals_and_a_good_message_still_goes_through()
+    {
+        // 552 (over MaxMessageSize), 452 (the in-flight budget is too small for a buffer segment) and a client that leaves mid-DATA all give back what they reserved.
+        await using (var big = new ServerFixture(o => new SmtpServerOptions { Hostname = o.Hostname, Certificates = o.Certificates, Listeners = o.Listeners, MaxMessageSize = 1000, AuthFailureDelay = TimeSpan.Zero }))
+        {
+            using var c = await OpenAsync(big);
+            await c.CommandAsync("EHLO x.test", 250);
+            for (int i = 0; i < 3; i++)
+            {
+                await SendMessageAsync(c, "a@b.example", ["c@d.example"], string.Concat(Enumerable.Repeat(new string('x', 98) + "\r\n", 30)), expect: 552);
+                Assert.Equal(0, big.Server.Budget.Used);
+            }
+
+            await SendMessageAsync(c, "a@b.example", ["c@d.example"], "Subject: ok\r\n\r\nsmall\r\n");
+            Assert.Equal(0, big.Server.Budget.Used);
+            Assert.Single(big.Handler.Messages);
+        }
+
+        await using (var small = new ServerFixture(o => new SmtpServerOptions { Hostname = o.Hostname, Certificates = o.Certificates, Listeners = o.Listeners, MaxInFlightBytes = 1024, AuthFailureDelay = TimeSpan.Zero }))
+        {
+            using var c = await OpenAsync(small);
+            await c.CommandAsync("EHLO x.test", 250);
+            for (int i = 0; i < 3; i++)
+            {
+                await SendMessageAsync(c, "a@b.example", ["c@d.example"], "Subject: s\r\n\r\nbody\r\n", expect: 452);
+                Assert.Equal(0, small.Server.Budget.Used);
+            }
+
+            Assert.Empty(small.Handler.Messages);
+        }
+
+        await using (var leaves = new ServerFixture())
+        {
+            using (var c = await OpenAsync(leaves))
+            {
+                await c.CommandAsync("EHLO x.test", 250);
+                await c.CommandAsync("MAIL FROM:<a@b.example>", 250);
+                await c.CommandAsync("RCPT TO:<c@d.example>", 250);
+                await c.CommandAsync("DATA", 354);
+                await c.SendAsync("Subject: half\r\n\r\nno end of data");
+            }   // disconnects in the middle of DATA
+
+            var deadline = DateTime.UtcNow.AddSeconds(10);
+            while (leaves.Server.Budget.Used != 0 && DateTime.UtcNow < deadline)
+            {
+                await Task.Yield();
+            }
+
+            Assert.Equal(0, leaves.Server.Budget.Used);
+            using var again = await OpenAsync(leaves);
+            await again.CommandAsync("EHLO x.test", 250);
+            await SendMessageAsync(again, "a@b.example", ["c@d.example"], "Subject: after\r\n\r\nfine\r\n");
+            Assert.Equal(0, leaves.Server.Budget.Used);
+            Assert.Equal("Subject: after\r\n\r\nfine\r\n", Encoding.UTF8.GetString(Assert.Single(leaves.Handler.Messages).Body));
+        }
     }
 
     [Theory]

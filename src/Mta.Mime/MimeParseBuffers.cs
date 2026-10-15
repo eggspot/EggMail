@@ -39,7 +39,7 @@ public sealed class MimeParseBuffers
         }
         else
         {
-            Array.Clear(_headers, 0, Math.Min(_used, _headers.Length));
+            Array.Clear(_headers);   // all of it, not just what the last parse asked for: nothing of an earlier message may stay behind
         }
 
         _used = 0;

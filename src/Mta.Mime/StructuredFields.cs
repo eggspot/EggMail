@@ -890,28 +890,35 @@ internal static class ParameterFormatter
 /// are the same for every message (charset, format, delsp) go in; a boundary or a file name is different each time and would only fill the table. The parsed objects
 /// are immutable, so sharing them is invisible.
 /// </summary>
-internal sealed class ContentTypeCache(int maxEntries = ContentTypeCache.DefaultMaxEntries)
+internal sealed class ContentTypeCache
 {
     public const int DefaultMaxEntries = 256;
     private const int MaxValueLength = 100;
 
     public static ContentTypeCache Shared { get; } = new();
 
+    private readonly int _maxEntries;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, ContentType> _table = new(StringComparer.Ordinal);
-    private System.Collections.Concurrent.ConcurrentDictionary<string, ContentType>.AlternateLookup<ReadOnlySpan<char>>? _lookup;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, ContentType>.AlternateLookup<ReadOnlySpan<char>> _lookup;   // made once, here: a struct assigned lazily could be read half written by another thread
     private int _count;
+
+    public ContentTypeCache(int maxEntries = DefaultMaxEntries)
+    {
+        _maxEntries = maxEntries;
+        _lookup = _table.GetAlternateLookup<ReadOnlySpan<char>>();
+    }
 
     public int Count => Volatile.Read(ref _count);
 
     public bool TryGet(ReadOnlySpan<char> value, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out ContentType? contentType)
     {
         contentType = null;
-        return value.Length <= MaxValueLength && (_lookup ??= _table.GetAlternateLookup<ReadOnlySpan<char>>()).TryGetValue(value, out contentType);
+        return value.Length <= MaxValueLength && _lookup.TryGetValue(value, out contentType);
     }
 
     public void TryAdd(ReadOnlySpan<char> value, ContentType parsed)
     {
-        if (value.Length > MaxValueLength || Volatile.Read(ref _count) >= maxEntries || !IsShareable(parsed))
+        if (value.Length > MaxValueLength || Volatile.Read(ref _count) >= _maxEntries || !IsShareable(parsed))
         {
             return;
         }

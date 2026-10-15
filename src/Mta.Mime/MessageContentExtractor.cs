@@ -153,7 +153,7 @@ public static class MessageContentExtractor
                 bool markedAttachment = part.Disposition is { IsAttachment: true };
                 if (!markedAttachment && ct.IsText && ct.MediaSubtype == "plain" && text is null && textUtf8 is null)
                 {
-                    if (bodiesAsUtf8 && part.TryGetVerbatimUtf8Text(maxBodyBytes, out var textBytes))
+                    if (bodiesAsUtf8 && part.TryGetVerbatimUtf8Text(maxBodyBytes, ref an, out var textBytes))
                     {
                         textUtf8 = textBytes;
                     }
@@ -164,7 +164,7 @@ public static class MessageContentExtractor
                 }
                 else if (!markedAttachment && ct.IsText && ct.MediaSubtype == "html" && html is null && htmlUtf8 is null)
                 {
-                    if (bodiesAsUtf8 && part.TryGetVerbatimUtf8Text(maxBodyBytes, out var htmlBytes))
+                    if (bodiesAsUtf8 && part.TryGetVerbatimUtf8Text(maxBodyBytes, ref an, out var htmlBytes))
                     {
                         htmlUtf8 = htmlBytes;
                     }

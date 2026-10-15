@@ -32,6 +32,8 @@ services:
       - "8443:8443"                         # dashboard and API (HTTPS)
       - "127.0.0.1:8080:8080"               # HTTP probes and first setup, loopback of the Docker host only
       # - "25:2526"                         # bounce listener: needs an MX record for Delivery__BounceDomain pointing here
+      # - "80:80"                           # ACME HTTP-01: the certificate authority connects to port 80 of EGGMAIL_HOSTNAME (Acme__Enabled=true, Acme__Email=you@example.com);
+      #                                       # the built-in listener answers /.well-known/acme-challenge/ there and nothing else. Without DNS-01 (Acme__CloudflareApiToken) this is required.
     volumes:
       - eggmail-data:/data                  # SQLite files, backups, bootstrap file: a local volume only, never network storage
     secrets:

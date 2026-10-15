@@ -101,6 +101,7 @@ public class ParseOnceTests
                 Assert.Equal(plain.TextTruncated, viaBytes.TextTruncated);
                 Assert.Equal(plain.HtmlTruncated, viaBytes.HtmlTruncated);
                 Assert.Equal(plain.IsTruncated, viaBytes.IsTruncated);
+                Assert.Equal(plain.Anomalies, viaBytes.Anomalies);
                 Assert.True(viaBytes.TextBodyUtf8 is null || viaBytes.TextBody is null);
                 Assert.True(viaBytes.HtmlBodyUtf8 is null || viaBytes.HtmlBody is null);
                 if (viaBytes.TextBodyUtf8 is not null || viaBytes.HtmlBodyUtf8 is not null)
@@ -240,6 +241,40 @@ public class ParseOnceTests
         }
 
         Assert.Equal(3, small.Count);
+    }
+
+    [Fact]
+    public void The_shared_content_type_cache_is_safe_to_use_from_many_threads_at_once()
+    {
+        // Fresh cache, many threads asking and adding the same and different values from the first call on: no lookup may fail half made, and every answer is the right type.
+        for (int round = 0; round < 20; round++)
+        {
+            var cache = new ContentTypeCache(maxEntries: 64);
+            var headers = Enumerable.Range(0, 24)
+                .Select(i => HeaderList.Parse(T.Crlf($"Content-Type: text/plain; charset=x-{i % 12}\n\nbody\n")).Single())
+                .ToArray();
+            Parallel.For(0, 16, new ParallelOptions { MaxDegreeOfParallelism = 16 }, worker =>
+            {
+                for (int i = 0; i < 2000; i++)
+                {
+                    var h = headers[(worker + i) % headers.Length];
+                    var parsed = ContentType.ParseHeader(h, MimeLimits.Default, cache);
+                    Assert.Equal("text/plain", parsed.MimeType);
+                    Assert.Equal($"x-{(worker + i) % headers.Length % 12}", parsed.Charset);
+                }
+            });
+            Assert.True(cache.Count <= 12);
+        }
+
+        // The process-wide instance, the one parsing uses, under the same load.
+        byte[] raw = T.Crlf("From: a@example.com\nContent-Type: text/plain; charset=utf-8\n\nbody\n");
+        Parallel.For(0, 16, new ParallelOptions { MaxDegreeOfParallelism = 16 }, _ =>
+        {
+            for (int i = 0; i < 2000; i++)
+            {
+                Assert.Equal("utf-8", MimeMessage.Parse(raw).Root.ContentType.Charset);
+            }
+        });
     }
 
     private static MimeHeader FromHeader(string value)

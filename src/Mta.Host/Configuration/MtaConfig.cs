@@ -286,16 +286,86 @@ public sealed class TlsSection
     public string? ReportContact { get; init; }
 }
 
+/// <summary>Which ACME challenge proves control of the names (decision 87).</summary>
+public enum AcmeChallengeMode : byte
+{
+    /// <summary>DNS-01 when a Cloudflare API token is configured, else HTTP-01.</summary>
+    Auto = 0,
+
+    /// <summary>HTTP-01 on the built-in listener (<see cref="AcmeSection.Http01ListenPort"/>): no DNS access needed, no wildcard names.</summary>
+    Http01,
+
+    /// <summary>DNS-01 through the DNS provider: wildcard names, no inbound port.</summary>
+    Dns01,
+}
+
 public sealed class AcmeSection
 {
+    /// <summary>The ACME directory of Let's Encrypt (production), the default CA.</summary>
+    public const string LetsEncryptDirectoryUrl = "https://acme-v02.api.letsencrypt.org/directory";
+
+    /// <summary>The ACME directory of Let's Encrypt's staging environment (untrusted certificates, generous rate limits).</summary>
+    public const string LetsEncryptStagingDirectoryUrl = "https://acme-staging-v02.api.letsencrypt.org/directory";
+
+    /// <summary>The ACME directory of ZeroSSL (needs external account binding: <see cref="EabKeyId"/> and <see cref="EabHmacKey"/>).</summary>
+    public const string ZeroSslDirectoryUrl = "https://acme.zerossl.com/v2/DV90";
+
     public bool Enabled { get; init; }
-    public string DirectoryUrl { get; init; } = "https://acme-v02.api.letsencrypt.org/directory";
+    public string DirectoryUrl { get; init; } = LetsEncryptDirectoryUrl;
+
+    /// <summary>
+    /// The CA by name or URL: <c>LetsEncrypt</c>, <c>LetsEncryptStaging</c>, <c>ZeroSsl</c> or the ACME directory URL of any CA. When set it wins over
+    /// <see cref="DirectoryUrl"/> (which stays the way to give a URL only); unset, <see cref="DirectoryUrl"/> (Let's Encrypt production) is used.
+    /// </summary>
+    public string? Directory { get; init; }
+
+    /// <summary>The directory in use: <see cref="Directory"/> resolved, else <see cref="DirectoryUrl"/>. Null when <see cref="Directory"/> is neither a known name nor a URL.</summary>
+    public string? EffectiveDirectoryUrl() => ResolveDirectory(Directory) ?? (string.IsNullOrWhiteSpace(Directory) ? DirectoryUrl : null);
+
+    /// <summary>Well-known CA names (case-insensitive) or an absolute URL; null for anything else.</summary>
+    public static string? ResolveDirectory(string? directory)
+    {
+        string? name = directory?.Trim();
+        if (string.IsNullOrEmpty(name))
+        {
+            return null;
+        }
+
+        return name.ToLowerInvariant().Replace("-", "", StringComparison.Ordinal).Replace("_", "", StringComparison.Ordinal) switch
+        {
+            "letsencrypt" or "letsencryptproduction" or "le" => LetsEncryptDirectoryUrl,
+            "letsencryptstaging" or "lestaging" or "staging" => LetsEncryptStagingDirectoryUrl,
+            "zerossl" => ZeroSslDirectoryUrl,
+            _ => Uri.TryCreate(name, UriKind.Absolute, out Uri? uri) && uri.Scheme is "https" or "http" ? name : null,
+        };
+    }
+
     public string? Email { get; init; }
 
-    /// <summary>Names for one certificate (the SMTP and dashboard host names; wildcards need DNS-01, the default).</summary>
+    /// <summary>Names for one certificate (the SMTP and dashboard host names; wildcards need DNS-01). Empty: the server's <c>Hostname</c>.</summary>
     public List<string> Domains { get; init; } = [];
 
     public string CertificateName { get; init; } = "default";
+
+    /// <summary>Which challenge proves control of the names (<see cref="AcmeChallengeMode.Auto"/>: DNS-01 with a Cloudflare token, else HTTP-01).</summary>
+    public AcmeChallengeMode Challenge { get; init; } = AcmeChallengeMode.Auto;
+
+    /// <summary>
+    /// HTTP-01: the port of the built-in listener that answers the CA (<c>/.well-known/acme-challenge/</c> only). The CA always connects to port 80 of
+    /// the name, so this is 80 unless a container or load balancer maps port 80 to it. Binding 80 as a non-root user needs a mapping or a capability (operations guide).
+    /// </summary>
+    public int Http01ListenPort { get; init; } = 80;
+
+    /// <summary>HTTP-01: the address of the built-in listener (<c>::</c>: every IPv4 and IPv6 address).</summary>
+    public string Http01BindAddress { get; init; } = "::";
+
+    /// <summary>External account binding (RFC 8555 section 7.3.4), needed by some CAs such as ZeroSSL: the key identifier the CA gave you. Used when the account is registered.</summary>
+    public string? EabKeyId { get; init; }
+
+    /// <summary>External account binding: the base64url HMAC key the CA gave you (prefer <see cref="EabHmacKeyFile"/>).</summary>
+    public string? EabHmacKey { get; init; }
+
+    public string? EabHmacKeyFile { get; init; }
 
     /// <summary>Cloudflare is the first DNS provider (decision 19).</summary>
     public string DnsProvider { get; init; } = "Cloudflare";
@@ -314,6 +384,15 @@ public sealed class AcmeSection
     /// <see cref="RenewAtRemainingFraction"/> decides. The CA is asked no more often than <see cref="CheckInterval"/> and its Retry-After allow.
     /// </summary>
     public bool UseRenewalInfo { get; init; } = true;
+
+    /// <summary>Is a DNS provider token configured (inline or by file)? It decides <see cref="AcmeChallengeMode.Auto"/>.</summary>
+    public bool HasDnsCredentials() => !string.IsNullOrWhiteSpace(CloudflareApiToken) || !string.IsNullOrWhiteSpace(CloudflareApiTokenFile);
+
+    /// <summary>The challenge type orders use, with <see cref="AcmeChallengeMode.Auto"/> resolved.</summary>
+    public bool UsesDns01() => Challenge == AcmeChallengeMode.Dns01 || Challenge == AcmeChallengeMode.Auto && HasDnsCredentials();
+
+    /// <summary>Does this server answer HTTP-01 challenges itself (the built-in listener runs)?</summary>
+    public bool UsesHttp01() => !UsesDns01();
 }
 
 /// <summary>

@@ -4,6 +4,7 @@
     <NoWarn>$(NoWarn);CS1591</NoWarn>
   </PropertyGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="Mta.Delivery.Tests" />
     <ProjectReference Include="..\Mta.Core\Mta.Core.csproj" />
     <ProjectReference Include="..\Mta.Storage\Mta.Storage.csproj" />
     <ProjectReference Include="..\Mta.Policy\Mta.Policy.csproj" />

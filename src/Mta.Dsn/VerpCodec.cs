@@ -36,6 +36,9 @@ public sealed class VerpCodec
         _activeKeyId = activeKeyId;
     }
 
+    /// <summary>The id of the key new tokens are signed with.</summary>
+    public int ActiveKeyId => _activeKeyId;
+
     public static byte[] GenerateKey() => RandomNumberGenerator.GetBytes(32);
 
     /// <summary>

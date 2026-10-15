@@ -26,6 +26,11 @@ workflow refuses a stable tag without a non-empty section for that exact version
 - Storage backends with the same feature set: SQLite (default, `Sqlite:SyncMode=Off` with a loud warning) and PostgreSQL (EF Core +
   Npgsql, day partitions, `SKIP LOCKED` claims, owner and runtime roles). Shared conformance suites run against both.
 - Replica coordination on PostgreSQL: replicas share the failed-login budget, the per-destination connection and rate ceilings (each takes its share from the live replica set) and, bounded, what remote destinations told a replica (throttling, an unreachable MX host). A delivery whose lease another replica took over is flagged `possible_duplicate` when its first holder reports (schema version 6).
+- Automatic TLS certificates: with `Hostname`, `Acme:Enabled` and `Acme:Email` set the server gets and renews a Let's Encrypt certificate over HTTP-01
+  on a built-in port 80 listener that serves nothing but the challenge; DNS-01 (Cloudflare) for wildcards or when a token is configured; any CA by
+  name or URL (staging, ZeroSSL) with external account binding; the self-signed certificate keeps serving, with a log and dashboard banner
+  (`acme_pending`, `acme_failing`), while issuing is pending or failing; several replicas answer each other's challenges through the config
+  store. Verified against the Pebble test CA (decision 87).
 - Backend switch in both directions (`mta migrate-storage`, `/api/v1/admin/storage/switch/*` and the dashboard wizard): drain or
   quiesce, fence, symmetric bundle, verification, activation, rollback, resumable history migration, secrets re-protected with Data
   Protection.
@@ -43,7 +48,7 @@ workflow refuses a stable tag without a non-empty section for that exact version
 - Benchmark harness (`bench/`) and a scheduled allocation-regression gate with a checked-in baseline.
 - Allocation round 3: the ingest path allocates about 1.7 KB per 200-byte message and 3.5 KB per 2 KB message on SQLite (was 5.1 and 10.7 KB), the
   SMTP server path alone 0.1 KB (was 1 KB); delivery about 25 KB per recipient (was 28 KB). New setting `Delivery:MaxIdleConnectionsPerTarget`
-  (default 2, unchanged behaviour) for the idle outbound connections kept per destination (decision 87).
+  (default 2, unchanged behaviour) for the idle outbound connections kept per destination (decision 88).
 - Cancelling queued mail: `POST /api/v1/messages/{id}/cancel` and a "Cancel delivery" action on the dashboard's message page stop delivery
   to the recipients that are still waiting (all of them, or the ones named); a recipient whose delivery attempt is running is left alone and
   reported as in flight. Works with and without per-message history, publishes a `message.cancelled` webhook event and is implemented on every storage backend (decision 86; adds the index `delivery_queue (message_id)`, schema version 7).

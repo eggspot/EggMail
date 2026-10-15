@@ -215,7 +215,7 @@ public sealed class MimePart
     /// The memory is a slice of the parsed message. False for everything else (other charsets, quoted-printable or base64 bodies, cut or odd bodies): the caller
     /// then decodes the text to a string.
     /// </summary>
-    internal bool TryGetVerbatimUtf8Text(long maxBytes, out ReadOnlyMemory<byte> body)
+    internal bool TryGetVerbatimUtf8Text(long maxBytes, ref MimeAnomaly anomalies, out ReadOnlyMemory<byte> body)
     {
         body = default;
         var enc = EffectiveEncoding;
@@ -234,6 +234,7 @@ public sealed class MimePart
 
         string? charset = ContentType.Charset;
         bool decodedAsIs;
+        bool unknownCharset = false;
         if (charset is not null && MimeCharsets.TryGetEncoding(charset, out var encoding) && encoding.CodePage != 20127)
         {
             decodedAsIs = encoding.CodePage == 65001 && System.Text.Unicode.Utf8.IsValid(span);   // UTF-8: unchanged when valid, otherwise bad sequences become U+FFFD
@@ -242,11 +243,17 @@ public sealed class MimePart
         {
             // No usable charset (or us-ascii): ASCII, else UTF-8 when valid (MimeCharsets.DecodeUnlabeled); windows-1252 otherwise.
             decodedAsIs = System.Text.Ascii.IsValid(span) || System.Text.Unicode.Utf8.IsValid(span);
+            unknownCharset = charset is not null && !MimeCharsets.TryGetEncoding(charset, out _);   // what MimeCharsets.Decode reports for a name it cannot resolve
         }
 
         if (!decodedAsIs)
         {
             return false;
+        }
+
+        if (unknownCharset)
+        {
+            anomalies |= MimeAnomaly.UnknownCharset;
         }
 
         body = bytes;

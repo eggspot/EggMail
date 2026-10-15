@@ -184,6 +184,51 @@ public class WriterTests : SqliteTestBase
     }
 
     [Fact]
+    public async Task A_commit_that_fails_leaves_no_transaction_open_and_only_the_offending_command_fails()
+    {
+        // A deferred foreign key is only checked by COMMIT, so the whole native batch fails at its end with the transaction still open: it must be rolled back, the
+        // commands replayed one by one (the good ones succeed), and the writer must go on with new batches afterwards.
+        var writer = Sql.Runtime.QueueWriter;
+        await writer.SubmitAsync(0, static (ctx, _) =>
+        {
+            using var cmd = ctx.Connection.CreateCommand();
+            cmd.CommandText = "PRAGMA foreign_keys = ON; CREATE TABLE zz_parent (id INTEGER PRIMARY KEY); CREATE TABLE zz_child (id INTEGER PRIMARY KEY, parent INTEGER REFERENCES zz_parent(id) DEFERRABLE INITIALLY DEFERRED); CREATE TABLE zz_log (v INTEGER)";
+            cmd.ExecuteNonQuery();
+            return 0;
+        }, exclusive: true);
+
+        static int Insert(WriterContext ctx, string sql)
+        {
+            using var cmd = ctx.Connection.CreateCommand();
+            cmd.CommandText = sql;
+            return cmd.ExecuteNonQuery();
+        }
+
+        var (blocked, release) = BlockQueueWriter();
+        var good1 = writer.SubmitAsync(1, static (ctx, v) => Insert(ctx, "INSERT INTO zz_log VALUES (1)")).AsTask();
+        var bad = writer.SubmitAsync(2, static (ctx, v) => Insert(ctx, "INSERT INTO zz_child VALUES (1, 999)")).AsTask();
+        var good2 = writer.SubmitAsync(3, static (ctx, v) => Insert(ctx, "INSERT INTO zz_log VALUES (3)")).AsTask();
+        release.Set();
+        await blocked;
+
+        Assert.Equal(1, await good1);
+        Assert.Equal(1, await good2);
+        await Assert.ThrowsAnyAsync<Exception>(async () => await bad);
+        Assert.True(Queue.FailedBatches >= 1);
+
+        // No transaction is left open, and the next batches work (a leftover transaction would fail every BEGIN).
+        Assert.False(await writer.SubmitAsync(0, static (ctx, _) => ctx.InTransaction, exclusive: true));
+        for (int i = 0; i < 3; i++)
+        {
+            Assert.Equal(1, await writer.SubmitAsync(i, static (ctx, v) => Insert(ctx, "INSERT INTO zz_log VALUES (" + (10 + v) + ")")));
+        }
+
+        await AcceptAsync();
+        Assert.Equal(5, ScalarLong(PathOf("queue.db"), "SELECT COUNT(*) FROM zz_log"));
+        Assert.Equal(0, ScalarLong(PathOf("queue.db"), "SELECT COUNT(*) FROM zz_child"));
+    }
+
+    [Fact]
     public async Task A_constraint_violation_inside_a_batch_only_fails_its_own_caller()
     {
         var dup = Msg();

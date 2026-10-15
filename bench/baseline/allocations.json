@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "recordedOn": "GitHub-hosted ubuntu-latest runner, bench-gate run 38684023507, 2026-10-15, on this branch (allocation round 3, decision 87). The micro steps are identical on the runner and on the development laptop (3,309 B for SQLite SubmitAsync with a 2 KB message there, 3,307 B on the runner); the pipeline value is a single run and varies by a few percent between runs because the runtime's small pool of async state machines misses more or less under concurrency. Before round 3: SubmitAsync InMemory 2 KB 10,760 B, pipeline 11,180 B per message.",
+  "recordedOn": "GitHub-hosted ubuntu-latest runner, bench-gate run 38684023507, 2026-10-15, on this branch (allocation round 3, decision 88). The micro steps are identical on the runner and on the development laptop (3,309 B for SQLite SubmitAsync with a 2 KB message there, 3,307 B on the runner); the pipeline value is a single run and varies by a few percent between runs because the runtime's small pool of async state machines misses more or less under concurrency. Before round 3: SubmitAsync InMemory 2 KB 10,760 B, pipeline 11,180 B per message.",
   "thresholds": {
     "microPercent": 5,
     "pipelinePercent": 10
