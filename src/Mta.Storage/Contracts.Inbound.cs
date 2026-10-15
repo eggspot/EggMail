@@ -121,7 +121,7 @@ public enum InboundActionState : byte
 /// <param name="MaxMessageBytes">Largest accepted message; capped by the server limit. Null: the server limit.</param>
 /// <param name="MaxMessagesPerMinute">Messages per minute accepted for the domain. Null: the server default.</param>
 /// <param name="MaxMessagesPerMinutePerRemote">Messages per minute accepted from one remote address for the domain. Null: the server default.</param>
-/// <param name="MaxStoredBytes">Total body bytes kept for the domain; at the limit new mail is refused with <c>452 4.2.2</c>. Null: the server default.</param>
+/// <param name="MaxStoredBytes">Total body bytes kept for the domain; at the limit new mail is refused with <c>452 4.2.2</c>. 0: unlimited. Null: the server default.</param>
 /// <param name="RetentionDays">Days a message (row and body) is kept, counted from receipt. 0: keep forever. Null: the server default.</param>
 /// <param name="UpdatedAt">When the settings were last written.</param>
 public sealed record InboundDomainSettings(

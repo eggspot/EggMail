@@ -179,6 +179,7 @@ public class InboundRulesTests
         var ok = new InboundDomainSettings(Domain, Tenant, true, InboundDmarcAction.Reject, 10_000_000, 60, 10, 1L << 30, 0, Now);
         Assert.Empty(InboundRules.ValidateSettings(ok));
         Assert.Empty(InboundRules.ValidateSettings(InboundDomainSettings.Disabled(Domain, Tenant, Now)));
+        Assert.Empty(InboundRules.ValidateSettings(ok with { MaxStoredBytes = 0 }));
 
         var bad = ok with { MaxMessageBytes = 10, MaxMessagesPerMinute = 0, MaxMessagesPerMinutePerRemote = 20_000, MaxStoredBytes = 5, RetentionDays = -1, DmarcAction = (InboundDmarcAction)9 };
         string[] fields = InboundRules.ValidateSettings(bad).Select(e => e.Field).ToArray();

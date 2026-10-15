@@ -168,9 +168,9 @@ public static class InboundRules
             errors.Add(new("maxMessagesPerMinutePerRemote", "Must be between 1 and 10000."));
         }
 
-        if (settings.MaxStoredBytes is { } stored && (stored < (1L << 20) || stored > (1L << 50)))
+        if (settings.MaxStoredBytes is { } stored && stored != 0 && (stored < (1L << 20) || stored > (1L << 50)))
         {
-            errors.Add(new("maxStoredBytes", "Must be between 1 MiB and 1 PiB."));
+            errors.Add(new("maxStoredBytes", "Must be 0 (unlimited) or between 1 MiB and 1 PiB."));
         }
 
         if (settings.RetentionDays is { } days && (days < 0 || days > MaxRetentionDays))

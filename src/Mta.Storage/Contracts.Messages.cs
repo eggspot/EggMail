@@ -9,6 +9,9 @@ public enum MessageSource : byte
     Api,
     Bounce,
     System,
+
+    /// <summary>A copy of received mail forwarded by an inbound route (decision 92). Like <see cref="Api"/> mail it never gets a bounce message, only events and webhooks.</summary>
+    Forward,
 }
 
 public readonly record struct AcceptedRecipient(Guid DeliveryId, EmailAddress Address);
