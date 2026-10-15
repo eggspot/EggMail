@@ -45,6 +45,13 @@ workflow refuses a stable tag without a non-empty section for that exact version
   to the recipients that are still waiting (all of them, or the ones named); a recipient whose delivery attempt is running is left alone and
   reported as in flight. Works with and without per-message history, publishes a `message.cancelled` webhook event and is implemented on every storage backend (decision 86; adds the index `delivery_queue (message_id)`, schema version 7).
 
+- Process metrics on `/metrics` and OTLP (`mta_process_resident_memory_bytes`, `mta_process_open_fds`, `mta_process_threads`, managed heap, CPU time, garbage collections) so a long run can be judged for leaks without access to the host.
+
+### Changed
+
+- The container image no longer sets `Storage__Backend` and `Sqlite__DataDirectory` (the defaults are the same): an environment variable counts as supplied by the deployment, which made a backend switch from the one-container quick start print a cutover patch instead of writing the bootstrap file.
+- `ci` starts on every pull request and skips its work for documentation-only changes inside the job, so a branch rule that requires the `build-test` check never waits for a documentation-only pull request; a missing PostgreSQL or Pebble in CI now fails the run instead of silently skipping their tests.
+
 ### Security
 
 - No known vulnerabilities; no independent security audit has been done yet. Report problems as described in [SECURITY.md](SECURITY.md).

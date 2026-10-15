@@ -42,9 +42,10 @@ LABEL org.opencontainers.image.source="https://github.com/eggspot/EggMail" \
 WORKDIR /app
 COPY --from=build /out/ ./
 COPY --from=build --chown=1654:1654 /seed/data /data
-ENV Storage__Backend=Sqlite \
-    Sqlite__DataDirectory=/data \
-    DOTNET_gcServer=0 \
+# Storage__Backend and Sqlite__DataDirectory are deliberately NOT set here: their built-in defaults are already SQLite and /data, and an
+# environment variable counts as "supplied by the deployment", which makes a backend switch print a cutover patch instead of writing the
+# bootstrap file the single-container quick start relies on (docs/design.md section 4.6). Set them in compose or Kubernetes if you want that.
+ENV DOTNET_gcServer=0 \
     DOTNET_TieredPGO=1
 # Container ports (high, mapped outward): 5587 submission STARTTLS, 4465 submissions, 2525 alt STARTTLS, 2526 bounce, 8080 HTTP (probes), 8443 HTTPS.
 EXPOSE 5587 4465 2525 2526 8080 8443
