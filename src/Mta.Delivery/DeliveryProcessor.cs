@@ -278,7 +278,9 @@ public sealed class DeliveryProcessor
 
     // ---------------------------------------------------------------- envelope
 
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (Guid Id, long ExpiresAt)> _domainIds = new(StringComparer.OrdinalIgnoreCase);
+    private const int MaxAddressLength = 254;   // RFC 5321 4.5.3.1.3: a path is 256 octets with its angle brackets
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (Guid Id, string ReturnPathHost, long ExpiresAt)> _domainIds = new(StringComparer.OrdinalIgnoreCase);
 
     private async ValueTask<EmailAddress> ChooseEnvelopeFromAsync(ClaimedDelivery d, DateTimeOffset now, CancellationToken ct)
     {
@@ -287,14 +289,18 @@ public sealed class DeliveryProcessor
             return d.EnvelopeFrom;
         }
 
-        // The token carries the sending domain's id so a bounce can be attributed without a lookup of the message.
-        Guid domainId = await FindDomainIdAsync(d.SendingDomain, ct).ConfigureAwait(false);
+        // The token carries the sending domain's id so a bounce can be attributed without a lookup of the message. The host after the @ is the
+        // sending domain's own return-path host (bounce.<domain>) once its CNAME has been verified, otherwise the shared bounce domain: only
+        // the first is a domain the customer controls, which is what lets SPF align with the From domain.
+        (Guid domainId, string host) = await FindReturnPathAsync(d.SendingDomain, ct).ConfigureAwait(false);
 
-        // The token only changes with the key, the tenant, the sending domain and the hour: see BounceAddressCache.
+        // The token is also bound to the destination domain (all recipients of a delivery group share it), so a report that names an address in
+        // another domain cannot get that address suppressed (docs/decisions.md 92). It only changes with the key, the tenant, the sending domain,
+        // the host, the destination domain and the hour: see BounceAddressCache.
         var verp = _s.Verp;
-        EmailAddress? bounce = _bounceAddresses.GetOrCreate(verp.ActiveKeyId, d.TenantId, domainId, Mta.Dsn.VerpCodec.HourStamp(now), (verp, d.TenantId, domainId, _options.BounceDomain!, now), static s =>
+        EmailAddress? bounce = _bounceAddresses.GetOrCreate(verp.ActiveKeyId, d.TenantId, domainId, host, d.RecipientDomain, Mta.Dsn.VerpCodec.HourStamp(now), (verp, d.TenantId, domainId, host, d.RecipientDomain, now), static s =>
         {
-            string address = s.verp.CreateAddress(s.TenantId, s.domainId, s.Item4, s.now);
+            string address = s.verp.CreateAddress(s.TenantId, s.domainId, s.host, s.now, s.RecipientDomain);
             // allowUtf8: a bounce domain configured as a U-label is accepted and put on the wire in its A-label form (the local part is ASCII).
             return EmailAddress.TryParse(address, allowUtf8: true, out var parsed) ? parsed : null;
         });
@@ -303,23 +309,32 @@ public sealed class DeliveryProcessor
 
     private readonly BounceAddressCache _bounceAddresses = new();
 
-    private async ValueTask<Guid> FindDomainIdAsync(string? sendingDomain, CancellationToken ct)
+    private async ValueTask<(Guid Id, string Host)> FindReturnPathAsync(string? sendingDomain, CancellationToken ct)
     {
+        string shared = _options.BounceDomain!;
         if (string.IsNullOrEmpty(sendingDomain))
         {
-            return Guid.Empty;
+            return (Guid.Empty, shared);
         }
 
         long now = _s.Clock.Timestamp;
         if (_domainIds.TryGetValue(sendingDomain, out var cached) && now < cached.ExpiresAt)
         {
-            return cached.Id;
+            return (cached.Id, cached.ReturnPathHost);
         }
 
         var record = await _s.Storage.Config.FindDomainByNameAsync(sendingDomain, ct).ConfigureAwait(false);
         Guid id = record?.Id ?? Guid.Empty;
-        _domainIds[sendingDomain] = (id, now + 60 * Stopwatch.Frequency);
-        return id;
+        string host = SenderPolicy.SelectReturnPath(record, shared).Host;
+        if (!string.Equals(host, shared, StringComparison.OrdinalIgnoreCase) && VerpCodec.AddressLengthAt(host) > MaxAddressLength)
+        {
+            // b+<token>@bounce.<very long domain> would not fit the 254 characters of an SMTP address; the shared bounce domain always does.
+            _s.Log.Write(MtaLogLevel.Warning, Source, $"The return-path host {host} is too long for a bounce address; mail of {sendingDomain} uses the shared bounce domain");
+            host = shared;
+        }
+
+        _domainIds[sendingDomain] = (id, host, now + 60 * Stopwatch.Frequency);
+        return (id, host);
     }
 
     // ---------------------------------------------------------------- routes

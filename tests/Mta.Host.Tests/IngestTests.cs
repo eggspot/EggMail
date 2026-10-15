@@ -55,6 +55,8 @@ public class IngestTests : IAsyncLifetime
         await _storage.Config.UpsertTenantAsync(new Tenant(TenantId, "Acme", "acme", true, now, false), default);
         await _storage.Config.UpsertDomainAsync(new DomainRecord(Ids.New(), TenantId, "example.org", DomainStatus.Verified, null, false, now, now, now, 0, null, false, null), default);
         await _storage.Config.UpsertDomainAsync(new DomainRecord(Ids.New(), TenantId, "pending.example", DomainStatus.Pending, null, false, now, null, now, 0, null, false, null), default);
+        await _storage.Config.UpsertDomainAsync(new DomainRecord(Ids.New(), TenantId, "dedicated.example", DomainStatus.Verified, "bounce.dedicated.example", true, now, now, now, 0, null, false, null), default);
+        await _storage.Config.UpsertDomainAsync(new DomainRecord(Ids.New(), TenantId, "unverified-rp.example", DomainStatus.Verified, "bounce.unverified-rp.example", false, now, now, now, 0, null, false, null), default);
         await _storage.Config.UpsertSmtpCredentialAsync(new SmtpCredential(Ids.New(), TenantId, "acme-user", PasswordHasher.Hash("s3cret", 2000), true, now), default);
 
         _verp = new VerpCodec(new Dictionary<int, byte[]> { [1] = VerpCodec.GenerateKey() }, 1);
@@ -252,6 +254,64 @@ public class IngestTests : IAsyncLifetime
         Assert.Equal(WebhookEventFactory.Bounced, item.EventType);
         Assert.Contains("gone@dest.example", item.PayloadJson);
         Assert.Contains("\"asynchronous\":true", item.PayloadJson);
+    }
+
+    private async Task<SmtpCommandException?> SendDsnAsync(string bounceAddress, string failedRecipient)
+    {
+        byte[] dsn = DsnBuilder.Build(new DsnRequest
+        {
+            ReportingMta = "mx.remote.example",
+            To = EmailAddress.Parse(bounceAddress),
+            Action = DsnAction.Failed,
+            ArrivalDate = DateTimeOffset.UtcNow,
+            Now = DateTimeOffset.UtcNow,
+            OriginalMessage = Encoding.ASCII.GetBytes("Message-ID: <orig@egg.test>\r\nSubject: x\r\n\r\nbody\r\n"),
+            Recipients = [new DsnRecipient(EmailAddress.Parse(failedRecipient), "5.1.1", "550 5.1.1 No such user")],
+        });
+        using var client = new MailKit.Net.Smtp.SmtpClient();
+        await client.ConnectAsync("127.0.0.1", _bouncePort, SecureSocketOptions.None);
+        using var ms = new MemoryStream(dsn);
+        try
+        {
+            await client.SendAsync(MimeMessage.Load(ms), MailboxAddress.Parse("mailer-daemon@remote.example"), [MailboxAddress.Parse(bounceAddress)]);
+            return null;
+        }
+        catch (SmtpCommandException ex)
+        {
+            return ex;
+        }
+    }
+
+    [Fact]
+    public async Task The_bounce_listener_takes_a_token_at_a_sending_domains_verified_return_path_host_and_at_no_other_host()
+    {
+        string Address(string host) => _verp.CreateAddress(TenantId, Ids.New(), host, DateTimeOffset.UtcNow, "dest.example");
+
+        // The customer's own host, once its CNAME is verified.
+        Assert.Null(await SendDsnAsync(Address("bounce.dedicated.example"), "gone@dest.example"));
+        Assert.True(await _storage.Config.IsSuppressedAsync(TenantId, "gone@dest.example", default));
+
+        // Not verified, not a registered domain, not the return-path label, or a valid token at a host that only looks similar: all refused at RCPT.
+        foreach (string host in new[] { "bounce.unverified-rp.example", "bounce.nosuch.example", "mail.dedicated.example", "bounce.bounce.dedicated.example", "dedicated.example", "bounce." })
+        {
+            var refused = await SendDsnAsync(Address(host), "other@dest.example");
+            Assert.True(refused is { StatusCode: SmtpStatusCode.MailboxUnavailable }, $"{host}: {refused?.Message}");
+        }
+
+        Assert.False(await _storage.Config.IsSuppressedAsync(TenantId, "other@dest.example", default));
+    }
+
+    [Fact]
+    public async Task A_return_path_host_without_a_valid_token_is_refused_and_postmaster_exists_only_at_the_shared_bounce_domain()
+    {
+        using var client = new MailKit.Net.Smtp.SmtpClient();
+        await client.ConnectAsync("127.0.0.1", _bouncePort, SecureSocketOptions.None);
+
+        var noToken = await Assert.ThrowsAsync<SmtpCommandException>(() => client.SendAsync(Message(from: "x@remote.example", to: "someone@bounce.dedicated.example")));
+        Assert.Equal(550, (int)noToken.StatusCode);
+        var postmasterThere = await Assert.ThrowsAsync<SmtpCommandException>(() => client.SendAsync(Message(from: "x@remote.example", to: "postmaster@bounce.dedicated.example")));
+        Assert.Equal(550, (int)postmasterThere.StatusCode);
+        await client.SendAsync(Message(from: "x@remote.example", to: "postmaster@bounces.egg.test"));
     }
 
     [Fact]

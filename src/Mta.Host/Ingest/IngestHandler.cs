@@ -12,6 +12,9 @@ public sealed class IngestOptions
     /// <summary>Domain of bounce addresses; recipients on the bounce listener must be tokens at this domain (or postmaster/abuse).</summary>
     public string? BounceDomain { get; init; }
 
+    /// <summary>First label of a sending domain's own return-path host (<c>bounce.example.com</c>); the host is accepted on the bounce listener once the domain's return-path CNAME is verified.</summary>
+    public string ReturnPathLabel { get; init; } = Mta.Policy.SenderPolicy.DefaultReturnPathLabel;
+
     public int MaxRecipientsPerMessage { get; init; } = 100;
 }
 
@@ -34,6 +37,11 @@ public sealed class IngestHandler : ISmtpServerHandler
 
     private static readonly SmtpReply AuthUnavailable = SmtpReply.Constant(454, "4.7.0", "Too many failed attempts, try again later");
     private static readonly SmtpReply StorageProblem = SmtpReply.Constant(451, "4.3.0", "Temporary problem accepting the message, try again later");
+
+    // Answers of the return-path host lookup, for a minute: the RCPT of a bounce and its DATA both ask, and a remote server may send many bounces.
+    private static readonly long HostCacheTicks = 60 * System.Diagnostics.Stopwatch.Frequency;
+    private const int MaxCachedHosts = 1024;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (bool Verified, long ExpiresAt)> _returnPathHosts = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly IStorage _storage;
     private readonly SubmissionService _submission;
@@ -125,9 +133,7 @@ public sealed class IngestHandler : ISmtpServerHandler
     {
         if (session.Role == ListenerRole.Bounce)
         {
-            return ValueTask.FromResult(IsBounceRecipient(recipient)
-                ? SmtpReplies.RecipientOk
-                : SmtpReply.Create(550, "5.1.1", "No such user here"));
+            return IsBounceRecipientReplyAsync(recipient, ct);
         }
 
         if (session.HandlerState is not State state)
@@ -141,6 +147,22 @@ public sealed class IngestHandler : ISmtpServerHandler
         }
 
         return ValueTask.FromResult(SmtpReplies.RecipientOk);
+    }
+
+    private async ValueTask<SmtpReply> IsBounceRecipientReplyAsync(EmailAddress recipient, CancellationToken ct)
+    {
+        try
+        {
+            return await IsBounceRecipientAsync(recipient, ct).ConfigureAwait(false)
+                ? SmtpReplies.RecipientOk
+                : SmtpReply.Create(550, "5.1.1", "No such user here");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Only a token at a sending domain's return-path host needs the storage; a remote server that gets 451 tries again later.
+            _log.Write(MtaLogLevel.Warning, "ingest", "bounce recipient could not be checked", ex);
+            return StorageProblem;
+        }
     }
 
     /// <summary>
@@ -252,9 +274,9 @@ public sealed class IngestHandler : ISmtpServerHandler
         if (_bounces is not null)
         {
             byte[] body = message.ToArray();
-            foreach (var rcpt in message.Recipients.Where(IsBounceRecipient))
+            foreach (var rcpt in message.Recipients)
             {
-                if (_bounces.IsValidBounceAddress(rcpt.LocalPart))
+                if (_bounces.IsValidBounceAddress(rcpt.LocalPart) && await IsBounceRecipientAsync(rcpt, ct).ConfigureAwait(false))
                 {
                     await _bounces.ProcessAsync(rcpt.LocalPart, body, ct).ConfigureAwait(false);
                 }
@@ -264,19 +286,55 @@ public sealed class IngestHandler : ISmtpServerHandler
         return SmtpReply.Create(250, "2.0.0", "Accepted");
     }
 
-    private bool IsBounceRecipient(EmailAddress recipient)
+    /// <summary>
+    /// A recipient the bounce listener takes: a valid signed token at the shared bounce domain (or <c>postmaster</c>/<c>abuse</c> there), or a valid
+    /// token at a sending domain's own return-path host. The token check is a local HMAC, so strangers' addresses cost no storage access; only an
+    /// address that carries a valid token for a host other than the shared bounce domain is looked up.
+    /// </summary>
+    private async ValueTask<bool> IsBounceRecipientAsync(EmailAddress recipient, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(_options.BounceDomain) || !string.Equals(recipient.Domain, _options.BounceDomain, StringComparison.OrdinalIgnoreCase))
+        if (string.IsNullOrWhiteSpace(_options.BounceDomain))
         {
             return false;
         }
 
-        if (recipient.LocalPart.Equals("postmaster", StringComparison.OrdinalIgnoreCase) || recipient.LocalPart.Equals("abuse", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(recipient.Domain, _options.BounceDomain, StringComparison.OrdinalIgnoreCase))
         {
-            return true;
+            if (recipient.LocalPart.Equals("postmaster", StringComparison.OrdinalIgnoreCase) || recipient.LocalPart.Equals("abuse", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            return _bounces?.IsValidBounceAddress(recipient.LocalPart) ?? false;
         }
 
-        return _bounces?.IsValidBounceAddress(recipient.LocalPart) ?? false;
+        return (_bounces?.IsValidBounceAddress(recipient.LocalPart) ?? false) && await IsVerifiedReturnPathHostAsync(recipient.Domain, ct).ConfigureAwait(false);
+    }
+
+    /// <summary><c>bounce.example.com</c> is the return-path host of the registered domain <c>example.com</c> when that domain's return-path CNAME has been verified.</summary>
+    private async ValueTask<bool> IsVerifiedReturnPathHostAsync(string host, CancellationToken ct)
+    {
+        string prefix = _options.ReturnPathLabel + ".";
+        if (!host.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) || host.Length == prefix.Length)
+        {
+            return false;
+        }
+
+        long now = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (_returnPathHosts.TryGetValue(host, out var cached) && now < cached.ExpiresAt)
+        {
+            return cached.Verified;
+        }
+
+        DomainRecord? domain = await _storage.Config.FindDomainByNameAsync(host[prefix.Length..], ct).ConfigureAwait(false);
+        bool verified = domain is { ReturnPathVerified: true, ReturnPathHost: { } returnPathHost } && string.Equals(returnPathHost, host, StringComparison.OrdinalIgnoreCase);
+        if (_returnPathHosts.Count >= MaxCachedHosts)
+        {
+            _returnPathHosts.Clear();   // only hosts that came with a valid token get this far, but never let a prober grow the table
+        }
+
+        _returnPathHosts[host] = (verified, now + HostCacheTicks);
+        return verified;
     }
 
     public void OnDisconnected(SmtpSessionContext session)
