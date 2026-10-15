@@ -16,6 +16,8 @@ name: soak
 # or chained runs: start the next dispatch when this one ends; each run is judged on its own (docs/soak.md).
 
 on:
+  push:   # TEMPORARY: proof run from the feature branch (a new workflow cannot be dispatched before it is on the default branch); removed again before merge
+    branches: [feat/soak-bench-workflows]
   workflow_dispatch:
     inputs:
       hours:
@@ -96,8 +98,8 @@ jobs:
       - name: Plan (does it fit in one job?)
         id: plan
         env:
-          HOURS: ${{ inputs.hours || '2' }}
-          BACKEND: ${{ inputs.backend || 'sqlite' }}
+          HOURS: ${{ inputs.hours || '0.33' }}
+          BACKEND: ${{ inputs.backend || 'both' }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -123,18 +125,18 @@ jobs:
       - name: Soak
         timeout-minutes: 345
         env:
-          HOURS: ${{ inputs.hours || '2' }}
-          BACKEND: ${{ inputs.backend || 'sqlite' }}
+          HOURS: ${{ inputs.hours || '0.33' }}
+          BACKEND: ${{ inputs.backend || 'both' }}
           HISTORY: ${{ inputs.history || 'full' }}
           SYNC: ${{ inputs.sync || 'off' }}
           RATE: ${{ inputs.rate || '30' }}
           SIZE_MIX: ${{ inputs.size_mix || '1024:55,8192:30,65536:12,524288:3' }}
           CONNECTIONS: ${{ inputs.connections || '8' }}
-          CRASH_INTERVAL_MIN: ${{ inputs.crash_interval_min || '20' }}
-          BACKUP_INTERVAL_MIN: ${{ inputs.backup_interval_min || '30' }}
-          QUIET_TAIL: ${{ inputs.quiet_tail || '0.25' }}
-          SAMPLE_INTERVAL_S: ${{ inputs.sample_interval_s || '60' }}
-          CLAIM_LEASE_MIN: ${{ inputs.claim_lease_min || '0' }}
+          CRASH_INTERVAL_MIN: ${{ inputs.crash_interval_min || '4' }}
+          BACKUP_INTERVAL_MIN: ${{ inputs.backup_interval_min || '5' }}
+          QUIET_TAIL: ${{ inputs.quiet_tail || '0.4' }}
+          SAMPLE_INTERVAL_S: ${{ inputs.sample_interval_s || '15' }}
+          CLAIM_LEASE_MIN: ${{ inputs.claim_lease_min || '2' }}
         run: |
           set -uo pipefail
           started=$(date +%s)
