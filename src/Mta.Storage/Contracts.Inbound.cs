@@ -1,6 +1,6 @@
 namespace Mta.Storage;
 
-// Contracts of inbound mail (design section 11, decision 91). Three kinds of data, one interface:
+// Contracts of inbound mail (design section 11, decision 92). Three kinds of data, one interface:
 //   - per-domain inbound settings and the routes of a domain: configuration (the config part), read at RCPT time through a cache;
 //   - inbound messages: the received mail with its verification results and the state of the route action (the queue part, so a
 //     forward can join the outbound queue in the same file and the switch holds them like deliveries);

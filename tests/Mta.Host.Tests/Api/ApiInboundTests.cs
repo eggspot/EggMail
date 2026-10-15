@@ -6,7 +6,7 @@ using Mta.Storage;
 
 namespace Mta.Host.Tests.Api;
 
-/// <summary>Inbound mail over the HTTP API (decision 91): settings, routes, received messages, authorization and tenant isolation.</summary>
+/// <summary>Inbound mail over the HTTP API (decision 92): settings, routes, received messages, authorization and tenant isolation.</summary>
 [Collection("api")]
 public class ApiInboundTests : IAsyncLifetime
 {

@@ -120,7 +120,7 @@ public static class TransferTables
         Upsert = true,
     });
 
-    /// <summary>The inbound settings of each domain (decision 91).</summary>
+    /// <summary>The inbound settings of each domain (decision 92).</summary>
     public static readonly TransferTable<InboundDomainSettingsEntity> InboundDomainSettings = new("inbound_domain_settings", TransferPart.Config, new()
     {
         Order = q => q.OrderBy(x => x.DomainId),

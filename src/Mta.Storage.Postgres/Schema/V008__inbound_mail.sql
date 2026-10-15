@@ -1,4 +1,4 @@
--- Version 8: inbound mail (decision 91). Frozen like V001: never edit, add the next version.
+-- Version 8: inbound mail (decision 92). Frozen like V001: never edit, add the next version.
 --
 --  * inbound_domain_settings, inbound_route: the per-domain inbound switch and settings, and the routes (config part). Deleted with the domain by the application.
 --  * inbound_message, inbound_message_raw: received mail, one row and one body per accepted recipient, with the verification results and the state of the route

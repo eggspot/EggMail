@@ -8,7 +8,7 @@ Conventions: response members are camelCase except where listed as snake_case (`
 
 ## Authentication
 
-- **API clients:** `Authorization: Bearer <api key>` (`egm_<8 character id>_<43 character secret>`). Keys are shown once at creation, stored as SHA-256 digests, scoped to one tenant and to a list of scopes (`send`, `read`, `domains`, `webhooks`, `suppressions`, `keys`, and **(addition, decision 91)** `inbound`). A key of a suspended tenant is refused (`403 tenant_disabled`). A key never reaches `/admin/*`, and naming another tenant in `X-Tenant-Id` is `403 forbidden`.
+- **API clients:** `Authorization: Bearer <api key>` (`egm_<8 character id>_<43 character secret>`). Keys are shown once at creation, stored as SHA-256 digests, scoped to one tenant and to a list of scopes (`send`, `read`, `domains`, `webhooks`, `suppressions`, `keys`, and **(addition, decision 92)** `inbound`). A key of a suspended tenant is refused (`403 tenant_disabled`). A key never reaches `/admin/*`, and naming another tenant in `X-Tenant-Id` is `403 forbidden`.
 - **Dashboard:** `POST /api/v1/session` with `{ "user": "...", "password": "..." }` sets an HttpOnly, `SameSite=Strict` cookie `eggmail_session` (`Secure` unless the request is plain HTTP from a loopback peer; `Api:CookieSecure`) and returns `{ user, role, tenantId }`. The cookie holds a random secret; the server keeps only its SHA-256 digest and the session (absolute lifetime 12 h, ended after 2 h without use; `Api:SessionLifetime` and `Api:SessionIdleTimeout`). Mutating requests (`POST`, `PUT`, `PATCH`, `DELETE`) with a cookie must carry the `X-CSRF-Token` header returned by `GET /api/v1/me` as `csrfToken`, otherwise `403 forbidden`. Bearer requests need no CSRF token. A new sign-in replaces the session of the cookie it presents. **(addition)** `DELETE /api/v1/session` signs out (idempotent: `204` even without a session; with a live session it needs the CSRF token).
 - **Roles:** `admin` (all tenants; selects the tenant for tenant endpoints with the `X-Tenant-Id` header: missing is `400 validation_failed` with field `X-Tenant-Id`, unknown is `404`) and `tenant` (one tenant; a different `X-Tenant-Id` is `403`). `/admin/*` needs the admin role.
 - **Accounts** are created and managed through the API (see "Dashboard users" below), besides `mta admin create` and the bootstrap administrator; a user changes their own password with `POST /me/password`.
@@ -42,7 +42,7 @@ RFC 9457 problem details (`application/problem+json`): `{ "type", "title", "stat
 | `password_change_required` | 403 | **(addition)** the session belongs to a user with a temporary password; only `GET /me`, `POST /me/password` and `DELETE /session` are allowed |
 | `content_not_recorded` | 410 | **(addition)** the content of the message was never recorded (`Content:Mode=None`) |
 | `unsupported_media_type` | 415 | **(addition)** the body is not `application/json` |
-| `inbound_body_gone` | 410 | **(addition, decision 91)** the received message has no stored body any more (discarded, a completed forward, expired) |
+| `inbound_body_gone` | 410 | **(addition, decision 92)** the received message has no stored body any more (discarded, a completed forward, expired) |
 | `server_error` | 500 | **(addition)** unexpected failure; the detail is generic and the cause is only in the server log, quote `request_id` |
 
 Request bodies are limited (JSON: 1 MiB `Api:MaxBodyBytes`, the two sending endpoints 40 MiB `Api:MaxSendBodyBytes`) and checked while streaming, so an oversized chunked body is also refused.
@@ -113,7 +113,7 @@ Response `202`: `{ "id": "<message id>", "status": "queued", "recipients": 1 }` 
 
 ## Inbound mail (`inbound` scope)
 
-**(addition, decision 91)** Receiving mail for a domain: the settings of the domain, its routes, and the received messages. The design is [design.md section 11](design.md#11-inbound-mail). Everything here needs the `inbound` scope (an API key) or a dashboard session, behaves identically on both backends and in both history modes, and is tenant scoped: another tenant's domain, route or message is `404 not_found`, never `403`. The master switch `Inbound:Enabled` does not change the API: with it off, settings and routes can be prepared and read, messages are simply never received.
+**(addition, decision 92)** Receiving mail for a domain: the settings of the domain, its routes, and the received messages. The design is [design.md section 11](design.md#11-inbound-mail). Everything here needs the `inbound` scope (an API key) or a dashboard session, behaves identically on both backends and in both history modes, and is tenant scoped: another tenant's domain, route or message is `404 not_found`, never `403`. The master switch `Inbound:Enabled` does not change the API: with it off, settings and routes can be prepared and read, messages are simply never received.
 
 Conventions: wire words are lower-case (`record_only`, `quarantine_flag`, `reject`; `webhook`, `forward`, `store`, `discard`; `catch_all`, `address`, `wildcard`; `json`, `raw_mime`; `pending`, `done`, `failed`; verdicts `none`, `pass`, `fail`, `softfail`, `neutral`, `temperror`, `permerror`, `policy`); members are camelCase; lists of routes are bare arrays and message lists are `{ items, next_cursor }`.
 

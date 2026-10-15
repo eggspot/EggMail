@@ -423,7 +423,7 @@ internal sealed class SqliteFile
     }
 
     /// <summary>
-    /// Version 8 added inbound mail (decision 91): <c>inbound_domain_settings</c> and <c>inbound_route</c> in config.db, <c>inbound_message</c> and
+    /// Version 8 added inbound mail (decision 92): <c>inbound_domain_settings</c> and <c>inbound_route</c> in config.db, <c>inbound_message</c> and
     /// <c>inbound_message_raw</c> in queue.db, with their indexes. The statements come from the generated schema script so they cannot drift from the model,
     /// and each is skipped when its table or index already exists (a file taken back to an older version by hand). The other files just move to the new version.
     /// </summary>
