@@ -84,7 +84,7 @@ dotnet src/Mta.Tools/bin/Release/net10.0/mta-tools.dll load --port 2525 --connec
     --messages 100000 --size 2048 --pipelining --label "sink-pipelined"                       # closed-loop ingest benchmark
 ```
 
-`load` reports accepted messages/s, MB/s and p50/p95/p99 transaction latency, and (with `--server-pid`) the server's CPU per 1,000 messages.
+`load` reports accepted messages/s, MB/s and p50/p95/p99 transaction latency, and (with `--server-pid`) the server's CPU per 1,000 messages. For hours-long runs it also takes `--persist`, `--rate`, `--size-mix`, `--id-prefix`, `--ack-log` and `--stats-jsonl` (see `mta-tools --help` and [soak.md](soak.md)).
 
 **Sample, not a claim:** the SMTP server alone against the discard `sink` on one developer machine (10-core Apple silicon, load generator and server on the same host, loopback, no TLS, no storage) accepted about 63k messages/s of 2 KB with 16 pipelined connections (p99 about 0.6 ms). This measures the protocol path only, not durable ingest through storage; numbers with storage, TLS and on dedicated hardware are published per release under the fairness rules above.
 
@@ -92,12 +92,13 @@ dotnet src/Mta.Tools/bin/Release/net10.0/mta-tools.dll load --port 2525 --connec
 
 ## Automation (GitHub Actions)
 
-Billing comes first: nothing here runs on every pull request. Two workflows, both separate from `ci` and `release`:
+Billing comes first: nothing here runs on every pull request. Three workflows, all separate from `ci` and `release`:
 
 | Workflow | Trigger | What it does | Cost |
 |---|---|---|---|
 | `bench-gate` | weekly (Monday 04:41 UTC, skipped when `main` has no commit in the last 8 days) and manual | Builds the harness, measures **allocation per message** two ways and compares with `bench/baseline/allocations.json`; fails above the thresholds | about one billed minute (the first run took 52 s) |
-| `bench-throughput` | manual only | Runs the pipeline harness for several configurations (3 runs each), publishes the raw JSON as an artifact and a markdown summary (median and range); optionally measures JIT versus ReadyToRun start-up and size | about 10 to 15 minutes |
+| `bench-throughput` | manual only | Runs `bench/run-local-matrix.sh`: both backends, each **durable and non-durable** (SQLite `Sync=Off`, `Normal`, `Full`; PostgreSQL `synchronous_commit=off` and the default), ingest and end-to-end delivery, 3 interleaved runs each; publishes the raw JSON as an artifact and a markdown summary that reports every pair side by side; optionally measures JIT versus ReadyToRun throughput, start-up and size | about 25 to 40 minutes |
+| `soak` | manual only (a monthly schedule exists and is off until the repository variable `SOAK_SCHEDULE_ENABLED` is `true`) | Hours of load against the real published host with kill -9 and backup/restore drills and a PASS/FAIL verdict: [soak.md](soak.md) | its wall time: a 6 hour run bills about 360 minutes |
 
 ### The allocation gate
 
@@ -112,7 +113,27 @@ The gate prevents regressions; it does not mean the budget is met. Since round 3
 
 ### The throughput run
 
-`gh workflow run bench-throughput --ref <branch>` (inputs: messages per run, runs per configuration, PostgreSQL on or off, ReadyToRun measurement on or off). Configurations: SQLite non-durable (`Sqlite:SyncMode=Off`, the default) and its durable pair (`Full`), `StatsOnly` history, SQLite with delivery to the counting sink (end-to-end recipients per second), and PostgreSQL 17 in a container on the same machine, durable and with `synchronous_commit=off`. The summary starts with the label **"GitHub-hosted ubuntu-latest N-core runner, noisy, not publishable"**, where N is what `nproc` reports on the runner (4 for this repository), and prints the core count the process saw. It also records the wall time of the JIT and ReadyToRun publish steps. The load generator, the server, the sink and the database share one machine that other jobs also share, so the numbers are for trends and for catching order-of-magnitude mistakes. They break fairness rules 1, 3, 6 and 9 (no pair on identical quiet hardware, no baselines, one noisy run set, no disk published) and must not be quoted or compared with other servers.
+`gh workflow run bench-throughput --ref <branch>` (inputs: messages per run, runs per configuration, PostgreSQL on or off, ReadyToRun measurement on or off). The matrix is defined once, in `bench/run-local-matrix.sh`, and the workflow calls that script, so a laptop and the runner measure the same thing:
+
+| Backend | Non-durable | Durable | History | What |
+|---|---|---|---|---|
+| SQLite | `Sqlite:SyncMode=Off` (the default) | `Full`, and `Normal` (survives a process kill and an OS crash, may lose the last commits on power loss) | `Full` | ingest (accepted messages/s) |
+| SQLite | `Off` | `Full` | `StatsOnly` | ingest |
+| SQLite | `Off` | `Full` | `Full` | end-to-end recipients/s to the counting sink (a third of the messages: delivery is the slow part) |
+| PostgreSQL 17 | `synchronous_commit=off` (set per connection) | the default (`synchronous_commit=on`, `fsync=on`) | `Full`, `StatsOnly` | ingest |
+| PostgreSQL 17 | `synchronous_commit=off` | the default | `Full` | end-to-end recipients/s |
+
+Run order is interleaved (run 1 of every configuration, then run 2, and so on), so a slow minute on a shared machine does not fall on one side of a pair. The summary has a table "Durable and non-durable, side by side" (median and range of each side, the ratio, the ingest p99 of each) above the table of every configuration; a number without its pair is not a result (fairness rule 2). It starts with the label **"GitHub-hosted ubuntu-latest N-core runner, noisy, not publishable"**, where N is what `nproc` reports on the runner (4 for this repository), and prints the core count the process saw. In the workflow the PostgreSQL 17 container is started and removed by the script (`--postgres docker`); the ReadyToRun comparison is a separate step that repeats the first SQLite configuration with precompiled application assemblies, and the workflow also records the wall time of the JIT and ReadyToRun publish steps. The load generator, the server, the sink and the database share one machine that other jobs also share, so the numbers are for trends and for catching order-of-magnitude mistakes. They break fairness rules 1, 3, 6 and 9 (no pair on identical quiet hardware, no baselines, one noisy run set, no disk published) and must not be quoted or compared with other servers.
+
+### The same matrix on a laptop or a server of your own
+
+```sh
+bench/run-local-matrix.sh                       # everything, 3 runs of 30,000 messages each; 15 to 40 minutes
+bench/run-local-matrix.sh --quick               # one run of 10,000: a few minutes, to check the setup
+bench/run-local-matrix.sh --messages 50000 --runs 5 --out ~/eggmail-bench --postgres local
+```
+
+Needs the .NET 10 SDK and python3. PostgreSQL rows need either `initdb`, `pg_ctl` and `psql` on `PATH` (for example `brew install postgresql@17`; the script creates a throwaway cluster inside the results folder and stops it at the end; the project does not use Docker on developer machines) or docker (the Actions runner's way); with neither, the PostgreSQL rows are skipped and `matrix.md` says so. The results folder (`artifacts/bench/<UTC time>` unless `--out`) holds one `<backend>-<sync>-<history>-<phase>.run<N>.json` per run, `machine.txt` (CPU, memory, disk of the results folder, .NET version), `run.log` and `matrix.md`, the table to paste into a report. The label names the machine. A laptop number is still one machine, the load generator shares it, and the disk is whatever the laptop has (how much a durable commit costs depends on the drive and the operating system's flush semantics, for example a laptop SSD with a volatile cache versus a server drive with power-loss protection, which is exactly the durable versus non-durable gap this matrix exists to show; this was not verified for the Mac that will run it). Record the machine and the OS next to any number you quote.
 
 ## Baseline comparison: Postfix and KumoMTA (`bench/compare`)
 
@@ -136,6 +157,21 @@ The gate prevents regressions; it does not mean the budget is met. Since round 3
 | ... the same, end to end | 984 recipients/s until the sink had them all | | | |
 
 How little these numbers can be trusted: the same SQLite `Off` configuration measured 4,114, 5,027, 7,184 and now 3,999 msg/s in four runs of this workflow on four runner instances over two days (the code also changed between them), and the same code on a 10-core laptop gave 1,400 to 6,100. Only the allocation columns are stable (within about 1 % across runs of the same code), which is why the regression gate uses them. Read the table for shape, not for values: SQLite `Off` is faster than `Full` and PostgreSQL on this runner; `StatsOnly` is about 25 % faster than `Full` history; `synchronous_commit=off` did not help PostgreSQL measurably here (the runner's disk is fast and the load generator is probably the limit); the durable SQLite row is not comparable with the PostgreSQL durable row (different fsync behaviour, different storage); the ReadyToRun row is inside the noise of the JIT row. Nothing here is a claim about being the fastest, and no other server was run on the same machine. The first run of this section (2026-10-13, before the allocation work) had 7,184 msg/s and 32.7 KB per message for the first row.
+
+## The durable and non-durable matrix on the hosted runner (2026-10-15)
+
+First run of the matrix of "The throughput run" ([workflow run](https://github.com/eggspot/EggMail/actions/runs/38671785477), 14.6 minutes of runner time, 3 interleaved runs of 30,000 messages, 10,000 for delivery). **GitHub-hosted ubuntu-latest 4-core runner, noisy, not publishable** (Ubuntu 24.04, .NET 10.0.13; PostgreSQL 17 in a container on the same runner). Median (min-max) of three runs; ratio = non-durable / durable.
+
+| Backend | History | What | Non-durable | Durable | Ratio |
+|---|---|---|---:|---:|---:|
+| SQLite | Full | ingest msg/s | `Off`: 3,920 (3,916-4,011) | `Full`: 2,248 (2,216-2,253); `Normal`: 3,564 (3,557-3,741) | 1.7x (`Normal`: 1.1x) |
+| SQLite | Full | end-to-end recipients/s | 984 | `Full`: 896 | 1.1x |
+| SQLite | StatsOnly | ingest msg/s | `Off`: 4,759 (4,699-5,241) | `Full`: 3,197 (2,934-3,256) | 1.5x |
+| PostgreSQL 17 | Full | ingest msg/s | `synchronous_commit=off`: 1,803 (1,784-1,854) | default: 1,760 (1,739-1,830) | 1.0x |
+| PostgreSQL 17 | Full | end-to-end recipients/s | 397 | 382 | 1.0x |
+| PostgreSQL 17 | StatsOnly | ingest msg/s | 2,606 (2,366-2,635) | 2,301 (2,301-2,308) | 1.1x |
+
+What the pairs say, and what they do not: on this runner SQLite `Full` costs about 40 % of the throughput of `Off` (the group commit batches the fsync, so the cost is far below one fsync per message), `Normal` costs almost nothing, and PostgreSQL's `synchronous_commit` made no difference that exceeds the run-to-run spread, probably because the container's disk acknowledges a flush cheaply; that is a property of this runner's storage, not of PostgreSQL, and it is why the pair must be measured on the hardware that matters. End-to-end delivery is bound by the delivery path (about 1,000 recipients/s on SQLite, 400 on PostgreSQL here), not by the commit mode. A local run of the same script on an Apple M-series Mac mini (`bench/run-local-matrix.sh --quick`, one run of 10,000, PostgreSQL 16.13 from Homebrew) showed the same shape: SQLite `Full` 2.9x slower than `Off`, `Normal` equal to `Off`, PostgreSQL pair equal; that single run is a check of the script, not a measurement.
 
 ## Pipeline harness and first profile (2026-10-13)
 

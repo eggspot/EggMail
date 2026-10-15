@@ -47,6 +47,7 @@ workflow refuses a stable tag without a non-empty section for that exact version
   sidecar so DANE works, Kubernetes manifests (StatefulSet for SQLite, Deployment for PostgreSQL, Services, NetworkPolicy, probes)
   and an end-to-end smoke test that the release workflow runs against the pushed image.
 - Benchmark harness (`bench/`) and a scheduled allocation-regression gate with a checked-in baseline.
+- Throughput matrix for both backends, each durable and non-durable, reported in pairs (`bench/run-local-matrix.sh` on a laptop, the `bench-throughput` workflow on a runner), and a soak test of the real published host (`bench/soak/run-soak.sh`, the `soak` workflow): hours of load, `kill -9` and backup/restore drills, PASS/FAIL criteria for lost messages, unflagged duplicates, memory, descriptor and thread growth, error rate and queue drain. `/metrics` also exports the .NET runtime meter (garbage collections, working set, thread pool).
 - Allocation round 3: the ingest path allocates about 1.7 KB per 200-byte message and 3.5 KB per 2 KB message on SQLite (was 5.1 and 10.7 KB), the
   SMTP server path alone 0.1 KB (was 1 KB); delivery about 25 KB per recipient (was 28 KB). New setting `Delivery:MaxIdleConnectionsPerTarget`
   (default 2, unchanged behaviour) for the idle outbound connections kept per destination (decision 89).
@@ -60,16 +61,33 @@ workflow refuses a stable tag without a non-empty section for that exact version
 - Cancelling queued mail: `POST /api/v1/messages/{id}/cancel` and a "Cancel delivery" action on the dashboard's message page stop delivery
   to the recipients that are still waiting (all of them, or the ones named); a recipient whose delivery attempt is running is left alone and
   reported as in flight. Works with and without per-message history, publishes a `message.cancelled` webhook event and is implemented on every storage backend (decision 86; adds the index `delivery_queue (message_id)`, schema version 7).
-
 - Descriptor and thread metrics on `/metrics` and OTLP (`mta_process_open_fds` on Linux, `mta_process_threads`) so a long run can be judged for leaks without access to the host.
+- `mta_bounce_reports_ignored_total{kind}` counts bounce and complaint reports that were not acted on because they name an address outside the destination domain of their bounce address.
+- The outbound client sends `ORCPT` when the receiving server offers DSN, so bounces for forwarded addresses still name the address EggMail used.
 
 ### Changed
 
 - The container image no longer sets `Storage__Backend` and `Sqlite__DataDirectory` (the defaults are the same): an environment variable counts as supplied by the deployment, which made a backend switch from the one-container quick start print a cutover patch instead of writing the bootstrap file.
 - `ci` starts on every pull request and skips its work for documentation-only changes inside the job, so a branch rule that requires the `build-test` check never waits for a documentation-only pull request; a missing PostgreSQL or Pebble in CI now fails the run instead of silently skipping their tests.
 
+### Fixed
+
+- The envelope sender (and so SPF) uses the sending domain's own `bounce.<domain>` host once its return-path CNAME is verified; before, the record was required and verified but never used, and the bounce listener now accepts bounces addressed to it.
+
+### Fixed
+
+- `BDAT` bodies are held to the same line-ending rule as `DATA` (bare LF, bare CR and NUL are refused with `500 5.5.2` and the connection is closed) instead of being acknowledged and bounced at delivery.
+- A full disk on the SQLite backend is answered `452 4.3.1` instead of `451 4.3.0`.
+
+### Changed
+
+- `Delivery:Throttle:MaxMessagesPerConnection` is documented as reserved: it is read and validated but the delivery engine never enforces it.
+- Webhook deliveries need direct network access to the receivers: a proxy configured through `HTTP_PROXY`/`HTTPS_PROXY` is ignored (see Security).
+
 ### Security
 
+- A forged bounce or complaint report could get any address suppressed for a tenant: every message carries a valid bounce address in its Return-Path and the report body decided which address was suppressed. Bounce addresses are now bound to the destination domain of the message and reports naming addresses elsewhere are ignored (decision 92). Bounce addresses issued before the change keep their old behaviour until they expire (14 days). Residual risk: the binding is to the destination domain, not the address, so someone who received one message to `gmail.com` can still get another `gmail.com` address suppressed for that tenant. Upgrading: replicas of an older build refuse the new bounce addresses (`550`), so run mixed versions only during a rollout; new builds accept old ones for 14 days.
+- Webhook deliveries never go through a proxy, so `HTTP_PROXY`/`HTTPS_PROXY` in the environment cannot bypass the SSRF guard (the guard checks the address it connects to, which through a proxy is the proxy). Deployments that could only reach receivers through a proxy must allow direct egress for the webhook port range instead.
 - No known vulnerabilities; no independent security audit has been done yet. Report problems as described in [SECURITY.md](SECURITY.md).
 
 [Unreleased]: https://github.com/eggspot/EggMail/commits/main

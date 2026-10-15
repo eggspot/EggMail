@@ -231,6 +231,59 @@ public class DeliveryDkimAndLimitsTests
         Assert.True(verp.TryDecode(sender[..sender.IndexOf('@')], DateTimeOffset.UtcNow, TimeSpan.FromHours(1), out var token));
         Assert.Equal(DeliveryFixture.Tenant, token.TenantId);
         Assert.True(Mta.Dsn.VerpCodec.MatchesDomain(token, domainId));
+        // Bound to the domain the message went to: a report that names an address elsewhere is not acted on (docs/decisions.md 92).
+        Assert.Equal(Mta.Dsn.VerpDestinationCheck.Match, verp.CheckDestination(token, "dest.example"));
+        Assert.Equal(Mta.Dsn.VerpDestinationCheck.Mismatch, verp.CheckDestination(token, "other.example"));
+    }
+
+    [Fact]
+    public async Task The_envelope_sender_is_on_the_sending_domains_own_return_path_host_once_its_cname_is_verified()
+    {
+        var verp = new Mta.Dsn.VerpCodec(new Dictionary<int, byte[]> { [1] = Mta.Dsn.VerpCodec.GenerateKey() }, 1);
+        await using var f = new DeliveryFixture(o => new DeliveryOptions { Owner = o.Owner, Hostname = o.Hostname, RemotePort = o.RemotePort, IdlePoll = o.IdlePoll, ExpirySweepInterval = o.ExpirySweepInterval, BounceDomain = "bounces.egg.test" }, verp: verp);
+        var now = DateTimeOffset.UtcNow;
+        var domainId = Ids.New();
+        await f.Storage.Config.UpsertDomainAsync(new DomainRecord(domainId, DeliveryFixture.Tenant, "example.org", DomainStatus.Verified, "bounce.example.org", true, now, now, now, 0, null, false, null), default);
+
+        var id = await f.EnqueueAsync(["rcpt@dest.example"]);
+        await f.WaitForEventAsync(id, MessageEventType.Delivered);
+
+        string sender = Assert.Single(f.Remote.Messages).Sender;
+        Assert.EndsWith("@bounce.example.org", sender);   // the customer's own host: SPF is then checked against a name under their From domain
+        Assert.True(verp.TryDecode(sender[..sender.IndexOf('@')], DateTimeOffset.UtcNow, TimeSpan.FromHours(1), out var token));
+        Assert.Equal(DeliveryFixture.Tenant, token.TenantId);
+        Assert.True(Mta.Dsn.VerpCodec.MatchesDomain(token, domainId));
+    }
+
+    [Fact]
+    public async Task A_sending_domain_too_long_for_a_bounce_address_uses_the_shared_bounce_domain()
+    {
+        var verp = new Mta.Dsn.VerpCodec(new Dictionary<int, byte[]> { [1] = Mta.Dsn.VerpCodec.GenerateKey() }, 1);
+        await using var f = new DeliveryFixture(o => new DeliveryOptions { Owner = o.Owner, Hostname = o.Hostname, RemotePort = o.RemotePort, IdlePoll = o.IdlePoll, ExpirySweepInterval = o.ExpirySweepInterval, BounceDomain = "bounces.egg.test" }, verp: verp);
+        var now = DateTimeOffset.UtcNow;
+        string longDomain = string.Join('.', Enumerable.Repeat(new string('a', 60), 3)) + ".example";   // 188 characters: b+<61>@bounce.<188> is 258
+        await f.Storage.Config.UpsertDomainAsync(new DomainRecord(Ids.New(), DeliveryFixture.Tenant, longDomain, DomainStatus.Verified, "bounce." + longDomain, true, now, now, now, 0, null, false, null), default);
+
+        var id = await f.EnqueueAsync(["rcpt@dest.example"], sendingDomain: longDomain);
+        await f.WaitForEventAsync(id, MessageEventType.Delivered);
+
+        string sender = Assert.Single(f.Remote.Messages).Sender;
+        Assert.EndsWith("@bounces.egg.test", sender);   // not the original sender, and not a host that makes the address unparsable
+        Assert.True(verp.TryDecode(sender[..sender.IndexOf('@')], DateTimeOffset.UtcNow, TimeSpan.FromHours(1), out _));
+    }
+
+    [Fact]
+    public async Task The_shared_bounce_domain_is_used_while_the_return_path_cname_is_not_verified()
+    {
+        var verp = new Mta.Dsn.VerpCodec(new Dictionary<int, byte[]> { [1] = Mta.Dsn.VerpCodec.GenerateKey() }, 1);
+        await using var f = new DeliveryFixture(o => new DeliveryOptions { Owner = o.Owner, Hostname = o.Hostname, RemotePort = o.RemotePort, IdlePoll = o.IdlePoll, ExpirySweepInterval = o.ExpirySweepInterval, BounceDomain = "bounces.egg.test" }, verp: verp);
+        var now = DateTimeOffset.UtcNow;
+        await f.Storage.Config.UpsertDomainAsync(new DomainRecord(Ids.New(), DeliveryFixture.Tenant, "example.org", DomainStatus.Verified, "bounce.example.org", false, now, now, now, 0, null, false, null), default);
+
+        var id = await f.EnqueueAsync(["rcpt@dest.example"]);
+        await f.WaitForEventAsync(id, MessageEventType.Delivered);
+
+        Assert.EndsWith("@bounces.egg.test", Assert.Single(f.Remote.Messages).Sender);
     }
 
     [Fact]

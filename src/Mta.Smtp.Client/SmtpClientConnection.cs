@@ -319,14 +319,25 @@ public sealed class SmtpClientConnection : IAsyncDisposable
         line.Clear();
     }
 
-    private void WriteRcptTo(EmailAddress recipient)
+    private void WriteRcptTo(EmailAddress recipient, SmtpCapabilities caps)
     {
         var line = new DefaultInterpolatedStringHandler(0, 0, System.Globalization.CultureInfo.InvariantCulture, stackalloc char[320]);
         line.AppendLiteral("RCPT TO:");
         AppendPath(ref line, recipient);
+        if (caps.Dsn && !recipient.IsNull && IsAscii(recipient))
+        {
+            // RFC 3461: the address as we were asked to send it. A server that forwards the message passes it on, and the server that finally
+            // reports a failure puts it in Original-Recipient, which is how a bounce for a forwarded address still names the address we used
+            // (the bounce processor only acts on addresses in the domain it sent to). No NOTIFY: ORCPT alone changes nothing about what is reported.
+            line.AppendLiteral(" ORCPT=rfc822;");
+            line.AppendFormatted(Mta.Smtp.Protocol.Sasl.EncodeXtext(recipient.LocalPart + "@" + recipient.Domain));
+        }
+
         WriteLine(line.Text);
         line.Clear();
     }
+
+    private static bool IsAscii(EmailAddress address) => System.Text.Ascii.IsValid(address.LocalPart) && System.Text.Ascii.IsValid(address.Domain);
 
     private static void AppendPath(ref DefaultInterpolatedStringHandler line, EmailAddress address)
     {
@@ -543,7 +554,7 @@ public sealed class SmtpClientConnection : IAsyncDisposable
             WriteMailFrom(envelope, caps, message.Length);
             for (int i = 0; i < envelope.Recipients.Count; i++)   // by index: enumerating the interface allocates
             {
-                WriteRcptTo(envelope.Recipients[i]);
+                WriteRcptTo(envelope.Recipients[i], caps);
             }
 
             // DATA/BDAT cannot be pipelined blindly with BDAT; with DATA we may send it right behind the last RCPT.
@@ -606,7 +617,7 @@ public sealed class SmtpClientConnection : IAsyncDisposable
         for (int i = 0; i < envelope.Recipients.Count; i++)
         {
             var rcpt = envelope.Recipients[i];
-            WriteRcptTo(rcpt);
+            WriteRcptTo(rcpt, caps);
             var r = await FlushAndReadReplyAsync(SmtpStage.RcptTo, _options.CommandTimeout, cancellationToken).ConfigureAwait(false);
             results.Add(new SmtpRecipientResult { Address = rcpt, Reply = r });
         }

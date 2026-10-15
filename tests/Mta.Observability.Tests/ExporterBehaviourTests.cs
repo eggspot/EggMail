@@ -169,6 +169,7 @@ public class ExporterBehaviourTests
     {
         Assert.True(PrometheusTextExporter.IsDefaultMeter(new Meter("Mta.Delivery")));
         Assert.True(PrometheusTextExporter.IsDefaultMeter(new Meter("Npgsql")));
+        Assert.True(PrometheusTextExporter.IsDefaultMeter(new Meter("System.Runtime")));
         Assert.False(PrometheusTextExporter.IsDefaultMeter(new Meter("System.Net.Http")));
         Assert.False(PrometheusTextExporter.IsDefaultMeter(new Meter("Mta")));   // "Mta." is the namespace, a meter literally called Mta is not ours
     }

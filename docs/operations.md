@@ -190,7 +190,7 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | `Delivery:RetryDelays` | built-in ladder | Delays between retries (2 m, 5 m, 15 m, 30 m, 1 h, 2 h, 4 h); the last repeats |
 | `Delivery:Throttle:MaxConnections` | 20 | Ceiling of concurrent connections to one destination domain |
 | `Delivery:Throttle:MaxMessagesPerMinute` | 600 | Ceiling of messages per minute to one destination domain |
-| `Delivery:Throttle:MaxMessagesPerConnection` | 100 | Messages over one connection before it is closed |
+| `Delivery:Throttle:MaxMessagesPerConnection` | 100 | Reserved: read and validated, but **not enforced yet** (a connection is closed when it goes idle, and a transaction carries one message group); only `MaxConnections` and `MaxMessagesPerMinute` limit a destination today |
 | `Delivery:Throttle:InitialConnections` | 5 | Connections allowed at first; grows while the destination keeps accepting |
 | `Delivery:Throttle:InitialMessagesPerMinute` | 120 | Messages per minute allowed at first; grows the same way |
 | `Delivery:RemotePort` | 25 | Destination port for direct MX delivery; lab setups only |
@@ -280,7 +280,7 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | `Observability:OtlpProtocol` | `Grpc` | `Grpc` (port 4317) or `HttpProtobuf` (port 4318; EggMail appends `/v1/metrics`, `/v1/traces`, `/v1/logs`) |
 | `Observability:TraceSampleRatio` | 0.1 | Share of messages whose trace is exported, 0 to 1. A message is traced completely or not at all |
 | `Observability:QueueSampleSeconds` | 15 | Seconds between samples of the queue for the `mta_delivery_queue_*` gauges; `0` turns them off |
-| `Webhooks:AllowHttp` | false | Allow plain `http` webhook endpoints (HTTPS only otherwise) |
+| `Webhooks:AllowHttp` | false | Allow plain `http` webhook endpoints (HTTPS only otherwise). Deliveries are made **directly**: `HTTP_PROXY`/`HTTPS_PROXY` are ignored on purpose, because the SSRF guard checks the address it connects to and through a proxy that is the proxy. The host needs outbound access to the receivers (in Kubernetes the NetworkPolicy allows TCP 443 to the public Internet) |
 | `Webhooks:Timeout` | `00:00:15` | One delivery attempt |
 | `Webhooks:MaxConcurrency` | 32 | Concurrent webhook deliveries |
 | `Webhooks:MaxConcurrencyPerEndpoint` | 4 | So one slow endpoint cannot take all workers |
@@ -466,6 +466,10 @@ With `Domains:MtaStsMode=Testing` or `Enforce`:
 - Probes and the CA's HTTP-01 challenge (`/healthz`, `/readyz`, `/.well-known/acme-challenge/`) are answered on every host name, also on `mta-sts.<domain>`; nothing else of the dashboard is.
 - The `id` in the `_mta-sts` TXT record is a hash of the policy file. When you change the mode, the max age or the `mx:` lines the id changes, and the domain page shows the record as **Mismatch** until the TXT record is updated to the new value.
 
+### Bounce addresses and the return path
+
+Once the return-path CNAME is verified, the envelope sender of the mail of that domain is `b+<token>@bounce.<domain>` instead of `b+<token>@<Delivery:BounceDomain>` (a domain whose CNAME is missing keeps using the shared bounce domain). Receivers check SPF against that name: the CNAME makes `bounce.<domain>` resolve the TXT record of your bounce domain, so publish **one SPF record at the bounce domain** that names your sending IP (`v=spf1 ip4:203.0.113.10 ~all`), and the check passes and aligns (relaxed) with the `From` domain, which is what makes DMARC pass through SPF as well as through DKIM. The MX of the bounce domain (`Delivery:BounceDomain` → `Hostname`) receives the bounces for both forms of address: a mail server resolving the MX of `bounce.<domain>` follows the CNAME. The bounce listener (port 25) accepts a valid token at the shared bounce domain, or at a registered domain's `bounce.<domain>` once that domain's CNAME is verified, and refuses everything else. Bounce addresses are bound to the destination domain of the message: a report (bounce or complaint) is acted on only for addresses in that domain (or the `Original-Recipient` it names), so someone who received one message cannot get another address suppressed by sending a forged report to the address in the `Return-Path`. Tokens issued before this binding existed keep working until they expire (14 days). **Rolling upgrade:** a replica of an older build cannot read the new bounce addresses and answers `550` for them, so run mixed versions only for the length of a rollout. When the receiving server offers DSN, EggMail sends the address it used as `ORCPT`, so a bounce for a forwarded address still names it (`Original-Recipient`); a report that names only a forwarding target is ignored and counted in `mta_bounce_reports_ignored_total`. A sending domain so long that `b+<token>@bounce.<domain>` would exceed 254 characters uses the shared bounce domain (a warning in the log).
+
 ## TLS certificates and ACME
 
 Certificates live in the database and are served by SMTP (STARTTLS and implicit TLS) and by the dashboard/API HTTPS listener. A new instance starts with a self-signed certificate for `Hostname` (every start says so in the log and the dashboard flags it with a persistent banner; a certificate made for another host name, before `EGGMAIL_HOSTNAME` was set, is replaced by one for the new name, and one that expires within 30 days is replaced at the next start; any other certificate wins over it); import a certificate in the dashboard, mount one with `Tls:CertificatePath`/`KeyPath` (it takes precedence), or let EggMail order one.
@@ -558,6 +562,7 @@ and set `Storage:Postgres:ReadOnlyConnectionString` to a connection string for i
 | `mta_storage_sqlite_quarantined` | gauge | `file` | 1 for a file that failed its start-up integrity check and was moved aside when this process started, else 0 |
 | `mta_process_open_fds` | gauge | none | Open file descriptors (sockets and files), Linux only (no series elsewhere). Returns to its idle value when load stops; a climb is a leak |
 | `mta_process_threads` | gauge | none | Operating-system threads of the process (not only the thread pool's) |
+| `mta_bounce_reports_ignored_total` | counter | `kind` (`bounce`, `complaint`) | Reports that arrived under a valid bounce address and were not acted on because they name an address outside the domain the bounce address was issued for (no suppression, no webhook). A trickle is forwarded mail whose server does not return the Original-Recipient; a burst is somebody trying to get addresses suppressed |
 | `mta_tls_certificate_expiry_seconds` | gauge | `name`, `source` | Seconds until each served certificate expires |
 | `mta_tls_certificates` | gauge | none | Certificates served; an expired one is no longer served, so alert on 0 as well |
 | `mta_backup_runs_total` | counter | `outcome` (`success`, `failed`) | Scheduled backup runs |
@@ -577,12 +582,29 @@ PostgreSQL command latency and pool state come from the Npgsql driver's own mete
 | `db_client_connection_npgsql_timeouts_total` | counter | pool name | Connection requests that timed out |
 | `db_client_connection_npgsql_create_time_seconds` | histogram | pool name | Time to open a new connection |
 
+The .NET runtime's own meter (`System.Runtime`) is exported unchanged too, so memory growth, garbage collections and thread-pool pressure can be watched without a profiler (the soak test of [soak.md](soak.md) reads them). Only the ones below are documented and pinned by a test; the runtime publishes a few more (`dotnet_jit_*`, `dotnet_assembly_count`, `dotnet_timer_count`, `dotnet_process_cpu_count`). The names and types are exactly what the runtime declares: `dotnet_thread_pool_thread_count_total` and `dotnet_thread_pool_queue_length_total` carry the **current** number although the runtime declares them as counters, so read them as gauges.
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `dotnet_gc_collections_total` | counter | `gc_heap_generation` (`gen0`, `gen1`, `gen2`) | Garbage collections since the process started. A steadily rising `gen2` rate under constant load is a sign of heap growth |
+| `dotnet_gc_heap_total_allocated_bytes_total` | counter | none | Managed bytes allocated since the process started (the allocation rate is its derivative) |
+| `dotnet_gc_pause_time_seconds_total` | counter | none | Time the process was paused by garbage collections |
+| `dotnet_gc_last_collection_heap_size_bytes` | gauge | `gc_heap_generation` (`gen0`, `gen1`, `gen2`, `loh`, `poh`) | Managed heap size by generation as of the latest collection (`loh` is the large object heap: where message bodies of 85 KB and more live) |
+| `dotnet_process_memory_working_set_bytes` | gauge | none | Physical memory mapped to the process (close to the resident set size) |
+| `dotnet_process_cpu_time_seconds_total` | counter | `cpu_mode` (`user`, `system`) | CPU time used by the process |
+| `dotnet_thread_pool_thread_count_total` | counter | none | Thread-pool threads that exist now (see the note above) |
+| `dotnet_thread_pool_queue_length_total` | counter | none | Work items waiting for a thread-pool thread now (see the note above); above zero for long means the pool is starved |
+| `dotnet_thread_pool_work_item_count_total` | counter | none | Work items the thread pool has completed |
+| `dotnet_monitor_lock_contentions_total` | counter | none | Contended monitor lock acquisitions |
+| `dotnet_exceptions_total` | counter | `error_type` | Exceptions thrown in managed code |
+
 **What to alert on.**
 
 - Queue backlog: `mta_delivery_queue_oldest_due_age_seconds` above a few minutes for more than a few scrapes, or `mta_delivery_queue_depth{state="queued"}` growing steadily. `mta_delivery_queue_sample_age_seconds` above a minute means both are stale.
 - Repeated deferrals to one domain: the metrics carry no domain label (it is unbounded); the dashboard's per-domain statistics and the message events show which one. Alert on the `deferred` share of `mta_delivery_attempts_total`.
 - Certificates: `mta_tls_certificate_expiry_seconds` below 14 days (ACME renews with a third of the lifetime left) or `mta_tls_certificates == 0`.
 - Leaks over days: `mta_process_open_fds` and `mta_process_threads` should settle under constant load and return to their idle values when it stops; alert on a slope (for example `deriv(mta_process_open_fds[6h]) > 0` for a day). Memory comes from the platform (`docker stats`, the cgroup) or from the .NET runtime meter where the host exports it.
+- Disk full on the SQLite backend: submissions are answered `452 4.3.1 Insufficient system storage` (clients retry; other storage failures are `451 4.3.0`) and the log has "the disk is full" at error level. Free space (or move `Sqlite:DataDirectory`) and intake resumes by itself; nothing needs a restart. Watch the free space of the volume yourself: the process does not export it.
 - Durability warnings: `mta_storage_sqlite_sync_off == 1` when you did not choose `Sqlite:SyncMode=Off`, and `mta_storage_sqlite_quarantined == 1` (a file was found corrupt and replaced by an empty one; the evidence is in `<data>/quarantine/`).
 - Backups: `mta_backup_runs_total{outcome="failed"}` increasing, or `time() - mta_backup_last_success_timestamp_seconds` above two backup intervals. The gauge exists from start when a backup is already on disk, and is absent on a fresh install until the first one: with backups enabled on SQLite also alert on `absent(mta_backup_last_success_timestamp_seconds)` for longer than the interval (a PostgreSQL deployment has no such series, since backups are the database's own).
 - SQLite write pressure (advisory; switching backends is manual): `mta_storage_sqlite_writer_queue_depth{file="queue.db"}` high for minutes, or the p99 of `mta_storage_sqlite_commit_duration_seconds` above about 100 ms.
@@ -688,3 +710,7 @@ Things to get right:
 ## Graceful shutdown
 
 On SIGTERM the SMTP listeners stop accepting, running deliveries are given time to finish, the rest are returned to the queue unchanged (a delivery that may already have been sent is flagged `possible_duplicate`), then the process exits. Give the container at least 60 s of termination grace.
+
+## Load, benchmark and soak tests
+
+Before trusting a configuration with real mail, measure it on your hardware. `bench/run-local-matrix.sh` runs the throughput matrix (both backends, durable and non-durable, ingest and delivery) on the machine you are on and writes a table ([benchmarks.md](benchmarks.md#the-same-matrix-on-a-laptop-or-a-server-of-your-own)). `bench/soak/run-soak.sh` runs the real `mta serve` for hours under mixed load, kills it with `kill -9` on a schedule, restores backups into a second instance, and ends with a PASS/FAIL verdict on lost messages, unflagged duplicates, memory, descriptor and thread growth, error rate and queue drain ([soak.md](soak.md)). Both run on a laptop or a server without Docker (PostgreSQL from the binaries on `PATH`); the matching GitHub Actions workflows are `bench-throughput` and `soak`, dispatched by hand because they bill by the minute.

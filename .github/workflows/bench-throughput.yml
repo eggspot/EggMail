@@ -1,7 +1,9 @@
 name: bench-throughput
 
-# Manual throughput run of the pipeline harness (SMTP ingest through storage, optionally with delivery to a sink), published as a workflow
-# artifact and a markdown summary. Dispatch only: it takes about ten minutes of runner time.
+# Manual throughput run of the pipeline harness (SMTP ingest through storage, and end-to-end delivery to a sink) for BOTH backends, each durable and
+# non-durable (SQLite Sync=Off, Normal, Full; PostgreSQL synchronous_commit=off and the default), published as a workflow artifact and a markdown
+# summary that reports every pair side by side. Dispatch only; billed by the minute: about 25 to 40 minutes of runner time with the defaults.
+# The same matrix runs on a laptop with bench/run-local-matrix.sh (docs/benchmarks.md).
 #
 #   gh workflow run bench-throughput --ref <branch> [-f messages=30000 -f runs=3 -f postgres=true -f readytorun=true]
 #
@@ -20,7 +22,7 @@ on:
         description: Runs per configuration (the summary reports the median)
         default: '3'
       postgres:
-        description: Also measure the PostgreSQL backend (durable and synchronous_commit=off)
+        description: Also measure the PostgreSQL backend (default durability and synchronous_commit=off)
         type: boolean
         default: true
       readytorun:
@@ -42,7 +44,7 @@ env:
 jobs:
   throughput:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -59,12 +61,6 @@ jobs:
       - name: Build the harness and the load generator
         run: dotnet build bench/Mta.Bench.Pipeline -c Release
 
-      - name: PostgreSQL 17 (default durability; the non-durable pair sets synchronous_commit=off per connection)
-        if: inputs.postgres
-        run: |
-          docker run -d --name pg -p 5432:5432 -e POSTGRES_USER=eggmail -e POSTGRES_PASSWORD=eggmail -e POSTGRES_DB=postgres postgres:17
-          for _ in $(seq 1 30); do if docker exec pg pg_isready -U eggmail; then break; fi; sleep 1; done
-
       - name: Machine
         run: |
           echo "cores: $(nproc)"; grep -m1 'model name' /proc/cpuinfo || true; free -m | head -2; df -h . | tail -1
@@ -74,52 +70,32 @@ jobs:
         if: inputs.readytorun
         run: dotnet publish bench/Mta.Bench.Pipeline -c Release -r linux-x64 --self-contained false -p:PublishReadyToRun=true -o publish-bench-r2r -v q
 
-      - name: Ingest runs
+      # bench/run-local-matrix.sh is the one definition of the matrix (the same script runs on a laptop): SQLite Sync=Off, Normal and Full, PostgreSQL 17
+      # (container) with synchronous_commit=off and the durable default, history Full and StatsOnly, ingest and end-to-end delivery. Runs are interleaved.
+      - name: Matrix, both backends, each durable and non-durable
         env:
           MESSAGES: ${{ inputs.messages }}
           RUNS: ${{ inputs.runs }}
           POSTGRES: ${{ inputs.postgres }}
+          BENCH_LABEL: GitHub-hosted ubuntu-latest runner, noisy, not publishable
         run: |
           set -euo pipefail
-          mkdir -p results
-          harness=(dotnet bench/Mta.Bench.Pipeline/bin/Release/net10.0/Mta.Bench.Pipeline.dll)
-          common=(--connections 16 --size 2048 --messages "${MESSAGES}")
-          runner=("${harness[@]}")
-          run_config() { # run_config <name> <harness arguments...>
-            name=$1; shift
-            for n in $(seq 1 "$RUNS"); do
-              echo "== $name run $n"
-              "${runner[@]}" "$@" --label "$name" --json "results/${name}.run${n}.json" | tail -n 40
-            done
-          }
-          # SQLite, the default backend: non-durable (Sqlite:SyncMode=Off, the default) and its durable pair (Full), History:Mode=Full.
-          run_config sqlite-off-full      --sync off  --history full      --deliver false "${common[@]}"
-          if [ -d publish-bench-r2r ]; then
-            # The same configuration with the application assemblies precompiled (ReadyToRun), run right after the JIT one.
-            runner=(dotnet publish-bench-r2r/Mta.Bench.Pipeline.dll)
+          pg=skip; [ "$POSTGRES" != "true" ] || pg=docker
+          bench/run-local-matrix.sh --messages "$MESSAGES" --runs "$RUNS" --postgres "$pg" --out results
+
+      - name: JIT versus ReadyToRun ingest (the sqlite-off-full-ingest configuration with precompiled application assemblies)
+        if: inputs.readytorun
+        env:
+          MESSAGES: ${{ inputs.messages }}
+          RUNS: ${{ inputs.runs }}
+        run: |
+          set -euo pipefail
+          for n in $(seq 1 "$RUNS"); do
+            echo "== sqlite-off-full-ingest-r2r run $n"
             EGGMAIL_BENCH_TOOLS="$PWD/src/Mta.Tools/bin/Release/net10.0/mta-tools.dll" \
-              run_config sqlite-off-full-r2r --sync off --history full --deliver false "${common[@]}"
-            runner=("${harness[@]}")
-          fi
-          run_config sqlite-full-full     --sync full --history full      --deliver false "${common[@]}"
-          run_config sqlite-off-statsonly --sync off  --history statsonly --deliver false "${common[@]}"
-          # With delivery to the counting sink (end-to-end recipients per second); fewer messages: delivery is the slow part.
-          run_config sqlite-off-full-delivery --sync off --history full --deliver true --connections 16 --size 2048 --messages 10000
-          if [ "$POSTGRES" = "true" ]; then
-            pg() { docker exec pg psql -U eggmail -d postgres -v ON_ERROR_STOP=1 -q -c "$1"; }
-            # Each run needs an empty database.
-            for variant in durable nondurable; do
-              options=""; [ "$variant" = "nondurable" ] && options=";Options='-c synchronous_commit=off'"
-              for n in $(seq 1 "$RUNS"); do
-                db="bench_${variant}_${n}"
-                pg "create database ${db}"
-                echo "== postgres-${variant}-full run $n"
-                EGGMAIL_BENCH_POSTGRES="Host=localhost;Port=5432;Username=eggmail;Password=eggmail;Database=${db};Maximum Pool Size=64${options}" \
-                  "${harness[@]}" --backend postgres --history full --deliver false "${common[@]}" --label "postgres-${variant}-full" \
-                  --json "results/postgres-${variant}-full.run${n}.json" | tail -n 40
-              done
-            done
-          fi
+              dotnet publish-bench-r2r/Mta.Bench.Pipeline.dll --sync off --history full --deliver false --connections 16 --size 2048 --messages "$MESSAGES" \
+              --label sqlite-off-full-ingest-r2r --json "results/sqlite-off-full-ingest-r2r.run${n}.json" | tail -n 4
+          done
 
       - name: Start-up time and size, JIT versus ReadyToRun (linux-x64), and the linux-arm64 cross-publish
         if: inputs.readytorun
