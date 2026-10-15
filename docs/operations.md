@@ -158,6 +158,7 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | `Stats:RecipientDomainTopNDaily` | 10 | The same for the daily rollup |
 | `Stats:MaxSeriesPerHour` | 200000 | Cap on distinct statistic series in one hour; the overflow goes to `other` |
 | `Queue:MaxLifetime` | `5.00:00:00` | After this a deferred delivery expires and bounces. Must be shorter than `Content:RetentionDays` while history is recorded |
+| `Inbound:RetentionDays` | 7 | Days received mail (row and body) is kept when its domain sets no value; `0` keeps forever (see [Inbound mail](#inbound-mail)) |
 | `Queue:MaxLifetimeDays` | 5 | The same in whole days: the form the dashboard's settings page stores. If both are set, `Queue:MaxLifetime` wins |
 
 ### SMTP and delivery
@@ -272,6 +273,7 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | `Api:MaxApiKeysPerTenant` | 100 | Active API keys |
 | `Api:MaxSmtpCredentialsPerTenant` | 100 | |
 | `Api:MaxWebhooksPerTenant` | 50 | |
+| `Api:MaxInboundRoutesPerDomain` | 100 | Inbound routes per domain (never more than 100) |
 | `Api:MaxStatsRows` | 50000 | Rows one statistics query may return |
 | `Api:MetricsAllowedNetworks` | loopback and private ranges | *List.* Networks (CIDR) allowed to read `/metrics`; it carries no credentials, so keep it off the public internet |
 | `Api:SpfInclude` | none | `include:` host suggested to customers in their SPF record (see [Sending domains](#sending-domains-and-their-dns-records)) |
@@ -294,6 +296,17 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | `Webhooks:UserAgent` | `EggMail-Webhooks/1.0` | |
 | `Webhooks:OutboxRetentionDays` | 7 | Finished deliveries; `0` keeps forever |
 | `Webhooks:AttemptLogDays` | 7 | Attempt log; `0` keeps forever |
+
+### Inbound mail
+
+Server defaults for the domains that receive mail; a domain's own settings override them (see [Inbound mail](#inbound-mail)).
+
+| Key | Default | Meaning |
+|---|---|---|
+| `Inbound:MaxMessageSize` | `Smtp:MaxMessageSize` | Largest inbound message in bytes; a domain can lower it, never raise it |
+| `Inbound:MaxMessagesPerMinute` | 600 | Messages per minute accepted for one domain |
+| `Inbound:MaxMessagesPerMinutePerRemote` | 60 | Messages per minute accepted from one client address for one domain |
+| `Inbound:MaxStoredBytesPerDomain` | 2147483648 | Message bytes kept for one domain; at the limit new mail is refused with `452 4.2.2`; `0` is unlimited |
 
 ### Sending domains and their DNS records
 
@@ -614,6 +627,18 @@ Manage both in the dashboard (administrators: **Relay routes**, **TLS policies**
 * **Upgrade note.** Earlier builds accepted any certificate for relay TLS modes `verify` and `implicit` (and nothing could create a route through the API, so only routes inserted straight into the database were affected). They now validate the chain and the host name: a route whose relay presents a self-signed or mismatching certificate stops carrying mail (retried, then expired) until the certificate is fixed or the mode is set to `required` (encryption without validation).
 
 Not verified: delivery through a real relay provider (the engine tests use loopback servers, including STARTTLS with a self-signed certificate that `required` accepts and `verify` refuses).
+## Inbound mail
+
+Received mail, the settings and routes of the domains that receive it, and the state of the route actions are stored like the rest of the data ([design.md section 11](design.md#11-inbound-mail), decision 91). What an operator should know about the storage and the API (the SMTP receive path, the route actions and the dashboard pages are separate changes; until the receive path ships no mail arrives and the tables stay empty):
+
+- **Where it lives.** Settings and routes in the config part (`config.db`), messages and their bodies in the queue part (`queue.db`): `inbound_domain_settings`, `inbound_route`, `inbound_message`, `inbound_message_raw` (a body is a separate row so lists and claims never read it). One row and one body per accepted recipient. On PostgreSQL they are ordinary tables in the one database. Stored mail grows the hot `queue.db`: a deployment that stores a lot of mail should use a finite `Inbound:RetentionDays` (or per-domain `retentionDays`) and the per-domain `maxStoredBytes`, or PostgreSQL.
+- **Retention.** A message (row and body) is deleted when it is older than its domain's `retentionDays`, else `Inbound:RetentionDays` (default 7); **`0` keeps forever**, which shows as the health warning `retention_unlimited:Inbound:RetentionDays` and as `retention_unlimited` in the settings API. The job is `inbound_retention` of the storage maintenance (every five minutes with the other jobs, safe on several replicas): batched deletes (`Sqlite:RetentionDeleteBatchSize`, `Storage:Postgres:RetentionDeleteBatchSize`) on both backends, bodies first. The cutoff is read from the current settings when the job runs, so shortening a domain's retention frees old mail at the next run. **A message whose action is still pending is never deleted by retention.** A forward that completed has no body; a discarded message never had one.
+- **The server defaults** the API shows as `effective` values: `Inbound:MaxMessageSize` (default `Smtp:MaxMessageSize`; a domain can lower it, never raise it), `Inbound:MaxMessagesPerMinute`, `Inbound:MaxMessagesPerMinutePerRemote`, `Inbound:MaxStoredBytesPerDomain`. The receive path applies the same ones; a domain's own settings override them.
+- **API.** Scope `inbound` ([api.md](api.md#inbound-mail-inbound-scope)). Create an API key with it (`POST /api-keys` with `"scopes": ["inbound"]`) for the application that reads received mail. Raw messages and attachments are only ever served as downloads (`Content-Disposition: attachment`, `nosniff`, no caching).
+- **Deleting a webhook endpoint** that an inbound route uses is refused with `409` (`webhook_endpoint_in_use`); deleting a domain deletes its inbound settings and routes but not the mail it received (that follows its retention).
+- **Backups and the backend switch.** A SQLite backup or `pg_dump` has all of it. The switch bundle (format 1.3) carries the four tables: settings and routes with the config part, messages and bodies with the queue part (the body in a body pack, like the spool). Pending actions are held on the source until the switch finishes, so none runs twice. `--skip-history` does not skip received mail. A bundle of format 1.2 (without inbound tables) imports into a build that has them and starts with no inbound data; a bundle with the tables is refused by a build that does not know them.
+- **Upgrade note.** Schema version 8 (SQLite files are upgraded at the first start; PostgreSQL `V008`) adds the four tables and an index on `inbound_message`; no existing table changes and nothing is rewritten, so the upgrade is quick on any size of database.
+
 ## Cancelling queued mail
 
 A message that has not been delivered yet can be stopped from the message page of the dashboard (**Cancel delivery**) or with `POST /api/v1/messages/{id}/cancel` ([api.md](api.md)); the caller needs the `send` scope. What an operator should know:

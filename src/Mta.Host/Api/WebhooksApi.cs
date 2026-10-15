@@ -169,6 +169,16 @@ public sealed class WebhooksApi(ApiAuthenticator auth, IStorage storage, ISecret
     {
         ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.Webhooks).ConfigureAwait(false);
         WebhookEndpointRecord endpoint = await FindOwnAsync(caller, id, context.RequestAborted).ConfigureAwait(false);
+
+        // An inbound route whose action posts to the endpoint would fail every message from now on: the route has to be changed first (decision 91).
+        var routes = await storage.Inbound.GetRoutesUsingWebhookEndpointAsync(endpoint.Id, context.RequestAborted).ConfigureAwait(false);
+        if (routes.Count > 0)
+        {
+            throw new ApiException(
+                StatusCodes.Status409Conflict, ApiCodes.Conflict, "The endpoint is the target of inbound routes: change or delete those routes first.",
+                extensions: new Dictionary<string, object?> { ["reason"] = "webhook_endpoint_in_use", ["routes"] = routes.Select(r => ApiJson.Id(r.Id)).ToList() });
+        }
+
         await Config.DeleteWebhookEndpointAsync(caller.TenantId, endpoint.Id, context.RequestAborted).ConfigureAwait(false);
         return ApiResults.NoContent();
     }

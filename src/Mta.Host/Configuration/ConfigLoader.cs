@@ -285,6 +285,7 @@ public static class ConfigLoader
                 RecentEvents = c.GetValue("History:RecentEvents", d.History.RecentEvents),
             },
             Queue = new QueueOptions { MaxLifetime = QueueMaxLifetime(c, d.Queue.MaxLifetime) },
+            Inbound = new InboundStorageOptions { RetentionDays = c.GetValue("Inbound:RetentionDays", d.Inbound.RetentionDays) },
             Content = new ContentOptions
             {
                 Retain = !string.Equals(c["Content:Mode"], "None", StringComparison.OrdinalIgnoreCase),
@@ -368,7 +369,7 @@ public static class ConfigLoader
         foreach (var (name, value) in new[]
         {
             ("Retention:MetadataDays", r.MetadataDays), ("Stats:HourlyRetentionDays", r.StatsHourlyDays), ("Stats:DailyRetentionDays", r.StatsDailyDays),
-            ("Webhooks:OutboxRetentionDays", r.WebhookOutboxDays), ("Webhooks:AttemptLogDays", r.WebhookAttemptLogDays),
+            ("Webhooks:OutboxRetentionDays", r.WebhookOutboxDays), ("Webhooks:AttemptLogDays", r.WebhookAttemptLogDays), ("Inbound:RetentionDays", c.Storage.Inbound.RetentionDays),
         })
         {
             if (value < 0)

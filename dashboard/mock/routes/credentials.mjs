@@ -2,7 +2,7 @@
 import { randomBytes } from 'node:crypto';
 import { HttpError, daysAgo, hoursAgo, iso, newId, validate } from '../lib.mjs';
 
-const SCOPES = ['send', 'read', 'domains', 'webhooks', 'suppressions', 'keys'];
+const SCOPES = ['send', 'read', 'domains', 'webhooks', 'suppressions', 'keys', 'inbound'];
 
 function seed() {
   return {

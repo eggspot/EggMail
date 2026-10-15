@@ -59,6 +59,7 @@ public static class EggMailApiExtensions
         services.TryAddSingleton<DomainsApi>();
         services.TryAddSingleton<SuppressionsApi>();
         services.TryAddSingleton<WebhooksApi>();
+        services.TryAddSingleton<InboundApi>();
         services.TryAddSingleton<CredentialsApi>();
         services.TryAddSingleton<StatsApi>();
         services.TryAddSingleton<TenantSettingsApi>();
@@ -107,6 +108,8 @@ public static class EggMailApiExtensions
             MaxApiKeysPerTenant = api.MaxApiKeysPerTenant,
             MaxSmtpCredentialsPerTenant = api.MaxSmtpCredentialsPerTenant,
             MaxWebhooksPerTenant = api.MaxWebhooksPerTenant,
+            MaxInboundRoutesPerDomain = api.MaxInboundRoutesPerDomain,
+            Inbound = InboundDefaultsFrom(config),
             MaxStatsRows = api.MaxStatsRows,
             SpfInclude = domainRecords.SpfInclude,
             DomainRecords = domainRecords,   // the one source of the bounce domain and the SPF include for the suggested records (the two properties above are copies)
@@ -115,6 +118,16 @@ public static class EggMailApiExtensions
                 : api.MetricsAllowedNetworks.Select(Mta.Webhooks.IpNetwork.Parse).ToList(),
         };
     }
+
+    /// <summary>The server-wide inbound defaults (<c>Inbound:*</c>) the settings API reports next to the values a domain sets itself.</summary>
+    public static InboundApiDefaults InboundDefaultsFrom(MtaConfig config) => new()
+    {
+        MaxMessageBytes = config.Inbound.MaxMessageSize ?? config.Smtp.MaxMessageSize,
+        MaxMessagesPerMinute = config.Inbound.MaxMessagesPerMinute,
+        MaxMessagesPerMinutePerRemote = config.Inbound.MaxMessagesPerMinutePerRemote,
+        MaxStoredBytesPerDomain = config.Inbound.MaxStoredBytesPerDomain,
+        RetentionDays = config.Storage.Inbound.RetentionDays,
+    };
 
     /// <summary>The options of the DNS records suggested for a sending domain: the bounce domain, host name, sending IP and the <c>Domains:*</c> settings.</summary>
     public static DomainRecordOptions DomainRecordOptionsFrom(MtaConfig config)
@@ -154,6 +167,7 @@ public static class EggMailApiExtensions
         sp.GetRequiredService<DomainsApi>().Map(api);
         sp.GetRequiredService<SuppressionsApi>().Map(api);
         sp.GetRequiredService<WebhooksApi>().Map(api);
+        sp.GetRequiredService<InboundApi>().Map(api);
         sp.GetRequiredService<CredentialsApi>().Map(api);
         sp.GetRequiredService<StatsApi>().Map(api);
         sp.GetRequiredService<TenantSettingsApi>().Map(api);

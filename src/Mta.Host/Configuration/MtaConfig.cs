@@ -33,6 +33,7 @@ public sealed class MtaConfig
     public TlsSection Tls { get; init; } = new();
     public AcmeSection Acme { get; init; } = new();
     public ApiSection Api { get; init; } = new();
+    public InboundSection Inbound { get; init; } = new();
     public DomainsSection Domains { get; init; } = new();
 }
 
@@ -455,6 +456,7 @@ public sealed class ApiSection
     public int MaxApiKeysPerTenant { get; init; } = D.MaxApiKeysPerTenant;
     public int MaxSmtpCredentialsPerTenant { get; init; } = D.MaxSmtpCredentialsPerTenant;
     public int MaxWebhooksPerTenant { get; init; } = D.MaxWebhooksPerTenant;
+    public int MaxInboundRoutesPerDomain { get; init; } = D.MaxInboundRoutesPerDomain;
 
     /// <summary>Most rows one statistics query may return.</summary>
     public int MaxStatsRows { get; init; } = D.MaxStatsRows;
@@ -464,6 +466,27 @@ public sealed class ApiSection
 
     /// <summary>SPF <c>include:</c> host suggested to customers in the DNS records of a sending domain.</summary>
     public string? SpfInclude { get; init; } = D.SpfInclude;
+}
+
+/// <summary>
+/// Inbound mail (design section 11, decision 91). The retention of received mail is <c>Inbound:RetentionDays</c>, bound with the storage options.
+/// A domain's own settings override these defaults; <c>null</c> in a domain's settings means the value here.
+/// </summary>
+public sealed class InboundSection
+{
+    private static readonly InboundApiDefaults D = new();
+
+    /// <summary>Largest inbound message, in bytes. Null: <c>Smtp:MaxMessageSize</c>. A domain can lower it, never raise it.</summary>
+    public long? MaxMessageSize { get; init; }
+
+    /// <summary>Messages per minute accepted for one domain.</summary>
+    public int MaxMessagesPerMinute { get; init; } = D.MaxMessagesPerMinute;
+
+    /// <summary>Messages per minute accepted from one client address for one domain.</summary>
+    public int MaxMessagesPerMinutePerRemote { get; init; } = D.MaxMessagesPerMinutePerRemote;
+
+    /// <summary>Message bytes kept for one domain; at the limit new mail is refused with <c>452 4.2.2</c>. <c>0</c> is unlimited.</summary>
+    public long MaxStoredBytesPerDomain { get; init; } = D.MaxStoredBytesPerDomain;
 }
 
 /// <summary>

@@ -15,20 +15,18 @@ namespace Mta.Storage.Sqlite;
 /// </summary>
 internal sealed class SqliteInboundAccess(SqliteRuntime rt, IStorageModelHooks hooks) : IInboundDbAccess<QueueDbContext>
 {
-    private PooledDbContextFactory<QueueReadContext>? _readPool;
-    private DbContextOptions<QueueDbContext>? _writeOptions; // bound to the writer's connection, built on the writer thread
-
-    public SwitchGate Fence => rt.Fence;
-
-    internal IStorageModelHooks Hooks => hooks;
-
-    private PooledDbContextFactory<QueueReadContext> ReadPool => _readPool ??= new PooledDbContextFactory<QueueReadContext>(
+    private readonly Lazy<PooledDbContextFactory<QueueReadContext>> _readPool = new(() => new PooledDbContextFactory<QueueReadContext>(
         new DbContextOptionsBuilder<QueueReadContext>()
             .UseSqlite(rt.Queue.ReaderConnectionString)
             .UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking)
             .UseModelHooks(hooks)
             .Options,
-        poolSize: 32);
+        poolSize: 32));
+    private DbContextOptions<QueueDbContext>? _writeOptions; // bound to the writer's connection, built on the writer thread
+
+    public SwitchGate Fence => rt.Fence;
+
+    internal IStorageModelHooks Hooks => hooks;
 
     public ValueTask<T> ReadAsync<T>(Func<QueueDbContext, T> query)
     {
@@ -37,7 +35,7 @@ internal sealed class SqliteInboundAccess(SqliteRuntime rt, IStorageModelHooks h
             return WriteAsync(query, CancellationToken.None);
         }
 
-        using QueueReadContext ctx = ReadPool.CreateDbContext();
+        using QueueReadContext ctx = _readPool.Value.CreateDbContext();
         return ValueTask.FromResult(query(ctx));
     }
 

@@ -59,6 +59,12 @@ public sealed class ApiOptions
     public int MaxSmtpCredentialsPerTenant { get; set; } = 100;
     public int MaxWebhooksPerTenant { get; set; } = 50;
 
+    /// <summary>Routes per inbound domain (<c>Api:MaxInboundRoutesPerDomain</c>); never more than <see cref="Mta.Storage.Logic.InboundRules.MaxRoutesPerDomain"/>.</summary>
+    public int MaxInboundRoutesPerDomain { get; set; } = 100;
+
+    /// <summary>The server defaults the inbound settings API reports as effective values.</summary>
+    public InboundApiDefaults Inbound { get; set; } = new();
+
     /// <summary>Most rows one statistics query may return; larger ranges are refused with <c>validation_failed</c>.</summary>
     public int MaxStatsRows { get; set; } = 50_000;
 
