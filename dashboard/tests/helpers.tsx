@@ -105,6 +105,7 @@ export function makeApp(over: Partial<AppContextValue> & { role?: Role; mode?: H
     logout: async () => {},
     retry: () => {},
     refreshCapabilities: async () => {},
+    refreshMe: async () => {},
     refreshTenants: async () => {},
     ...over,
   };

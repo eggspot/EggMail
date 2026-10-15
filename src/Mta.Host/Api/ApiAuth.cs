@@ -60,6 +60,9 @@ public sealed class ApiCaller
     public Guid? UserId { get; init; }
     public byte[]? SessionHash { get; init; }
 
+    /// <summary>The user signed in with a temporary password (the generated one of the first administrator) and has to change it before anything else.</summary>
+    public bool MustChangePassword { get; init; }
+
     public bool IsAdmin => Role == DashboardRole.Admin;
 
     /// <summary>The effective tenant id; throws if the call has none (use after a tenant check).</summary>
@@ -127,10 +130,25 @@ public sealed class ApiAuthenticator
 
         if (context.Request.Cookies.TryGetValue(_options.SessionCookieName, out string? cookie) && !string.IsNullOrEmpty(cookie))
         {
-            return await AuthenticateSessionAsync(context, cookie).ConfigureAwait(false);
+            ApiCaller caller = await AuthenticateSessionAsync(context, cookie).ConfigureAwait(false);
+            if (caller.MustChangePassword && !IsAllowedWithTemporaryPassword(context.Request))
+            {
+                throw ApiException.PasswordChangeRequired();
+            }
+
+            return caller;
         }
 
         throw ApiException.Unauthorized();
+    }
+
+    /// <summary>With a temporary password a session may read who it is, change the password and sign out; nothing else.</summary>
+    private static bool IsAllowedWithTemporaryPassword(HttpRequest request)
+    {
+        string path = (request.Path.Value ?? "").TrimEnd('/');
+        return (HttpMethods.IsGet(request.Method) && path.Equals("/api/v1/me", StringComparison.OrdinalIgnoreCase))
+            || (HttpMethods.IsPost(request.Method) && path.Equals("/api/v1/me/password", StringComparison.OrdinalIgnoreCase))
+            || (HttpMethods.IsDelete(request.Method) && path.Equals("/api/v1/session", StringComparison.OrdinalIgnoreCase));
     }
 
     private async ValueTask<ApiCaller> AuthenticateKeyAsync(string authorization, CancellationToken ct)
@@ -213,6 +231,7 @@ public sealed class ApiAuthenticator
             CsrfToken = session.CsrfToken,
             UserId = user.Id,
             SessionHash = hash,
+            MustChangePassword = PasswordHasher.MustChange(user.PasswordHash),
         };
     }
 
@@ -421,6 +440,11 @@ public sealed class SessionService
             // password reset must not be undone by an upgrade of the hash (and an upgrade of a hash that was reset in the meantime is skipped).
             string verifiedHash = user.PasswordHash;
             string upgraded = PasswordHasher.Hash(password);
+            if (PasswordHasher.MustChange(verifiedHash))
+            {
+                upgraded = PasswordHasher.MarkMustChange(upgraded);   // a faster hash of a temporary password is still a temporary password
+            }
+
             await config.UpdateDashboardUserGuardedAsync(user.Id, u => u.PasswordHash == verifiedHash ? u with { PasswordHash = upgraded } : u, endSessions: false, keepSessionHash: null, ct).ConfigureAwait(false);
         }
 
