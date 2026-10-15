@@ -21,7 +21,7 @@ using Mta.Storage.Sqlite;
 //   options: --backend sqlite|postgres (postgres needs EGGMAIL_BENCH_POSTGRES=<connection string of an empty database>)
 //            --sync off|normal|full   --history full|statsonly   --messages N   --connections N   --size BYTES   --rcpt N
 //            --micro true [--only TEXT] [--alloc-profile true] [--json FILE (byte counts, read by the CI allocation gate)]: per-step allocation of the ingest path;  --micro-delivery true: per-step allocation of the delivery path;  --sink-only true: the SMTP server alone
-//            --tls true|false (default true: STARTTLS; false measures the server without TLS)   --deliver true|false (default true: also drain the queue to the sink)   --split true (start delivery after ingest so each phase is measured alone)   --label TEXT   --json out.json
+//            --idle N (Delivery:MaxIdleConnectionsPerTarget, default 2: the production default)   --tls true|false (default true: STARTTLS; false measures the server without TLS)   --deliver true|false (default true: also drain the queue to the sink)   --split true (start delivery after ingest so each phase is measured alone)   --label TEXT   --json out.json
 var opt = Args.Parse(args);
 if (opt.Get("micro-delivery", "false") == "true")
 {
@@ -105,6 +105,7 @@ var config = new MtaConfig
     Delivery = new DeliverySection
     {
         RemotePort = sinkServer.LocalEndPoints["sink"].Port, AllowPrivateMxAddresses = true, Workers = 64, BounceDomain = "bounces.bench.local",
+        MaxIdleConnectionsPerTarget = int.Parse(opt.Get("idle", "2")),
         Throttle = new ThrottleSection { MaxConnections = 64, InitialConnections = 64, MaxMessagesPerMinute = 100_000_000, InitialMessagesPerMinute = 100_000_000, MaxMessagesPerConnection = 10_000 },
     },
     Backup = new BackupSection { Enabled = false },

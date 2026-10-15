@@ -367,6 +367,50 @@ public abstract class HistoryConformance : StorageTestBase
     }
 
     [Fact]
+    public async Task Bodies_given_as_utf8_bytes_are_stored_and_read_back_like_strings()
+    {
+        // The intake path hands over a body that is already UTF-8 in the message as those bytes; every backend must store exactly what it would for the string.
+        await OpenAsync(Opts(content: new ContentOptions { RetentionDays = 7 }));
+        string text = "Café über € 😀 line two\r\n" + new string('x', 3000);
+        string html = "<p>Héllo</p>";
+        byte[] textBytes = System.Text.Encoding.UTF8.GetBytes(text);
+        byte[] htmlBytes = System.Text.Encoding.UTF8.GetBytes(html);
+        var viaBytes = await AcceptAsync(Msg(content: new MessageContent("Subj é", null, null, textBytes, htmlBytes, [], false)));
+        var viaStrings = await AcceptAsync(Msg(content: new MessageContent("Subj é", text, html, [], false)));
+
+        foreach (var m in new[] { viaBytes, viaStrings })
+        {
+            MessageDetail d = (await Storage.History.GetAsync(TenantA, m.MessageId, CancellationToken.None))!;
+            Assert.Equal("Subj é", d.Content!.Subject);
+            Assert.Equal(text, d.Content.Text);
+            Assert.Equal(html, d.Content.Html);
+            Assert.False(d.Content.Truncated);
+        }
+    }
+
+    [Fact]
+    public async Task Bodies_given_as_utf8_bytes_are_cut_at_the_configured_size_like_strings()
+    {
+        await OpenAsync(Opts(content: new ContentOptions { MaxStoredBodyBytes = 100, RetentionDays = 7 }));
+        string big = new string('é', 500);
+        var viaBytes = await AcceptAsync(Msg(content: new MessageContent("s", null, null, System.Text.Encoding.UTF8.GetBytes(big), System.Text.Encoding.UTF8.GetBytes("<p>short</p>"), [], false)));
+        MessageDetail d = (await Storage.History.GetAsync(TenantA, viaBytes.MessageId, CancellationToken.None))!;
+        Assert.True(d.Content!.Truncated);
+        Assert.Equal(new string('é', 50), d.Content.Text);
+        Assert.Equal("<p>short</p>", d.Content.Html);
+    }
+
+    [Fact]
+    public async Task An_empty_body_given_as_bytes_is_the_empty_string_and_not_null()
+    {
+        await OpenAsync(Opts(content: new ContentOptions { RetentionDays = 7 }));
+        var m = await AcceptAsync(Msg(content: new MessageContent("s", null, null, Array.Empty<byte>(), null, [], false)));
+        MessageDetail d = (await Storage.History.GetAsync(TenantA, m.MessageId, CancellationToken.None))!;
+        Assert.Equal(string.Empty, d.Content!.Text);
+        Assert.Null(d.Content.Html);
+    }
+
+    [Fact]
     public async Task Event_tls_details_survive_a_round_trip()
     {
         var m = await AcceptAsync();

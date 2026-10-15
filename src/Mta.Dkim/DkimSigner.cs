@@ -157,6 +157,30 @@ public sealed class DkimSigner : IDisposable
         }
     }
 
+    /// <summary>
+    /// Signs the message and returns an array rented from <see cref="ArrayPool{T}.Shared"/> that holds the <c>DKIM-Signature</c> field followed by the message
+    /// itself (<paramref name="length"/> bytes of it): what goes on the wire for a signed message, built without the separate array of the field that
+    /// <see cref="SignToBytes"/> returns. The caller returns the array to the pool.
+    /// </summary>
+    public byte[] SignPrepended(ReadOnlySpan<byte> rawMessage, out int length)
+    {
+        var buffer = new PooledBuffer(1024);
+        try
+        {
+            SignCore(rawMessage, ref buffer);
+            var signature = buffer.WrittenSpan;
+            byte[] rented = ArrayPool<byte>.Shared.Rent(signature.Length + rawMessage.Length);
+            signature.CopyTo(rented);
+            rawMessage.CopyTo(rented.AsSpan(signature.Length));
+            length = signature.Length + rawMessage.Length;
+            return rented;
+        }
+        finally
+        {
+            buffer.Dispose();
+        }
+    }
+
     /// <summary>Signs the message and writes the header into <paramref name="output"/> without any intermediate string or array. Returns the number of bytes written.</summary>
     public int Sign(ReadOnlySpan<byte> rawMessage, IBufferWriter<byte> output)
     {

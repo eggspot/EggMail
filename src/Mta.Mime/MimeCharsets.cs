@@ -15,7 +15,9 @@ public static class MimeCharsets
     private const int MaxCharsetNameLength = 64;
     private const int MaxCacheEntries = 512;
 
-    private static readonly ConcurrentDictionary<string, Encoding?> Cache = new(StringComparer.Ordinal);
+    // Keys are the lower-case names; the comparer ignores case so that a name as written in a message is found without building its lower-case form first.
+    private static readonly ConcurrentDictionary<string, Encoding?> Cache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ConcurrentDictionary<string, Encoding?>.AlternateLookup<ReadOnlySpan<char>> CacheLookup = Cache.GetAlternateLookup<ReadOnlySpan<char>>();
     private static readonly Encoding? Windows1252;
 
     static MimeCharsets()
@@ -71,17 +73,18 @@ public static class MimeCharsets
             }
         }
 
-        string key = string.Create(charset.Length, charset, static (dst, src) => src.ToLowerInvariant(dst));
-        if (IsRefused(key))
+        if (IsRefused(charset))
         {
             return false;
         }
 
-        if (Cache.TryGetValue(key, out var cached))
+        if (CacheLookup.TryGetValue(charset, out var cached))
         {
             encoding = cached;
             return cached is not null;
         }
+
+        string key = string.Create(charset.Length, charset, static (dst, src) => src.ToLowerInvariant(dst));
 
         Encoding? resolved;
         try
@@ -115,8 +118,11 @@ public static class MimeCharsets
     public static Encoding? GetEncodingOrNull(string? charset) =>
         charset is not null && TryGetEncoding(charset, out var e) ? e : null;
 
-    private static bool IsRefused(string lower) =>
-        lower is "utf-7" or "utf7" or "unicode-1-1-utf-7" or "unicode-2-0-utf-7" or "x-unicode-1-1-utf-7" or "x-unicode-2-0-utf-7" or "csunicode11utf7" or "cp65000";
+    private static bool IsRefused(ReadOnlySpan<char> name) =>
+        name.Equals("utf-7", StringComparison.OrdinalIgnoreCase) || name.Equals("utf7", StringComparison.OrdinalIgnoreCase)
+        || name.Equals("unicode-1-1-utf-7", StringComparison.OrdinalIgnoreCase) || name.Equals("unicode-2-0-utf-7", StringComparison.OrdinalIgnoreCase)
+        || name.Equals("x-unicode-1-1-utf-7", StringComparison.OrdinalIgnoreCase) || name.Equals("x-unicode-2-0-utf-7", StringComparison.OrdinalIgnoreCase)
+        || name.Equals("csunicode11utf7", StringComparison.OrdinalIgnoreCase) || name.Equals("cp65000", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Decodes bytes of the given charset to a string. Malformed sequences become U+FFFD. When <paramref name="charset"/>

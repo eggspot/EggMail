@@ -27,6 +27,9 @@ public sealed class IngestHandler : ISmtpServerHandler
         public Tenant Tenant { get; init; } = null!;
         public string RemoteAddress { get; init; } = "";   // the same for every message of the session: formatted once
         public int Recipients;
+
+        /// <summary>The request object of the session, filled again for each message (the session handles one message at a time and waits for the submission to finish).</summary>
+        public SubmissionRequest Request { get; init; } = null!;
     }
 
     private static readonly SmtpReply AuthUnavailable = SmtpReply.Constant(454, "4.7.0", "Too many failed attempts, try again later");
@@ -94,7 +97,12 @@ public sealed class IngestHandler : ISmtpServerHandler
         }
 
         await _throttle.RecordSuccessAsync(check, ip, userKey).ConfigureAwait(false);
-        session.HandlerState = new State { Tenant = tenant, RemoteAddress = ip };
+        session.HandlerState = new State
+        {
+            Tenant = tenant,
+            RemoteAddress = ip,
+            Request = new SubmissionRequest { Tenant = tenant, Source = MessageSource.Smtp, EnvelopeFrom = default, Recipients = [], Message = default, RemoteAddress = ip },
+        };
         return SmtpAuthResult.Succeeded(credential!.UserName);
     }
 
@@ -136,14 +144,78 @@ public sealed class IngestHandler : ISmtpServerHandler
         return ValueTask.FromResult(SmtpReplies.RecipientOk);
     }
 
+    /// <summary>
+    /// The submission path is written out in this one method (no separate method for it): every asynchronous method that waits for storage is a
+    /// state machine on the heap for as long as the wait lasts, and the method is the one frame between the SMTP session and the submission service.
+    /// </summary>
     [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<SmtpReply> OnMessageAsync(SmtpMessage message, CancellationToken ct)
     {
         try
         {
-            return message.Session.Role == ListenerRole.Bounce
-                ? await HandleBounceAsync(message, ct).ConfigureAwait(false)
-                : await HandleSubmissionAsync(message, ct).ConfigureAwait(false);
+            if (message.Session.Role == ListenerRole.Bounce)
+            {
+                return await HandleBounceAsync(message, ct).ConfigureAwait(false);
+            }
+
+            if (message.Session.HandlerState is not State state)
+            {
+                return SmtpReply.Create(530, "5.7.0", "Authentication required");
+            }
+
+            var request = state.Request;
+            request.EnvelopeFrom = message.Sender;
+            request.Recipients = message.Recipients;
+            // The message memory is valid for the duration of this call, which is all the submission needs (it makes its own copy of the stored message).
+            request.Message = message.Body.IsSingleSegment ? message.Body.First : message.ToArray();
+            request.ReceivedHeader = message.ReceivedHeader;
+            request.Authenticated = message.Session.AuthenticatedUser;
+            SubmissionResult result;
+            try
+            {
+                // The steps of SubmitAsync, written out here: the checks and the repair run without waiting, so the only suspended frames while storage works
+                // are this one and the storage's own. (A message that needs a setting loaded first, once in a few seconds, takes the ordinary path.)
+                var loaded = new LoadedSettings();
+                PreparedSubmission prepared = _submission.Prepare(request, ref loaded, out SubmissionLoad load, out SubmissionResult refused);
+                if (load != SubmissionLoad.None)
+                {
+                    result = await _submission.SubmitAsync(request, ct).ConfigureAwait(false);
+                }
+                else if (prepared.IsFinal)
+                {
+                    result = refused;
+                }
+                else
+                {
+                    IntakeResult intake;
+                    try
+                    {
+                        intake = await _submission.StoreAsync(prepared, ct).ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        _submission.Abandon(ref prepared);
+                        throw;
+                    }
+
+                    result = _submission.Complete(ref prepared, intake);
+                }
+            }
+            finally
+            {
+                // Nothing of the message may stay reachable through the reused request once the call is over (the memory goes back to its pool).
+                request.EnvelopeFrom = default;
+                request.Recipients = [];
+                request.Message = default;
+                request.ReceivedHeader = default;
+            }
+
+            if (result.Status is SubmissionStatus.Accepted or SubmissionStatus.Duplicate)
+            {
+                _onAccepted?.Invoke();
+            }
+
+            return ReplyFor(result);
         }
         catch (OperationCanceledException)
         {
@@ -161,37 +233,13 @@ public sealed class IngestHandler : ISmtpServerHandler
         }
     }
 
-    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
-    private async ValueTask<SmtpReply> HandleSubmissionAsync(SmtpMessage message, CancellationToken ct)
+    private static SmtpReply ReplyFor(SubmissionResult result)
     {
-        if (message.Session.HandlerState is not State state)
-        {
-            return SmtpReply.Create(530, "5.7.0", "Authentication required");
-        }
-
-        var result = await _submission.SubmitAsync(new SubmissionRequest
-        {
-            Tenant = state.Tenant,
-            Source = MessageSource.Smtp,
-            EnvelopeFrom = message.Sender,
-            Recipients = message.Recipients,
-            // The message memory is valid for the duration of this call, which is all the submission needs (it makes its own copy of the stored message).
-            Message = message.Body.IsSingleSegment ? message.Body.First : message.ToArray(),
-            ReceivedHeader = message.ReceivedHeader,
-            RemoteAddress = state.RemoteAddress,
-            Authenticated = message.Session.AuthenticatedUser,
-        }, ct).ConfigureAwait(false);
-
         switch (result.Status)
         {
             case SubmissionStatus.Accepted:
             case SubmissionStatus.Duplicate:
-                _onAccepted?.Invoke();
-                return SmtpReply.Create(250, "2.0.0", string.Create(10 + 32, result.MessageId, static (span, id) =>
-                {
-                    "Queued as ".CopyTo(span);
-                    id.TryFormat(span[10..], out _, "N");
-                }));
+                return SmtpReply.CreateWithId(250, "2.0.0", "Queued as ", result.MessageId);
             case SubmissionStatus.Rejected:
                 return SmtpReply.Create(result.Rejection!.SmtpCode, result.Rejection.EnhancedCode, result.Rejection.Message);
             case SubmissionStatus.TooLarge:

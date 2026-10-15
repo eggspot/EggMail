@@ -47,6 +47,34 @@ public readonly record struct EmailAddress
     public static bool TryParse(ReadOnlySpan<char> mailbox, bool allowUtf8, out EmailAddress address)
     {
         address = default;
+        if (!TryParseParts(mailbox, allowUtf8, out ReadOnlySpan<char> local, out string? domain, out bool international))
+        {
+            return false;
+        }
+
+        address = new EmailAddress(local.ToString(), domain, international);
+        return true;
+    }
+
+    /// <summary>
+    /// Parses <paramref name="mailbox"/> exactly like <see cref="TryParse(ReadOnlySpan{char}, bool, out EmailAddress)"/> but returns only the normalized domain, so
+    /// a caller that does not need the local part (the sender check on the <c>From</c> header) does not allocate a string for it.
+    /// </summary>
+    public static bool TryParseDomain(ReadOnlySpan<char> mailbox, bool allowUtf8, [NotNullWhen(true)] out string? domain) =>
+        TryParseParts(mailbox, allowUtf8, out _, out domain, out _);
+
+    /// <summary>
+    /// Parses with a small memo of recent results: the same text, for example the sender of every message of a connection, gives back
+    /// the address parsed before instead of new strings. The result is identical to <see cref="TryParse(ReadOnlySpan{char}, bool, out EmailAddress)"/>.
+    /// </summary>
+    public static bool TryParse(ReadOnlySpan<char> mailbox, bool allowUtf8, EmailAddressCache? cache, out EmailAddress address) =>
+        cache is null ? TryParse(mailbox, allowUtf8, out address) : cache.TryParse(mailbox, allowUtf8, out address);
+
+    private static bool TryParseParts(ReadOnlySpan<char> mailbox, bool allowUtf8, out ReadOnlySpan<char> local, [NotNullWhen(true)] out string? domain, out bool international)
+    {
+        local = default;
+        domain = null;
+        international = false;
         if (mailbox.Length == 0 || mailbox.Length > MaxPathLength)
         {
             return false;
@@ -58,19 +86,20 @@ public readonly record struct EmailAddress
             return false;
         }
 
-        ReadOnlySpan<char> local = mailbox[..at];
-        ReadOnlySpan<char> domain = mailbox[(at + 1)..];
-        if (!IsValidLocalPart(local, allowUtf8, out bool intlLocal))
+        ReadOnlySpan<char> localPart = mailbox[..at];
+        ReadOnlySpan<char> domainPart = mailbox[(at + 1)..];
+        if (!IsValidLocalPart(localPart, allowUtf8, out bool intlLocal))
         {
             return false;
         }
 
-        if (!TryNormalizeDomain(domain, allowUtf8, out string? normalized, out bool intlDomain))
+        if (!TryNormalizeDomain(domainPart, allowUtf8, out domain, out bool intlDomain))
         {
             return false;
         }
 
-        address = new EmailAddress(local.ToString(), normalized, intlLocal || intlDomain);
+        local = localPart;
+        international = intlLocal || intlDomain;
         return true;
     }
 
@@ -201,23 +230,26 @@ public readonly record struct EmailAddress
             if (c > 0x7F) { nonAscii = true; break; }
         }
 
-        string ascii;
-        if (nonAscii)
+        if (!nonAscii)
         {
-            if (!allowUtf8) { return false; }
-            international = true;
-            try
-            {
-                ascii = new IdnMapping { UseStd3AsciiRules = false, AllowUnassigned = false }.GetAscii(domain.ToString());
-            }
-            catch (ArgumentException)
-            {
-                return false;
-            }
+            // The usual case: an ASCII host name. Validated and looked up as characters; a name seen before is not allocated again.
+            if (!IsValidHostName(domain)) { return false; }
+            ReadOnlySpan<char> trimmed = domain.TrimEnd('.');
+            if (trimmed.Length == 0) { return false; }
+            normalized = DomainNames.Intern(trimmed);
+            return true;
         }
-        else
+
+        if (!allowUtf8) { return false; }
+        international = true;
+        string ascii;
+        try
         {
-            ascii = domain.ToString();
+            ascii = new IdnMapping { UseStd3AsciiRules = false, AllowUnassigned = false }.GetAscii(domain.ToString());
+        }
+        catch (ArgumentException)
+        {
+            return false;
         }
 
         if (!IsValidHostName(ascii)) { return false; }

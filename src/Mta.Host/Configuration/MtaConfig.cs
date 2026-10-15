@@ -104,6 +104,13 @@ public sealed class DeliverySection
     public int MaxRecipientsPerTransaction { get; init; } = 100;
     public bool PreferChunking { get; init; }
 
+    /// <summary>
+    /// Idle outbound connections kept per destination (MX host and security setting) for the next delivery. A delivery that finds none connects (and, with TLS,
+    /// handshakes) again, so a destination that is served by more concurrent deliveries than this keeps opening and closing connections. 2 is the long-standing
+    /// value; raise it towards <c>Delivery:Throttle:MaxConnections</c> to reuse more connections at the price of more idle sockets to the same server.
+    /// </summary>
+    public int MaxIdleConnectionsPerTarget { get; init; } = 2;
+
     /// <summary>Per-destination connection and rate limits (adaptive: they start low and grow while the destination keeps accepting).</summary>
     public ThrottleSection Throttle { get; init; } = new();
 

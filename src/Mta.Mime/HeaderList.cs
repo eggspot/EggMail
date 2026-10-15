@@ -68,7 +68,10 @@ public sealed class HeaderList : IReadOnlyList<MimeHeader>
     public MimeHeader this[int index] => (uint)index < (uint)_count ? _headers[index] : throw new ArgumentOutOfRangeException(nameof(index));
 
     /// <summary>Parses the header block at the start of <paramref name="data"/>.</summary>
-    public static HeaderList Parse(ReadOnlyMemory<byte> data, MimeLimits? limits = null) => ParseCore(data, limits ?? MimeLimits.Default);
+    public static HeaderList Parse(ReadOnlyMemory<byte> data, MimeLimits? limits = null) => ParseCore(data, limits ?? MimeLimits.Default, null);
+
+    /// <summary>Like <see cref="Parse(ReadOnlyMemory{byte}, MimeLimits?)"/>, with the record array taken from <paramref name="buffers"/> (see <see cref="MimeParseBuffers"/> for the lifetime).</summary>
+    internal static HeaderList Parse(ReadOnlyMemory<byte> data, MimeLimits limits, MimeParseBuffers? buffers) => ParseCore(data, limits, buffers);
 
     /// <summary>
     /// Finds where the headers end without recording any field: returns the offset of the first body byte
@@ -146,12 +149,13 @@ public sealed class HeaderList : IReadOnlyList<MimeHeader>
         return list.ToArray();
     }
 
-    private static HeaderList ParseCore(ReadOnlyMemory<byte> data, MimeLimits limits)
+    private static HeaderList ParseCore(ReadOnlyMemory<byte> data, MimeLimits limits, MimeParseBuffers? buffers)
     {
         var span = data.Span;
         int length = span.Length;
         var anomalies = MimeAnomaly.None;
-        var headers = new MimeHeader[length == 0 ? 0 : InitialCapacity(span, limits)];
+        int capacity = length == 0 ? 0 : InitialCapacity(span, limits);
+        var headers = buffers is null ? new MimeHeader[capacity] : buffers.Headers(capacity);
         int count = 0;
         int pos = 0;
         int bodyOffset = length;
@@ -199,6 +203,7 @@ public sealed class HeaderList : IReadOnlyList<MimeHeader>
             var id = nameLength > 0 ? HeaderNames.Identify(span.Slice(fieldStart, nameLength)) : HeaderId.Unknown;
             if (count == headers.Length)
             {
+                // A block with more field lines than the initial capacity (a hostile one) grows into an array of its own, also when the first one was lent.
                 Array.Resize(ref headers, Math.Min(Math.Max(16, count * 2), limits.MaxHeaderCount));
             }
 

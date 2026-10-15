@@ -49,28 +49,44 @@ public sealed class SmtpAuthResult
     public static SmtpAuthResult Rejected(SmtpReply reply) => new(false, null, reply);
 }
 
+/// <summary>
+/// The sender of the transaction and its MAIL FROM parameters. The server keeps one instance per session and reuses it for the next
+/// transaction, so a handler that wants the values after its call returns must copy them.
+/// </summary>
 public sealed class MailFromInfo
 {
-    public required EmailAddress Sender { get; init; }
-    public required MailParameters Parameters { get; init; }
+    public EmailAddress Sender { get; internal set; }
+    public MailParameters Parameters { get; internal set; }
 }
 
-/// <summary>One accepted message ready to be handed to storage. <see cref="Body"/> is valid only during the handler call.</summary>
+/// <summary>
+/// One accepted message ready to be handed to storage. The server keeps one instance per session and reuses it for the next message, and
+/// <see cref="Body"/>, <see cref="ReceivedHeader"/> and <see cref="Recipients"/> are valid only during the handler call: a handler that keeps any
+/// of them longer must copy it (<see cref="ToArray"/>, <c>ToArray()</c> on the header and the list).
+/// </summary>
 public sealed class SmtpMessage
 {
-    public required SmtpSessionContext Session { get; init; }
-    public required EmailAddress Sender { get; init; }
-    public required MailParameters Parameters { get; init; }
-    public required IReadOnlyList<EmailAddress> Recipients { get; init; }
+    public SmtpSessionContext Session { get; internal set; } = null!;
+    public EmailAddress Sender { get; internal set; }
+    public MailParameters Parameters { get; internal set; }
+    public IReadOnlyList<EmailAddress> Recipients { get; internal set; } = [];
 
     /// <summary>The unstuffed message exactly as received (CRLF line endings), without the Received header.</summary>
-    public required ReadOnlySequence<byte> Body { get; init; }
+    public ReadOnlySequence<byte> Body { get; internal set; }
 
     /// <summary>Server-generated Received header (CRLF terminated) the handler should prepend to the stored copy.</summary>
-    public required ReadOnlyMemory<byte> ReceivedHeader { get; init; }
+    public ReadOnlyMemory<byte> ReceivedHeader { get; internal set; }
 
     public long Size => Body.Length;
-    public required DateTimeOffset ReceivedAt { get; init; }
+    public DateTimeOffset ReceivedAt { get; internal set; }
+
+    /// <summary>Drops the references to the per-message memory once the handler call has returned (the arrays behind <see cref="Body"/> go back to their pool).</summary>
+    internal void Clear()
+    {
+        Body = default;
+        ReceivedHeader = default;
+        Recipients = [];
+    }
 
     public byte[] ToArray() => Body.ToArray();
 }

@@ -215,15 +215,6 @@ internal sealed class RecordingHandler(HttpMessageHandler inner) : DelegatingHan
             }
         }
 
-        if (payload.Contains("\"replaces\"", StringComparison.Ordinal))
-        {
-            // Pebble 2.10.1 (wfe/wfe.go, FinalizeOrder) records which order issued a certificate in a goroutine AFTER it has marked the order valid, so for
-            // a moment the certificate can be downloaded and its renewal information fetched while a `replaces` order naming it is answered "could not find
-            // an order for the given certificate" (serverInternal). On a loaded CI runner that moment was long enough to fail ARI tests in two runs of ten.
-            // The product treats a server error as a server error (a test pins that), so the emulator gets a second to finish.
-            await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
-        }
-
         var response = await base.SendAsync(request, cancellationToken);
         // A request the CA bounced with badNonce is repeated by the client with a fresh nonce; it is one request, not two.
         if (response.StatusCode == HttpStatusCode.BadRequest)

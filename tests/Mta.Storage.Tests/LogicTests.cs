@@ -164,6 +164,60 @@ public class LogicTests
     [InlineData(null, null)]
     public void Message_id_keys_ignore_brackets_case_comments_and_folding(string? header, string? key) => Assert.Equal(key, MessageIdKey.Normalize(header));
 
+    [Fact]
+    public void Message_id_key_returns_the_header_itself_when_it_already_is_the_key()
+    {
+        string header = "abc@example.com";
+        Assert.Same(header, MessageIdKey.Normalize(header));
+        Assert.NotSame(header, MessageIdKey.Normalize(" abc@example.com"));
+        Assert.Equal("abc@example.com", MessageIdKey.Normalize(" abc@example.com"));
+        Assert.Null(MessageIdKey.Normalize(new string('a', MessageIdKey.MaxLength + 1)));
+        Assert.Equal(MessageIdKey.MaxLength, MessageIdKey.Normalize(new string('A', MessageIdKey.MaxLength))!.Length);
+        Assert.Equal("\u00e9\ud801\udc28x", MessageIdKey.Normalize("<\u00c9 \ud801\udc00\tX>"));   // non-ASCII and a surrogate pair take the string case mapping
+    }
+
+    /// <summary>The previous implementation (LINQ and substrings), kept as the reference for the allocation-free one.</summary>
+    private static string? NormalizeReference(string? headerValue)
+    {
+        if (headerValue is null)
+        {
+            return null;
+        }
+
+        string v = headerValue.Trim();
+        int open = v.IndexOf('<', StringComparison.Ordinal);
+        int close = open < 0 ? -1 : v.IndexOf('>', open + 1);
+        if (open >= 0 && close > open)
+        {
+            v = v[(open + 1)..close];
+        }
+
+        v = string.Concat(v.Where(c => !char.IsWhiteSpace(c)));
+        return v.Length is 0 or > MessageIdKey.MaxLength ? null : v.ToLowerInvariant();
+    }
+
+    [Fact]
+    public void Message_id_key_matches_the_reference_on_generated_headers()
+    {
+        var random = new Random(20261015);
+        const string alphabet = "abcXYZ019@.<>() \t\r\n-_\u00e9\u00c9\u0130\u3000\ud801\udc00\ud801\udc28";
+        for (int i = 0; i < 20_000; i++)
+        {
+            int length = random.Next(0, 24);
+            var chars = new char[length];
+            for (int j = 0; j < length; j++)
+            {
+                chars[j] = alphabet[random.Next(alphabet.Length)];
+            }
+
+            string header = new(chars);
+            Assert.Equal(NormalizeReference(header), MessageIdKey.Normalize(header));
+        }
+
+        string wide = "<" + new string('a', 990) + " " + new string('B', 20) + ">";   // 1010 characters in the id, 1011 with the blank: over the limit once the blank is gone
+        Assert.Equal(NormalizeReference(wide), MessageIdKey.Normalize(wide));
+    }
+
     [Theory]
     [InlineData("ReturnPathHost", "return_path_host")]
     [InlineData("Id", "id")]

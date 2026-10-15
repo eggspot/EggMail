@@ -30,6 +30,9 @@ internal sealed class SmtpSession
 
     // Open transaction.
     private MailFromInfo? _mail;
+    private readonly MailFromInfo _mailInfo = new();   // reused by every transaction of the session
+    private readonly SmtpMessage _message = new();   // reused by every message of the session
+    private readonly MessageBuffer _dataBuffer = CreateDisposedBuffer();   // the message buffer of DATA, reused by every message of the session
     private readonly List<EmailAddress> _recipients = [];
     private readonly ReceivedHeaderBuilder _received = new();
 
@@ -43,7 +46,7 @@ internal sealed class SmtpSession
         _stopping = stopping;
         _transport = new SocketTransport(socket, startPlain: listener.Mode != ListenerMode.Implicit);
         _readCts = CancellationTokenSource.CreateLinkedTokenSource(stopping);
-        _parseOptions = new SmtpParseOptions { MaxLineLength = _options.MaxLineLength, AllowSmtpUtf8 = _options.SmtpUtf8 };
+        _parseOptions = new SmtpParseOptions { MaxLineLength = _options.MaxLineLength, AllowSmtpUtf8 = _options.SmtpUtf8, AddressCache = new EmailAddressCache() };
         var remote = (IPEndPoint)socket.RemoteEndPoint!;
         var local = (IPEndPoint)socket.LocalEndPoint!;
         _ctx = new SmtpSessionContext
@@ -61,6 +64,13 @@ internal sealed class SmtpSession
             RequireAuthForMail = listener.AuthRequired,
             MaxRecipients = _options.MaxRecipients,
         };
+    }
+
+    private static MessageBuffer CreateDisposedBuffer()
+    {
+        var buffer = new MessageBuffer();
+        buffer.Dispose();
+        return buffer;
     }
 
     public async Task RunAsync()
@@ -186,7 +196,25 @@ internal sealed class SmtpSession
             ReadResult read;
             try
             {
-                read = await ReadAsync(first ? _options.GreetingTimeout : _options.CommandTimeout).ConfigureAwait(false);
+                // Reads straight from the pipe (no asynchronous helper in between, see the DATA branch below).
+                if (!_transport.Input.TryRead(out read))
+                {
+                    // About to block: push out pipelined replies first.
+                    await FlushAsync().ConfigureAwait(false);
+                    _readCts.CancelAfter(first ? _options.GreetingTimeout : _options.CommandTimeout);
+                    try
+                    {
+                        read = await _transport.Input.ReadAsync(_readCts.Token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (!_stopping.IsCancellationRequested)
+                    {
+                        throw new TimeoutException();
+                    }
+                    finally
+                    {
+                        _readCts.CancelAfter(Timeout.InfiniteTimeSpan);
+                    }
+                }
             }
             catch (TimeoutException)
             {
@@ -261,6 +289,188 @@ internal sealed class SmtpSession
                 continue;
             }
 
+            if (cmd.Verb == SmtpVerb.Data)
+            {
+                // The DATA transaction is written out inside this loop rather than as an asynchronous method of its own (and reads straight from the
+                // pipe): every asynchronous method that is waiting is a state machine on the heap, and this one would be waiting for the whole time
+                // the handler stores the message. The loop's own state machine exists once per session anyway.
+                Write(SmtpReplies.StartData);
+                await FlushAsync().ConfigureAwait(false);
+
+                var scanner = new DataScanner(_options.RejectNulInData);
+                var message = _dataBuffer;
+                message.Reset();
+                CountingNullWriter? discard = null;
+                long reserved = 0;
+                bool tooLarge = false, noMemory = false;
+                long started = _server.Clock.Timestamp;
+                try
+                {
+                    while (true)
+                    {
+                        ReadResult dataRead;
+                        try
+                        {
+                            if (_server.Clock.GetElapsedTime(started) > _options.MaxDataDuration)
+                            {
+                                throw new TimeoutException();
+                            }
+
+                            if (!_transport.Input.TryRead(out dataRead))
+                            {
+                                // About to block: push out pipelined replies first.
+                                await FlushAsync().ConfigureAwait(false);
+                                _readCts.CancelAfter(_options.DataTimeout);
+                                try
+                                {
+                                    dataRead = await _transport.Input.ReadAsync(_readCts.Token).ConfigureAwait(false);
+                                }
+                                catch (OperationCanceledException) when (!_stopping.IsCancellationRequested)
+                                {
+                                    throw new TimeoutException();
+                                }
+                                finally
+                                {
+                                    _readCts.CancelAfter(Timeout.InfiniteTimeSpan);
+                                }
+                            }
+                        }
+                        catch (TimeoutException)
+                        {
+                            _server.Budget.Release(reserved);
+                            reserved = 0;
+                            await ReplyAsync(SmtpReplies.Timeout).ConfigureAwait(false);
+                            _close = true;
+                            return;
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            _server.Budget.Release(reserved);
+                            reserved = 0;
+                            await ReplyAsync(SmtpReplies.ShuttingDown).ConfigureAwait(false);
+                            _close = true;
+                            return;
+                        }
+
+                        var dataBuffer = dataRead.Buffer;
+                        DataScanStatus dataStatus = DataScanStatus.NeedMoreData;
+                        long consumedTotal = 0;
+                        foreach (var segment in dataBuffer)
+                        {
+                            IBufferWriter<byte> sink = (tooLarge || noMemory) ? (discard ??= new CountingNullWriter()) : message;
+                            dataStatus = scanner.Scan(segment.Span, sink, out int used);
+                            consumedTotal += used;
+                            if (!(tooLarge || noMemory))
+                            {
+                                if (scanner.BytesWritten > _options.MaxMessageSize)
+                                {
+                                    tooLarge = true;
+                                }
+                                else if (message.Capacity > reserved)
+                                {
+                                    long need = message.Capacity - reserved;
+                                    if (_server.Budget.TryReserve(need))
+                                    {
+                                        reserved += need;
+                                    }
+                                    else
+                                    {
+                                        noMemory = true;
+                                    }
+                                }
+
+                                if (tooLarge || noMemory)
+                                {
+                                    message.Dispose();
+                                    _server.Budget.Release(reserved);
+                                    reserved = 0;
+                                }
+                            }
+
+                            if (dataStatus != DataScanStatus.NeedMoreData)
+                            {
+                                break;
+                            }
+                        }
+
+                        _transport.Input.AdvanceTo(dataBuffer.GetPosition(consumedTotal));
+
+                        if (dataStatus == DataScanStatus.NeedMoreData)
+                        {
+                            if (dataRead.IsCompleted)
+                            {
+                                _close = true;
+                                return;
+                            }
+
+                            continue;
+                        }
+
+                        if (dataStatus != DataScanStatus.Complete)
+                        {
+                            // BareLf, BareCr or Nul.
+                            _server.Budget.Release(reserved);
+                            reserved = 0;
+                            SmtpMetrics.ProtocolErrors.Add(1);
+                            _log.Write(MtaLogLevel.Warning, "smtp.server", $"session {_ctx.SessionId} from {_ctx.RemoteEndPoint}: {dataStatus} in message data (possible smuggling attempt)");
+                            await ReplyAsync(SmtpReplies.BareLineEnding).ConfigureAwait(false);
+                            _close = true;
+                            return;
+                        }
+
+                        break;
+                    }
+
+                    if (tooLarge)
+                    {
+                        SmtpMetrics.MessagesRejected.Add(1);
+                        ResetTransaction();
+                        Write(SmtpReplies.MessageTooLarge);
+                        continue;
+                    }
+
+                    if (noMemory)
+                    {
+                        SmtpMetrics.MessagesRejected.Add(1);
+                        ResetTransaction();
+                        Write(SmtpReplies.InsufficientStorage);
+                        continue;
+                    }
+
+                    long t0 = _server.Clock.Timestamp;
+                    var handed = BeginMessage(message, _server.Clock.UtcNow);
+                    SmtpReply reply;
+                    try
+                    {
+                        reply = await _handler.OnMessageAsync(handed, _stopping).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (_stopping.IsCancellationRequested)
+                    {
+                        reply = SmtpReplies.ShuttingDown;
+                        _close = true;
+                    }
+                    catch (Exception ex)
+                    {
+                        reply = HandlerFailed(ex);
+                    }
+                    finally
+                    {
+                        handed.Clear();
+                    }
+
+                    EndMessage(reply, message.Length);
+                    await FlushAsync().ConfigureAwait(false);
+                    SmtpMetrics.TransactionSeconds.Record(_server.Clock.GetElapsedTime(t0).TotalSeconds);
+                }
+                finally
+                {
+                    message.Dispose();
+                    _server.Budget.Release(reserved);
+                }
+
+                continue;
+            }
+
             await DispatchAsync(cmd).ConfigureAwait(false);
         }
     }
@@ -307,8 +517,11 @@ internal sealed class SmtpSession
         return false;
     }
 
-    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
-    private async ValueTask DispatchAsync(SmtpCommand cmd)
+    /// <summary>
+    /// Runs one command. Not itself asynchronous: a command that has to wait returns the task of its own handler, so a message in flight holds
+    /// one suspended frame less (every suspended frame is a heap-allocated state machine unless the pool of boxes happens to have one).
+    /// </summary>
+    private ValueTask DispatchAsync(SmtpCommand cmd)
     {
         switch (cmd.Verb)
         {
@@ -322,10 +535,7 @@ internal sealed class SmtpSession
                 break;
 
             case SmtpVerb.Quit:
-                Write(SmtpReplies.Bye);
-                await FlushAsync().ConfigureAwait(false);
-                _close = true;
-                break;
+                return QuitAsync();
 
             case SmtpVerb.Rset:
                 ResetTransaction();
@@ -345,29 +555,33 @@ internal sealed class SmtpSession
                 break;
 
             case SmtpVerb.StartTls:
-                await HandleStartTlsAsync().ConfigureAwait(false);
-                break;
+                return HandleStartTlsAsync();
 
             case SmtpVerb.Auth:
-                await HandleAuthAsync(cmd).ConfigureAwait(false);
-                break;
+                return HandleAuthAsync(cmd);
 
             case SmtpVerb.Mail:
-                await HandleMailAsync(cmd).ConfigureAwait(false);
-                break;
+                return HandleMailAsync(cmd);
 
             case SmtpVerb.Rcpt:
-                await HandleRcptAsync(cmd).ConfigureAwait(false);
-                break;
+                return HandleRcptAsync(cmd);
 
             case SmtpVerb.Data:
-                await HandleDataAsync().ConfigureAwait(false);
-                break;
+                throw new InvalidOperationException("DATA is handled by the command loop.");
 
             case SmtpVerb.Bdat:
-                await HandleBdatAsync(cmd).ConfigureAwait(false);
-                break;
+                return HandleBdatAsync(cmd);
         }
+
+        return ValueTask.CompletedTask;
+    }
+
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
+    private async ValueTask QuitAsync()
+    {
+        Write(SmtpReplies.Bye);
+        await FlushAsync().ConfigureAwait(false);
+        _close = true;
     }
 
     // ---------------------------------------------------------------- verbs
@@ -492,7 +706,9 @@ internal sealed class SmtpSession
             return;
         }
 
-        var info = new MailFromInfo { Sender = cmd.Path, Parameters = cmd.Mail };
+        var info = _mailInfo;
+        info.Sender = cmd.Path;
+        info.Parameters = cmd.Mail;
         var reply = await _handler.OnMailFromAsync(_ctx, info, _stopping).ConfigureAwait(false);
         if (reply.IsPositiveCompletion)
         {
@@ -667,145 +883,6 @@ internal sealed class SmtpSession
     // ---------------------------------------------------------------- message data
 
     [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
-    private async ValueTask HandleDataAsync()
-    {
-        Write(SmtpReplies.StartData);
-        await FlushAsync().ConfigureAwait(false);
-
-        var scanner = new DataScanner(_options.RejectNulInData);
-        using var message = new MessageBuffer();
-        CountingNullWriter? discard = null;
-        long reserved = 0;
-        bool tooLarge = false, noMemory = false;
-        long started = _server.Clock.Timestamp;
-
-        while (true)
-        {
-            ReadResult read;
-            try
-            {
-                if (_server.Clock.GetElapsedTime(started) > _options.MaxDataDuration)
-                {
-                    throw new TimeoutException();
-                }
-
-                read = await ReadAsync(_options.DataTimeout).ConfigureAwait(false);
-            }
-            catch (TimeoutException)
-            {
-                _server.Budget.Release(reserved);
-                await ReplyAsync(SmtpReplies.Timeout).ConfigureAwait(false);
-                _close = true;
-                return;
-            }
-            catch (OperationCanceledException)
-            {
-                _server.Budget.Release(reserved);
-                await ReplyAsync(SmtpReplies.ShuttingDown).ConfigureAwait(false);
-                _close = true;
-                return;
-            }
-
-            var buffer = read.Buffer;
-            DataScanStatus status = DataScanStatus.NeedMoreData;
-            long consumedTotal = 0;
-            foreach (var segment in buffer)
-            {
-                IBufferWriter<byte> sink = (tooLarge || noMemory) ? (discard ??= new CountingNullWriter()) : message;
-                status = scanner.Scan(segment.Span, sink, out int used);
-                consumedTotal += used;
-                if (!(tooLarge || noMemory))
-                {
-                    if (scanner.BytesWritten > _options.MaxMessageSize)
-                    {
-                        tooLarge = true;
-                    }
-                    else if (message.Capacity > reserved)
-                    {
-                        long need = message.Capacity - reserved;
-                        if (_server.Budget.TryReserve(need))
-                        {
-                            reserved += need;
-                        }
-                        else
-                        {
-                            noMemory = true;
-                        }
-                    }
-
-                    if (tooLarge || noMemory)
-                    {
-                        message.Dispose();
-                        _server.Budget.Release(reserved);
-                        reserved = 0;
-                    }
-                }
-
-                if (status != DataScanStatus.NeedMoreData)
-                {
-                    break;
-                }
-            }
-
-            var consumedPos = buffer.GetPosition(consumedTotal);
-            _transport.Input.AdvanceTo(consumedPos);
-
-            switch (status)
-            {
-                case DataScanStatus.NeedMoreData:
-                    if (read.IsCompleted)
-                    {
-                        _server.Budget.Release(reserved);
-                        _close = true;
-                        return;
-                    }
-
-                    continue;
-
-                case DataScanStatus.BareLf:
-                case DataScanStatus.BareCr:
-                case DataScanStatus.Nul:
-                    _server.Budget.Release(reserved);
-                    SmtpMetrics.ProtocolErrors.Add(1);
-                    _log.Write(MtaLogLevel.Warning, "smtp.server", $"session {_ctx.SessionId} from {_ctx.RemoteEndPoint}: {status} in message data (possible smuggling attempt)");
-                    await ReplyAsync(SmtpReplies.BareLineEnding).ConfigureAwait(false);
-                    _close = true;
-                    return;
-
-                case DataScanStatus.Complete:
-                    break;
-            }
-
-            break;
-        }
-
-        try
-        {
-            if (tooLarge)
-            {
-                SmtpMetrics.MessagesRejected.Add(1);
-                ResetTransaction();
-                Write(SmtpReplies.MessageTooLarge);
-                return;
-            }
-
-            if (noMemory)
-            {
-                SmtpMetrics.MessagesRejected.Add(1);
-                ResetTransaction();
-                Write(SmtpReplies.InsufficientStorage);
-                return;
-            }
-
-            await CompleteMessageAsync(message).ConfigureAwait(false);
-        }
-        finally
-        {
-            _server.Budget.Release(reserved);
-        }
-    }
-
-    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask HandleBdatAsync(SmtpCommand cmd)
     {
         _state.OnChunkingStarted();
@@ -923,7 +1000,30 @@ internal sealed class SmtpSession
                 }
                 else if (chunk.LastChunk)
                 {
-                    await CompleteMessageAsync(message).ConfigureAwait(false);
+                    long t0 = _server.Clock.Timestamp;
+                    var handed = BeginMessage(message, _server.Clock.UtcNow);
+                    SmtpReply reply;
+                    try
+                    {
+                        reply = await _handler.OnMessageAsync(handed, _stopping).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (_stopping.IsCancellationRequested)
+                    {
+                        reply = SmtpReplies.ShuttingDown;
+                        _close = true;
+                    }
+                    catch (Exception ex)
+                    {
+                        reply = HandlerFailed(ex);
+                    }
+                    finally
+                    {
+                        handed.Clear();
+                    }
+
+                    EndMessage(reply, message.Length);
+                    await FlushAsync().ConfigureAwait(false);
+                    SmtpMetrics.TransactionSeconds.Record(_server.Clock.GetElapsedTime(t0).TotalSeconds);
                     return;
                 }
                 else
@@ -1024,46 +1124,42 @@ internal sealed class SmtpSession
         }
     }
 
-    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
-    private async ValueTask CompleteMessageAsync(MessageBuffer body)
+    /// <summary>
+    /// The end of a DATA or BDAT transaction is written out in both callers (reading the message, handing it to the handler, answering) instead of
+    /// being one more asynchronous method between them and the handler: a frame that waits for the handler is a state machine on the heap for as long as
+    /// the handler takes. This is the first half: the message object the handler receives.
+    /// </summary>
+    private SmtpMessage BeginMessage(MessageBuffer body, DateTimeOffset now)
     {
-        long t0 = _server.Clock.Timestamp;
         var mail = _mail!;
-        var now = _server.Clock.UtcNow;
         Span<byte> compactId = stackalloc byte[32];
         Ids.New().TryFormat(compactId, out _, "N");
-        byte[] received = _received.Build(_ctx, _options.Hostname, _recipients.Count == 1 ? _recipients[0].ToString() : null, compactId[..16], now);
-        var message = new SmtpMessage
-        {
-            Session = _ctx,
-            Sender = mail.Sender,
-            Parameters = mail.Parameters,
-            Recipients = _recipients.ToArray(),
-            Body = body.AsSequence(),
-            ReceivedHeader = received,
-            ReceivedAt = now,
-        };
+        var received = _received.Build(_ctx, _options.Hostname, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_recipients), compactId[..16], now);
+        var message = _message;
+        message.Session = _ctx;
+        message.Sender = mail.Sender;
+        message.Parameters = mail.Parameters;
+        message.Recipients = _recipients;
+        message.Body = body.AsSequence();
+        message.ReceivedHeader = received;
+        message.ReceivedAt = now;
+        return message;
+    }
 
-        SmtpReply reply;
-        try
-        {
-            reply = await _handler.OnMessageAsync(message, _stopping).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (_stopping.IsCancellationRequested)
-        {
-            reply = SmtpReplies.ShuttingDown;
-            _close = true;
-        }
-        catch (Exception ex)
-        {
-            _log.Write(MtaLogLevel.Error, "smtp.server", $"session {_ctx.SessionId}: handler failed for message", ex);
-            reply = SmtpReplies.LocalError;
-        }
+    /// <summary>The reply for a handler that threw (called from the catch block of the callers).</summary>
+    private SmtpReply HandlerFailed(Exception ex)
+    {
+        _log.Write(MtaLogLevel.Error, "smtp.server", $"session {_ctx.SessionId}: handler failed for message", ex);
+        return SmtpReplies.LocalError;
+    }
 
+    /// <summary>The second half: counts the message, ends the transaction and queues the reply (the caller flushes it).</summary>
+    private void EndMessage(SmtpReply reply, long bodyLength)
+    {
         if (reply.IsPositiveCompletion)
         {
             SmtpMetrics.Messages.Add(1);
-            SmtpMetrics.Bytes.Add(body.Length);
+            SmtpMetrics.Bytes.Add(bodyLength);
             _messages++;
         }
         else
@@ -1073,8 +1169,6 @@ internal sealed class SmtpSession
 
         ResetTransaction();
         Write(reply);
-        await FlushAsync().ConfigureAwait(false);
-        SmtpMetrics.TransactionSeconds.Record(_server.Clock.GetElapsedTime(t0).TotalSeconds);
     }
 
     private sealed class CountingNullWriter : IBufferWriter<byte>
