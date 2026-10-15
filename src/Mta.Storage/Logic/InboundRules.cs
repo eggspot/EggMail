@@ -140,6 +140,12 @@ public static class InboundRules
         return p == pattern.Length;
     }
 
+    /// <summary>Whether a query narrows the tenant's mail at all (a bulk erasure refuses a query that does not). The paging members do not count.</summary>
+    public static bool HasFilter(InboundMessageQuery query) =>
+        query.DomainId is not null || !string.IsNullOrWhiteSpace(query.Recipient) || !string.IsNullOrWhiteSpace(query.Sender) || !string.IsNullOrEmpty(query.SubjectContains)
+        || query.RouteId is not null || query.ActionKind is not null || query.ActionState is not null || query.Dmarc is not null || query.DmarcFlagged is not null
+        || query.From is not null || query.To is not null;
+
     /// <summary>The action state a new message starts in (see <see cref="InboundMessageDraft"/>).</summary>
     public static InboundActionState InitialActionState(InboundActionKind kind) =>
         kind is InboundActionKind.Webhook or InboundActionKind.Forward ? InboundActionState.Pending : InboundActionState.Done;

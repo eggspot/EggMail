@@ -329,4 +329,20 @@ public class InboundRulesTests
         InboundAuthResults none = InboundAuthResults.NotChecked;
         Assert.All(new[] { none.Spf, none.SpfHelo, none.Dkim, none.Dmarc, none.Arc }, v => Assert.Equal(InboundVerdict.None, v));
     }
+
+    [Fact]
+    public void A_query_has_a_filter_when_it_narrows_the_tenants_mail_and_paging_is_not_a_filter()
+    {
+        Assert.False(InboundRules.HasFilter(new InboundMessageQuery(Tenant)));
+        Assert.False(InboundRules.HasFilter(new InboundMessageQuery(Tenant, Limit: 5, Cursor: "abc")));
+        Assert.False(InboundRules.HasFilter(new InboundMessageQuery(Tenant, Recipient: "  ", Sender: "", SubjectContains: "")));
+        Assert.True(InboundRules.HasFilter(new InboundMessageQuery(Tenant, DomainId: Domain)));
+        Assert.True(InboundRules.HasFilter(new InboundMessageQuery(Tenant, Recipient: "a@example.com")));
+        Assert.True(InboundRules.HasFilter(new InboundMessageQuery(Tenant, Sender: "a@example.com")));
+        Assert.True(InboundRules.HasFilter(new InboundMessageQuery(Tenant, SubjectContains: "x")));
+        Assert.True(InboundRules.HasFilter(new InboundMessageQuery(Tenant, DmarcFlagged: false)));
+        Assert.True(InboundRules.HasFilter(new InboundMessageQuery(Tenant, ActionState: InboundActionState.Failed)));
+        Assert.True(InboundRules.HasFilter(new InboundMessageQuery(Tenant, From: Now)));
+    }
 }
+
