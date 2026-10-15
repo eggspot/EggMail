@@ -5,45 +5,21 @@ using System.Globalization;
 namespace Mta.Host.Hosting;
 
 /// <summary>
-/// Meters of the server process itself (<c>Mta.Process</c>): resident memory, managed heap, open file descriptors, threads, CPU time and garbage
-/// collections. They exist so that a long run (the 7-day soak of <c>docs/go-live-checklist.md</c>) can judge "memory, descriptors and threads stay
-/// flat" from the same <c>/metrics</c> endpoint as everything else, instead of from outside the container. Gauges only: a scrape reads the
-/// operating system's counters for this process and touches nothing else (no database, no lock held by the mail path).
-/// <para>On Linux the descriptor and thread counts come from <c>/proc/self</c>; elsewhere the descriptor gauge reports nothing (no series) rather
-/// than a made-up number.</para>
+/// Meters of the server process itself (<c>Mta.Process</c>) that the .NET runtime meter does not carry: open file descriptors and operating-system
+/// threads. They exist so that a long run (the 7-day soak of <c>docs/go-live-checklist.md</c>) can judge "descriptors and threads stay flat" from the
+/// same <c>/metrics</c> endpoint as everything else, instead of from outside the container (the chiseled image has no shell). Gauges only: a scrape
+/// reads the operating system's counters for this process and touches nothing else (no database, no lock held by the mail path).
+/// <para>On Linux both come from <c>/proc/self</c>; elsewhere the descriptor gauge reports nothing (no series) rather than a made-up number.</para>
 /// </summary>
 public static class ProcessMetrics
 {
     public static readonly Meter Meter = new("Mta.Process");
 
-    /// <summary>Resident set size (the working set on Windows and macOS).</summary>
-    public static readonly ObservableGauge<long> ResidentMemory = Meter.CreateObservableGauge("mta.process.resident_memory", ObserveResidentMemory, "By", "Resident memory of the server process");
-
-    /// <summary>Bytes the garbage collector manages: the managed heap as of the last collection.</summary>
-    public static readonly ObservableGauge<long> ManagedHeap = Meter.CreateObservableGauge("mta.process.managed_heap", ObserveManagedHeap, "By", "Managed heap size as of the last garbage collection");
-
     /// <summary>Open file descriptors (sockets and files). A steady climb under constant load is a leak. Linux only.</summary>
     public static readonly ObservableGauge<long> OpenFileDescriptors = Meter.CreateObservableGauge("mta.process.open_fds", ObserveOpenFileDescriptors, "{descriptor}", "Open file descriptors of the server process (Linux)");
 
-    /// <summary>Operating-system threads of the process.</summary>
+    /// <summary>Operating-system threads of the process (not only the thread pool's).</summary>
     public static readonly ObservableGauge<long> Threads = Meter.CreateObservableGauge("mta.process.threads", ObserveThreads, "{thread}", "Operating-system threads of the server process");
-
-    /// <summary>CPU time used by the process (user plus system), in seconds; take its rate for the CPU share.</summary>
-    public static readonly ObservableCounter<double> CpuTime = Meter.CreateObservableCounter("mta.process.cpu.time", ObserveCpuTime, "s", "CPU time used by the server process");
-
-    /// <summary>Garbage collections since the process started, by generation (0, 1, 2).</summary>
-    public static readonly ObservableCounter<long> GcCollections = Meter.CreateObservableCounter("mta.process.gc.collections", ObserveGcCollections, "{collection}", "Garbage collections since start, by generation");
-
-    private static IEnumerable<Measurement<long>> ObserveResidentMemory()
-    {
-        using Process process = Process.GetCurrentProcess();
-        yield return new Measurement<long>(process.WorkingSet64);
-    }
-
-    private static IEnumerable<Measurement<long>> ObserveManagedHeap()
-    {
-        yield return new Measurement<long>(GC.GetGCMemoryInfo().HeapSizeBytes);
-    }
 
     private static IEnumerable<Measurement<long>> ObserveOpenFileDescriptors()
     {
@@ -56,20 +32,6 @@ public static class ProcessMetrics
     private static IEnumerable<Measurement<long>> ObserveThreads()
     {
         yield return new Measurement<long>(CountThreads());
-    }
-
-    private static IEnumerable<Measurement<double>> ObserveCpuTime()
-    {
-        using Process process = Process.GetCurrentProcess();
-        yield return new Measurement<double>(process.TotalProcessorTime.TotalSeconds);
-    }
-
-    private static IEnumerable<Measurement<long>> ObserveGcCollections()
-    {
-        for (int generation = 0; generation <= 2; generation++)
-        {
-            yield return new Measurement<long>(GC.CollectionCount(generation), new KeyValuePair<string, object?>("generation", generation.ToString(CultureInfo.InvariantCulture)));
-        }
     }
 
     /// <summary>Entries of <c>/proc/self/fd</c> (the directory listing itself opens one descriptor, which is counted out), or null where that does not exist.</summary>

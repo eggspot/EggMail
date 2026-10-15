@@ -12,12 +12,7 @@ public class ProcessMetricsTests
 
         capture.Pull();
 
-        Assert.True(Assert.Single(capture.Of("mta.process.resident_memory")).Value > 1_000_000, "a .NET process uses more than 1 MB");
-        Assert.True(Assert.Single(capture.Of("mta.process.managed_heap")).Value >= 0);
         Assert.True(Assert.Single(capture.Of("mta.process.threads")).Value >= 1);
-        Assert.True(Assert.Single(capture.Of("mta.process.cpu.time")).Value > 0);
-        Assert.Equal(3, capture.Of("mta.process.gc.collections").Count());   // generations 0, 1, 2
-        Assert.Contains(capture.Of("mta.process.gc.collections"), m => (string)m.Tags["generation"]! == "2");
         if (OperatingSystem.IsLinux())
         {
             Assert.True(Assert.Single(capture.Of("mta.process.open_fds")).Value >= 3, "stdin, stdout and stderr are open");
@@ -32,12 +27,11 @@ public class ProcessMetricsTests
 
         string text = exporter.Render();
 
-        foreach (string name in new[] { "mta_process_resident_memory_bytes", "mta_process_managed_heap_bytes", "mta_process_threads", "mta_process_cpu_time_seconds_total" })
+        Assert.Contains("\nmta_process_threads ", "\n" + text);
+        if (OperatingSystem.IsLinux())
         {
-            Assert.Contains($"\n{name} ", "\n" + text);
+            Assert.Contains("\nmta_process_open_fds ", "\n" + text);
         }
-
-        Assert.Contains("mta_process_gc_collections_total{generation=\"0\"}", text);
     }
 
     [Fact]

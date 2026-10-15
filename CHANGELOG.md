@@ -45,7 +45,7 @@ workflow refuses a stable tag without a non-empty section for that exact version
   to the recipients that are still waiting (all of them, or the ones named); a recipient whose delivery attempt is running is left alone and
   reported as in flight. Works with and without per-message history, publishes a `message.cancelled` webhook event and is implemented on every storage backend (decision 86; adds the index `delivery_queue (message_id)`, schema version 7).
 
-- Process metrics on `/metrics` and OTLP (`mta_process_resident_memory_bytes`, `mta_process_open_fds`, `mta_process_threads`, managed heap, CPU time, garbage collections) so a long run can be judged for leaks without access to the host.
+- Descriptor and thread metrics on `/metrics` and OTLP (`mta_process_open_fds` on Linux, `mta_process_threads`) so a long run can be judged for leaks without access to the host.
 
 ### Changed
 
