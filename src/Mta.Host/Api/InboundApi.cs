@@ -80,7 +80,14 @@ public sealed record InboundVerdictResponse(string Result, [property: JsonIgnore
 
 public sealed record InboundAuthResponse(InboundVerdictResponse Spf, InboundVerdictResponse SpfHelo, InboundVerdictResponse Dkim, InboundVerdictResponse Dmarc, InboundVerdictResponse Arc);
 
-public sealed record InboundActionResponse(string Kind, string State, int Attempts, int RetryGeneration, DateTimeOffset? NextAttemptAt, DateTimeOffset? FinishedAt, string? LastError, Guid? ForwardMessageId);
+/// <summary>
+/// <c>Kind</c> is the action the message was given when it was received. The action that runs is the route's current one (design section 11.7), so on the detail endpoint <c>CurrentKind</c> says
+/// what the route does now (null: no route, it was deleted, or this is a list entry); <c>Note</c> is set when the action finished but something happened the tenant should know.
+/// </summary>
+public sealed record InboundActionResponse(
+    string Kind, string State, int Attempts, int RetryGeneration, DateTimeOffset? NextAttemptAt, DateTimeOffset? FinishedAt, string? LastError, Guid? ForwardMessageId,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Note = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? CurrentKind = null);
 
 public sealed record InboundHeaderResponse(string Name, string Value);
 
@@ -185,7 +192,7 @@ public sealed class UpdateInboundRouteRequest
 
 /// <summary>
 /// Inbound mail over the HTTP API (docs/api.md, "Inbound mail"): the settings and routes of a domain and the received messages. Every call is keyed by the
-/// caller's tenant (another tenant's domain, route or message is a 404) and needs the <c>inbound</c> scope.
+/// caller's tenant (another tenant's domain, route or message is a 404) and needs <c>inbound:read</c> (reads) or <c>inbound:write</c> (changes); a forward route also needs <c>send</c>.
 /// </summary>
 public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVerificationService verification, ApiOptions options, IClock clock)
 {
@@ -230,18 +237,9 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
 
     private InboundEffectiveResponse EffectiveOf(InboundDomainSettings s)
     {
-        InboundApiDefaults d = options.Inbound;
-        return new InboundEffectiveResponse(
-            Math.Min(s.MaxMessageBytes ?? d.MaxMessageBytes, d.MaxMessageBytes),
-            Math.Min(s.MaxMessagesPerMinute ?? d.MaxMessagesPerMinute, d.MaxMessagesPerMinute),
-            Math.Min(s.MaxMessagesPerMinutePerRemote ?? d.MaxMessagesPerMinutePerRemote, d.MaxMessagesPerMinutePerRemote),
-            EffectiveStoredBytes(s.MaxStoredBytes, d.MaxStoredBytesPerDomain),
-            InboundRules.ResolveRetentionDays(s.RetentionDays, d.RetentionDays, d.MaxRetentionDays));
+        InboundEffectiveLimits e = InboundRules.Effective(s, options.Inbound.Ceilings(), options.Inbound.RetentionDays);
+        return new InboundEffectiveResponse(e.MaxMessageBytes, e.MaxMessagesPerMinute, e.MaxMessagesPerMinutePerRemote, e.MaxStoredBytes, e.RetentionDays);
     }
-
-    // 0 is unlimited, so "the lower of two limits" must not take the 0.
-    private static long EffectiveStoredBytes(long? domain, long ceiling) =>
-        domain is null ? ceiling : ceiling == 0 ? domain.Value : domain.Value == 0 ? ceiling : Math.Min(domain.Value, ceiling);
 
     private InboundSettingsResponse ToResponse(InboundDomainSettings s, bool stored, IReadOnlyList<InboundWarningResponse>? warnings = null)
     {
@@ -278,7 +276,7 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
         InboundDmarcAction action = current.DmarcAction;
         if (body.DmarcAction is not null && !InboundNames.TryParse(body.DmarcAction, out action))
         {
-            errors.Add("dmarcAction", "Must be one of: record_only, quarantine_flag, reject.");
+            errors.Add("dmarcAction", "Must be one of: " + string.Join(", ", Enum.GetValues<InboundDmarcAction>().Select(InboundNames.Of)) + ".");
         }
 
         InboundDomainSettings updated = current with
@@ -293,7 +291,7 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
             UpdatedAt = clock.UtcNow,
         };
         errors.ThrowIfAny();
-        foreach (InboundValidationError e in InboundRules.ValidateSettings(updated, options.Inbound.Ceilings()))
+        foreach (InboundValidationError e in InboundRules.ValidateSettings(updated, options.Inbound.Ceilings(), ChangedMembers(body)))
         {
             errors.Add(e.Field, e.Message);
         }
@@ -323,6 +321,38 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
         }
 
         return ApiResults.Ok(ToResponse(updated, stored: true));
+    }
+
+    // The members the request names: only these are held to the operator's ceilings, so a stored value that a lowered ceiling now exceeds never blocks an unrelated change (such as turning the domain off).
+    private static List<string> ChangedMembers(UpdateInboundSettingsRequest body)
+    {
+        var changed = new List<string>();
+        if (body.MaxMessageBytes.ValueKind != JsonValueKind.Undefined)
+        {
+            changed.Add("maxMessageBytes");
+        }
+
+        if (body.MaxMessagesPerMinute.ValueKind != JsonValueKind.Undefined)
+        {
+            changed.Add("maxMessagesPerMinute");
+        }
+
+        if (body.MaxMessagesPerMinutePerRemote.ValueKind != JsonValueKind.Undefined)
+        {
+            changed.Add("maxMessagesPerMinutePerRemote");
+        }
+
+        if (body.MaxStoredBytes.ValueKind != JsonValueKind.Undefined)
+        {
+            changed.Add("maxStoredBytes");
+        }
+
+        if (body.RetentionDays.ValueKind != JsonValueKind.Undefined)
+        {
+            changed.Add("retentionDays");
+        }
+
+        return changed;
     }
 
     // Mail for these names has one meaning, signed bounces; the receive path classifies it before any inbound domain (design section 11.4).
@@ -461,6 +491,10 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
         {
             await Inbound.UpsertRouteAsync(route, ct).ConfigureAwait(false);
         }
+        catch (StorageConflictException ex) when (ex.Message.Contains("webhook endpoint", StringComparison.Ordinal))
+        {
+            throw ApiException.Validation("action.webhookEndpointId", "No such webhook endpoint.");   // deleted while the request ran
+        }
         catch (StorageConflictException)
         {
             throw ApiException.NotFound("Domain not found.");   // deleted while the request ran
@@ -512,6 +546,12 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
             {
                 errors.Add(FieldOf(e.Field), e.Message);
             }
+        }
+
+        if (!errors.Any && actionKind == InboundActionKind.Forward && validateEndpoint && !caller.HasScope(ApiScopes.Send))
+        {
+            // A forward route sends every matching message, from now on, to an address of the caller's choosing: that is sending mail, so it takes the send scope as well (design section 11.9).
+            throw ApiException.Forbidden($"A forward route also needs the '{ApiScopes.Send}' scope: it sends the mail it receives to the addresses it names.");
         }
 
         if (!errors.Any && actionKind == InboundActionKind.Forward)
@@ -614,13 +654,13 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
 
     private static InboundVerdictResponse Verdict(InboundVerdict v, string? domain = null, string? policy = null) => new(InboundNames.Of(v), domain, policy);
 
-    private static InboundActionResponse ActionOf(InboundMessage m) =>
-        new(InboundNames.Of(m.ActionKind), InboundNames.Of(m.ActionState), m.ActionAttempts, m.RetryGeneration, m.ActionNextAttemptAt, m.ActionFinishedAt, m.ActionLastError, m.ForwardMessageId);
+    private static InboundActionResponse ActionOf(InboundMessage m, string? currentKind = null) =>
+        new(InboundNames.Of(m.ActionKind), InboundNames.Of(m.ActionState), m.ActionAttempts, m.RetryGeneration, m.ActionNextAttemptAt, m.ActionFinishedAt, m.ActionLastError, m.ForwardMessageId, m.ActionNote, currentKind);
 
-    private static InboundMessageResponse ToResponse(InboundMessage m, InboundContentResponse? content = null) => new(
+    private static InboundMessageResponse ToResponse(InboundMessage m, InboundContentResponse? content = null, string? currentKind = null) => new(
         m.Id, m.DomainId, m.Domain, m.ReceivedAt, m.RemoteAddress, m.Helo, m.TlsUsed, m.EnvelopeFrom, m.EnvelopeTo, m.Subject, m.Size,
         new InboundAuthResponse(Verdict(m.Auth.Spf, m.Auth.SpfDomain), Verdict(m.Auth.SpfHelo), Verdict(m.Auth.Dkim, m.Auth.DkimDomain), Verdict(m.Auth.Dmarc, policy: m.Auth.DmarcPolicy), Verdict(m.Auth.Arc)),
-        m.Disposition == InboundDmarcDisposition.Flagged, m.RouteId, ActionOf(m), m.HasRaw, content);
+        m.Disposition == InboundDmarcDisposition.Flagged, m.RouteId, ActionOf(m, currentKind), m.HasRaw, content);
 
     private async Task<InboundMessage> FindMessageAsync(ApiCaller caller, string id, CancellationToken ct)
     {
@@ -745,7 +785,8 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
                 read.Attachments.Select(a => new InboundAttachmentResponse(a.Index, a.FileName, a.ContentType, a.Size, a.ContentId, a.Disposition)).ToList());
         }
 
-        return ApiResults.Ok(ToResponse(message, content));
+        InboundRouteRecord? route = message.RouteId is { } routeId ? await Inbound.GetRouteAsync(caller.TenantId, routeId, ct).ConfigureAwait(false) : null;
+        return ApiResults.Ok(ToResponse(message, content, route is null ? null : InboundNames.Of(route.ActionKind)));
     }
 
     private static ApiException BodyGone() =>

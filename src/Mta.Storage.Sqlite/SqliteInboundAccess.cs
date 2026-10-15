@@ -48,6 +48,34 @@ internal sealed class SqliteInboundAccess(SqliteRuntime rt, IStorageModelHooks h
             return s.work(db);
         }, cancellationToken, needsDriverTransaction: true);
 
+    /// <summary>
+    /// What a SQLite failure means for the caller. EF wraps the provider exception (<c>DbUpdateException</c> around a <c>SqliteException</c>), so the chain is searched: SQLITE_FULL (13,
+    /// whatever its extended code) is <see cref="StorageFullException"/> (the receive path answers <c>452 4.3.1</c>, as for the other queue writes), a busy or locked database, an I/O error or
+    /// an unreadable file is <see cref="StorageUnavailableException"/>; anything else (a constraint) is not translated and the store reports it as a conflict.
+    /// </summary>
+    public Exception? TranslateException(Exception exception)
+    {
+        if (exception is StorageUnavailableException)
+        {
+            return exception;   // the writer already translated it
+        }
+
+        for (Exception? e = exception; e is not null; e = e.InnerException)
+        {
+            if (e is Microsoft.Data.Sqlite.SqliteException sqlite)
+            {
+                return (sqlite.SqliteErrorCode & 0xFF) switch
+                {
+                    13 => new StorageFullException("The disk holding the SQLite files is full (SQLITE_FULL).", exception),
+                    5 or 6 or 10 or 11 or 14 => new StorageUnavailableException("SQLite could not complete the inbound write (busy, locked or an I/O error): " + sqlite.Message, exception),
+                    _ => null,
+                };
+            }
+        }
+
+        return null;
+    }
+
     // One writer, one transaction: the single-process claim needs no row locks.
     public IReadOnlyList<Guid> ClaimIds(QueueDbContext context, string owner, int max, DateTimeOffset now, DateTimeOffset until)
     {

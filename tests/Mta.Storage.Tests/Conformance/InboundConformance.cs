@@ -110,7 +110,7 @@ public abstract class InboundConformance : StorageTestBase
     public async Task Routes_are_listed_in_evaluation_order_and_read_back_exactly()
     {
         DomainRecord domain = await AddDomainAsync(TenantA, "example.com");
-        Guid endpoint = Ids.New();
+        Guid endpoint = await AddEndpointAsync(TenantA, true, "*");
         Guid low = Guid.Parse("00000000-0000-7000-8000-00000000000a");
         Guid high = Guid.Parse("00000000-0000-7000-8000-00000000000b");
         InboundRouteRecord catchAll = Route(domain, "catch-all", 1000, kind: InboundMatchKind.CatchAll, action: InboundActionKind.Discard);
@@ -159,7 +159,7 @@ public abstract class InboundConformance : StorageTestBase
         DomainRecord a = await AddDomainAsync(TenantA, "example.com");
         DomainRecord b = await AddDomainAsync(TenantB, "example.net");
         Guid endpoint = await AddEndpointAsync(TenantA, true, "*");
-        Guid otherEndpoint = await AddEndpointAsync(TenantA, true, "*");
+        Guid otherEndpoint = await AddEndpointAsync(TenantB, true, "*");
         InboundRouteRecord one = Route(a, "one", action: InboundActionKind.Webhook, endpoint: endpoint, kind: InboundMatchKind.Address, local: "x");
         InboundRouteRecord two = Route(a, "two", order: 200, action: InboundActionKind.Webhook, endpoint: endpoint, kind: InboundMatchKind.Address, local: "y");
         InboundRouteRecord unrelated = Route(b, "unrelated", action: InboundActionKind.Webhook, endpoint: otherEndpoint);
@@ -684,8 +684,12 @@ public abstract class InboundConformance : StorageTestBase
         await Assert.ThrowsAsync<ArgumentException>(async () => await Inbound.DeleteMatchingAsync(new InboundMessageQuery(TenantA, Limit: 5, Cursor: "x"), default));   // paging is not a filter
 
         Assert.Equal(5, await Inbound.DeleteMatchingAsync(new InboundMessageQuery(TenantA, Sender: "victim@sender.test"), default));
-        Assert.All(victims, v => Assert.Null(Inbound.GetAsync(TenantA, v.Id, default).AsTask().Result));
-        Assert.All(victims, v => Assert.Null(Inbound.GetRawAsync(TenantA, v.Id, default).AsTask().Result));
+        foreach (InboundMessageDraft victim in victims)
+        {
+            Assert.Null(await Inbound.GetAsync(TenantA, victim.Id, default));
+            Assert.Null(await Inbound.GetRawAsync(TenantA, victim.Id, default));
+        }
+
         Assert.NotNull(await Inbound.GetAsync(TenantA, bystander.Id, default));
         Assert.NotNull(await Inbound.GetAsync(TenantA, otherDomain.Id, default));
         Assert.NotNull(await Inbound.GetRawAsync(TenantB, theirs.Id, default));   // another tenant's mail is never touched, whatever it matches
@@ -762,5 +766,145 @@ public abstract class InboundConformance : StorageTestBase
         Assert.Empty(page.Items);
         Assert.Equal([mine.Id], (await Inbound.SearchAsync(new InboundMessageQuery(TenantA), default)).Items.Select(m => m.Id));
         Assert.Equal([theirs.Id], (await Inbound.SearchAsync(new InboundMessageQuery(TenantB), default)).Items.Select(m => m.Id));
+    }
+
+    // Review round: completion notes, the retention/retry guard, literal search characters, cleaned client text, route endpoint check
+
+    [Fact]
+    public async Task A_done_action_can_carry_a_note_that_a_retry_clears_and_other_states_never_keep_one()
+    {
+        DomainRecord domain = await AddDomainAsync(TenantA, "example.com");
+        InboundMessageDraft draft = await StoreAsync(Draft(domain, Ids.New(), InboundActionKind.Forward));
+        Assert.Single(await ClaimActionsAsync());
+
+        Assert.True(await Inbound.CompleteActionAsync(draft.Id, Owner, new InboundActionOutcome(InboundActionState.Done, Clock.UtcNow, null, null, Note: "all targets_suppressed!"), default));
+        InboundMessage done = (await Inbound.GetAsync(TenantA, draft.Id, default))!;
+        Assert.Equal(("alltargets_suppressed", InboundActionState.Done), (done.ActionNote, done.ActionState));   // a code: letters, digits and underscore only
+
+        Assert.Equal(InboundRetryResult.Queued, await Inbound.RetryActionAsync(TenantA, draft.Id, Clock.UtcNow, default));
+        Assert.Null((await Inbound.GetAsync(TenantA, draft.Id, default))!.ActionNote);
+
+        Assert.Single(await ClaimActionsAsync(now: Clock.UtcNow.AddMinutes(1)));
+        await Inbound.CompleteActionAsync(draft.Id, Owner, new InboundActionOutcome(InboundActionState.Failed, Clock.UtcNow, null, "gave up", Note: "ignored"), default);
+        Assert.Null((await Inbound.GetAsync(TenantA, draft.Id, default))!.ActionNote);
+    }
+
+    [Fact]
+    public async Task A_second_retry_of_a_pending_action_is_refused_without_a_new_generation_or_a_lost_lease()
+    {
+        DomainRecord domain = await AddDomainAsync(TenantA, "example.com");
+        InboundMessageDraft draft = await StoreAsync(Draft(domain, Ids.New(), InboundActionKind.Webhook));
+        Assert.Single(await ClaimActionsAsync());
+        await Inbound.CompleteActionAsync(draft.Id, Owner, new InboundActionOutcome(InboundActionState.Failed, Clock.UtcNow, null, "x"), default);
+
+        Assert.Equal(InboundRetryResult.Queued, await Inbound.RetryActionAsync(TenantA, draft.Id, Clock.UtcNow, default));
+        Assert.Single(await ClaimActionsAsync(owner: "worker-2"));   // leased by worker-2 now
+        Assert.Equal(InboundRetryResult.AlreadyPending, await Inbound.RetryActionAsync(TenantA, draft.Id, Clock.UtcNow, default));
+
+        InboundMessage message = (await Inbound.GetAsync(TenantA, draft.Id, default))!;
+        Assert.Equal(1, message.RetryGeneration);
+        Assert.True(await Inbound.ExtendActionLeaseAsync(draft.Id, "worker-2", Clock.UtcNow.AddMinutes(5), default));   // still worker-2's
+    }
+
+    [Fact]
+    public async Task Retention_never_deletes_a_message_that_a_retry_made_pending_and_never_its_body()
+    {
+        await OpenAsync(WithInbound(Opts(), 7));
+        DomainRecord domain = await AddDomainAsync(TenantA, "example.com");
+        InboundMessageDraft old = await StoreAsync(Draft(domain, Ids.New(), InboundActionKind.Webhook, at: Clock.UtcNow.AddDays(-30)));
+        Assert.Single(await ClaimActionsAsync());
+        await Inbound.CompleteActionAsync(old.Id, Owner, new InboundActionOutcome(InboundActionState.Failed, Clock.UtcNow, null, "x"), default);
+
+        // The operator retries the failed action just before the retention job runs: the old message is pending again and keeps its body.
+        Assert.Equal(InboundRetryResult.Queued, await Inbound.RetryActionAsync(TenantA, old.Id, Clock.UtcNow, default));
+        var reports = await Storage.Maintenance.RunAsync(Clock.UtcNow, default);
+        Assert.Equal(0, Assert.Single(reports, r => r.Job == "inbound_retention").RowsAffected);
+        Assert.NotNull(await Inbound.GetAsync(TenantA, old.Id, default));
+        Assert.NotNull(await Inbound.GetRawAsync(TenantA, old.Id, default));
+    }
+
+    [Fact]
+    public async Task Retention_and_erasure_work_through_many_batches()
+    {
+        await OpenAsync(WithInbound(Opts(), 7));
+        DomainRecord domain = await AddDomainAsync(TenantA, "example.com");
+        Guid route = Ids.New();
+        for (int i = 0; i < 260; i++)
+        {
+            await StoreAsync(Draft(domain, route, InboundActionKind.Store, from: i % 2 == 0 ? "even@sender.test" : "odd@sender.test", size: 64, at: Clock.UtcNow.AddDays(-20).AddMilliseconds(i)));
+        }
+
+        InboundMessageDraft fresh = await StoreAsync(Draft(domain, route, InboundActionKind.Store, size: 64));
+
+        // A sparse filter finds its rows among many that do not match.
+        Assert.Equal(130, await Inbound.DeleteMatchingAsync(new InboundMessageQuery(TenantA, Sender: "odd@sender.test"), default));
+        var reports = await Storage.Maintenance.RunAsync(Clock.UtcNow, default);
+        Assert.Equal(130, Assert.Single(reports, r => r.Job == "inbound_retention").RowsAffected);
+        InboundUsage usage = await Inbound.GetUsageAsync(TenantA, null, default);
+        Assert.Equal((1L, (long)fresh.Raw.Length), (usage.Messages, usage.BodyBytes));
+    }
+
+    [Fact]
+    public async Task A_search_takes_percent_underscore_and_backslash_literally_and_folds_only_ascii_letters()
+    {
+        DomainRecord domain = await AddDomainAsync(TenantA, "example.com");
+        Guid route = Ids.New();
+        async Task<Guid> Add(string subject) => (await StoreAsync(Draft(domain, route, InboundActionKind.Store, subject: subject, size: 100 + subject.Length))).Id;
+        Guid percent = await Add("100% sure");
+        Guid plain = await Add("1000 sure");
+        Guid underscore = await Add("file_name.txt");
+        Guid lookalike = await Add("fileXname.txt");
+        Guid backslash = await Add(@"C:\temp\x");
+        Guid umlaut = await Add("Äpfel Test");
+        Guid upper = await Add("ÄPFEL");
+
+        async Task<List<Guid>> Find(string term) => (await Inbound.SearchAsync(new InboundMessageQuery(TenantA, SubjectContains: term), default)).Items.Select(m => m.Id).OrderBy(x => x).ToList();
+        static List<Guid> Sorted(params Guid[] ids) => [.. ids.OrderBy(x => x)];
+
+        Assert.Equal(Sorted(percent), await Find("0% s"));
+        Assert.Equal(Sorted(percent), await Find("%"));
+        Assert.Equal(Sorted(underscore), await Find("e_n"));
+        Assert.Equal(Sorted(backslash), await Find(@"\temp"));
+        Assert.Equal(Sorted(plain), await Find("1000"));
+        Assert.Empty(await Find("nothing like it"));
+
+        // ASCII letters fold, everything else is compared as it is, the same on every backend.
+        Assert.Equal(Sorted(upper, umlaut), await Find("Äpfel"));
+        Assert.Equal(Sorted(umlaut), await Find("ÄPFEL te"));
+        Assert.Empty(await Find("äpfel"));
+        Assert.Equal(Sorted(upper, umlaut), await Find("ÄPFEL"));   // the term is folded like the column: "Äpfel" matches both
+        Assert.Equal(Sorted(lookalike), await Find("FILEXNAME"));
+    }
+
+    [Fact]
+    public async Task Client_supplied_text_is_cleaned_and_bounded()
+    {
+        DomainRecord domain = await AddDomainAsync(TenantA, "example.com");
+        InboundMessageDraft draft = Draft(domain, Ids.New(), InboundActionKind.Store);
+        draft.Helo = "mail.\u0001sender\r\n.test" + new string('x', 400);
+        draft.RemoteAddress = "203.0.113.9\u0000";
+        draft.Auth = draft.Auth with { SpfDomain = new string('d', 300), DkimDomain = "sender\u0007.test", DmarcPolicy = " reject\n " };
+        await StoreAsync(draft);
+
+        InboundMessage stored = (await Inbound.GetAsync(TenantA, draft.Id, default))!;
+        Assert.Equal(255, stored.Helo!.Length);
+        Assert.StartsWith("mail.sender.testx", stored.Helo);
+        Assert.Equal("203.0.113.9", stored.RemoteAddress);
+        Assert.Equal((new string('d', 255), "sender.test", "reject"), (stored.Auth.SpfDomain, stored.Auth.DkimDomain, stored.Auth.DmarcPolicy));
+    }
+
+    [Fact]
+    public async Task A_webhook_route_must_name_an_endpoint_of_its_tenant_in_the_same_write()
+    {
+        DomainRecord domain = await AddDomainAsync(TenantA, "example.com");
+        Guid mine = await AddEndpointAsync(TenantA, true, "*");
+        Guid theirs = await AddEndpointAsync(TenantB, true, "*");
+
+        await Assert.ThrowsAsync<StorageConflictException>(async () => await Inbound.UpsertRouteAsync(Route(domain, action: InboundActionKind.Webhook, endpoint: Ids.New()), default));
+        await Assert.ThrowsAsync<StorageConflictException>(async () => await Inbound.UpsertRouteAsync(Route(domain, action: InboundActionKind.Webhook, endpoint: theirs), default));
+        Assert.Empty(await Inbound.GetRoutesAsync(domain.Id, default));
+
+        await Inbound.UpsertRouteAsync(Route(domain, action: InboundActionKind.Webhook, endpoint: mine), default);
+        Assert.Single(await Inbound.GetRoutesAsync(domain.Id, default));
     }
 }

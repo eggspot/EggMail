@@ -39,6 +39,12 @@ public sealed partial class EfConfigStore<TContext>
                 throw new StorageConflictException("The domain does not exist for this tenant.");
             }
 
+            // The endpoint a webhook route names must exist for this tenant, checked in this write (the schema has no foreign keys; DeleteWebhookEndpointAsync checks the other direction).
+            if (entity.ActionKind == InboundActionKind.Webhook && !c.WebhookEndpoints.Any(w => w.Id == entity.WebhookEndpointId && w.TenantId == entity.TenantId))
+            {
+                throw new StorageConflictException("The webhook endpoint does not exist for this tenant.");
+            }
+
             // A route cannot move to another tenant or domain: that would be a different route.
             if (c.InboundRoutes.Any(r => r.Id == entity.Id && (r.TenantId != entity.TenantId || r.DomainId != entity.DomainId)))
             {

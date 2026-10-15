@@ -84,7 +84,7 @@ public class InboundPostgresTests : PgTestBase
     {
         (DomainRecord domain, Guid route) = await DomainAsync(Storage);
         await Storage.Inbound.UpsertSettingsAsync(new InboundDomainSettings(domain.Id, TenantA, true, InboundDmarcAction.Flag, null, null, null, null, 3, Clock.UtcNow), default);
-        await Storage.Inbound.UpsertRouteAsync(new InboundRouteRecord(route, TenantA, domain.Id, "all", 100, true, InboundMatchKind.CatchAll, null, false, InboundActionKind.Webhook, Ids.New(), InboundWebhookFormat.RawMime, [], Clock.UtcNow, Clock.UtcNow), default);
+        await Storage.Inbound.UpsertRouteAsync(new InboundRouteRecord(route, TenantA, domain.Id, "all", 100, true, InboundMatchKind.CatchAll, null, false, InboundActionKind.Webhook, await AddEndpointAsync(TenantA, true, "*"), InboundWebhookFormat.RawMime, [], Clock.UtcNow, Clock.UtcNow), default);
         InboundMessageDraft draft = Draft(domain, route, InboundActionKind.Webhook, Clock.UtcNow, 321);
         await Storage.Inbound.AcceptAsync([draft], default);
         Assert.Single(await Storage.Inbound.ClaimActionsAsync("a", 5, Clock.UtcNow, TimeSpan.FromMinutes(1), default));

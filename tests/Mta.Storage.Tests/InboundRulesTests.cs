@@ -344,5 +344,66 @@ public class InboundRulesTests
         Assert.True(InboundRules.HasFilter(new InboundMessageQuery(Tenant, ActionState: InboundActionState.Failed)));
         Assert.True(InboundRules.HasFilter(new InboundMessageQuery(Tenant, From: Now)));
     }
-}
 
+    [Fact]
+    public void Only_the_members_a_caller_names_are_held_to_the_ceilings()
+    {
+        // Stored when the ceilings were higher: everything is above them now.
+        InboundDomainSettings stale = new(Domain, Tenant, true, InboundDmarcAction.Flag, 20_000_000, 500, 50, 0, 365, Now);
+        Assert.Equal(5, InboundRules.ValidateSettings(stale, Ceilings).Count);
+        Assert.Empty(InboundRules.ValidateSettings(stale, Ceilings, []));                                   // a caller that changed nothing of them
+        Assert.Equal(["retentionDays"], InboundRules.ValidateSettings(stale, Ceilings, ["retentionDays"]).Select(e => e.Field).ToArray());
+        Assert.Equal(["maxMessageBytes", "maxStoredBytes"], InboundRules.ValidateSettings(stale, Ceilings, ["maxMessageBytes", "maxStoredBytes", "dmarcAction"]).Select(e => e.Field).ToArray());
+    }
+
+    [Fact]
+    public void The_effective_limits_are_the_domains_own_value_never_above_the_ceiling_and_zero_is_unlimited()
+    {
+        InboundDomainSettings none = InboundDomainSettings.Disabled(Domain, Tenant, Now);
+        Assert.Equal(new InboundEffectiveLimits(10_000_000, 100, 10, 1L << 30, 7), InboundRules.Effective(none, Ceilings, 7));
+
+        InboundDomainSettings lower = none with { MaxMessageBytes = 1_000_000, MaxMessagesPerMinute = 10, MaxMessagesPerMinutePerRemote = 2, MaxStoredBytes = 1L << 20, RetentionDays = 3 };
+        Assert.Equal(new InboundEffectiveLimits(1_000_000, 10, 2, 1L << 20, 3), InboundRules.Effective(lower, Ceilings, 7));
+
+        InboundDomainSettings stale = none with { MaxMessageBytes = 99_000_000, MaxMessagesPerMinute = 5000, MaxMessagesPerMinutePerRemote = 500, MaxStoredBytes = 0, RetentionDays = 0 };
+        Assert.Equal(new InboundEffectiveLimits(10_000_000, 100, 10, 1L << 30, 30), InboundRules.Effective(stale, Ceilings, 7));   // "unlimited" and "forever" cannot outgrow a finite ceiling
+
+        InboundCeilings open = Ceilings with { MaxStoredBytesPerDomain = 0, MaxRetentionDays = 0 };
+        Assert.Equal((0L, 0), (InboundRules.Effective(stale, open, 7).MaxStoredBytes, InboundRules.Effective(stale, open, 7).RetentionDays));
+        Assert.Equal(1L << 20, InboundRules.Effective(lower, open, 7).MaxStoredBytes);
+    }
+
+    [Fact]
+    public void A_forward_target_in_the_routes_own_domain_is_found_whatever_the_spelling_of_the_domain()
+    {
+        InboundRouteRecord route = Route(InboundMatchKind.CatchAll, null, action: InboundActionKind.Forward, forwardTo: ["x@xn--bcher-kva.example", "y@elsewhere.test"]);
+        Assert.Equal(["forwardTo[0]"], InboundRules.ValidateRoute(route, "b\u00fccher.example").Select(e => e.Field).ToArray());
+        Assert.Equal(["forwardTo[0]"], InboundRules.ValidateRoute(route with { ForwardTo = ["x@b\u00fccher.example", "y@elsewhere.test"] }, "XN--BCHER-KVA.example.").Select(e => e.Field).ToArray());
+        Assert.Empty(InboundRules.ValidateRoute(route with { ForwardTo = ["x@bucher.example"] }, "b\u00fccher.example"));
+
+        // The same address spelled with the U-label and the A-label is listed twice.
+        InboundRouteRecord twice = route with { ForwardTo = ["x@b\u00fccher.test", "x@xn--bcher-kva.test"] };
+        Assert.Equal(["forwardTo[1]"], InboundRules.ValidateRoute(twice, "own.example").Select(e => e.Field).ToArray());
+    }
+
+    [Fact]
+    public void The_fingerprint_of_a_domain_configuration_changes_with_anything_the_receive_path_uses()
+    {
+        InboundDomainSettings settings = new(Domain, Tenant, true, InboundDmarcAction.Flag, null, null, null, null, 14, Now);
+        InboundRouteRecord route = Route(InboundMatchKind.Address, "support", action: InboundActionKind.Forward, forwardTo: ["a@elsewhere.test"]);
+        InboundDomainConfiguration Make(InboundDomainSettings s, InboundRouteRecord[] routes, DomainStatus status = DomainStatus.Verified, bool tenantEnabled = true) =>
+            new("example.com", Domain, Tenant, tenantEnabled, status, s, routes);
+
+        string baseline = Make(settings, [route]).ETag;
+        Assert.Equal(baseline, Make(settings, [route with { ForwardTo = ["a@elsewhere.test"] }]).ETag);   // equal content, equal fingerprint
+        Assert.Equal(24, baseline.Length);
+
+        Assert.NotEqual(baseline, Make(settings with { RetentionDays = 15 }, [route]).ETag);
+        Assert.NotEqual(baseline, Make(settings with { DmarcAction = InboundDmarcAction.Reject }, [route]).ETag);
+        Assert.NotEqual(baseline, Make(settings, [route with { ForwardTo = ["b@elsewhere.test"] }]).ETag);
+        Assert.NotEqual(baseline, Make(settings, [route with { Order = 11 }]).ETag);
+        Assert.NotEqual(baseline, Make(settings, []).ETag);
+        Assert.NotEqual(baseline, Make(settings, [route], DomainStatus.Failed).ETag);
+        Assert.NotEqual(baseline, Make(settings, [route], tenantEnabled: false).ETag);
+    }
+}

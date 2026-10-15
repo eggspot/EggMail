@@ -152,6 +152,26 @@ public sealed class DomainsApi(ApiAuthenticator auth, IStorage storage, ISecretP
             throw ApiException.Conflict("A check or rotation of this domain is running; retry in a moment.");
         }
 
+        // Received mail belongs to the domain: deleting the domain would leave it unreachable through the API but kept (and counted) until retention. Refuse unless the caller says to purge it.
+        InboundUsage stored = await storage.Inbound.GetUsageAsync(caller.TenantId, domain.Id, context.RequestAborted).ConfigureAwait(false);
+        if (stored.Messages > 0)
+        {
+            if (!string.Equals(context.Request.Query["purgeInbound"], "true", StringComparison.Ordinal))
+            {
+                throw new ApiException(
+                    StatusCodes.Status409Conflict, ApiCodes.Conflict,
+                    $"The domain still has {stored.Messages} received message(s). Delete them first, or pass purgeInbound=true to delete them with the domain (needs the '{ApiScopes.InboundWrite}' scope).",
+                    extensions: new Dictionary<string, object?> { ["reason"] = "inbound_messages_exist", ["messages"] = stored.Messages });
+            }
+
+            if (!caller.HasScope(ApiScopes.InboundWrite))
+            {
+                throw ApiException.Forbidden($"purgeInbound=true deletes received mail and needs the '{ApiScopes.InboundWrite}' scope.");
+            }
+
+            await storage.Inbound.DeleteMatchingAsync(new InboundMessageQuery(caller.TenantId, DomainId: domain.Id), context.RequestAborted).ConfigureAwait(false);
+        }
+
         await Config.DeleteDomainAsync(domain.Id, context.RequestAborted).ConfigureAwait(false);
         Mta.Host.Submission.DomainChangeSignal.Bump();
         return ApiResults.NoContent();

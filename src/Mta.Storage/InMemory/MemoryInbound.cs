@@ -192,6 +192,7 @@ internal sealed class MemoryInbound(MemoryState s) : IInboundMessageStore
             e.RetryGeneration++;
             e.ActionNextAttemptAt = StorageTime.Normalize(now);
             e.ActionFinishedAt = null;
+            e.ActionNote = null;
             e.LeaseOwner = null;
             e.LeaseUntil = InboundMapping.NoLease;
             return R(InboundRetryResult.Queued);
@@ -260,6 +261,7 @@ internal sealed class MemoryInbound(MemoryState s) : IInboundMessageStore
             e.ActionNextAttemptAt = outcome.State == InboundActionState.Pending ? StorageTime.Normalize(outcome.NextAttemptAt) : null;
             e.ActionFinishedAt = outcome.State == InboundActionState.Pending ? null : at;
             e.ActionLastError = outcome.State == InboundActionState.Done ? null : InboundErrorText.Clean(outcome.Error, 1000);
+            e.ActionNote = outcome.State == InboundActionState.Done ? InboundErrorText.CleanNote(outcome.Note) : null;
             e.LeaseOwner = null;
             e.LeaseUntil = InboundMapping.NoLease;
             if (outcome.ForwardMessageId is { } forward)

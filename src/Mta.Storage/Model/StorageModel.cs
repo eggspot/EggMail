@@ -217,6 +217,8 @@ public static class StorageModel
             e.HasIndex(x => new { x.TenantId, x.EnvelopeTo, x.Id });
             e.HasIndex(x => new { x.DomainId, x.ReceivedAt });
             e.HasIndex(x => x.ActionNextAttemptAt).HasFilter("action_state = 0");
+            // The retention pass for the server default scans the settled messages by age; pending ones are never candidates.
+            e.HasIndex(x => x.ReceivedAt).HasFilter("action_state <> 0");
         });
         mb.Entity<InboundMessageRawEntity>(e =>
         {

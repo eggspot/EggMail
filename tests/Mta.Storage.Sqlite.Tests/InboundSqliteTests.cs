@@ -144,4 +144,47 @@ public class InboundSqliteTests : SqliteTestBase
         Assert.Equal(before + 1, Sql.WriterMetrics["queue"].Commands);
         Assert.Equal(2, ScalarLong(PathOf("queue.db"), "SELECT count(*) FROM inbound_message"));
     }
+
+    [Fact]
+    public async Task A_full_disk_fails_an_inbound_write_as_storage_full_and_keeps_what_was_stored()
+    {
+        (DomainRecord domain, Guid route) = await DomainAsync();
+        await Storage.Inbound.AcceptAsync([Draft(domain, route, InboundActionKind.Store, Clock.UtcNow, 1024)], default);
+        await ReopenAsync();   // closes the files so that the page count below includes everything
+        string queue = PathOf("queue.db");
+        SqliteFile.PageLimitsForTests[queue] = (int)ScalarLong(queue, "PRAGMA page_count") + 8;
+        try
+        {
+            await ReopenAsync();   // the writer connection of the reopened file carries the limit
+
+            int accepted = 0;
+            StorageFullException? full = null;
+            for (int i = 0; i < 100 && full is null; i++)
+            {
+                try
+                {
+                    await Storage.Inbound.AcceptAsync([Draft(domain, route, InboundActionKind.Store, Clock.UtcNow.AddMilliseconds(i + 1), 65536)], default);
+                    accepted++;
+                }
+                catch (StorageFullException ex)
+                {
+                    full = ex;   // not a StorageConflictException: a full disk is the operator's problem and the sender retries (452 4.3.1)
+                }
+            }
+
+            Assert.NotNull(full);
+            Assert.True(accepted < 100, "the cap must bite");
+            Assert.Equal(1 + accepted, (await Storage.Inbound.GetUsageAsync(TenantA, null, default)).Messages);
+        }
+        finally
+        {
+            SqliteFile.PageLimitsForTests.TryRemove(queue, out _);
+        }
+    }
+
+    [Fact]
+    public async Task The_retention_pass_for_the_server_default_has_an_index_on_settled_messages()
+    {
+        Assert.Equal(1, ScalarLong(PathOf("queue.db"), "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'IX_inbound_message_received_at' AND sql LIKE '%action_state%<>%'"));
+    }
 }

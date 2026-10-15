@@ -76,6 +76,40 @@ public static class InboundMapping
         }
     });
 
+    /// <summary>The longest stored client-supplied text (HELO name, address, domains in the verdicts): the SMTP limits are looser than this and the values reach the dashboard and webhooks.</summary>
+    public const int MaxTextLength = 255;
+
+    /// <summary>Client-supplied text for storage: control characters removed, trimmed, at most <paramref name="maxLength"/> characters (never a lone surrogate). Null when nothing is left.</summary>
+    public static string? CleanText(string? text, int maxLength)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return null;
+        }
+
+        var sb = new System.Text.StringBuilder(Math.Min(text.Length, maxLength));
+        foreach (char c in text)
+        {
+            if (sb.Length >= maxLength)
+            {
+                break;
+            }
+
+            if (!char.IsControl(c))
+            {
+                sb.Append(c);
+            }
+        }
+
+        if (sb.Length > 0 && char.IsHighSurrogate(sb[^1]))
+        {
+            sb.Length--;
+        }
+
+        string clean = sb.ToString().Trim();
+        return clean.Length == 0 ? null : clean;
+    }
+
     /// <summary>
     /// The subject for display and search: line breaks and tabs become one space, other control characters are removed, and the length is bounded
     /// (<see cref="InboundRules.MaxSubjectLength"/>). Null when nothing is left.
@@ -131,20 +165,20 @@ public static class InboundMapping
             DomainId = d.DomainId,
             Domain = d.Domain.ToLowerInvariant(),
             ReceivedAt = received,
-            RemoteAddress = d.RemoteAddress,
-            Helo = d.Helo,
+            RemoteAddress = CleanText(d.RemoteAddress, MaxTextLength) ?? string.Empty,
+            Helo = CleanText(d.Helo, MaxTextLength),
             TlsUsed = d.TlsUsed,
             EnvelopeFrom = d.EnvelopeFrom.ToLowerInvariant(),
             EnvelopeTo = d.EnvelopeTo.ToLowerInvariant(),
             Subject = CleanSubject(d.Subject),
             Size = d.Raw.Length,
             Spf = d.Auth.Spf,
-            SpfDomain = d.Auth.SpfDomain,
+            SpfDomain = CleanText(d.Auth.SpfDomain, MaxTextLength),
             SpfHelo = d.Auth.SpfHelo,
             Dkim = d.Auth.Dkim,
-            DkimDomain = d.Auth.DkimDomain,
+            DkimDomain = CleanText(d.Auth.DkimDomain, MaxTextLength),
             Dmarc = d.Auth.Dmarc,
-            DmarcPolicy = d.Auth.DmarcPolicy,
+            DmarcPolicy = CleanText(d.Auth.DmarcPolicy, MaxTextLength),
             Arc = d.Auth.Arc,
             Disposition = d.Disposition,
             RouteId = d.RouteId,
@@ -161,5 +195,48 @@ public static class InboundMapping
     public static InboundMessage ToRecord(this InboundMessageEntity e) => new(
         e.Id, e.TenantId, e.DomainId, e.Domain, e.ReceivedAt, e.RemoteAddress, e.Helo, e.TlsUsed, e.EnvelopeFrom, e.EnvelopeTo, e.Subject, e.Size,
         new InboundAuthResults(e.Spf, e.SpfDomain, e.SpfHelo, e.Dkim, e.DkimDomain, e.Dmarc, e.DmarcPolicy, e.Arc),
-        e.Disposition, e.RouteId, e.ActionKind, e.ActionState, e.ActionAttempts, e.ActionNextAttemptAt, e.ActionFinishedAt, e.ActionLastError, e.ForwardMessageId, e.HasRaw, e.RetryGeneration);
+        e.Disposition, e.RouteId, e.ActionKind, e.ActionState, e.ActionAttempts, e.ActionNextAttemptAt, e.ActionFinishedAt, e.ActionLastError, e.ForwardMessageId, e.HasRaw, e.RetryGeneration, e.ActionNote);
+}
+
+/// <summary>Bounds and cleans the failure text kept on a message: a sentence for people, without control characters or unbounded length.</summary>
+public static class InboundErrorText
+{
+    /// <summary>A completion note is a code: letters, digits and <c>_</c> only, at most 64 characters; anything else is dropped (null when nothing is left).</summary>
+    public static string? CleanNote(string? note)
+    {
+        if (string.IsNullOrEmpty(note))
+        {
+            return null;
+        }
+
+        string code = new string(note.Where(c => char.IsAsciiLetterOrDigit(c) || c == '_').Take(64).ToArray());
+        return code.Length == 0 ? null : code;
+    }
+
+    public static string? Clean(string? error, int maxLength)
+    {
+        if (string.IsNullOrWhiteSpace(error))
+        {
+            return null;
+        }
+
+        var sb = new System.Text.StringBuilder(Math.Min(error.Length, maxLength));
+        foreach (char c in error)
+        {
+            if (sb.Length >= maxLength)
+            {
+                break;
+            }
+
+            sb.Append(char.IsControl(c) ? ' ' : c);
+        }
+
+        if (sb.Length > 0 && char.IsHighSurrogate(sb[^1]))
+        {
+            sb.Length--;
+        }
+
+        string text = sb.ToString().Trim();
+        return text.Length == 0 ? null : text;
+    }
 }

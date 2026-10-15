@@ -77,6 +77,7 @@ CREATE TABLE inbound_message (
     action_next_attempt_at timestamp with time zone,
     action_finished_at timestamp with time zone,
     action_last_error text COLLATE "C",
+    action_note text COLLATE "C",
     forward_message_id uuid,
     has_raw boolean NOT NULL,
     lease_owner text COLLATE "C",
@@ -93,6 +94,8 @@ CREATE INDEX "IX_inbound_message_tenant_id_envelope_to_id" ON inbound_message (t
 CREATE INDEX "IX_inbound_message_domain_id_received_at" ON inbound_message (domain_id, received_at);
 
 CREATE INDEX "IX_inbound_message_action_next_attempt_at" ON inbound_message (action_next_attempt_at) WHERE action_state = 0;
+
+CREATE INDEX "IX_inbound_message_received_at" ON inbound_message (received_at) WHERE action_state <> 0;
 
 CREATE TABLE inbound_message_raw (
     message_id uuid NOT NULL,

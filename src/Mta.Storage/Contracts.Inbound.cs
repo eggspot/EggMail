@@ -199,7 +199,36 @@ public sealed record InboundDomainConfiguration(
     bool TenantEnabled,
     DomainStatus DomainStatus,
     InboundDomainSettings Settings,
-    IReadOnlyList<InboundRouteRecord> Routes);
+    IReadOnlyList<InboundRouteRecord> Routes)
+{
+    /// <summary>
+    /// A fingerprint of everything in this object (domain, status, tenant state, settings and the enabled routes with their targets): it changes exactly when the receive path's view of
+    /// the domain changes. The receive path compares it after each refresh to rebuild its derived structures (compiled route lists, limiter configuration) only for the domains that changed.
+    /// It is computed from the content, so it needs no storage support and is identical on every backend and replica.
+    /// </summary>
+    public string ETag
+    {
+        get
+        {
+            var sb = new System.Text.StringBuilder(256);
+            sb.Append(DomainName).Append('|').Append(DomainId).Append('|').Append(TenantId).Append('|').Append(TenantEnabled).Append('|').Append((int)DomainStatus);
+            InboundDomainSettings s = Settings;
+            sb.Append('|').Append(s.Enabled).Append('|').Append((int)s.DmarcAction).Append('|').Append(s.MaxMessageBytes).Append('|').Append(s.MaxMessagesPerMinute)
+                .Append('|').Append(s.MaxMessagesPerMinutePerRemote).Append('|').Append(s.MaxStoredBytes).Append('|').Append(s.RetentionDays).Append('|').Append(s.UpdatedAt.UtcTicks);
+            foreach (InboundRouteRecord r in Routes)
+            {
+                sb.Append('#').Append(r.Id).Append('|').Append(r.Order).Append('|').Append(r.Enabled).Append('|').Append((int)r.MatchKind).Append('|').Append(r.LocalPart).Append('|').Append(r.PlusAddressing)
+                    .Append('|').Append((int)r.ActionKind).Append('|').Append(r.WebhookEndpointId).Append('|').Append((int)r.WebhookFormat).Append('|').Append(r.UpdatedAt.UtcTicks);
+                foreach (string target in r.ForwardTo)
+                {
+                    sb.Append('>').Append(target);
+                }
+            }
+
+            return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(sb.ToString())))[..24];
+        }
+    }
+}
 
 /// <summary>One received message for one recipient (a transaction with several recipients stores one row, and one body, per recipient: tenants never share a stored copy).</summary>
 /// <param name="Id">Message id (UUIDv7; the retention clock reads the day from it).</param>
@@ -226,6 +255,7 @@ public sealed record InboundDomainConfiguration(
 /// <param name="ForwardMessageId">For a forward, the id of the outbound message that carries it.</param>
 /// <param name="HasRaw">The body is stored (false for discard, after a completed forward, or when it was deleted).</param>
 /// <param name="RetryGeneration">How often the action was put back with <see cref="IInboundMessageStore.RetryActionAsync"/>; part of the webhook id, so a manual retry is a new event for the receiver.</param>
+/// <param name="ActionNote">Set when the action finished <see cref="InboundActionState.Done"/> but something happened that the tenant should know (a short code such as <c>all_targets_suppressed</c> or <c>route_is_now_store</c>); null otherwise. Cleared by a retry.</param>
 public sealed record InboundMessage(
     Guid Id,
     Guid TenantId,
@@ -250,7 +280,8 @@ public sealed record InboundMessage(
     string? ActionLastError,
     Guid? ForwardMessageId,
     bool HasRaw,
-    int RetryGeneration = 0);
+    int RetryGeneration = 0,
+    string? ActionNote = null);
 
 /// <summary>
 /// A message to store, built by the receive path after verification and route matching. The state is derived, not given: webhook and forward
@@ -312,8 +343,9 @@ public sealed record ClaimedInboundAction(InboundMessage Message, byte[]? Raw);
 /// <param name="NextAttemptAt">Required for <see cref="InboundActionState.Pending"/>.</param>
 /// <param name="Error">What failed (kept as <see cref="InboundMessage.ActionLastError"/>; cleared by a success).</param>
 /// <param name="ForwardMessageId">The outbound message id of a forward.</param>
+/// <param name="Note">Only for <see cref="InboundActionState.Done"/>: a short code (letters, digits, <c>_</c>) for a completion the tenant should know about, kept as <see cref="InboundMessage.ActionNote"/>. Known codes: <c>all_targets_suppressed</c> (every forward target is on the tenant's suppression list: nothing was queued), <c>route_is_now_store</c> and <c>route_is_now_discard</c> (the route was changed to an action without delivery while the message waited; the body is kept until retention).</param>
 /// <param name="FreeBody">Delete the stored body: the runner sets it for a completed forward, whose copy now lives in the outbound queue. A completed webhook keeps the body for the attachment references until retention.</param>
-public sealed record InboundActionOutcome(InboundActionState State, DateTimeOffset At, DateTimeOffset? NextAttemptAt, string? Error, Guid? ForwardMessageId = null, bool FreeBody = false);
+public sealed record InboundActionOutcome(InboundActionState State, DateTimeOffset At, DateTimeOffset? NextAttemptAt, string? Error, Guid? ForwardMessageId = null, bool FreeBody = false, string? Note = null);
 
 public enum InboundRetryResult : byte
 {
@@ -361,7 +393,11 @@ public interface IInboundConfigStore
     /// <summary>One route of the tenant; null when unknown or another tenant's.</summary>
     ValueTask<InboundRouteRecord?> GetRouteAsync(Guid tenantId, Guid routeId, CancellationToken cancellationToken);
 
-    /// <summary>Inserts or replaces a route (validated by <see cref="Logic.InboundRules.ValidateRoute"/> before the call). The domain must exist and belong to the route's tenant (<see cref="StorageConflictException"/> otherwise).</summary>
+    /// <summary>
+    /// Inserts or replaces a route (validated by <see cref="Logic.InboundRules.ValidateRoute"/> before the call). The domain must exist and belong to the route's tenant, and a webhook route's
+    /// endpoint must exist and belong to the same tenant: both are checked inside the same write as the insert (<see cref="StorageConflictException"/> otherwise), so an endpoint deleted at the same moment
+    /// cannot be left behind a route. The schema has no foreign keys by design; this and <see cref="IConfigStore.DeleteWebhookEndpointAsync"/> are the integrity rule.
+    /// </summary>
     ValueTask UpsertRouteAsync(InboundRouteRecord route, CancellationToken cancellationToken);
 
     /// <summary>Deletes a route of the tenant; false when there is none. Messages that referenced it keep their row (their action then fails with <c>route_deleted</c> if still pending).</summary>

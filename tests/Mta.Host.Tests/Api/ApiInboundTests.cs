@@ -802,4 +802,107 @@ public class ApiInboundTests : IAsyncLifetime
         await _f.Storage.Inbound.UpsertRouteAsync(new InboundRouteRecord(Ids.New(), ApiFixture.TenantAId, _domainA.Id, "late", 1, true, InboundMatchKind.CatchAll, null, false, InboundActionKind.Webhook, endpoint, InboundWebhookFormat.Json, [], _f.Clock.UtcNow, _f.Clock.UtcNow), default);
         await Assert.ThrowsAsync<StorageConflictException>(async () => await _f.Storage.Config.DeleteWebhookEndpointAsync(ApiFixture.TenantAId, endpoint, default));
     }
+
+    [Fact]
+    public async Task A_stored_value_above_a_lowered_ceiling_never_blocks_a_change_that_does_not_touch_it()
+    {
+        await WithCeilingsAsync(d =>
+        {
+            d.MaxMessageBytes = 5_000_000;
+            d.MaxMessagesPerMinute = 100;
+            d.MaxRetentionDays = 30;
+        });
+        // Valid when it was stored, above the ceilings the operator has now.
+        await _f.Storage.Inbound.UpsertSettingsAsync(new InboundDomainSettings(_domainA.Id, ApiFixture.TenantAId, true, InboundDmarcAction.RecordOnly, 20_000_000, 900, null, null, 365, _f.Clock.UtcNow), default);
+
+        // Turning the domain off, or changing a member that is within the ceilings, works.
+        Reply off = await _a.PatchAsync(_base, new { enabled = false });
+        Assert.Equal(HttpStatusCode.OK, off.Status);
+        Assert.False(off["enabled"].GetBoolean());
+        Assert.Equal(HttpStatusCode.OK, (await _a.PatchAsync(_base, new { dmarcAction = "flag", maxMessagesPerMinute = 50 })).Status);
+
+        // Naming a member that is still above its ceiling is refused, and only that one.
+        Reply above = await _a.PatchAsync(_base, new { retentionDays = 365, maxMessagesPerMinute = 60 });
+        above.Problem(HttpStatusCode.BadRequest, "validation_failed");
+        Assert.Equal(["retentionDays"], above.ErrorFields);
+        Assert.Equal(HttpStatusCode.OK, (await _a.PatchAsync(_base, new { retentionDays = 30 })).Status);
+    }
+
+    [Fact]
+    public async Task The_dmarc_action_error_lists_the_accepted_words()
+    {
+        Reply r = await _a.PatchAsync(_base, new { dmarcAction = "quarantine" });
+
+        r.Problem(HttpStatusCode.BadRequest, "validation_failed");
+        Assert.Equal("Must be one of: record_only, flag, reject.", r.Json.GetProperty("errors").EnumerateArray().Single().GetProperty("message").GetString());
+    }
+
+    [Fact]
+    public async Task A_forward_route_needs_the_send_scope_as_well_because_it_sends_the_mail_it_receives()
+    {
+        ApiClient inboundOnly = await _f.KeyClientAsync(ApiFixture.TenantAId, "inbound:read", "inbound:write");
+        object forward = new { match = new { kind = "catch_all" }, action = new { kind = "forward", forwardTo = new[] { "a@elsewhere.test" } } };
+
+        (await inboundOnly.PostAsync(_base + "/routes", forward)).Problem(HttpStatusCode.Forbidden, "forbidden");
+        Assert.Empty(await _f.Storage.Inbound.GetRoutesAsync(_domainA.Id, default));
+        // The other actions do not send anything and need no more than inbound:write.
+        Assert.Equal(HttpStatusCode.Created, (await inboundOnly.PostAsync(_base + "/routes", CatchAll())).Status);
+
+        ApiClient withSend = await _f.KeyClientAsync(ApiFixture.TenantAId, "inbound:read", "inbound:write", "send");
+        Reply created = await withSend.PostAsync(_base + "/routes", forward);
+        Assert.Equal(HttpStatusCode.Created, created.Status);
+        // Changing only the name of a forward route is not creating a forward.
+        Assert.Equal(HttpStatusCode.OK, (await inboundOnly.PatchAsync(_base + "/routes/" + created.Str("id"), new { name = "renamed" })).Status);
+    }
+
+    [Fact]
+    public async Task A_domain_with_received_mail_is_deleted_only_when_the_mail_is_purged_with_it()
+    {
+        await StoreAsync(ApiFixture.TenantAId, _domainA, InboundActionKind.Store);
+        await StoreAsync(ApiFixture.TenantAId, _domainA, InboundActionKind.Webhook);
+        string url = $"/api/v1/domains/{_domainA.Id:N}";
+
+        Reply refused = await _a.DeleteAsync(url);
+        refused.Problem(HttpStatusCode.Conflict, "conflict");
+        Assert.Equal("inbound_messages_exist", refused["reason"].GetString());
+        Assert.Equal(2, refused["messages"].GetInt64());
+        Assert.NotNull(await _f.Storage.Config.GetDomainAsync(_domainA.Id, default));
+
+        // Purging deletes received mail: it needs inbound:write on top of domains.
+        ApiClient domainsOnly = await _f.KeyClientAsync(ApiFixture.TenantAId, "domains");
+        (await domainsOnly.DeleteAsync(url + "?purgeInbound=true")).Problem(HttpStatusCode.Forbidden, "forbidden");
+        Assert.Equal(2, (await _f.Storage.Inbound.GetUsageAsync(ApiFixture.TenantAId, null, default)).Messages);
+
+        Assert.Equal(HttpStatusCode.NoContent, (await _a.DeleteAsync(url + "?purgeInbound=true")).Status);
+        Assert.Null(await _f.Storage.Config.GetDomainAsync(_domainA.Id, default));
+        Assert.Equal(0, (await _f.Storage.Inbound.GetUsageAsync(ApiFixture.TenantAId, null, default)).Messages);
+    }
+
+    [Fact]
+    public async Task The_detail_shows_what_the_route_does_now_and_the_note_of_a_completed_action()
+    {
+        InboundRouteRecord route = new(Ids.New(), ApiFixture.TenantAId, _domainA.Id, "r", 1, true, InboundMatchKind.CatchAll, null, false, InboundActionKind.Webhook, await EndpointAsync(ApiFixture.TenantAId), InboundWebhookFormat.Json, [], _f.Clock.UtcNow, _f.Clock.UtcNow);
+        await _f.Storage.Inbound.UpsertRouteAsync(route, default);
+        InboundMessageDraft draft = await StoreAsync(ApiFixture.TenantAId, _domainA, InboundActionKind.Webhook);
+        // The helper gives the message a route id of its own; store it again pointing at the real route.
+        await _f.Storage.Inbound.DeleteAsync(ApiFixture.TenantAId, draft.Id, default);
+        draft.RouteId = route.Id;
+        await _f.Storage.Inbound.AcceptAsync([draft], default);
+        string url = "/api/v1/inbound/messages/" + draft.Id.ToString("N");
+
+        Reply before = await _a.GetAsync(url);
+        Assert.Equal(("webhook", "webhook"), (before["action"].GetProperty("kind").GetString(), before["action"].GetProperty("currentKind").GetString()));
+
+        // The route is changed while the message waits: the message keeps the kind it was received with, the detail says what runs now.
+        await _f.Storage.Inbound.UpsertRouteAsync(route with { ActionKind = InboundActionKind.Store, WebhookEndpointId = null }, default);
+        await _f.Storage.Inbound.ClaimActionsAsync("w", 5, _f.Clock.UtcNow, TimeSpan.FromMinutes(1), default);
+        await _f.Storage.Inbound.CompleteActionAsync(draft.Id, "w", new InboundActionOutcome(InboundActionState.Done, _f.Clock.UtcNow, null, null, Note: "route_is_now_store"), default);
+        Reply after = await _a.GetAsync(url);
+        Assert.Equal(("webhook", "store", "done", "route_is_now_store"), (after["action"].GetProperty("kind").GetString(), after["action"].GetProperty("currentKind").GetString(), after["action"].GetProperty("state").GetString(), after["action"].GetProperty("note").GetString()));
+
+        // A list entry carries the note but not the current kind.
+        JsonElement entry = (await _a.GetAsync("/api/v1/inbound/messages"))["items"][0].GetProperty("action");
+        Assert.Equal("route_is_now_store", entry.GetProperty("note").GetString());
+        Assert.False(entry.TryGetProperty("currentKind", out _));
+    }
 }

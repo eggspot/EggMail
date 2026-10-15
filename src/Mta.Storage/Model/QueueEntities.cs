@@ -150,6 +150,9 @@ public sealed class InboundMessageEntity
     public DateTimeOffset? ActionNextAttemptAt { get; set; }
     public DateTimeOffset? ActionFinishedAt { get; set; }
     public string? ActionLastError { get; set; }
+
+    /// <summary>A short code for a completion the tenant should know about (see <see cref="InboundActionOutcome.Note"/>).</summary>
+    public string? ActionNote { get; set; }
     public Guid? ForwardMessageId { get; set; }
 
     /// <summary>The body row exists.</summary>
