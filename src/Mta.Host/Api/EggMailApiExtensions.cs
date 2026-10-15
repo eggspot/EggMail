@@ -33,7 +33,7 @@ public static class EggMailApiExtensions
         services.TryAddSingleton(sp =>
         {
             ApiOptions o = sp.GetRequiredService<ApiOptions>();
-            return new DomainRecordOptions { BounceDomain = o.BounceDomain, SpfInclude = o.SpfInclude };
+            return o.DomainRecords ?? new DomainRecordOptions { BounceDomain = o.BounceDomain, SpfInclude = o.SpfInclude };
         });
         services.TryAddSingleton<DomainChecker>();
         services.TryAddSingleton<IStorageSwitchService, UnavailableStorageSwitchService>();
@@ -83,11 +83,12 @@ public static class EggMailApiExtensions
     public static ApiOptions ApiOptionsFrom(MtaConfig config, IReadOnlySet<string> lockedKeys)
     {
         ApiSection api = config.Api;
+        DomainRecordOptions domainRecords = DomainRecordOptionsFrom(config);
         return new ApiOptions
         {
             MaxMessageBytes = config.Smtp.MaxMessageSize,
             MaxRecipients = config.Smtp.MaxRecipients,
-            BounceDomain = config.Delivery.BounceDomain,
+            BounceDomain = domainRecords.BounceDomain,
             MessageIdDomain = config.Hostname,
             Webhooks = config.Webhooks,
             LockedKeys = lockedKeys,
@@ -107,10 +108,30 @@ public static class EggMailApiExtensions
             MaxSmtpCredentialsPerTenant = api.MaxSmtpCredentialsPerTenant,
             MaxWebhooksPerTenant = api.MaxWebhooksPerTenant,
             MaxStatsRows = api.MaxStatsRows,
-            SpfInclude = api.SpfInclude,
+            SpfInclude = domainRecords.SpfInclude,
+            DomainRecords = domainRecords,   // the one source of the bounce domain and the SPF include for the suggested records (the two properties above are copies)
             MetricsAllowedNetworks = api.MetricsAllowedNetworks.Count == 0
                 ? ApiOptions.DefaultMetricsNetworks()
                 : api.MetricsAllowedNetworks.Select(Mta.Webhooks.IpNetwork.Parse).ToList(),
+        };
+    }
+
+    /// <summary>The options of the DNS records suggested for a sending domain: the bounce domain, host name, sending IP and the <c>Domains:*</c> settings.</summary>
+    public static DomainRecordOptions DomainRecordOptionsFrom(MtaConfig config)
+    {
+        DomainsSection d = config.Domains;
+        return new DomainRecordOptions
+        {
+            BounceDomain = config.Delivery.BounceDomain,
+            SpfInclude = config.Api.SpfInclude,
+            ServerHostname = DomainRecordOptions.UsableHostname(config.Hostname),
+            PublicSendingIp = config.Delivery.PublicSendingIp,
+            DmarcPolicy = d.DmarcPolicy,
+            DmarcReportAddress = d.DmarcReportAddress,
+            TlsReportAddress = d.TlsReportAddress,
+            MtaStsMode = d.MtaStsMode,
+            MtaStsMaxAge = d.MtaStsMaxAge,
+            MtaStsMx = d.MtaStsMx.Select(m => DomainRecordOptions.NormalizeMtaStsMx(m) ?? m.Trim().ToLowerInvariant()).ToList(),
         };
     }
 

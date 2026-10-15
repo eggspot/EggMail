@@ -48,6 +48,25 @@ describe('WarningBanner', () => {
   });
 });
 
+describe('certificate (ACME) warnings', () => {
+  it('shows the pending and failing states with a readable title and the server text', () => {
+    renderWithApp(<WarningBanner />, {
+      capabilities: makeCapabilities({
+        warnings: [
+          { code: 'acme_pending', message: 'The certificate for mail.example.com is being requested.' },
+          { code: 'acme_failing', message: 'Last error: Timeout during connect. Next attempt: 2026-10-15 08:30 UTC.' },
+        ],
+      }),
+    });
+    const banners = screen.getAllByRole('status');
+    expect(banners).toHaveLength(2);
+    expect(banners[0].textContent).toContain('Certificate pending');
+    expect(banners[0].textContent).toContain('being requested');
+    expect(banners[1].textContent).toContain('Certificate request failing');
+    expect(banners[1].textContent).toContain('Next attempt: 2026-10-15 08:30 UTC.');
+  });
+});
+
 describe('history mode adaptation', () => {
   it('shows an explanatory empty state instead of children when history is statsonly', () => {
     renderWithApp(

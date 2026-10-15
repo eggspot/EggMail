@@ -135,7 +135,7 @@ A pure function implementing design 8: `Evaluate(state, checkResult, now)` and `
 | `TemporaryFailure` | hourly; back to `Verified` on success; to `Failed` and `SendingPaused = true` once the 72 h grace (counted from entering temporary failure) has passed at a failed check |
 | `Failed` | daily; recovers to `Verified` (and lifts the pause it set) when the records return |
 | DNS temporary failure | never changes the status or counters; re-check in 5 min |
-| "Verify now" | at least 30 s after the last check (`CanVerifyNow`) |
+| "Check DNS" (`POST /domains/{id}/verify`) | at least 30 s after the last check (`CanVerifyNow`) |
 
 A manual pause on a healthy domain is not lifted by a successful check; only the pause set on entering `Failed` is.
 

@@ -959,6 +959,38 @@ pre.patch {
 .dns-detail td {
   background: var(--surface-2);
 }
+.dns-level {
+  margin-top: 0.25rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.dns-note {
+  margin: 0.25rem 0 0;
+  max-width: 34rem;
+}
+pre.zone-file {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75rem;
+  overflow: auto;
+  white-space: pre;
+  max-height: 28rem;
+  font-size: 0.85rem;
+}
+.readiness {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1.5rem;
+}
+.readiness-state {
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+.readiness-actions {
+  margin-left: auto;
+}
 .dns-hints {
   margin: 0.25rem 0 0;
   padding-left: 1.25rem;

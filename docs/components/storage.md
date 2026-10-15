@@ -124,7 +124,7 @@ State the process used to keep in memory only, and what an asynchronous bounce n
 
 | Table (part) | What it holds | Writer |
 |---|---|---|
-| `domain_record_check` (config) | the result of the last DNS check of each record a domain must publish: `(domain_id, record_key = "TYPE\|host")` to `status` (ok, missing, invalid, pending), what was `found`, `checked_at`. The set of a domain is replaced by each check and deleted with the domain | `DomainVerificationService` after each check |
+| `domain_record_check` (config) | the result of the last DNS check of each record a domain must publish: `(domain_id, record_key = "TYPE\|host")` to `status` (ok, missing, invalid, mismatch, pending), what was `found`, `checked_at`. The set of a domain is replaced by each check and deleted with the domain | `DomainVerificationService` after each check |
 | `tls_rpt_bucket` (config) | an append-only journal of TLS-RPT collector flushes: one row per flush, policy domain and UTC day, with the aggregate as JSON and the number of failed attempts to send that day's report | `TlsReportJournal` (every minute and at shutdown); the report sender merges the rows of a completed day and deletes them once the report is sent |
 | `sending_counter` (config) | the hourly and daily counters behind the sending caps and the warm-up: `(scope, tenant_id, domain, window_kind, window_index)` to `count`; the value is the sum of what every replica flushed | `SendingCounterPersistence` (write-behind, every 10 s and at shutdown) |
 | `message_index.message_id_header` (history) | the normalized `Message-ID` header of the message (no angle brackets, lower case), indexed with the tenant, so a returned bounce finds the message | intake, `History:Mode=Full` only |
