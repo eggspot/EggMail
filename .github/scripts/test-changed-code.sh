@@ -9,6 +9,26 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/changed-code.XXXXXX")
 trap 'cd /; rm -rf "$work"' EXIT
 failures=0
 
+# Hermetic: nothing of the caller's environment may reach the cases. On a push event the runner exports GITHUB_EVENT_NAME=push (and the other
+# GITHUB_* variables), which changed-code.sh reads: the self-test passed on pull requests and failed on main for exactly that reason. Git is
+# isolated the same way (no user or system configuration, an explicit identity, an explicit default branch), so the result does not depend on
+# the machine either.
+while IFS= read -r name; do
+  case $name in
+    GITHUB_* | GIT_* | RUNNER_* | CI) unset "$name" ;;
+  esac
+done < <(compgen -e)
+mkdir -p "$work/home"
+export HOME="$work/home" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+export GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.invalid GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.invalid
+
+# changed_code <event> [args]: the script as the workflow runs it for that event, with an otherwise empty GITHUB_* environment.
+changed_code() {
+  local event=$1
+  shift
+  GITHUB_EVENT_NAME=$event "$script" "$@"
+}
+
 expect() { # expect <expected> <description> <actual>
   if [ "$1" = "$3" ]; then
     echo "ok   $2 -> $3"
@@ -22,8 +42,6 @@ new_repo() { # new_repo <name>: a repository with docs/a.md, docs/operations.md 
   cd "$work"
   git init -q -b main "$1"
   cd "$1"
-  git config user.email test@example.invalid
-  git config user.name test
   mkdir docs src
   echo a >docs/a.md
   echo o >docs/operations.md
@@ -38,8 +56,6 @@ base=$(git rev-parse HEAD)
 cd "$work"
 git clone -q --depth=1 "file://$work/origin" pr
 cd pr
-git config user.email test@example.invalid
-git config user.name test
 
 # Only what the old workflow filter ignored: docs/**, *.md anywhere, .github/FUNDING.yml
 echo b >>docs/a.md
@@ -49,33 +65,33 @@ mkdir -p .github
 echo f >.github/FUNDING.yml
 git add .
 git commit -qm docs
-expect false "documentation only" "$("$script" "$base")"
+expect false "documentation only" "$(changed_code pull_request "$base")"
 
 echo c >>docs/operations.md
 git commit -qam "operations guide"
-expect true "docs/operations.md is read by tests, so it counts as code" "$("$script" "$base")"
+expect true "docs/operations.md is read by tests, so it counts as code" "$(changed_code pull_request "$base")"
 git reset -q --hard HEAD~1
 
 echo c >>src/x.cs
 git commit -qam code
-expect true "documentation plus a source file" "$("$script" "$base")"
+expect true "documentation plus a source file" "$(changed_code pull_request "$base")"
 git reset -q --hard HEAD~1
 
 mkdir -p .github/workflows
 echo w >.github/workflows/ci.yml
 git add .
 git commit -qm workflow
-expect true "a workflow file" "$("$script" "$base")"
+expect true "a workflow file" "$(changed_code pull_request "$base")"
 git reset -q --hard HEAD~1
 
 git mv src/x.cs docs/x.md
 git commit -qm "move source into docs"
-expect true "a source file renamed into docs/ (the removal of code is seen)" "$("$script" "$base")"
+expect true "a source file renamed into docs/ (the removal of code is seen)" "$(changed_code pull_request "$base")"
 git reset -q --hard HEAD~1
 
-expect true "no base given" "$("$script")"
-expect true "a base that cannot be fetched" "$("$script" 0000000000000000000000000000000000000001)"
-expect true "a push is never skipped" "$(GITHUB_EVENT_NAME=push "$script" "$base")"
+expect true "no base given" "$(changed_code pull_request)"
+expect true "a base that cannot be fetched" "$(changed_code pull_request 0000000000000000000000000000000000000001)"
+expect true "a push is never skipped" "$(changed_code push "$base")"
 
 # ---- merge commit (what actions/checkout gives a pull request): the pull request's own changes only
 new_repo merged
@@ -87,7 +103,7 @@ echo changed >>src/x.cs          # somebody else merges code into main after the
 git commit -qam "code on main"
 git switch -q -c merge-ref
 git merge -q --no-ff -m "merge of the pull request" feature
-expect false "documentation-only pull request whose base moved on with code" "$("$script" 0000000000000000000000000000000000000001)"
+expect false "documentation-only pull request whose base moved on with code" "$(changed_code pull_request 0000000000000000000000000000000000000001)"
 
 git switch -q feature
 echo y >src/y.cs
@@ -96,6 +112,6 @@ git commit -qm "code in the pull request"
 git switch -q main
 git switch -q -c merge-ref2
 git merge -q --no-ff -m "merge of the pull request" feature
-expect true "a pull request with code, merged" "$("$script" 0000000000000000000000000000000000000001)"
+expect true "a pull request with code, merged" "$(changed_code pull_request 0000000000000000000000000000000000000001)"
 
 [ "$failures" -eq 0 ]
