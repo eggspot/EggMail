@@ -152,6 +152,22 @@ public partial class MetricsDocumentationTests
     }
 
     [Fact]
+    public void The_documented_runtime_metrics_are_exported_by_the_default_exporter_with_the_documented_type()
+    {
+        var documented = DocumentedMetrics().Where(r => r.Key.StartsWith("dotnet_", StringComparison.Ordinal)).ToDictionary(r => r.Key, r => r.Value);
+        Assert.NotEmpty(documented);
+
+        using var exporter = new PrometheusTextExporter();
+        GC.Collect();   // the garbage collection counters need one collection to have happened
+        try { throw new InvalidOperationException("one exception, so the runtime has a type to count"); } catch (InvalidOperationException) { }
+        string text = exporter.Render();
+        foreach ((string name, string type) in documented)
+        {
+            Assert.True(text.Contains($"# TYPE {name} {type}\n", StringComparison.Ordinal), $"{name} ({type}) is documented but the default exporter does not render it as that type");
+        }
+    }
+
+    [Fact]
     public void Every_documented_metric_has_a_help_text_and_a_label_column()
     {
         // The table has four columns: metric, type, labels, meaning. A row without them is an unfinished row.

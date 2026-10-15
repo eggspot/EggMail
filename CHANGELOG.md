@@ -47,6 +47,7 @@ workflow refuses a stable tag without a non-empty section for that exact version
   sidecar so DANE works, Kubernetes manifests (StatefulSet for SQLite, Deployment for PostgreSQL, Services, NetworkPolicy, probes)
   and an end-to-end smoke test that the release workflow runs against the pushed image.
 - Benchmark harness (`bench/`) and a scheduled allocation-regression gate with a checked-in baseline.
+- Throughput matrix for both backends, each durable and non-durable, reported in pairs (`bench/run-local-matrix.sh` on a laptop, the `bench-throughput` workflow on a runner), and a soak test of the real published host (`bench/soak/run-soak.sh`, the `soak` workflow): hours of load, `kill -9` and backup/restore drills, PASS/FAIL criteria for lost messages, unflagged duplicates, memory, descriptor and thread growth, error rate and queue drain. `/metrics` also exports the .NET runtime meter (garbage collections, working set, thread pool).
 - Allocation round 3: the ingest path allocates about 1.7 KB per 200-byte message and 3.5 KB per 2 KB message on SQLite (was 5.1 and 10.7 KB), the
   SMTP server path alone 0.1 KB (was 1 KB); delivery about 25 KB per recipient (was 28 KB). New setting `Delivery:MaxIdleConnectionsPerTarget`
   (default 2, unchanged behaviour) for the idle outbound connections kept per destination (decision 89).
