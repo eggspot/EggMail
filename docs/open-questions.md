@@ -40,6 +40,9 @@ Note on the license: the Unlicense / CC0 public-domain dedication is the only mo
 
 ## Owner action items
 
+The owner-only steps below (and the other real-world checks: deploy with a public IP, DNS, Gmail/Outlook/Yahoo, ACME against a real CA, TLS-RPT, security audit, 7-day soak, first release, GitHub settings, restore drill) are written out as commands with expected output in [go-live-checklist.md](go-live-checklist.md).
+
+
 - **A cloud KMS for `Secrets:KeyProtection=Kms`.** Design section 9.1 lists `Certificate | Kms | None`. What is built: `Kms` with the `LocalKey` provider (AES-256-GCM, a 32-byte key from a file or the environment held outside the database) and the `IKeyWrapProvider` extension point. What is **not** built: AWS KMS, Azure Key Vault or Google Cloud KMS providers. Each needs a cloud SDK package (allowed outside the protocol assemblies) and, to be anything more than untested code, **an account to test against**, which only the owner can provide. Say which service(s) are wanted and provide a sandbox account; until then `Secrets:KmsProvider` with any other name stops the start with a message that points here. Decision: [decisions.md](decisions.md) 79.
 - **Funding:** enable and get approved for **GitHub Sponsors for the eggspot organization**; choose a payout route (bank account in a supported region, or a fiscal host); add other platforms to `.github/FUNDING.yml` if wanted; review the policy draft. Until Sponsors is enabled, the README badge and the `FUNDING.yml` button point at a profile that does not exist yet. Steps in [funding.md](funding.md).
 - **Security reporting:** enable *Private vulnerability reporting* for the repository (Settings, Code security); [SECURITY.md](../SECURITY.md) and `/.well-known/security.txt` point reporters at it. Decide who receives the reports.
