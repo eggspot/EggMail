@@ -62,6 +62,9 @@ internal sealed class SqliteFile
         }.ToString();
     }
 
+    /// <summary>Tests only: a cap on the pages of a file (<c>PRAGMA max_page_count</c>, by the file's full path) that provokes SQLITE_FULL without a full disk. Empty in production.</summary>
+    internal static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> PageLimitsForTests = new(StringComparer.Ordinal);
+
     public SqliteFileKind Kind { get; }
 
     /// <summary>Open read connections with prepared statements for the reads on the delivery path (not used for the in-memory queue, whose reads run on its writer).</summary>
@@ -119,6 +122,11 @@ internal sealed class SqliteFile
             Execute(connection, "PRAGMA busy_timeout=" + ((long)_options.BusyTimeout.TotalMilliseconds).ToString(CultureInfo.InvariantCulture));
             Execute(connection, "PRAGMA journal_size_limit=" + _options.JournalSizeLimitBytes.ToString(CultureInfo.InvariantCulture));
             Execute(connection, "PRAGMA cache_size=-16384");
+            if (Path is not null && PageLimitsForTests.TryGetValue(Path, out int maxPages))
+            {
+                Execute(connection, "PRAGMA max_page_count=" + maxPages.ToString(CultureInfo.InvariantCulture));
+            }
+
             EnsureSchema(connection);
             return connection;
         }

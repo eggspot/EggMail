@@ -147,6 +147,56 @@ public class ServerProtocolTests
         Assert.Empty(f.Handler.Messages); // nothing smuggled in as a second message
     }
 
+    [Theory]
+    [InlineData("Subject: x\n\nbody\r\n", false)]            // bare LF in the headers
+    [InlineData("Subject: x\r\n\r\nbody\n.\n", false)]       // the LF.LF smuggling shape, inside a BDAT body
+    [InlineData("Subject: x\r\n\r\nbo\0dy\r\n", false)]      // NUL
+    [InlineData("Subject: x\r\n\r\nbody\r", false)]          // the body ends in a CR with no LF after it
+    [InlineData("Subject: x\r\n\r\nbo\rdy\r\n", false)]      // CR in the middle
+    [InlineData("Subject: x\r\n\r\nfine\r\n", true)]         // control: the same shape, well formed, is accepted
+    public async Task Bdat_bodies_follow_the_same_line_ending_rule_as_data(string body, bool accepted)
+    {
+        await using var f = new ServerFixture();
+        using var c = await OpenAsync(f);
+        await c.CommandAsync("EHLO x.test", 250);
+        await c.CommandAsync("MAIL FROM:<a@b.example>", 250);
+        await c.CommandAsync("RCPT TO:<c@d.example>", 250);
+
+        await c.SendAsync($"BDAT {body.Length} LAST\r\n{body}");
+
+        var r = await c.ReadReplyAsync();
+        Assert.NotNull(r);
+        if (accepted)
+        {
+            Assert.Equal(250, r!.Code);
+            Assert.Single(f.Handler.Messages);
+        }
+        else
+        {
+            Assert.Equal(500, r!.Code);
+            Assert.True(await c.WaitForCloseAsync());
+            Assert.Empty(f.Handler.Messages);
+        }
+    }
+
+    [Fact]
+    public async Task A_crlf_split_across_two_bdat_chunks_is_one_line_ending_and_a_bare_lf_in_a_later_chunk_is_refused()
+    {
+        await using var f = new ServerFixture();
+        using var c = await OpenAsync(f);
+        await c.CommandAsync("EHLO x.test", 250);
+        await c.CommandAsync("MAIL FROM:<a@b.example>", 250);
+        await c.CommandAsync("RCPT TO:<c@d.example>", 250);
+        await c.SendAsync("BDAT 11\r\nSubject: x\r");
+        await c.ExpectAsync(250);
+        await c.SendAsync("BDAT 6\r\n\nbody\n");   // the LF completes the CR of the previous chunk; the second LF is bare
+
+        var r = await c.ReadReplyAsync();
+        Assert.Equal(500, r!.Code);
+        Assert.True(await c.WaitForCloseAsync());
+        Assert.Empty(f.Handler.Messages);
+    }
+
     [Fact]
     public async Task Bare_lf_in_command_closes_connection()
     {
