@@ -41,7 +41,7 @@ That is a working mail server: SMTP submission with AUTH on 587 (STARTTLS), 465 
 - a **self-signed certificate** for `Hostname`, used by STARTTLS, implicit TLS and the dashboard. Every start says so in the log (`Serving a SELF-SIGNED certificate ...`), the API reports the warning `self_signed_certificate`, and the dashboard shows a persistent banner on every page, including the sign-in page. Clients that verify certificates (browsers, most mail clients) will complain until you set up a real one (`EGGMAIL_HOSTNAME` with `EGGMAIL_ACME_EMAIL`, or upload one). Mail servers that receive your mail do not require a trusted certificate from a sender;
 - a **DKIM key per sending domain**, generated when the domain is added (dashboard, API, or `EGGMAIL_DOMAINS`); the dashboard then shows the DNS records to publish.
 
-A start that cannot work is refused before anything is changed: the exit code is 2 and the message names the variable and says what to set (`configuration error: EGGMAIL_ACME_EMAIL needs EGGMAIL_HOSTNAME: ...`).
+A start that cannot work is refused: the exit code is 2 and the message names the variable and says what to set (`configuration error: EGGMAIL_ACME_EMAIL needs EGGMAIL_HOSTNAME: ...`).
 
 ### The simple environment variables
 
