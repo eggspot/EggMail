@@ -28,6 +28,35 @@ public class ReplyTests
     }
 
     [Fact]
+    public void A_reply_with_an_id_is_written_and_read_like_the_reply_with_the_same_text()
+    {
+        var id = Guid.Parse("0197a2b3-4c5d-7e6f-8091-a2b3c4d5e6f7");
+        var withId = SmtpReply.CreateWithId(250, "2.0.0", "Queued as ", id);
+        var plain = SmtpReply.Create(250, "2.0.0", "Queued as 0197a2b34c5d7e6f8091a2b3c4d5e6f7");
+        Assert.Equal(Render(plain), Render(withId));
+        Assert.Equal(Render(plain, enhanced: false), Render(withId, enhanced: false));
+        Assert.Equal("250 2.0.0 Queued as 0197a2b34c5d7e6f8091a2b3c4d5e6f7\r\n", Render(withId));
+        Assert.Equal(["Queued as 0197a2b34c5d7e6f8091a2b3c4d5e6f7"], withId.Lines);
+        Assert.Equal(plain.ToString(), withId.ToString());
+        Assert.True(withId.IsPositiveCompletion);
+        Assert.Throws<ArgumentException>(() => SmtpReply.CreateWithId(250, null, "bad\r\n", id));
+        Assert.Throws<ArgumentOutOfRangeException>(() => SmtpReply.CreateWithId(100, null, "x", id));
+    }
+
+    [Fact]
+    public void A_single_line_reply_makes_its_list_of_lines_only_when_asked_and_writes_the_same_either_way()
+    {
+        var reply = SmtpReply.Create(451, "4.3.0", "Temporary problem");
+        string before = Render(reply);
+        Assert.Equal(["Temporary problem"], reply.Lines);
+        Assert.Same(reply.Lines, reply.Lines);
+        Assert.Equal(before, Render(reply));
+        Assert.Equal("451 4.3.0 Temporary problem\r\n", before);
+        Assert.Equal("451 Temporary problem\r\n", Render(reply, enhanced: false));
+        Assert.Equal("250 café\r\n", Render(SmtpReply.Create(250, null, "café")));
+    }
+
+    [Fact]
     public void Rejects_crlf_injection_in_text()
     {
         Assert.Throws<ArgumentException>(() => SmtpReply.Create(250, null, "ok\r\n550 evil"));

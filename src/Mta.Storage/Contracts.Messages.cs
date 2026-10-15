@@ -11,7 +11,7 @@ public enum MessageSource : byte
     System,
 }
 
-public sealed record AcceptedRecipient(Guid DeliveryId, EmailAddress Address);
+public readonly record struct AcceptedRecipient(Guid DeliveryId, EmailAddress Address);
 
 /// <summary>
 /// Content extracted at accept time for history (only recorded when <see cref="HistoryMode.Full"/>). A body is either a string or, for the intake path, the UTF-8 bytes

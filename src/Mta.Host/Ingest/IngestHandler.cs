@@ -233,11 +233,7 @@ public sealed class IngestHandler : ISmtpServerHandler
         {
             case SubmissionStatus.Accepted:
             case SubmissionStatus.Duplicate:
-                return SmtpReply.Create(250, "2.0.0", string.Create(10 + 32, result.MessageId, static (span, id) =>
-                {
-                    "Queued as ".CopyTo(span);
-                    id.TryFormat(span[10..], out _, "N");
-                }));
+                return SmtpReply.CreateWithId(250, "2.0.0", "Queued as ", result.MessageId);
             case SubmissionStatus.Rejected:
                 return SmtpReply.Create(result.Rejection!.SmtpCode, result.Rejection.EnhancedCode, result.Rejection.Message);
             case SubmissionStatus.TooLarge:

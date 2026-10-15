@@ -11,12 +11,20 @@ public sealed class SmtpReply
 {
     private readonly byte[]? _wire;
 
+    // A reply is held as a list of lines, or, for the common single-line reply, as just its text, or its fixed text and an id: the list (and the text of
+    // an id reply) is only made when somebody asks for it. The reply of every accepted message is one of these, and is created per message.
+    private IReadOnlyList<string>? _lines;
+    private readonly string? _text;
+    private readonly Guid _id;
+
     public int Code { get; }
 
     /// <summary>Enhanced status such as <c>2.1.0</c>, or null.</summary>
     public string? EnhancedCode { get; }
 
-    public IReadOnlyList<string> Lines { get; }
+    public IReadOnlyList<string> Lines => _lines ??= [_text is { } text ? text : string.Concat(_prefix, _id.ToString("N"))];
+
+    private readonly string? _prefix;
 
     /// <summary>True for 4yz replies (transient failure).</summary>
     public bool IsTransient => Code is >= 400 and < 500;
@@ -52,7 +60,26 @@ public sealed class SmtpReply
 
         Code = code;
         EnhancedCode = enhancedCode;
-        Lines = lines;
+        _lines = lines;
+    }
+
+    private SmtpReply(int code, string? enhancedCode, string text, string? prefix, Guid id)
+    {
+        if (code is < 200 or > 599)
+        {
+            throw new ArgumentOutOfRangeException(nameof(code));
+        }
+
+        if (text.AsSpan().IndexOfAny('\r', '\n', '\0') >= 0 || (prefix is not null && prefix.AsSpan().IndexOfAny('\r', '\n', '\0') >= 0))
+        {
+            throw new ArgumentException("Reply text must not contain CR, LF or NUL.", nameof(text));
+        }
+
+        Code = code;
+        EnhancedCode = enhancedCode;
+        _text = prefix is null ? text : null;
+        _prefix = prefix;
+        _id = id;
     }
 
     private SmtpReply(int code, string? enhanced, string line, bool prerender) : this(code, enhanced, [line])
@@ -66,7 +93,13 @@ public sealed class SmtpReply
     }
 
     /// <summary>Creates a single-line reply. Pass <paramref name="enhanced"/> as null when ENHANCEDSTATUSCODES is not in use.</summary>
-    public static SmtpReply Create(int code, string? enhanced, string text) => new(code, enhanced, [text]);
+    public static SmtpReply Create(int code, string? enhanced, string text) => new(code, enhanced, text, null, default);
+
+    /// <summary>
+    /// Creates the single-line reply <c>prefix</c> + the id as 32 hex digits (<c>"Queued as "</c> + the message id), without building that text: it is written straight to
+    /// the wire, and made only if a caller reads <see cref="Lines"/>.
+    /// </summary>
+    public static SmtpReply CreateWithId(int code, string? enhanced, string prefix, Guid id) => new(code, enhanced, "", prefix, id);
 
     /// <summary>Creates a constant reply whose wire form is rendered once.</summary>
     public static SmtpReply Constant(int code, string? enhanced, string text) => new(code, enhanced, text, prerender: true);
@@ -81,28 +114,67 @@ public sealed class SmtpReply
         }
 
         string? enhanced = includeEnhanced ? EnhancedCode : null;
-        for (int i = 0; i < Lines.Count; i++)
+        if (_lines is null)
         {
-            bool last = i == Lines.Count - 1;
-            string text = Lines[i];
+            WriteSingleLine(writer, enhanced);
+            return;
+        }
+
+        var lines = _lines;
+        for (int i = 0; i < lines.Count; i++)
+        {
+            bool last = i == lines.Count - 1;
+            string text = lines[i];
             int max = 3 + 1 + (enhanced?.Length + 1 ?? 0) + Encoding.UTF8.GetMaxByteCount(text.Length) + 2;
             var span = writer.GetSpan(max);
-            int p = 0;
-            span[p++] = (byte)('0' + Code / 100);
-            span[p++] = (byte)('0' + Code / 10 % 10);
-            span[p++] = (byte)('0' + Code % 10);
-            span[p++] = last ? (byte)' ' : (byte)'-';
-            if (enhanced is not null)
-            {
-                p += Encoding.ASCII.GetBytes(enhanced, span[p..]);
-                span[p++] = (byte)' ';
-            }
-
+            int p = WriteStart(span, last, enhanced);
             p += Encoding.UTF8.GetBytes(text, span[p..]);
             span[p++] = (byte)'\r';
             span[p++] = (byte)'\n';
             writer.Advance(p);
         }
+    }
+
+    private void WriteSingleLine(IBufferWriter<byte> writer, string? enhanced)
+    {
+        if (_text is { } text)
+        {
+            int max = 3 + 1 + (enhanced?.Length + 1 ?? 0) + Encoding.UTF8.GetMaxByteCount(text.Length) + 2;
+            var span = writer.GetSpan(max);
+            int p = WriteStart(span, last: true, enhanced);
+            p += Encoding.UTF8.GetBytes(text, span[p..]);
+            span[p++] = (byte)'\r';
+            span[p++] = (byte)'\n';
+            writer.Advance(p);
+            return;
+        }
+
+        string prefix = _prefix!;
+        int length = 3 + 1 + (enhanced?.Length + 1 ?? 0) + Encoding.UTF8.GetMaxByteCount(prefix.Length) + 32 + 2;
+        var buffer = writer.GetSpan(length);
+        int n = WriteStart(buffer, last: true, enhanced);
+        n += Encoding.UTF8.GetBytes(prefix, buffer[n..]);
+        _id.TryFormat(buffer[n..], out int idBytes, "N");
+        n += idBytes;
+        buffer[n++] = (byte)'\r';
+        buffer[n++] = (byte)'\n';
+        writer.Advance(n);
+    }
+
+    private int WriteStart(Span<byte> span, bool last, string? enhanced)
+    {
+        int p = 0;
+        span[p++] = (byte)('0' + Code / 100);
+        span[p++] = (byte)('0' + Code / 10 % 10);
+        span[p++] = (byte)('0' + Code % 10);
+        span[p++] = last ? (byte)' ' : (byte)'-';
+        if (enhanced is not null)
+        {
+            p += Encoding.ASCII.GetBytes(enhanced, span[p..]);
+            span[p++] = (byte)' ';
+        }
+
+        return p;
     }
 
     public override string ToString() => $"{Code}{(EnhancedCode is null ? "" : " " + EnhancedCode)} {string.Join(" | ", Lines)}";

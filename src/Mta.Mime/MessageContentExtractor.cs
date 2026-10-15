@@ -13,7 +13,7 @@ namespace Mta.Mime;
 public sealed record AttachmentInfo(string? FileName, string ContentType, long Size, string? ContentId, bool IsInline);
 
 /// <summary>What <see cref="MessageContentExtractor"/> found in a message; the data stored for message history.</summary>
-public sealed class ExtractedContent
+public readonly struct ExtractedContent
 {
     internal ExtractedContent(
         string? subject,
