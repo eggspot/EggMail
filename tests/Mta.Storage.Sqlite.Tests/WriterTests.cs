@@ -122,6 +122,113 @@ public class WriterTests : SqliteTestBase
     }
 
     [Fact]
+    public async Task Reused_commands_give_every_caller_its_own_result_and_its_own_failure()
+    {
+        // The writer recycles its command objects once the caller has taken the result: many rounds of many concurrent callers must never mix them up.
+        for (int round = 0; round < 8; round++)
+        {
+            var tasks = Enumerable.Range(0, 150).Select(i => i % 10 == 7
+                ? Sql.Runtime.QueueWriter.SubmitAsync<int, int>(i, static (_, v) => throw new InvalidOperationException("fail " + v)).AsTask()
+                : Sql.Runtime.QueueWriter.SubmitAsync(i, static (_, v) => v * 2).AsTask()).ToList();
+            for (int i = 0; i < tasks.Count; i++)
+            {
+                if (i % 10 == 7)
+                {
+                    var ex = await Assert.ThrowsAsync<InvalidOperationException>(async () => await tasks[i]);
+                    Assert.Equal("fail " + i, ex.Message);
+                }
+                else
+                {
+                    Assert.Equal(i * 2, await tasks[i]);
+                }
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Taking_a_result_twice_is_refused_and_does_not_disturb_the_command_that_now_belongs_to_another_caller()
+    {
+        var first = Sql.Runtime.QueueWriter.SubmitAsync(1, static (_, v) => v + 100);
+        Assert.Equal(101, await first);
+
+        // The command behind "first" is back in the pool and the next submission takes it; the old task must not be able to complete or recycle it.
+        var (blocked, release) = BlockQueueWriter();
+        var second = Sql.Runtime.QueueWriter.SubmitAsync(2, static (_, v) => v + 100).AsTask();
+        Assert.Throws<InvalidOperationException>(() => first.GetAwaiter().GetResult());
+        release.Set();
+        await blocked;
+        Assert.Equal(102, await second);
+        Assert.Equal(103, await Sql.Runtime.QueueWriter.SubmitAsync(3, static (_, v) => v + 100));
+    }
+
+    [Fact]
+    public async Task A_finished_command_does_not_keep_its_state_reachable()
+    {
+        WeakReference weak = await SubmitWithStateAsync();
+        for (int i = 0; i < 4 && weak.IsAlive; i++)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+        }
+
+        Assert.False(weak.IsAlive, "a pooled writer command must drop its state and result when it is recycled");
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private async Task<WeakReference> SubmitWithStateAsync()
+    {
+        var state = new object();
+        object result = await Sql.Runtime.QueueWriter.SubmitAsync(state, static (_, s) => s);
+        Assert.Same(state, result);
+        return new WeakReference(state);
+    }
+
+    [Fact]
+    public async Task A_commit_that_fails_leaves_no_transaction_open_and_only_the_offending_command_fails()
+    {
+        // A deferred foreign key is only checked by COMMIT, so the whole native batch fails at its end with the transaction still open: it must be rolled back, the
+        // commands replayed one by one (the good ones succeed), and the writer must go on with new batches afterwards.
+        var writer = Sql.Runtime.QueueWriter;
+        await writer.SubmitAsync(0, static (ctx, _) =>
+        {
+            using var cmd = ctx.Connection.CreateCommand();
+            cmd.CommandText = "PRAGMA foreign_keys = ON; CREATE TABLE zz_parent (id INTEGER PRIMARY KEY); CREATE TABLE zz_child (id INTEGER PRIMARY KEY, parent INTEGER REFERENCES zz_parent(id) DEFERRABLE INITIALLY DEFERRED); CREATE TABLE zz_log (v INTEGER)";
+            cmd.ExecuteNonQuery();
+            return 0;
+        }, exclusive: true);
+
+        static int Insert(WriterContext ctx, string sql)
+        {
+            using var cmd = ctx.Connection.CreateCommand();
+            cmd.CommandText = sql;
+            return cmd.ExecuteNonQuery();
+        }
+
+        var (blocked, release) = BlockQueueWriter();
+        var good1 = writer.SubmitAsync(1, static (ctx, v) => Insert(ctx, "INSERT INTO zz_log VALUES (1)")).AsTask();
+        var bad = writer.SubmitAsync(2, static (ctx, v) => Insert(ctx, "INSERT INTO zz_child VALUES (1, 999)")).AsTask();
+        var good2 = writer.SubmitAsync(3, static (ctx, v) => Insert(ctx, "INSERT INTO zz_log VALUES (3)")).AsTask();
+        release.Set();
+        await blocked;
+
+        Assert.Equal(1, await good1);
+        Assert.Equal(1, await good2);
+        await Assert.ThrowsAnyAsync<Exception>(async () => await bad);
+        Assert.True(Queue.FailedBatches >= 1);
+
+        // No transaction is left open, and the next batches work (a leftover transaction would fail every BEGIN).
+        Assert.False(await writer.SubmitAsync(0, static (ctx, _) => ctx.InTransaction, exclusive: true));
+        for (int i = 0; i < 3; i++)
+        {
+            Assert.Equal(1, await writer.SubmitAsync(i, static (ctx, v) => Insert(ctx, "INSERT INTO zz_log VALUES (" + (10 + v) + ")")));
+        }
+
+        await AcceptAsync();
+        Assert.Equal(5, ScalarLong(PathOf("queue.db"), "SELECT COUNT(*) FROM zz_log"));
+        Assert.Equal(0, ScalarLong(PathOf("queue.db"), "SELECT COUNT(*) FROM zz_child"));
+    }
+
+    [Fact]
     public async Task A_constraint_violation_inside_a_batch_only_fails_its_own_caller()
     {
         var dup = Msg();

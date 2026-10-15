@@ -14,6 +14,7 @@ All input is hostile. Every parser is bounded by `MimeLimits`, runs in time line
 | Encoded words | `Rfc2047.Decode` / `Encode` / `EncodeWords` / `TryDecodeWord`, `MimeCharsets` (`RegisterCodePages`, `TryGetEncoding`, `Decode`) |
 | Addresses | `AddressList.Parse`, `Mailbox` (display name + `Mta.Core.EmailAddress`, `Domain`, `ToHeaderValue`), `MailboxGroup`, `AddressItem` |
 | Dates | `MimeDate.Format` / `TryFormat` / `TryParse` |
+| Parse buffers | `MimeParseBuffers`: working memory a caller may lend to `MimeMessage.Parse(raw, limits, buffers)` so the top-level header record array is not allocated per message; the message is valid only until the buffers are used again or released. `MessageContentExtractor.Extract(message, max, bodiesAsUtf8: true)` returns a body that is already valid UTF-8 in the message (7bit/8bit, no NUL, not cut) as that memory (`TextBodyUtf8`) instead of a string |
 | Tree | `MimeMessage.Parse` -> `MimePart` (headers, content type, lazy `Body`, `Children`, `DecodeBodyTo`, `GetDecodedBytes`, `GetDecodedLength`, `GetText`) |
 | Transfer coding | `Base64Decoder`, `QuotedPrintableDecoder` (streaming, lenient), `BodyDecoder`, `TransferEncoder` (base64, quoted-printable, choice) |
 | 8BITMIME downgrade | `EightBitDowngrader.Downgrade` -> `EightBitDowngradeResult` (`NotNeeded`, `Downgraded`, `Impossible` + reason) |

@@ -13,7 +13,7 @@ namespace Mta.Mime;
 public sealed record AttachmentInfo(string? FileName, string ContentType, long Size, string? ContentId, bool IsInline);
 
 /// <summary>What <see cref="MessageContentExtractor"/> found in a message; the data stored for message history.</summary>
-public sealed class ExtractedContent
+public readonly struct ExtractedContent
 {
     internal ExtractedContent(
         string? subject,
@@ -23,8 +23,12 @@ public sealed class ExtractedContent
         bool textTruncated,
         bool htmlTruncated,
         bool subjectTruncated,
-        MimeAnomaly anomalies)
+        MimeAnomaly anomalies,
+        ReadOnlyMemory<byte>? textBodyUtf8 = null,
+        ReadOnlyMemory<byte>? htmlBodyUtf8 = null)
     {
+        TextBodyUtf8 = textBodyUtf8;
+        HtmlBodyUtf8 = htmlBodyUtf8;
         Subject = subject;
         TextBody = textBody;
         HtmlBody = htmlBody;
@@ -43,6 +47,16 @@ public sealed class ExtractedContent
 
     /// <summary>The first text/html body part as UTF-16 text (not sanitized), or null.</summary>
     public string? HtmlBody { get; }
+
+    /// <summary>
+    /// Only when asked for (<c>bodiesAsUtf8</c>): the text body as the UTF-8 bytes it already is in the message (a slice of the parsed message's memory), in which
+    /// case <see cref="TextBody"/> is null. Set only for a body that needs no decoding and no cutting, so the bytes are exactly the UTF-8 of the string
+    /// <see cref="TextBody"/> would have been.
+    /// </summary>
+    public ReadOnlyMemory<byte>? TextBodyUtf8 { get; }
+
+    /// <summary>Like <see cref="TextBodyUtf8"/> for the HTML body.</summary>
+    public ReadOnlyMemory<byte>? HtmlBodyUtf8 { get; }
 
     /// <summary>All attachments and inline resources in document order.</summary>
     public IReadOnlyList<AttachmentInfo> Attachments { get; }
@@ -90,7 +104,14 @@ public static class MessageContentExtractor
     /// repairs the headers and extracts the history content from one parse). The result is identical to
     /// <see cref="Extract(ReadOnlyMemory{byte}, int, MimeLimits?)"/> on <see cref="MimeMessage.Raw"/> with the limits the message was parsed with.
     /// </summary>
-    public static ExtractedContent Extract(MimeMessage message, int maxBodyBytes = DefaultMaxStoredBodyBytes)
+    public static ExtractedContent Extract(MimeMessage message, int maxBodyBytes = DefaultMaxStoredBodyBytes) => Extract(message, maxBodyBytes, bodiesAsUtf8: false);
+
+    /// <summary>
+    /// Like <see cref="Extract(MimeMessage, int)"/>; with <paramref name="bodiesAsUtf8"/> a text or HTML body that is already valid UTF-8 in the message and needs
+    /// no decoding is returned as that memory (<see cref="ExtractedContent.TextBodyUtf8"/>) instead of as a new string, which is twice the size and a copy.
+    /// Everything else, and everything else about the result, is the same.
+    /// </summary>
+    public static ExtractedContent Extract(MimeMessage message, int maxBodyBytes, bool bodiesAsUtf8)
     {
         ArgumentNullException.ThrowIfNull(message);
         ArgumentOutOfRangeException.ThrowIfNegative(maxBodyBytes);
@@ -107,6 +128,8 @@ public static class MessageContentExtractor
 
         string? text = null;
         string? html = null;
+        ReadOnlyMemory<byte>? textUtf8 = null;
+        ReadOnlyMemory<byte>? htmlUtf8 = null;
         bool textTruncated = false;
         bool htmlTruncated = false;
         List<AttachmentInfo>? attachments = null;
@@ -128,13 +151,27 @@ public static class MessageContentExtractor
             {
                 var ct = part.ContentType;
                 bool markedAttachment = part.Disposition is { IsAttachment: true };
-                if (!markedAttachment && ct.IsText && ct.MediaSubtype == "plain" && text is null)
+                if (!markedAttachment && ct.IsText && ct.MediaSubtype == "plain" && text is null && textUtf8 is null)
                 {
-                    text = ReadText(part, maxBodyBytes, ref an, out textTruncated);
+                    if (bodiesAsUtf8 && part.TryGetVerbatimUtf8Text(maxBodyBytes, ref an, out var textBytes))
+                    {
+                        textUtf8 = textBytes;
+                    }
+                    else
+                    {
+                        text = ReadText(part, maxBodyBytes, ref an, out textTruncated);
+                    }
                 }
-                else if (!markedAttachment && ct.IsText && ct.MediaSubtype == "html" && html is null)
+                else if (!markedAttachment && ct.IsText && ct.MediaSubtype == "html" && html is null && htmlUtf8 is null)
                 {
-                    html = ReadText(part, maxBodyBytes, ref an, out htmlTruncated);
+                    if (bodiesAsUtf8 && part.TryGetVerbatimUtf8Text(maxBodyBytes, ref an, out var htmlBytes))
+                    {
+                        htmlUtf8 = htmlBytes;
+                    }
+                    else
+                    {
+                        html = ReadText(part, maxBodyBytes, ref an, out htmlTruncated);
+                    }
                 }
                 else
                 {
@@ -158,7 +195,7 @@ public static class MessageContentExtractor
             part = stack.Pop();
         }
 
-        return new ExtractedContent(subject, text, html, (IReadOnlyList<AttachmentInfo>?)attachments ?? [], textTruncated, htmlTruncated, subjectTruncated, an);
+        return new ExtractedContent(subject, text, html, (IReadOnlyList<AttachmentInfo>?)attachments ?? [], textTruncated, htmlTruncated, subjectTruncated, an, textUtf8, htmlUtf8);
     }
 
     private static string ReadText(MimePart part, int maxBodyBytes, ref MimeAnomaly an, out bool truncated)

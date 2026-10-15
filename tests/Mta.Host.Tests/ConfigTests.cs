@@ -97,6 +97,8 @@ public class ConfigTests
     [InlineData("Smtp:MaxRecipients", "0")]
     [InlineData("Switch:QuiesceTimeoutSeconds", "0")]
     [InlineData("Delivery:Workers", "0")]
+    [InlineData("Delivery:MaxIdleConnectionsPerTarget", "-1")]
+    [InlineData("Delivery:MaxIdleConnectionsPerTarget", "257")]
     [InlineData("Smtp:Listeners:submission:BindAddress", "not-an-ip")]
     [InlineData("Smtp:Listeners:submission:Port", "70000")]
     public void Invalid_values_are_reported(string key, string value)

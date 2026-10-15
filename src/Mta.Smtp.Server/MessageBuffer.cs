@@ -5,7 +5,8 @@ namespace Mta.Smtp.Server;
 /// <summary>
 /// Accumulates an incoming message in pooled segments (no large contiguous allocation, no LOH pressure for big
 /// messages) and exposes it as a <see cref="ReadOnlySequence{T}"/>. Implements <see cref="IBufferWriter{T}"/> so the
-/// DATA scanner can write into it directly. Must be disposed to return the arrays.
+/// DATA scanner can write into it directly. Must be disposed to return the arrays. A disposed buffer can be used again after <see cref="Reset"/>
+/// (a session keeps one for all its messages, and with it the object of the first segment).
 /// </summary>
 public sealed class MessageBuffer : IBufferWriter<byte>, IDisposable
 {
@@ -14,6 +15,7 @@ public sealed class MessageBuffer : IBufferWriter<byte>, IDisposable
 
     private Segment? _head;
     private Segment? _tail;
+    private Segment? _spare;   // the first segment object of the previous use, kept to be filled again
     private long _length;
     private bool _disposed;
 
@@ -53,7 +55,19 @@ public sealed class MessageBuffer : IBufferWriter<byte>, IDisposable
         // Grow geometrically (16 KiB, then double up to 1 MiB) so large messages use few segments.
         int size = _tail is null ? SegmentSize : Math.Min(MaxSegmentSize, Math.Max(SegmentSize, _tail.Array.Length * 2));
         size = Math.Max(size, sizeHint);
-        var seg = new Segment(ArrayPool<byte>.Shared.Rent(size), _tail is null ? 0 : _tail.RunningIndex + _tail.Written);
+        long runningIndex = _tail is null ? 0 : _tail.RunningIndex + _tail.Written;
+        Segment seg;
+        if (_tail is null && _spare is not null)
+        {
+            seg = _spare;
+            _spare = null;
+            seg.Start(ArrayPool<byte>.Shared.Rent(size), runningIndex);
+        }
+        else
+        {
+            seg = new Segment(ArrayPool<byte>.Shared.Rent(size), runningIndex);
+        }
+
         Capacity += seg.Array.Length;
         if (_tail is null)
         {
@@ -92,6 +106,7 @@ public sealed class MessageBuffer : IBufferWriter<byte>, IDisposable
         }
 
         _disposed = true;
+        Segment? first = _head;
         for (var s = _head; s is not null; s = (Segment?)s.Next)
         {
             ArrayPool<byte>.Shared.Return(s.Array);
@@ -100,17 +115,53 @@ public sealed class MessageBuffer : IBufferWriter<byte>, IDisposable
         _head = _tail = null;
         _length = 0;
         Capacity = 0;
+        if (first is not null)
+        {
+            // Every segment object but the first one is garbage; the first has no array and no link any more and waits for the next use.
+            first.Clear();
+            _spare = first;
+        }
+    }
+
+    /// <summary>Makes a disposed buffer usable again (it holds no memory until something is written).</summary>
+    public void Reset()
+    {
+        if (!_disposed)
+        {
+            throw new InvalidOperationException("Only a disposed buffer can be reset.");
+        }
+
+        _disposed = false;
     }
 
     private sealed class Segment : ReadOnlySequenceSegment<byte>
     {
-        public readonly byte[] Array;
+        public byte[] Array;
         private int _written;
 
         public Segment(byte[] array, long runningIndex)
         {
             Array = array;
             RunningIndex = runningIndex;
+        }
+
+        public void Start(byte[] array, long runningIndex)
+        {
+            Array = array;
+            RunningIndex = runningIndex;
+            _written = 0;
+            Next = null;
+            Memory = default;
+        }
+
+        /// <summary>Drops the array and the link (the array has been returned to its pool).</summary>
+        public void Clear()
+        {
+            Array = null!;
+            _written = 0;
+            Next = null;
+            Memory = default;
+            RunningIndex = 0;
         }
 
         public int Written

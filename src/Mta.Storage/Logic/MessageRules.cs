@@ -83,15 +83,37 @@ public static class ContentRules
     public static MessageContent Prepare(StorageOptions options, MessageContent content)
     {
         ContentOptions c = options.Content;
-        string? text = Truncate(content.Text, c.MaxStoredBodyBytes, out bool t1);
-        string? html = Truncate(content.Html, c.MaxStoredBodyBytes, out bool t2);
+        string? text = TruncateBody(content.TextUtf8 is null ? content.Text : null, content.TextUtf8, c.MaxStoredBodyBytes, out ReadOnlyMemory<byte>? textUtf8, out bool t1);
+        string? html = TruncateBody(content.HtmlUtf8 is null ? content.Html : null, content.HtmlUtf8, c.MaxStoredBodyBytes, out ReadOnlyMemory<byte>? htmlUtf8, out bool t2);
         string? subject = c.StoreSubject ? content.Subject : null;
         if (!t1 && !t2 && ReferenceEquals(subject, content.Subject))
         {
-            return content;   // nothing to cut or drop: the record is immutable, so it is passed on as it is
+            return content;   // nothing to cut or drop: the content is immutable, so it is passed on as it is
         }
 
-        return new MessageContent(subject, text, html, content.Attachments, content.Truncated || t1 || t2);
+        return new MessageContent(subject, text, html, textUtf8, htmlUtf8, content.Attachments, content.Truncated || t1 || t2);
+    }
+
+    /// <summary>
+    /// <see cref="Truncate"/> for a body held as a string or as UTF-8 bytes. Bytes that fit stay bytes (no string is made); bytes that do not fit are cut like the
+    /// string would be.
+    /// </summary>
+    private static string? TruncateBody(string? text, ReadOnlyMemory<byte>? utf8, int maxBytes, out ReadOnlyMemory<byte>? keptUtf8, out bool truncated)
+    {
+        keptUtf8 = null;
+        if (utf8 is { } bytes)
+        {
+            if (bytes.Length <= maxBytes)
+            {
+                truncated = false;
+                keptUtf8 = bytes;
+                return null;
+            }
+
+            text = System.Text.Encoding.UTF8.GetString(bytes.Span);
+        }
+
+        return Truncate(text, maxBytes, out truncated);
     }
 
     /// <summary>Truncates to at most <paramref name="maxBytes"/> UTF-8 bytes without splitting a character.</summary>
@@ -162,7 +184,30 @@ public static class StorageJson
     public static List<AttachmentInfo> DeserializeAttachments(string? json) =>
         string.IsNullOrEmpty(json) ? [] : JsonSerializer.Deserialize(json, StorageJsonContext.Default.ListAttachmentInfo) ?? [];
 
-    public static string? SerializeTls(TlsInfo? tls) => tls is null ? null : JsonSerializer.Serialize(tls, StorageJsonContext.Default.TlsInfo);
+    // The TLS facts of deliveries repeat (same server, same protocol and cipher): the JSON of one is made once and reused. Strings are immutable and TlsInfo is a
+    // record, so equal values give equal text; the table is bounded and never evicts (a flood of different peers just serializes as before).
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<TlsInfo, string> TlsJson = new();
+
+    public static string? SerializeTls(TlsInfo? tls)
+    {
+        if (tls is null)
+        {
+            return null;
+        }
+
+        if (TlsJson.TryGetValue(tls, out string? known))
+        {
+            return known;
+        }
+
+        string json = JsonSerializer.Serialize(tls, StorageJsonContext.Default.TlsInfo);
+        if (TlsJson.Count < 256)
+        {
+            TlsJson.TryAdd(tls, json);
+        }
+
+        return json;
+    }
 
     public static TlsInfo? DeserializeTls(string? json) =>
         string.IsNullOrEmpty(json) ? null : JsonSerializer.Deserialize(json, StorageJsonContext.Default.TlsInfo);
@@ -190,16 +235,68 @@ public static class MessageIdKey
             return null;
         }
 
-        string v = headerValue.Trim();
-        int open = v.IndexOf('<', StringComparison.Ordinal);
-        int close = open < 0 ? -1 : v.IndexOf('>', open + 1);
-        if (open >= 0 && close > open)
+        ReadOnlySpan<char> v = headerValue.AsSpan().Trim();
+        int open = v.IndexOf('<');
+        int close = open < 0 ? -1 : v[(open + 1)..].IndexOf('>');
+        if (open >= 0 && close >= 0)
         {
-            v = v[(open + 1)..close];   // the first <id>, without a trailing comment or folding around it
+            v = v.Slice(open + 1, close);   // the first <id>, without a trailing comment or folding around it
         }
 
-        v = string.Concat(v.Where(c => !char.IsWhiteSpace(c)));   // an id has no white space; a folded header may have gained some
-        return v.Length is 0 or > MaxLength ? null : v.ToLowerInvariant();
+        // An id has no white space (a folded header may have gained some) and is compared in lower case: one pass, one string.
+        int kept = 0;
+        bool ascii = true;
+        foreach (char c in v)
+        {
+            if (!char.IsWhiteSpace(c))
+            {
+                kept++;
+                ascii &= c < 0x80;
+            }
+        }
+
+        if (kept is 0 or > MaxLength)
+        {
+            return null;
+        }
+
+        if (!ascii)
+        {
+            // Case mapping outside ASCII (including surrogate pairs) stays with the string method, as before.
+            return string.Create(kept, v, static (destination, source) => CopyWithoutWhiteSpace(source, destination, lowerAscii: false)).ToLowerInvariant();
+        }
+
+        if (kept == headerValue.Length && !HasUpperAscii(v))
+        {
+            return headerValue;   // already in key form (no brackets, white space or capitals): no new string
+        }
+
+        return string.Create(kept, v, static (destination, source) => CopyWithoutWhiteSpace(source, destination, lowerAscii: true));
+    }
+
+    private static bool HasUpperAscii(ReadOnlySpan<char> value)
+    {
+        foreach (char c in value)
+        {
+            if (c is >= 'A' and <= 'Z')
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static void CopyWithoutWhiteSpace(ReadOnlySpan<char> source, Span<char> destination, bool lowerAscii)
+    {
+        int n = 0;
+        foreach (char c in source)
+        {
+            if (!char.IsWhiteSpace(c))
+            {
+                destination[n++] = lowerAscii && c is >= 'A' and <= 'Z' ? (char)(c + 32) : c;
+            }
+        }
     }
 }
 
