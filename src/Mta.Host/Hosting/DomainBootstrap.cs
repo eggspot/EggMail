@@ -100,6 +100,12 @@ public static class DomainBootstrap
                         log.Write(MtaLogLevel.Information, "domains", line.TrimEnd('\r'));
                     }
                 }
+                catch (StorageConflictException)
+                {
+                    // Registered at this very moment through the API (the lease only covers other bootstraps): it exists now, which is what was asked for.
+                    skipped.Add((name, "registered meanwhile"));
+                    log.Write(MtaLogLevel.Warning, "domains", $"Domains:Bootstrap: {name} was registered by someone else while it was being added; left as it is.");
+                }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     skipped.Add((name, ex.Message));

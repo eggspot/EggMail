@@ -19,6 +19,7 @@ Things that are easy to get wrong:
 
 - **Healthcheck command.** The chiseled image has no shell and `/app` is not on `PATH`: use `["CMD", "/app/mta", "--healthcheck"]` (the `HEALTHCHECK` of the image does). `["CMD", "mta", "--healthcheck"]` fails with "executable file not found in $PATH". The release workflow checks this on every build (`deploy/smoke/image.sh` prints the image's `PATH` and tries `mta`).
 - **First administrator.** Compose: a file secret read through `Dashboard__BootstrapAdminPasswordFile` (the file must be readable by uid 1654: Compose does not apply `uid` or `mode` to file secrets outside Swarm). Kubernetes: a Secret mounted at `/run/secrets/eggmail`. Or `mta admin create` while the SQLite server is stopped. Further users are made in the dashboard or the API while the server runs (see "Users while the server runs").
+- **First sending domain.** Set `EGGMAIL_DOMAINS=example.com` (`Domains__Bootstrap`): the first start registers the domain, generates its DKIM key and writes the DNS records to create into the log (`docker compose logs eggmail | grep -i "dns records"`); the dashboard shows them with a **Check DNS** button (see "Adding a sending domain and its DNS records").
 - **Volume ownership.** The image prepares `/data` for uid 1654; a new Kubernetes volume is owned by root, hence `fsGroup: 1654` in the StatefulSet.
 - **Inbound port 25 for bounces** needs a public MX record and a platform that offers inbound 25 (many load balancers do not).
 - **Kubernetes NetworkPolicy** is enforced only by a CNI that implements it; the smoke test applies the policy on kind but does not test enforcement.
@@ -36,7 +37,7 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | Key | Default | Meaning |
 |---|---|---|
 | `Hostname` | machine name | Name in SMTP greetings, `Received` headers and EHLO; should match the PTR record of the sending IP |
-| `Startup:RequireUnicodeSupport` | true | Refuse to run `serve`, `migrate-db`, `migrate-storage`, `admin` and `secrets` when the Unicode self-test fails (see "Unicode support" below); `false` only logs a warning |
+| `Startup:RequireUnicodeSupport` | true | Refuse to run `serve`, `migrate-db`, `migrate-storage`, `admin`, `domains` and `secrets` when the Unicode self-test fails (see "Unicode support" below); `false` only logs a warning |
 | `Storage:Backend` | `Sqlite` | `Sqlite` or `Postgres` (same image) |
 | `Sqlite:DataDirectory` | `/data` | Where the database files live (mount a volume here) |
 | `Sqlite:SyncMode` | `Off` | `Off`, `Normal`, `Full` for queue and stats files. **`Off` is safe against a process kill but not against power loss or an OS crash**: files can corrupt and acknowledged mail can be lost. Use `Normal` or `Full`, or PostgreSQL, if you need that |
