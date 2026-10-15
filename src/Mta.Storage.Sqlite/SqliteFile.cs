@@ -192,7 +192,12 @@ internal sealed class SqliteFile
                 UpgradeFromV4(connection);
             }
 
-            UpgradeFromV5(connection);
+            if (version <= 6)
+            {
+                UpgradeFromV5(connection);
+            }
+
+            UpgradeFromV7(connection);
             return;
         }
 
@@ -407,6 +412,51 @@ internal sealed class SqliteFile
             using var create = connection.CreateCommand();
             create.Transaction = tx;
             create.CommandText = index;
+            create.ExecuteNonQuery();
+        }
+
+        using var cmd = connection.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = "PRAGMA user_version=7";
+        cmd.ExecuteNonQuery();
+        tx.Commit();
+    }
+
+    /// <summary>
+    /// Version 8 added inbound mail (decision 92): <c>inbound_domain_settings</c> and <c>inbound_route</c> in config.db, <c>inbound_message</c> and
+    /// <c>inbound_message_raw</c> in queue.db, with their indexes. The statements come from the generated schema script so they cannot drift from the model,
+    /// and each is skipped when its table or index already exists (a file taken back to an older version by hand). The other files just move to the new version.
+    /// </summary>
+    private void UpgradeFromV7(SqliteConnection connection)
+    {
+        string script = ApplyWithoutRowId(_createScript(), WithoutRowIdTables);
+        var statements = new List<string>();
+        string[] tables = Kind switch
+        {
+            SqliteFileKind.Config => ["inbound_domain_settings", "inbound_route"],
+            SqliteFileKind.Queue => ["inbound_message", "inbound_message_raw"],
+            _ => [],
+        };
+        foreach (string table in tables)
+        {
+            statements.Add(IfNotExists(Regex.Match(script, "CREATE TABLE \"" + table + "\" \\(.*?\\r?\\n\\)(?: WITHOUT ROWID)?;", RegexOptions.Singleline).Value));
+            foreach (Match index in Regex.Matches(script, "CREATE (?:UNIQUE )?INDEX \"[^\"]+\" ON \"" + table + "\" [^;]*;"))
+            {
+                statements.Add(IfNotExists(index.Value));
+            }
+        }
+
+        if (statements.Any(string.IsNullOrEmpty))
+        {
+            throw new InvalidOperationException($"Could not derive the version 8 upgrade of {FileName} from the generated schema script.");
+        }
+
+        using var tx = connection.BeginTransaction();
+        foreach (string statement in statements)
+        {
+            using var create = connection.CreateCommand();
+            create.Transaction = tx;
+            create.CommandText = statement;
             create.ExecuteNonQuery();
         }
 

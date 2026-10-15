@@ -120,6 +120,17 @@ public static class TransferTables
         Upsert = true,
     });
 
+    /// <summary>The inbound settings of each domain (decision 92).</summary>
+    public static readonly TransferTable<InboundDomainSettingsEntity> InboundDomainSettings = new("inbound_domain_settings", TransferPart.Config, new()
+    {
+        Order = q => q.OrderBy(x => x.DomainId),
+    });
+
+    public static readonly TransferTable<InboundRouteEntity> InboundRoutes = new("inbound_route", TransferPart.Config, new()
+    {
+        Order = q => q.OrderBy(x => x.Id),
+    });
+
     public static readonly TransferTable<StatAggregateEntity> StatAggregates = new("stat_aggregate", TransferPart.Stats, new()
     {
         Order = q => q.OrderBy(x => x.Daily).ThenBy(x => x.PeriodStart).ThenBy(x => x.TenantId).ThenBy(x => x.SendingDomain).ThenBy(x => x.RecipientDomain),
@@ -154,6 +165,12 @@ public static class TransferTables
     }
 
     private static void ClearLease(WebhookOutboxEntity x)
+    {
+        x.LeaseOwner = null;
+        x.LeaseUntil = DateTimeOffset.UnixEpoch;
+    }
+
+    private static void ClearLease(InboundMessageEntity x)
     {
         x.LeaseOwner = null;
         x.LeaseUntil = DateTimeOffset.UnixEpoch;
@@ -201,6 +218,29 @@ public static class TransferTables
         Order = q => q.OrderBy(x => x.TenantId).ThenBy(x => x.IdempotencyKey),
     });
 
+    /// <summary>Received mail and the state of its route action. Held like deliveries, so a pending action runs on exactly one side of a switch.</summary>
+    public static readonly TransferTable<InboundMessageEntity> InboundMessages = new("inbound_message", TransferPart.Queue, new()
+    {
+        Order = q => q.OrderBy(x => x.Id),
+        PrepareExport = ClearLease,
+        PrepareImport = ClearLease,
+        Hold = new TransferHold<InboundMessageEntity>
+        {
+            Property = nameof(InboundMessageEntity.TransferSwitchId),
+            Set = (x, id) => x.TransferSwitchId = id,
+            HoldAll = (q, id, ct) => q.Where(x => x.TransferSwitchId == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.TransferSwitchId, (Guid?)id), ct),
+            Release = (q, id, ct) => q.Where(x => x.TransferSwitchId == id).ExecuteUpdateAsync(s => s.SetProperty(x => x.TransferSwitchId, (Guid?)null), ct),
+            CountHeld = (q, id, ct) => q.LongCountAsync(x => x.TransferSwitchId == id, ct),
+        },
+    });
+
+    /// <summary>The stored messages; the bytes travel in a body pack like the spool's.</summary>
+    public static readonly TransferTable<InboundMessageRawEntity> InboundRaw = new("inbound_message_raw", TransferPart.Queue, new()
+    {
+        Order = q => q.OrderBy(x => x.MessageId),
+        Body = new TransferBody<InboundMessageRawEntity>(nameof(InboundMessageRawEntity.Raw), x => x.Raw, (x, v) => x.Raw = v),
+    });
+
     public static readonly TransferTable<MessageIndexEntity> MessageIndex = new("message_index", TransferPart.History, new()
     {
         Order = q => q.OrderBy(x => x.Day).ThenBy(x => x.MessageId),
@@ -235,9 +275,9 @@ public static class TransferTables
     /// <summary>Every table, in import order (config, stats, queue, history).</summary>
     public static IReadOnlyList<TransferTable> All { get; } =
     [
-        Tenants, ApiKeys, SmtpCredentials, DashboardUsers, DashboardSessions, Domains, DkimKeys, Suppressions, WebhookEndpoints, Settings, TlsPolicies, RelayRoutes, Certificates, AcmeAccounts, AcmeRenewals, DomainRecordChecks, TlsRptBuckets, SendingCounters,
+        Tenants, ApiKeys, SmtpCredentials, DashboardUsers, DashboardSessions, Domains, DkimKeys, Suppressions, WebhookEndpoints, Settings, TlsPolicies, RelayRoutes, Certificates, AcmeAccounts, AcmeRenewals, DomainRecordChecks, TlsRptBuckets, SendingCounters, InboundDomainSettings, InboundRoutes,
         StatAggregates, StatMeta, RecentEvents, WebhookAttempts,
-        Deliveries, Spool, WebhookOutbox, IdempotencyKeys,
+        Deliveries, Spool, WebhookOutbox, IdempotencyKeys, InboundMessages, InboundRaw,
         MessageIndex, MessageRecipients, MessageEvents, MessageContents, RetainedRaw,
     ];
 

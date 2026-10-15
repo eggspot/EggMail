@@ -47,7 +47,7 @@ public static class StorageModel
     /// a message uses. SQLite files go from 5 straight to 7 so that the number matches PostgreSQL's <c>V007</c>: PostgreSQL's <c>V006</c> (replica
     /// coordination tables) is PostgreSQL-only and has no SQLite counterpart.
     /// </summary>
-    public const int SchemaVersion = 7;
+    public const int SchemaVersion = 8;
 
     /// <summary>
     /// Entity annotation requesting a <c>WITHOUT ROWID</c> table on SQLite (small rows whose primary key is the
@@ -155,6 +155,19 @@ public static class StorageModel
         {
             e.ToTable("sending_counter").HasKey(x => new { x.Scope, x.TenantId, x.Domain, x.WindowKind, x.WindowIndex });
         });
+        mb.Entity<InboundDomainSettingsEntity>(e =>
+        {
+            e.ToTable("inbound_domain_settings").HasKey(x => x.DomainId);
+            e.HasIndex(x => x.TenantId);
+            e.HasIndex(x => x.Enabled);
+        });
+        mb.Entity<InboundRouteEntity>(e =>
+        {
+            e.ToTable("inbound_route").HasKey(x => x.Id);
+            e.HasIndex(x => new { x.DomainId, x.SortOrder, x.Id });
+            e.HasIndex(x => x.TenantId);
+            e.HasIndex(x => x.WebhookEndpointId);
+        });
         mb.Entity<LeaseEntity>(e =>
         {
             e.ToTable("lease").HasKey(x => x.Name);
@@ -196,6 +209,18 @@ public static class StorageModel
         {
             e.ToTable("api_idempotency_key").HasKey(x => new { x.TenantId, x.IdempotencyKey });
             e.HasIndex(x => x.ExpiresAt);
+        });
+        mb.Entity<InboundMessageEntity>(e =>
+        {
+            e.ToTable("inbound_message").HasKey(x => x.Id);
+            e.HasIndex(x => new { x.TenantId, x.Id });
+            e.HasIndex(x => new { x.TenantId, x.EnvelopeTo, x.Id });
+            e.HasIndex(x => new { x.DomainId, x.ReceivedAt });
+            e.HasIndex(x => x.ActionNextAttemptAt).HasFilter("action_state = 0");
+        });
+        mb.Entity<InboundMessageRawEntity>(e =>
+        {
+            e.ToTable("inbound_message_raw").HasKey(x => x.MessageId);
         });
         ConfigureChunk<QueueTransferChunkEntity>(mb, "transfer_chunk_queue");
         ApplyColumnNaming(mb);

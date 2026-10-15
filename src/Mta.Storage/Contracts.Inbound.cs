@@ -175,7 +175,16 @@ public sealed record InboundRouteRecord(
     InboundWebhookFormat WebhookFormat,
     IReadOnlyList<string> ForwardTo,
     DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt)
+{
+    // A record compares its members by value, but a list by reference: two routes with the same forward targets are equal.
+    public bool Equals(InboundRouteRecord? other) =>
+        other is not null && Id == other.Id && TenantId == other.TenantId && DomainId == other.DomainId && Name == other.Name && Order == other.Order && Enabled == other.Enabled
+        && MatchKind == other.MatchKind && LocalPart == other.LocalPart && PlusAddressing == other.PlusAddressing && ActionKind == other.ActionKind && WebhookEndpointId == other.WebhookEndpointId
+        && WebhookFormat == other.WebhookFormat && ForwardTo.SequenceEqual(other.ForwardTo) && CreatedAt == other.CreatedAt && UpdatedAt == other.UpdatedAt;
+
+    public override int GetHashCode() => HashCode.Combine(Id, DomainId, Name, Order, MatchKind, LocalPart, ActionKind, ForwardTo.Count);
+}
 
 /// <summary>
 /// What the receive path needs to know about one inbound-enabled domain, in one object, so it can keep a cache and decide RCPT without a
@@ -294,7 +303,8 @@ public sealed record ClaimedInboundAction(InboundMessage Message, byte[]? Raw);
 /// <param name="NextAttemptAt">Required for <see cref="InboundActionState.Pending"/>.</param>
 /// <param name="Error">What failed (kept as <see cref="InboundMessage.ActionLastError"/>; cleared by a success).</param>
 /// <param name="ForwardMessageId">The outbound message id of a forward.</param>
-public sealed record InboundActionOutcome(InboundActionState State, DateTimeOffset At, DateTimeOffset? NextAttemptAt, string? Error, Guid? ForwardMessageId = null);
+/// <param name="FreeBody">Delete the stored body: the runner sets it for a completed forward, whose copy now lives in the outbound queue. A completed webhook keeps the body for the attachment references until retention.</param>
+public sealed record InboundActionOutcome(InboundActionState State, DateTimeOffset At, DateTimeOffset? NextAttemptAt, string? Error, Guid? ForwardMessageId = null, bool FreeBody = false);
 
 public enum InboundRetryResult : byte
 {
@@ -377,7 +387,7 @@ public interface IInboundMessageStore
 
     /// <summary>
     /// Records the result of an attempt made under the lease of <paramref name="owner"/>; false (nothing changed) when the lease was lost, the message was deleted or it is not leased
-    /// by <paramref name="owner"/>. A completed forward frees the body (<see cref="InboundMessage.HasRaw"/> false); a completed webhook keeps it for the attachment references until retention.
+    /// by <paramref name="owner"/>. <see cref="InboundActionOutcome.FreeBody"/> deletes the body (<see cref="InboundMessage.HasRaw"/> becomes false); an <see cref="InboundActionState.Pending"/> outcome needs <see cref="InboundActionOutcome.NextAttemptAt"/> (<see cref="ArgumentException"/> otherwise).
     /// </summary>
     ValueTask<bool> CompleteActionAsync(Guid messageId, string owner, InboundActionOutcome outcome, CancellationToken cancellationToken);
 

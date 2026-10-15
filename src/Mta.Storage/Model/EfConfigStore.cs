@@ -336,6 +336,7 @@ public sealed partial class EfConfigStore<TContext>(IConfigDbAccess<TContext> db
         {
             c.DkimKeys.Where(k => k.DomainId == domainId).ExecuteDelete();
             c.Set<DomainRecordCheckEntity>().Where(k => k.DomainId == domainId).ExecuteDelete();
+            DeleteInboundOfDomain(c, domainId);
             c.Domains.Where(d => d.Id == domainId).ExecuteDelete();
         }, ct).ConfigureAwait(false);
 

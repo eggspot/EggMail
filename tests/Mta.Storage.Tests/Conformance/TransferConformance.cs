@@ -64,6 +64,19 @@ public abstract class TransferConformance : StorageTestBase
         await c.SetSettingAsync(new SettingRecord(TransferTables.DataProtectionSettingPrefix + "key-1", null, "\"<key/>\"", now), default);
         Guid endpoint = await AddEndpointAsync(TenantA, true, "*");
 
+        // Inbound mail: settings, a webhook and a forward route, a pending webhook action, a stored message and a discarded one.
+        await Storage.Inbound.UpsertSettingsAsync(new InboundDomainSettings(domainId, TenantA, true, InboundDmarcAction.QuarantineFlag, 5_000_000, 100, 10, 1L << 30, 30, now), default);
+        Guid hookRoute = Ids.New();
+        await Storage.Inbound.UpsertRouteAsync(new InboundRouteRecord(hookRoute, TenantA, domainId, "hook", 10, true, InboundMatchKind.Wildcard, "billing-*", true, InboundActionKind.Webhook, endpoint, InboundWebhookFormat.RawMime, [], now, now), default);
+        await Storage.Inbound.UpsertRouteAsync(new InboundRouteRecord(Ids.New(), TenantA, domainId, "fwd", 20, true, InboundMatchKind.CatchAll, null, false, InboundActionKind.Forward, null, InboundWebhookFormat.Json, ["f@example.org"], now, now), default);
+        InboundMessageDraft Inbound(InboundActionKind kind, int size) => new()
+        {
+            Id = Ids.New(now), TenantId = TenantA, DomainId = domainId, Domain = "example.com", ReceivedAt = now, RemoteAddress = "203.0.113.9", Helo = "mail.sender.test", TlsUsed = true, EnvelopeFrom = "a@sender.test",
+            EnvelopeTo = "billing-eu@example.com", Subject = "Invoice", Auth = new InboundAuthResults(InboundVerdict.Pass, "sender.test", InboundVerdict.Fail, "sender.test", InboundVerdict.Fail, "reject", InboundVerdict.None),
+            Disposition = InboundDmarcDisposition.QuarantineFlagged, RouteId = hookRoute, ActionKind = kind, Raw = new byte[size],
+        };
+        await Storage.Inbound.AcceptAsync([Inbound(InboundActionKind.Webhook, 300), Inbound(InboundActionKind.Store, 400), Inbound(InboundActionKind.Discard, 500)], default);
+
         AcceptedMessage withFingerprint = Msg(to: ["a@example.org", "b@example.net"], idempotencyKey: "idem-1", retainRaw: true);
         await AcceptAsync(new AcceptedMessage
         {
@@ -97,7 +110,8 @@ public abstract class TransferConformance : StorageTestBase
             var rows = await ReadAllAsync(table);
             Assert.Equal(count, rows.Count);
             if (table.Name is "tenant" or "dashboard_user" or "dashboard_session" or "domain" or "dkim_key" or "api_key" or "smtp_credential" or "suppression" or "setting" or "tls_policy" or "relay_route" or "certificate"
-                or "acme_account" or "acme_renewal" or "webhook_endpoint" or "delivery_queue" or "message_spool" or "webhook_outbox" or "api_idempotency_key" or "stat_aggregate" or "webhook_attempt")
+                or "acme_account" or "acme_renewal" or "webhook_endpoint" or "delivery_queue" or "message_spool" or "webhook_outbox" or "api_idempotency_key" or "stat_aggregate" or "webhook_attempt"
+                or "inbound_domain_settings" or "inbound_route" or "inbound_message" or "inbound_message_raw")
             {
                 Assert.True(count > 0, $"{table.Name} should have rows");
             }
@@ -254,6 +268,45 @@ public abstract class TransferConformance : StorageTestBase
     }
 
     [Fact]
+    public async Task Pending_inbound_actions_are_held_by_a_transfer_mark_and_by_an_import_until_released()
+    {
+        await PopulateAsync();
+
+        // Source side: marked rows are not dispatched, are still exported, and run again when released.
+        var messages = await ReadAllAsync(TransferTables.InboundMessages);
+        var bodies = await ReadAllAsync(TransferTables.InboundRaw);
+        Assert.Equal(3, messages.Count);
+        Assert.Equal(2, bodies.Count);   // the discarded message has no body
+        long marked = await Transfer.MarkQueueTransferredAsync(SwitchId, default);
+        Assert.True(marked >= 3);
+        Assert.Empty(await Storage.Inbound.ClaimActionsAsync("after-mark", 10, Clock.UtcNow, TimeSpan.FromMinutes(1), default));
+        Assert.DoesNotContain("transfer", TransferTables.InboundMessages.Serialize(messages[0]), StringComparison.OrdinalIgnoreCase);
+        await Transfer.ReleaseQueueAsync(SwitchId, default);
+        var claimed = await Storage.Inbound.ClaimActionsAsync("after-release", 10, Clock.UtcNow, TimeSpan.FromMinutes(1), default);
+        Assert.Single(claimed);
+
+        // Target side: rows applied with the hold are not dispatched until it is released.
+        var copies = messages.Select(r => TransferTables.InboundMessages.Deserialize(TransferTables.InboundMessages.Serialize(r))).ToList();
+        var bodyCopies = bodies.Select(r =>
+        {
+            object copy = TransferTables.InboundRaw.Deserialize(TransferTables.InboundRaw.Serialize(r));
+            TransferTables.InboundRaw.Body!.Set(copy, TransferTables.InboundRaw.Body.Get(r));
+            return copy;
+        }).ToList();
+        await Transfer.DiscardImportedAsync(SwitchId, default);
+        Assert.Empty((await Storage.Inbound.SearchAsync(new InboundMessageQuery(TenantId: TenantA), default)).Items);
+
+        await Transfer.ApplyChunkAsync(new TransferChunk(SwitchId, TransferTables.InboundMessages, "queue/inbound_message.00001.ndjson", "M", true), copies, default);
+        await Transfer.ApplyChunkAsync(new TransferChunk(SwitchId, TransferTables.InboundRaw, "queue/inbound_message_raw.00001.ndjson", "R", false), bodyCopies, default);
+        Clock.Advance(TimeSpan.FromDays(1));
+        Assert.Empty(await Storage.Inbound.ClaimActionsAsync("held", 10, Clock.UtcNow, TimeSpan.FromMinutes(1), default));
+        Assert.Equal(3, (await Storage.Inbound.SearchAsync(new InboundMessageQuery(TenantId: TenantA), default)).Items.Count);   // visible, not dispatched
+        await Transfer.ReleaseQueueAsync(SwitchId, default);
+        var again = Assert.Single(await Storage.Inbound.ClaimActionsAsync("released", 10, Clock.UtcNow, TimeSpan.FromMinutes(1), default));
+        Assert.Equal(300, again.Raw!.Length);
+    }
+
+    [Fact]
     public async Task A_fenced_source_neither_accepts_nor_dispatches()
     {
         await AcceptAsync();
@@ -267,6 +320,12 @@ public abstract class TransferConformance : StorageTestBase
         Assert.Empty(await Storage.Deliveries.ClaimExpiredAsync("w", 10, Clock.UtcNow.AddDays(30), default));
         Assert.Empty(await Storage.Webhooks.ClaimDueAsync("w", 10, Clock.UtcNow, TimeSpan.FromMinutes(1), default));
         Assert.Empty(await Storage.Maintenance.RunAsync(Clock.UtcNow, default));
+        Assert.Empty(await Storage.Inbound.ClaimActionsAsync("w", 10, Clock.UtcNow, TimeSpan.FromMinutes(1), default));
+        await Assert.ThrowsAsync<StorageFencedException>(async () => await Storage.Inbound.AcceptAsync([new InboundMessageDraft
+        {
+            Id = Ids.New(), TenantId = TenantA, DomainId = Ids.New(), Domain = "example.com", ReceivedAt = Clock.UtcNow, RemoteAddress = "203.0.113.9", EnvelopeFrom = "a@b.test", EnvelopeTo = "x@example.com",
+            Auth = InboundAuthResults.NotChecked, RouteId = Ids.New(), ActionKind = InboundActionKind.Store, Raw = new byte[10],
+        }], default));
 
         // Reads still work (the fenced source is the read-only copy of the data).
         Assert.Equal(1, await Transfer.CountAsync(TransferTables.Deliveries, TransferRange.All, default));

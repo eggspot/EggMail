@@ -28,6 +28,8 @@ public sealed class InMemoryStorage : IStorage
         Stats = new MemoryStats(_state);
         History = new MemoryHistory(_state);
         Webhooks = new MemoryWebhooks(_state);
+        _state.InboundStore = new MemoryInbound(_state);
+        Inbound = new InboundStoreFacade(config, _state.InboundStore);
         Maintenance = new MemoryMaintenance(_state);
         Transfer = new MemoryTransfer(_state);
         Replicas = new InMemoryReplicaCoordination(_state.Clock);
@@ -53,6 +55,8 @@ public sealed class InMemoryStorage : IStorage
     public IHistoryStore History { get; }
 
     public IWebhookOutbox Webhooks { get; }
+
+    public IInboundStore Inbound { get; }
 
     public IStorageMaintenance Maintenance { get; }
 
@@ -89,12 +93,15 @@ internal sealed class MemoryState
     public readonly IClock Clock;
     public readonly IMtaLog Log;
     public InMemoryConfigStore Config = null!;
+    public MemoryInbound InboundStore = null!;
 
     // Queue
     public readonly Dictionary<Guid, QueuedDeliveryEntity> Deliveries = [];
     public readonly Dictionary<Guid, SpoolMessageEntity> Spool = [];
     public readonly Dictionary<Guid, WebhookOutboxEntity> Outbox = [];
     public readonly Dictionary<(Guid Tenant, string Key), IdempotencyKeyEntity> Idempotency = [];
+    public readonly Dictionary<Guid, InboundMessageEntity> InboundMessages = [];
+    public readonly Dictionary<Guid, InboundMessageRawEntity> InboundRaw = [];
 
     // History, keyed by message id (the day is derived from the id)
     public readonly Dictionary<Guid, MessageIndexEntity> Index = [];
@@ -1219,6 +1226,7 @@ internal sealed class MemoryMaintenance(MemoryState s) : IStorageMaintenance
         now = StorageTime.Normalize(now);
         var reports = new List<MaintenanceReport>();
         s.FlushStats();
+        IReadOnlyDictionary<Guid, int?> inboundRetention = s.Config.InboundRetentionByDomain();
         lock (s.Gate)
         {
             RetentionOptions r = s.Options.Retention;
@@ -1307,6 +1315,8 @@ internal sealed class MemoryMaintenance(MemoryState s) : IStorageMaintenance
             }
 
             reports.Add(new MaintenanceReport("idempotency.expired", TimeSpan.Zero, idem, null));
+
+            reports.Add(new MaintenanceReport("inbound_retention", TimeSpan.Zero, s.InboundStore.PurgeExpired(inboundRetention, s.Options.Inbound.RetentionDays, now), null));
         }
 
         return ValueTask.FromResult<IReadOnlyList<MaintenanceReport>>(reports);

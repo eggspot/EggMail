@@ -7,7 +7,7 @@ namespace Mta.Storage.Portability;
 public sealed class BundleManifest
 {
     /// <summary>Semantic version of the bundle format. A reader accepts the same major and any minor; it refuses a newer major.</summary>
-    public const string CurrentFormatVersion = "1.2.0";
+    public const string CurrentFormatVersion = "1.3.0";
 
     public string FormatVersion { get; set; } = CurrentFormatVersion;
     public Guid SwitchId { get; set; }

@@ -139,6 +139,13 @@ internal sealed class PostgresMaintenance(PostgresRuntime rt, PostgresQueueStore
 
         await Job("idempotency.expired", async () => (await BatchDeleteAsync("api_idempotency_key", "expires_at <= $1", now, ct).ConfigureAwait(false), null)).ConfigureAwait(false);
 
+        await Job("inbound_retention", async () =>
+        {
+            IReadOnlyDictionary<Guid, int?> retention = await rt.ConfigStore.GetInboundRetentionByDomainAsync(ct).ConfigureAwait(false);
+            long rows = await rt.InboundMessages.PurgeExpiredAsync(retention, rt.Options.Inbound.RetentionDays, now, rt.Options.Postgres.RetentionDeleteBatchSize, rt.Options.Postgres.RetentionDeletePause, ct).ConfigureAwait(false);
+            return (rows, rt.Options.Inbound.RetentionDays == 0 ? "server default unlimited" : null);
+        }).ConfigureAwait(false);
+
         // Leases of dead workers are already claimable (a claim only needs lease_until <= now); this clears the stale owner names.
         await Job("queue.leases", async () => (await queue.ReleaseExpiredLeasesAsync(now, ct).ConfigureAwait(false), "clears expired lease owners")).ConfigureAwait(false);
 

@@ -195,6 +195,19 @@ public static class Seed
         Guid endpoint = Ids.New();
         await c.UpsertWebhookEndpointAsync(new WebhookEndpointRecord(endpoint, TenantA, "https://hooks.example.com/in", secrets.Protect("whsec_123"u8, SecretPurposes.WebhookSecret), ["*"], true, null, null, now, null), default);
 
+        // Inbound mail: the domain receives, a webhook route and a store route, a webhook action still pending, a stored message and a discarded one.
+        await storage.Inbound.UpsertSettingsAsync(new InboundDomainSettings(domainId, TenantA, true, InboundDmarcAction.QuarantineFlag, 5_000_000, 100, 10, 1L << 30, 30, now), default);
+        Guid inboundRoute = Ids.New();
+        await storage.Inbound.UpsertRouteAsync(new InboundRouteRecord(inboundRoute, TenantA, domainId, "hook", 10, true, InboundMatchKind.Address, "billing", true, InboundActionKind.Webhook, endpoint, InboundWebhookFormat.Json, [], now, now), default);
+        await storage.Inbound.UpsertRouteAsync(new InboundRouteRecord(Ids.New(), TenantA, domainId, "rest", 1000, true, InboundMatchKind.CatchAll, null, false, InboundActionKind.Store, null, InboundWebhookFormat.Json, [], now, now), default);
+        InboundMessageDraft InboundMessage(InboundActionKind kind, int size) => new()
+        {
+            Id = Ids.New(now), TenantId = TenantA, DomainId = domainId, Domain = "example.com", ReceivedAt = now, RemoteAddress = "203.0.113.9", Helo = "mail.sender.test", TlsUsed = true, EnvelopeFrom = "a@sender.test",
+            EnvelopeTo = "billing@example.com", Subject = "Invoice", Auth = new InboundAuthResults(InboundVerdict.Pass, "sender.test", InboundVerdict.Pass, "sender.test", InboundVerdict.Pass, "reject", InboundVerdict.None),
+            RouteId = inboundRoute, ActionKind = kind, Raw = new byte[size],
+        };
+        await storage.Inbound.AcceptAsync([InboundMessage(InboundActionKind.Webhook, 700), InboundMessage(InboundActionKind.Store, 800), InboundMessage(InboundActionKind.Discard, 900)], default);
+
         // History over several days: messages received on earlier days, delivered now.
         for (int d = days; d >= 1; d--)
         {
