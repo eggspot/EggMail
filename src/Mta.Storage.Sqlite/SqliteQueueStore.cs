@@ -288,23 +288,33 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
     {
         using RawReader r = ctx.Command(stmt).Set(0, s.Owner).Set(1, s.UntilMs).Set(2, s.NowMs).Set(3, (long)s.Max).ExecuteReader();
         var rows = new List<(long Due, ClaimedDelivery Delivery)>();
+        // A batch is mostly one sender to a few domains: the text that repeats from one row to the next is made (and parsed) once.
+        string? lastFrom = null, lastDomain = null, lastSending = null;
+        EmailAddress lastFromAddress = default;
         while (r.Read())
         {
+            string? fromBefore = lastFrom;
+            string from = r.GetStringReusing(3, ref lastFrom);
+            if (!ReferenceEquals(fromBefore, lastFrom) || fromBefore is null)
+            {
+                lastFromAddress = AddressText.Parse(from);
+            }
+
             rows.Add((r.GetInt64(14), new ClaimedDelivery
             {
                 DeliveryId = r.GetGuid(0),
                 MessageId = r.GetGuid(1),
                 TenantId = r.GetGuid(2),
-                EnvelopeFrom = AddressText.Parse(r.GetString(3)),
+                EnvelopeFrom = lastFromAddress,
                 Recipient = AddressText.Parse(r.GetString(4)),
-                RecipientDomain = r.GetString(5),
+                RecipientDomain = r.GetStringReusing(5, ref lastDomain),
                 Attempt = r.GetInt32(6),
                 CreatedAt = r.GetInstant(7),
                 ExpiresAt = r.GetInstant(8),
                 LeaseUntil = r.GetInstant(9),
                 LastError = r.GetNullableString(10),
                 PossibleDuplicate = r.GetFlag(11),
-                SendingDomain = r.GetNullableString(12),
+                SendingDomain = r.GetNullableStringReusing(12, ref lastSending),
                 Source = (MessageSource)r.GetInt32(13),
                 HeadersUtf8 = r.GetFlag(15),
             }));

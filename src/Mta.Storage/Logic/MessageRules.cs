@@ -184,7 +184,30 @@ public static class StorageJson
     public static List<AttachmentInfo> DeserializeAttachments(string? json) =>
         string.IsNullOrEmpty(json) ? [] : JsonSerializer.Deserialize(json, StorageJsonContext.Default.ListAttachmentInfo) ?? [];
 
-    public static string? SerializeTls(TlsInfo? tls) => tls is null ? null : JsonSerializer.Serialize(tls, StorageJsonContext.Default.TlsInfo);
+    // The TLS facts of deliveries repeat (same server, same protocol and cipher): the JSON of one is made once and reused. Strings are immutable and TlsInfo is a
+    // record, so equal values give equal text; the table is bounded and never evicts (a flood of different peers just serializes as before).
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<TlsInfo, string> TlsJson = new();
+
+    public static string? SerializeTls(TlsInfo? tls)
+    {
+        if (tls is null)
+        {
+            return null;
+        }
+
+        if (TlsJson.TryGetValue(tls, out string? known))
+        {
+            return known;
+        }
+
+        string json = JsonSerializer.Serialize(tls, StorageJsonContext.Default.TlsInfo);
+        if (TlsJson.Count < 256)
+        {
+            TlsJson.TryAdd(tls, json);
+        }
+
+        return json;
+    }
 
     public static TlsInfo? DeserializeTls(string? json) =>
         string.IsNullOrEmpty(json) ? null : JsonSerializer.Deserialize(json, StorageJsonContext.Default.TlsInfo);

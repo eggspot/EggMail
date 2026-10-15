@@ -101,6 +101,19 @@ public sealed class SmtpReply
     /// </summary>
     public static SmtpReply CreateWithId(int code, string? enhanced, string prefix, Guid id) => new(code, enhanced, "", prefix, id);
 
+    /// <summary>
+    /// A single-line reply read from the wire by <see cref="SmtpReplyParser"/>: the parser has already refused control characters and a code outside 200 to 599, so
+    /// nothing is checked again and no list of lines is made unless somebody reads <see cref="Lines"/>.
+    /// </summary>
+    internal static SmtpReply FromWire(int code, string? enhanced, string text) => new(code, enhanced, text);
+
+    private SmtpReply(int code, string? enhanced, string text)
+    {
+        Code = code;
+        EnhancedCode = enhanced;
+        _text = text;
+    }
+
     /// <summary>Creates a constant reply whose wire form is rendered once.</summary>
     public static SmtpReply Constant(int code, string? enhanced, string text) => new(code, enhanced, text, prerender: true);
 

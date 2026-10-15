@@ -102,6 +102,7 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | `Delivery:PollInterval` | `00:00:00.250` | How often an idle engine looks for due deliveries |
 | `Delivery:MaxRecipientsPerTransaction` | 100 | Recipients of one destination domain sent in one SMTP transaction |
 | `Delivery:PreferChunking` | false | Use `BDAT` when the remote server offers it |
+| `Delivery:MaxIdleConnectionsPerTarget` | 2 | Idle outbound connections kept per destination for the next delivery (0 to 256; 256 idle in total). More concurrent deliveries to one destination than this reconnect (and handshake TLS) again and again; raise it towards `Delivery:Throttle:MaxConnections` to reuse more, at the price of more idle sockets to the same server |
 | `Delivery:RetryDelays` | built-in ladder | Delays between retries (2 m, 5 m, 15 m, 30 m, 1 h, 2 h, 4 h); the last repeats |
 | `Delivery:Throttle:MaxConnections` | 20 | Ceiling of concurrent connections to one destination domain |
 | `Delivery:Throttle:MaxMessagesPerMinute` | 600 | Ceiling of messages per minute to one destination domain |

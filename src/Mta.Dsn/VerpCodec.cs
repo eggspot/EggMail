@@ -38,6 +38,12 @@ public sealed class VerpCodec
 
     public static byte[] GenerateKey() => RandomNumberGenerator.GetBytes(32);
 
+    /// <summary>
+    /// The hour (counted from the codec's epoch) a token made at <paramref name="now"/> carries. Everything else in an address is fixed for a tenant and sending domain, so
+    /// the address is the same for every message of the same hour: a caller may keep it per (tenant, domain, hour stamp) instead of signing again for every message.
+    /// </summary>
+    public static long HourStamp(DateTimeOffset now) => (long)(now - Epoch).TotalHours;
+
     /// <summary>Returns the local part, for example <c>b+abc…</c>.</summary>
     public string CreateLocalPart(Guid tenantId, Guid domainId, DateTimeOffset now)
     {
@@ -47,7 +53,7 @@ public sealed class VerpCodec
         Span<byte> dom = stackalloc byte[16];
         domainId.TryWriteBytes(dom, bigEndian: true, out _);
         dom[..8].CopyTo(data[17..25]);
-        long hours = (long)(now - Epoch).TotalHours;
+        long hours = HourStamp(now);
         data[25] = (byte)(hours >> 16);
         data[26] = (byte)(hours >> 8);
         data[27] = (byte)hours;
