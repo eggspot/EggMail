@@ -74,7 +74,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
     private readonly List<IAsyncDisposable> _owned = [];
 
     public static async Task<EggMailRuntime> CreateAsync(MtaConfig config, IStorage storage, IClock clock, IMtaLog log, CancellationToken ct, IDnsResolver? dnsOverride = null,
-        IAcmeOrderRunner? acmeRunnerOverride = null, IDnsChallengeProvider? acmeDnsOverride = null)
+        IAcmeOrderRunner? acmeRunnerOverride = null, IDnsChallengeProvider? acmeDnsOverride = null, bool hostnameConfigured = true)
     {
         var secrets = Mta.Host.Secrets.SecretsFactory.Create(config.Secrets, storage.Config);
         foreach (string warning in Mta.Host.Secrets.SecretsFactory.Warnings(config.Secrets, storage.Config))
@@ -87,7 +87,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
             log.Write(MtaLogLevel.Warning, "startup", "Secrets:KeyProtection is None: the Data Protection key ring is stored unprotected. Use a certificate in production.");
         }
 
-        var certificates = new DatabaseCertificateProvider(storage.Config, secrets, config.Hostname, config.Tls, clock, log);
+        var certificates = new DatabaseCertificateProvider(storage.Config, secrets, config.Hostname, config.Tls, clock, log, replaceOnHostnameChange: hostnameConfigured);
         await certificates.InitializeAsync(ct).ConfigureAwait(false);
         var certificateMeters = Mta.Host.Tls.TlsMetrics.Attach(certificates, clock);
         System.Runtime.CompilerServices.RuntimeHelpers.RunClassConstructor(typeof(ProcessMetrics).TypeHandle);   // publishes the Mta.Process gauges (descriptors, threads) to the exporters

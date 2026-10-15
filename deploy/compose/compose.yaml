@@ -1,13 +1,19 @@
-# EggMail with the default SQLite backend: one container, one volume at /data, one replica.
+# EggMail with the default SQLite backend: one container, one volume at /data, one replica. This is the quick start of the README:
 #
 #   cp .env.example .env            # then edit EGGMAIL_HOSTNAME (and EGGMAIL_IMAGE to pin a version)
-#   mkdir -p secrets && printf '%s' 'a-long-admin-password' > secrets/admin_password.txt && chmod 644 secrets/admin_password.txt
-#   (644: the application runs as uid 1654 and Compose does not apply uid or mode to file secrets outside Swarm; the file is a bind mount of
-#   this one, so keep the secrets/ directory itself private to your user, mode 700, and out of version control)
 #   docker compose up -d
+#   docker compose logs eggmail     # the generated dashboard password is printed ONCE, between "FIRST START" and "END OF THE ONE-TIME PASSWORD"
 #
-# The first start creates the administrator named in Dashboard__BootstrapAdminUser from the password file (only when no administrator
-# exists yet) and a self-signed certificate (replace it from the dashboard or with ACME). Docs: docs/release.md, docs/operations.md.
+# The first start creates everything it needs: the SQLite files in the volume, the key ring, the first dashboard administrator (named by
+# EGGMAIL_ADMIN_USER; with EGGMAIL_ADMIN_PASSWORD empty the password is generated and printed once, otherwise that value is used) and a
+# SELF-SIGNED certificate (the dashboard says so; set EGGMAIL_ACME_EMAIL below, or upload one, for a trusted certificate).
+# The EGGMAIL_* names are documented aliases for configuration keys (docs/operations.md, "The simple environment variables"); the long
+# forms (Hostname, Storage__Backend, ...) keep working and win when both are set.
+#
+# More secure than a password in the environment: a file secret. Remove EGGMAIL_ADMIN_PASSWORD, set EGGMAIL_ADMIN_PASSWORD_FILE to
+# /run/secrets/eggmail_admin_password, add `secrets: [eggmail_admin_password]` to the service and a top-level
+# `secrets: { eggmail_admin_password: { file: ./secrets/admin_password.txt } }`; the file must be readable by uid 1654 (chmod 644: Compose does
+# not apply uid or mode to file secrets outside Swarm), so keep the secrets/ directory itself private (mode 700) and out of version control.
 #
 # The HEALTHCHECK uses the absolute path /app/mta: the chiseled image has no shell and /app is not on PATH, so ["CMD", "mta", ...]
 # would fail with "executable file not found in $PATH".
@@ -20,9 +26,12 @@ services:
     restart: unless-stopped
     stop_grace_period: 60s                  # running deliveries are given time to finish (docs/operations.md, graceful shutdown)
     environment:
-      Hostname: ${EGGMAIL_HOSTNAME}
-      Dashboard__BootstrapAdminUser: ${EGGMAIL_ADMIN_USER:-admin}
-      Dashboard__BootstrapAdminPasswordFile: /run/secrets/eggmail_admin_password
+      EGGMAIL_HOSTNAME: ${EGGMAIL_HOSTNAME}
+      EGGMAIL_ADMIN_USER: ${EGGMAIL_ADMIN_USER:-admin}
+      EGGMAIL_ADMIN_PASSWORD: ${EGGMAIL_ADMIN_PASSWORD:-}   # empty: generated on the first start and printed once in the log
+      # EGGMAIL_ACME_EMAIL: ${EGGMAIL_ACME_EMAIL}           # with the host name above: a free, automatically renewed certificate (uncomment "80:80" below, or set a Cloudflare token)
+      # CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN}       # selects the DNS-01 challenge
+      # EGGMAIL_DOMAINS: example.com                        # sending domains to register at the start
       # Sqlite__SyncMode: Normal              # Off (the default) survives a process kill, not power loss: see docs/operations.md
       # Delivery__BounceDomain: bounces.example.com
     ports:
@@ -32,12 +41,10 @@ services:
       - "8443:8443"                         # dashboard and API (HTTPS)
       - "127.0.0.1:8080:8080"               # HTTP probes and first setup, loopback of the Docker host only
       # - "25:2526"                         # bounce listener: needs an MX record for Delivery__BounceDomain pointing here
-      # - "80:80"                           # ACME HTTP-01: the certificate authority connects to port 80 of EGGMAIL_HOSTNAME (Acme__Enabled=true, Acme__Email=you@example.com);
+      # - "80:80"                           # ACME HTTP-01: the certificate authority connects to port 80 of EGGMAIL_HOSTNAME (with EGGMAIL_ACME_EMAIL above);
       #                                       # the built-in listener answers /.well-known/acme-challenge/ there and nothing else. Without DNS-01 (Acme__CloudflareApiToken) this is required.
     volumes:
       - eggmail-data:/data                  # SQLite files, backups, bootstrap file: a local volume only, never network storage
-    secrets:
-      - eggmail_admin_password
     read_only: true
     tmpfs:
       - /tmp
@@ -51,10 +58,6 @@ services:
       retries: 3
       start_period: 20s
       start_interval: 2s                    # check often while starting so `docker compose up --wait` returns quickly
-
-secrets:
-  eggmail_admin_password:
-    file: ./secrets/admin_password.txt      # must be readable by uid 1654 (chmod 644): Compose does not apply uid/mode to file secrets
 
 volumes:
   eggmail-data:

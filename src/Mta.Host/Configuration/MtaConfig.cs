@@ -114,6 +114,9 @@ public sealed class DeliverySection
     /// <summary>Per-destination connection and rate limits (adaptive: they start low and grow while the destination keeps accepting).</summary>
     public ThrottleSection Throttle { get; init; } = new();
 
+    /// <summary>A relay (smarthost) from the deployment configuration: the relay route that <see cref="Mta.Host.Hosting.RelayBootstrap"/> keeps in the config store, used when direct delivery fails.</summary>
+    public RelaySection Relay { get; init; } = new();
+
     /// <summary>Delays between retries after the 1st, 2nd, ... failed attempt; the last one repeats until the delivery expires. Empty keeps the built-in ladder (2 m, 5 m, 15 m, 30 m, 1 h, 2 h, 4 h).</summary>
     public List<TimeSpan> RetryDelays { get; init; } = [];
 
@@ -175,6 +178,21 @@ public sealed class DnsSection
     public bool TrustAuthenticatedData { get; init; }
 }
 
+public sealed class RelaySection
+{
+    /// <summary><c>host:port</c> of the relay; empty means no relay from configuration.</summary>
+    public string? Address { get; init; }
+
+    public string? User { get; init; }
+    public string? Password { get; init; }
+    public string? PasswordFile { get; init; }
+
+    /// <summary><c>verify</c>, <c>implicit</c>, <c>required</c>, <c>starttls</c> or <c>none</c> (see the relay routes of the dashboard); empty: <c>implicit</c> on port 465, else <c>verify</c>.</summary>
+    public string? TlsMode { get; init; }
+
+    public const string RouteName = "configuration-relay";
+}
+
 public sealed class ThrottleSection
 {
     /// <summary>Ceiling of concurrent connections to one destination domain.</summary>
@@ -202,6 +220,12 @@ public sealed class DashboardSection
 
     /// <summary>Path of a file holding the initial admin password (created once if no admin exists).</summary>
     public string? BootstrapAdminPasswordFile { get; init; }
+
+    /// <summary>
+    /// The initial admin password itself, for platforms that only pass environment variables (prefer <see cref="BootstrapAdminPasswordFile"/>: an environment
+    /// variable is visible to anyone who can inspect the container). With neither set and no administrator yet, the server generates a password and prints it once.
+    /// </summary>
+    public string? BootstrapAdminPassword { get; init; }
 
     public string BootstrapAdminUser { get; init; } = "admin";
 }
