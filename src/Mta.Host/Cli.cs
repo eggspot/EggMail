@@ -252,7 +252,7 @@ internal static class Cli
             await DomainBootstrap.RunAsync(config, storage, runtime.Secrets, clock, startupLog, CancellationToken.None).ConfigureAwait(false);   // Domains:Bootstrap (EGGMAIL_DOMAINS)
         }
 
-        StartupChecks.LogAdvice(config, startupLog);
+        StartupChecks.LogAdvice(config, startupLog, source: loaded.Source);
 
         builder.Services.AddSingleton(loaded);
         builder.Services.AddSingleton(config);

@@ -233,6 +233,46 @@ public class DeliveryDkimAndLimitsTests
         Assert.True(Mta.Dsn.VerpCodec.MatchesDomain(token, domainId));
     }
 
+    [Fact]
+    public async Task Messages_of_one_sending_domain_in_one_hour_share_a_valid_bounce_address_and_each_domain_has_its_own()
+    {
+        // The signed address only changes with the tenant, the sending domain and the hour: it is made once for those and reused by later messages.
+        var verp = new Mta.Dsn.VerpCodec(new Dictionary<int, byte[]> { [1] = Mta.Dsn.VerpCodec.GenerateKey() }, 1);
+        await using var f = new DeliveryFixture(o => new DeliveryOptions { Owner = o.Owner, Hostname = o.Hostname, RemotePort = o.RemotePort, IdlePoll = o.IdlePoll, ExpirySweepInterval = o.ExpirySweepInterval, BounceDomain = "bounces.egg.test" }, verp: verp);
+        var now = DateTimeOffset.UtcNow;
+        var domainId = Ids.New();
+        await f.Storage.Config.UpsertDomainAsync(new DomainRecord(domainId, DeliveryFixture.Tenant, "example.org", DomainStatus.Verified, null, false, now, now, now, 0, null, false, null), default);
+
+        for (int i = 0; i < 4; i++)
+        {
+            var id = await f.EnqueueAsync([$"rcpt{i}@dest.example"]);
+            await f.WaitForEventAsync(id, MessageEventType.Delivered);
+        }
+
+        var senders = f.Remote.Messages.Select(m => m.Sender).ToList();
+        Assert.Equal(4, senders.Count);
+        // Within one hour the four are the same address; in the rare case the hour turned between two of them, at least each one decodes to this tenant and domain.
+        Assert.True(senders.Distinct().Count() <= 2);
+        foreach (string sender in senders)
+        {
+            Assert.True(verp.TryDecode(sender[..sender.IndexOf('@')], DateTimeOffset.UtcNow, TimeSpan.FromHours(2), out var token));
+            Assert.Equal(DeliveryFixture.Tenant, token.TenantId);
+            Assert.True(Mta.Dsn.VerpCodec.MatchesDomain(token, domainId));
+        }
+    }
+
+    [Fact]
+    public void The_hour_stamp_is_what_the_token_carries()
+    {
+        var verp = new Mta.Dsn.VerpCodec(new Dictionary<int, byte[]> { [1] = Mta.Dsn.VerpCodec.GenerateKey() }, 1);
+        var at = new DateTimeOffset(2026, 10, 15, 10, 59, 59, TimeSpan.Zero);
+        string a = verp.CreateLocalPart(DeliveryFixture.Tenant, Ids.New(), at);
+        Assert.Equal(Mta.Dsn.VerpCodec.HourStamp(at), Mta.Dsn.VerpCodec.HourStamp(at.AddSeconds(-3599)));
+        Assert.NotEqual(Mta.Dsn.VerpCodec.HourStamp(at), Mta.Dsn.VerpCodec.HourStamp(at.AddSeconds(1)));
+        Assert.True(verp.TryDecode(a, at, TimeSpan.FromHours(1), out var token));
+        Assert.Equal(Mta.Dsn.VerpCodec.HourStamp(at), (long)(token.IssuedAt - new DateTimeOffset(2024, 1, 1, 0, 0, 0, TimeSpan.Zero)).TotalHours);
+    }
+
     private sealed class IdentityProtector : ISecretProtector
     {
         public byte[] Protect(ReadOnlySpan<byte> plaintext, string purpose) => plaintext.ToArray();

@@ -126,7 +126,7 @@ public static class ConfigLoader
 
             // EGGMAIL_ACME_STAGING / EGGMAIL_ACME_DIRECTORY only choose the CA. They are an error only when nothing, by whatever layer, turns ACME on:
             // Acme__Enabled=true in the environment or a mounted file is as good as EGGMAIL_ACME_EMAIL.
-            if (!cfg.Acme.Enabled && root.Providers.OfType<EnvironmentAliasesProvider>().Any(p => p.TryGet("Acme:DirectoryUrl", out _)))
+            if (!cfg.Acme.Enabled && root.Providers.OfType<EnvironmentAliasesProvider>().Any(p => p.TryGet("Acme:Directory", out _)))
             {
                 errors.Add("EGGMAIL_ACME_STAGING / EGGMAIL_ACME_DIRECTORY only choose the CA; ACME stays off until both EGGMAIL_HOSTNAME and EGGMAIL_ACME_EMAIL are set (or Acme:Enabled is true). Set them, or remove the CA variable.");
             }
@@ -494,6 +494,11 @@ public static class ConfigLoader
         if (c.Delivery.Workers < 1)
         {
             errors.Add("Delivery:Workers must be at least 1.");
+        }
+
+        if (c.Delivery.MaxIdleConnectionsPerTarget is < 0 or > 256)
+        {
+            errors.Add("Delivery:MaxIdleConnectionsPerTarget must be between 0 and 256.");
         }
 
         if (c.Switch.QuiesceTimeoutSeconds < 1)

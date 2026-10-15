@@ -361,11 +361,35 @@ public class ApiUsersTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task A_temporary_password_does_not_restrict_api_keys_or_other_users()
+    public async Task A_temporary_password_does_not_restrict_other_users()
     {
         await SignedInWithTemporaryPasswordAsync("firstadmin");
         Assert.Equal(HttpStatusCode.OK, (await _admin.GetAsync("/api/v1/admin/users")).Status);   // another administrator is unaffected
         Assert.False((await _admin.GetAsync("/api/v1/me")).Json.GetProperty("mustChangePassword").GetBoolean());
+    }
+
+    [Fact]
+    public async Task The_temporary_password_gate_has_no_side_doors()
+    {
+        ApiClient temp = await SignedInWithTemporaryPasswordAsync("firstadmin");
+
+        // Routes that do not exist for these methods stay unreachable, and the case and a trailing slash of an allowed path change nothing about what it is.
+        Assert.True((await temp.SendAsync(HttpMethod.Post, "/api/v1/me", new { })).Status >= HttpStatusCode.BadRequest);
+        Assert.True((await temp.GetAsync("/api/v1/session")).Status >= HttpStatusCode.BadRequest);
+        Assert.Equal(HttpStatusCode.OK, (await temp.GetAsync("/api/v1/ME/")).Status);
+        (await temp.GetAsync("/api/v1/ADMIN/users")).Problem(HttpStatusCode.Forbidden, "password_change_required");
+        (await temp.GetAsync("/api/v1/admin/users/")).Problem(HttpStatusCode.Forbidden, "password_change_required");
+        Assert.NotEqual(HttpStatusCode.NoContent, (await temp.GetAsync("/api/v1/me/password")).Status);   // only POST is allowed there
+
+        // The allowed password change still needs the CSRF token of the session.
+        temp.SendCsrf = false;
+        (await temp.PostAsync("/api/v1/me/password", new { currentPassword = "temporary password 1", newPassword = NewPassword })).Problem(HttpStatusCode.Forbidden, "forbidden");
+        temp.SendCsrf = true;
+
+        // Credentials cannot be created with it: neither an API key nor an SMTP credential (an administrator acts on a tenant with the header).
+        (await temp.PostAsync("/api/v1/api-keys", new { name = "sneaky", scopes = new[] { "send" } }, ("X-Tenant-Id", TenantA))).Problem(HttpStatusCode.Forbidden, "password_change_required");
+        (await temp.PostAsync("/api/v1/smtp-credentials", new { username = "sneaky@example.test" }, ("X-Tenant-Id", TenantA))).Problem(HttpStatusCode.Forbidden, "password_change_required");
+        Assert.DoesNotContain(await _f.Storage.Config.GetApiKeysAsync(ApiFixture.TenantAId, default), k => k.Name == "sneaky");
     }
 
     // Own password

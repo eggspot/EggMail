@@ -22,15 +22,13 @@ public sealed record EnvironmentAliasResult(IReadOnlyList<KeyValuePair<string, s
 /// </summary>
 public static partial class EnvironmentAliases
 {
-    public const string AcmeStagingDirectory = "https://acme-staging-v02.api.letsencrypt.org/directory";
-
     /// <summary>The variables, documented in docs/operations.md ("The simple environment variables"); a test keeps that table and this list identical.</summary>
     public static IReadOnlyList<EnvironmentAlias> Aliases { get; } =
     [
         new("EGGMAIL_HOSTNAME", "Name of this server in SMTP greetings (HELO/EHLO) and message ids, in the first-run certificate and the ACME certificate (the dashboard serves the same certificate)", ["Hostname", "Acme:Domains"]),
         new("EGGMAIL_ACME_EMAIL", "Contact for the ACME account; with EGGMAIL_HOSTNAME it turns ACME on", ["Acme:Enabled", "Acme:Email", "Acme:Domains"]),
-        new("EGGMAIL_ACME_STAGING", "true: order from the Let's Encrypt staging CA (certificates are not trusted by clients); use while testing", ["Acme:DirectoryUrl"]),
-        new("EGGMAIL_ACME_DIRECTORY", "ACME directory URL of any other CA", ["Acme:DirectoryUrl"]),
+        new("EGGMAIL_ACME_STAGING", "true: order from the Let's Encrypt staging CA (certificates are not trusted by clients); use while testing", ["Acme:Directory"]),
+        new("EGGMAIL_ACME_DIRECTORY", "ACME directory URL (or a name such as ZeroSsl) of any other CA", ["Acme:Directory"]),
         new("CLOUDFLARE_API_TOKEN", "Cloudflare API token with DNS edit rights; selects the DNS-01 challenge (wildcard names, no inbound port 80)", ["Acme:CloudflareApiToken", "Acme:Challenge"]),
         new("CLOUDFLARE_API_TOKEN_FILE", "The same token read from a file (a mounted secret)", ["Acme:CloudflareApiTokenFile", "Acme:Challenge"]),
         new("EGGMAIL_ADMIN_USER", "User name of the first dashboard administrator (default admin)", ["Dashboard:BootstrapAdminUser"]),
@@ -110,17 +108,17 @@ public static partial class EnvironmentAliases
         }
         else if (useStaging)
         {
-            Set("Acme:DirectoryUrl", AcmeStagingDirectory);
+            Set("Acme:Directory", "LetsEncryptStaging");   // the key that wins over Acme:DirectoryUrl: a mounted file that sets either cannot override the alias silently
         }
         else if (directory is not null)
         {
-            if (!Uri.TryCreate(directory, UriKind.Absolute, out Uri? uri) || uri.Scheme is not ("https" or "http"))
+            if (AcmeSection.ResolveDirectory(directory) is null)
             {
-                errors.Add("EGGMAIL_ACME_DIRECTORY is not an http(s) URL. Use the directory URL of your CA, for example https://acme-v02.api.letsencrypt.org/directory.");
+                errors.Add("EGGMAIL_ACME_DIRECTORY is neither an http(s) URL nor a known CA name (LetsEncrypt, LetsEncryptStaging, ZeroSsl). Use the directory URL of your CA, for example https://acme-v02.api.letsencrypt.org/directory.");
             }
             else
             {
-                Set("Acme:DirectoryUrl", directory);
+                Set("Acme:Directory", directory);
             }
         }
 

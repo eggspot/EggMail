@@ -37,6 +37,36 @@ public static class StartupChecks
         || !(string.Equals(config.Hostname, Environment.MachineName, StringComparison.OrdinalIgnoreCase)
             || string.Equals(config.Hostname, environment("HOSTNAME"), StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>
+    /// <c>EGGMAIL_HOSTNAME</c> wins over a different <c>Hostname</c> from a file or the long-form environment (it has to, see <see cref="ConfigLoader.Build"/>); say so, so that
+    /// nobody wonders why the file's value is ignored. Returns the sentence, or null when nothing is overridden. Only the command line is above the alias.
+    /// </summary>
+    public static string? HostnameOverrideNote(MtaConfig config, Microsoft.Extensions.Configuration.IConfiguration? source, Func<string, string?> environment)
+    {
+        if (environment("EGGMAIL_HOSTNAME") is null)
+        {
+            return null;
+        }
+
+        var others = new List<string?> { environment("Hostname") };
+        if (source is Microsoft.Extensions.Configuration.IConfigurationRoot root)
+        {
+            foreach (Microsoft.Extensions.Configuration.IConfigurationProvider provider in root.Providers)
+            {
+                if (provider is not (EnvironmentAliasesProvider or Microsoft.Extensions.Configuration.EnvironmentVariables.EnvironmentVariablesConfigurationProvider or Microsoft.Extensions.Configuration.CommandLine.CommandLineConfigurationProvider)
+                    && provider.TryGet("Hostname", out string? value))
+                {
+                    others.Add(value);
+                }
+            }
+        }
+
+        string? different = others.FirstOrDefault(o => !string.IsNullOrWhiteSpace(o) && !string.Equals(o.Trim().TrimEnd('.'), config.Hostname, StringComparison.OrdinalIgnoreCase));
+        return different is null
+            ? null
+            : $"EGGMAIL_HOSTNAME ('{config.Hostname}') overrides the different Hostname ('{different}') set in a file or the environment. Remove one of them; only the command line (--Hostname=) is above EGGMAIL_HOSTNAME.";
+    }
+
     /// <summary>What is wrong with a name used in HELO/EHLO and in certificates, as sentences; empty when it is fine. Receiving servers score these down or refuse them.</summary>
     public static IReadOnlyList<string> HeloNameWarnings(string name)
     {
@@ -71,9 +101,14 @@ public static class StartupChecks
     }
 
     /// <summary>The advice that applies to a start with little configuration: written to the log, never fatal.</summary>
-    public static void LogAdvice(MtaConfig config, IMtaLog log, Func<string, string?>? environment = null)
+    public static void LogAdvice(MtaConfig config, IMtaLog log, Func<string, string?>? environment = null, Microsoft.Extensions.Configuration.IConfiguration? source = null)
     {
         environment ??= Environment.GetEnvironmentVariable;
+        if (HostnameOverrideNote(config, source, environment) is { } overrideNote)
+        {
+            log.Write(MtaLogLevel.Warning, "startup", overrideNote);
+        }
+
         if (!HostnameConfigured(config, environment))
         {
             log.Write(MtaLogLevel.Warning, "startup",

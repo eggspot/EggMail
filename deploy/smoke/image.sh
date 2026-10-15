@@ -24,6 +24,9 @@
 #      in step 7) is still there
 #   9. the documented lost-password recovery: with the container stopped, `docker run --rm -v <volume>:/data -e MTA_ADMIN_PASSWORD=... <image> admin create --user rescue`
 #      makes another administrator, who signs in after the container is started again
+#  10. the documented real-server recipe (EGGMAIL_HOSTNAME + EGGMAIL_ACME_EMAIL, no Cloudflare token) starts as the non-root image user with the HTTP-01 listener on
+#      port 80 inside the container: published as -p 127.0.0.1::80 it answers a challenge path for an unknown token with 404 (the CA is an address nothing listens
+#      on, so no real CA is asked), and the container stays healthy
 # Linux only: the instance reaches the DNS stub and the SMTP sink of smoke.py at the address of this host, found with `ip route`
 # (set SMOKE_HOST_IP to override).
 set -euo pipefail
@@ -52,6 +55,7 @@ cleanup() {
   fi
   docker rm -f "$name" >/dev/null 2>&1 || true
   docker rm -f "$name-inspect" >/dev/null 2>&1 || true
+  docker rm -f "$name-acme" >/dev/null 2>&1 || true
   docker volume rm -f "$volume" "$admin_volume" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -170,3 +174,25 @@ docker start "$name" >/dev/null
 wait_healthy
 python3 "$here/smoke.py" --api "http://127.0.0.1:$(docker port "$name" 8080/tcp | head -n 1 | sed 's/.*://')" --admin-user rescue --admin-password "$admin_password" --expect-backend sqlite \
   --tenant-marker assert --stop-after signin
+
+echo "-- the real-server recipe: EGGMAIL_HOSTNAME + EGGMAIL_ACME_EMAIL start the HTTP-01 listener on port 80 as the non-root image user"
+docker run -d --name "$name-acme" -p 127.0.0.1::80 -p 127.0.0.1::8080 \
+  -e EGGMAIL_HOSTNAME=mail.smoke.test -e EGGMAIL_ACME_EMAIL=ops@smoke.test -e EGGMAIL_ACME_DIRECTORY=http://127.0.0.1:9/directory \
+  "$ref" >/dev/null
+acme_http=$(docker port "$name-acme" 8080/tcp | head -n 1 | sed 's/.*://')
+acme_challenge=$(docker port "$name-acme" 80/tcp | head -n 1 | sed 's/.*://')
+for _ in $(seq 1 60); do
+  curl -fsS "http://127.0.0.1:${acme_http}/healthz" >/dev/null 2>&1 && break
+  [ "$(docker inspect --format '{{.State.Running}}' "$name-acme")" = "true" ] || { docker logs "$name-acme" 2>&1 | tail -n 40; echo "::error::the ACME container exited"; exit 1; }
+  sleep 2
+done
+token=abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG
+status=""
+for _ in $(seq 1 30); do   # the listener binds shortly after the server starts
+  status=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${acme_challenge}/.well-known/acme-challenge/${token}" || true)
+  [ "$status" = "404" ] && break
+  sleep 2
+done
+[ "$status" = "404" ] || { docker logs "$name-acme" 2>&1 | tail -n 40; echo "::error::the HTTP-01 listener on container port 80 answered '$status' for an unknown token, expected 404"; exit 1; }
+curl -fsS "http://127.0.0.1:${acme_http}/healthz" >/dev/null
+echo "HTTP-01 listener answers 404 for an unknown token on container port 80"

@@ -1,5 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <ItemGroup>
+    <InternalsVisibleTo Include="Mta.Smtp.Server.Tests" />
     <ProjectReference Include="..\Mta.Core\Mta.Core.csproj" />
     <ProjectReference Include="..\Mta.Smtp.Protocol\Mta.Smtp.Protocol.csproj" />
     <ProjectReference Include="..\Mta.Mime\Mta.Mime.csproj" />

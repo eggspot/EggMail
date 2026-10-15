@@ -93,12 +93,12 @@ internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore, IMes
 
     // Writes
 
-    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
-    internal async ValueTask RecordAcceptedAsync(AcceptedMessage message, CancellationToken cancellationToken)
+    /// <summary>Queues the history rows of an accepted message. Not an asynchronous method: it hands the writer's task straight to the caller, so it is no state machine of its own while the write is pending.</summary>
+    internal ValueTask<int> RecordAcceptedAsync(AcceptedMessage message, CancellationToken cancellationToken)
     {
         MessageContent? content = ContentRules.ShouldRecord(rt.Options, message) ? ContentRules.Prepare(rt.Options, message.Content!) : null;
         string? subject = rt.Options.Content.StoreSubject ? message.Content?.Subject : null;
-        await rt.HistoryWriter!.SubmitAsync(new AcceptHistoryState(message, content, subject, EventIds.Next(message.ReceivedAt)), RecordAccepted, cancellationToken).ConfigureAwait(false);
+        return rt.HistoryWriter!.SubmitAsync(new AcceptHistoryState(message, content, subject, EventIds.Next(message.ReceivedAt)), RecordAccepted, cancellationToken);
     }
 
     private static readonly Func<WriterContext, AcceptHistoryState, int> RecordAccepted = static (ctx, s) =>
@@ -113,17 +113,19 @@ internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore, IMes
             .ExecuteNonQuery();
 
         PreparedCommand rcpt = ctx.Command(HistorySql.RecipientInsert).Set(0, day).Set(1, m.MessageId);
-        foreach (AcceptedRecipient r in m.Recipients)
+        IReadOnlyList<AcceptedRecipient> recipients = m.Recipients;
+        for (int i = 0; i < recipients.Count; i++)
         {
-            rcpt.SetAddress(2, r.Address, lowerCase: true).ExecuteNonQuery();
+            rcpt.SetAddress(2, recipients[i].Address, lowerCase: true).ExecuteNonQuery();
         }
 
         if (s.Content is { } c)
         {
-            ctx.Command(HistorySql.ContentInsert)
-                .Set(0, day).Set(1, m.MessageId).Set(2, m.TenantId).Set(3, c.Subject).Set(4, c.Text).Set(5, c.Html)
-                .Set(6, StorageJson.SerializeAttachments(c.Attachments)).Set(7, c.Truncated ? 1 : 0)
-                .ExecuteNonQuery();
+            PreparedCommand insert = ctx.Command(HistorySql.ContentInsert).Set(0, day).Set(1, m.MessageId).Set(2, m.TenantId).Set(3, c.Subject);
+            // A body held as UTF-8 (the usual one) is bound as it is; the string is only made for a content that has no bytes.
+            if (c.TextUtf8 is { } textBytes) { insert.SetUtf8Text(4, textBytes.Span); } else { insert.Set(4, c.Text); }
+            if (c.HtmlUtf8 is { } htmlBytes) { insert.SetUtf8Text(5, htmlBytes.Span); } else { insert.Set(5, c.Html); }
+            insert.Set(6, StorageJson.SerializeAttachments(c.Attachments)).Set(7, c.Truncated ? 1 : 0).ExecuteNonQuery();
         }
 
         ctx.Command(HistorySql.EventInsert)

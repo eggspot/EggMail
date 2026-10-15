@@ -71,8 +71,8 @@ async function startOnce({ variables = {}, name = 'zero' } = {}) {
   const dataDir = path.join(root, 'data'); // deliberately not created
   const dns = await startFakeDns();
   const sink = await startSmtpSink();
-  const [httpPort, httpsPort, submission, submissions, alternate, bounce] = await freePorts(6);
-  const ports = { http: httpPort, https: httpsPort, submission, submissions, alternate, bounce };
+  const [httpPort, httpsPort, submission, submissions, alternate, bounce, challenge] = await freePorts(7);
+  const ports = { http: httpPort, https: httpsPort, submission, submissions, alternate, bounce, challenge };
 
   const harness = {
     Sqlite__DataDirectory: dataDir,
@@ -87,7 +87,9 @@ async function startOnce({ variables = {}, name = 'zero' } = {}) {
     harness[`Smtp__Listeners__${listener}__Port`] = String(port);
     harness[`Smtp__Listeners__${listener}__BindAddress`] = '127.0.0.1';
   }
-  const env = { ...cleanEnvironment(), ...harness, ...variables };
+  // A test that needs the ACME HTTP-01 listener on a port of this stack writes '{challengePort}' as the value (port 80 cannot be bound on a test machine).
+  const given = Object.fromEntries(Object.entries(variables).map(([k, v]) => [k, String(v).replaceAll('{challengePort}', String(challenge))]));
+  const env = { ...cleanEnvironment(), ...harness, ...given };
 
   const logPath = path.join(root, 'server.log');
   const logFd = fs.openSync(logPath, 'a');

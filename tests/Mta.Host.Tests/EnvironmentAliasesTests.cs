@@ -70,7 +70,7 @@ public class EnvironmentAliasesTests
         Assert.Equal("true", values["Acme:Enabled"]);
         Assert.Equal("ops@example.com", values["Acme:Email"]);
         Assert.Equal("mail.example.com", values["Acme:Domains:0"]);
-        Assert.DoesNotContain("Acme:DirectoryUrl", values.Keys);   // the production CA is the default of the key
+        Assert.DoesNotContain("Acme:Directory", values.Keys);   // the production CA is the default of the key
     }
 
     [Fact]
@@ -134,9 +134,9 @@ public class EnvironmentAliasesTests
         var other = Values(Translate(("EGGMAIL_HOSTNAME", "mail.example.com"), ("EGGMAIL_ACME_EMAIL", "ops@example.com"), ("EGGMAIL_ACME_DIRECTORY", "https://ca.internal/dir")));
         var off = Values(Translate(("EGGMAIL_HOSTNAME", "mail.example.com"), ("EGGMAIL_ACME_EMAIL", "ops@example.com"), ("EGGMAIL_ACME_STAGING", "false")));
 
-        Assert.Equal("https://acme-staging-v02.api.letsencrypt.org/directory", staging["Acme:DirectoryUrl"]);
-        Assert.Equal("https://ca.internal/dir", other["Acme:DirectoryUrl"]);
-        Assert.DoesNotContain("Acme:DirectoryUrl", off.Keys);
+        Assert.Equal("LetsEncryptStaging", staging["Acme:Directory"]);
+        Assert.Equal("https://ca.internal/dir", other["Acme:Directory"]);
+        Assert.DoesNotContain("Acme:Directory", off.Keys);
     }
 
     [Fact]
@@ -157,7 +157,7 @@ public class EnvironmentAliasesTests
 
         LoadedConfig enabledElsewhere = Load(["--Acme:Enabled=true", "--Acme:CloudflareApiToken=x"], ("EGGMAIL_ACME_STAGING", "true"));
         Assert.DoesNotContain(enabledElsewhere.Errors, e => e.Contains("ACME stays off", StringComparison.Ordinal));
-        Assert.Equal(EnvironmentAliases.AcmeStagingDirectory, enabledElsewhere.Config.Acme.DirectoryUrl);
+        Assert.Equal(AcmeSection.LetsEncryptStagingDirectoryUrl, enabledElsewhere.Config.Acme.EffectiveDirectoryUrl());
     }
 
     [Fact]
@@ -476,6 +476,30 @@ public class EnvironmentAliasesTests
             MtaConfig fromCommandLine = ConfigLoader.Load(ConfigLoader.Build(["--Domains:Bootstrap:0=cli.example", "--Domains:MtaStsMx:0=mx.cli.example"], dataDirectoryHint: directory, appSettingsPath: appSettings, environment: env)).Config;
             Assert.Equal(["cli.example"], fromCommandLine.Domains.Bootstrap);                 // the command line owns the list
             Assert.Equal(["mx.cli.example"], fromCommandLine.Domains.MtaStsMx);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void The_ca_aliases_write_the_key_that_wins_so_a_directory_url_in_a_file_cannot_override_them()
+    {
+        string directory = TemporaryDirectory();
+        try
+        {
+            string appSettings = Path.Combine(directory, "appsettings.json");
+            File.WriteAllText(appSettings, """{ "Acme": { "DirectoryUrl": "https://file.example/directory" } }""");
+            Func<string, string?> staging = name => name switch { "EGGMAIL_HOSTNAME" => "mail.example.com", "EGGMAIL_ACME_EMAIL" => "ops@example.com", "EGGMAIL_ACME_STAGING" => "true", _ => null };
+            Func<string, string?> zero = name => name switch { "EGGMAIL_HOSTNAME" => "mail.example.com", "EGGMAIL_ACME_EMAIL" => "ops@example.com", "EGGMAIL_ACME_DIRECTORY" => "ZeroSsl", _ => null };
+
+            Assert.Equal(AcmeSection.LetsEncryptStagingDirectoryUrl, ConfigLoader.Load(ConfigLoader.Build([], dataDirectoryHint: directory, appSettingsPath: appSettings, environment: staging)).Config.Acme.EffectiveDirectoryUrl());
+            Assert.Equal(AcmeSection.ZeroSslDirectoryUrl, ConfigLoader.Load(ConfigLoader.Build([], dataDirectoryHint: directory, appSettingsPath: appSettings, environment: zero)).Config.Acme.EffectiveDirectoryUrl());
+
+            // Acme:Directory on the command line is a long-form key and wins over the alias; without the alias the file's URL is what is used.
+            Assert.Equal("https://cli.example/directory", ConfigLoader.Load(ConfigLoader.Build(["--Acme:Directory=https://cli.example/directory"], dataDirectoryHint: directory, appSettingsPath: appSettings, environment: staging)).Config.Acme.EffectiveDirectoryUrl());
+            Assert.Equal("https://file.example/directory", ConfigLoader.Load(ConfigLoader.Build([], dataDirectoryHint: directory, appSettingsPath: appSettings, environment: _ => null)).Config.Acme.EffectiveDirectoryUrl());
         }
         finally
         {

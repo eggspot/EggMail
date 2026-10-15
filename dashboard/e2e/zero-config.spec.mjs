@@ -1,6 +1,5 @@
 import fs from 'node:fs';
 import https from 'node:https';
-import net from 'node:net';
 import { expect, test } from '@playwright/test';
 import { ApiClient } from './support/apiClient.mjs';
 import { createRecipientDomain, createVerifiedDomain, unique } from './support/fixtures.mjs';
@@ -246,24 +245,18 @@ test.describe('the documented recipe: EGGMAIL_HOSTNAME + EGGMAIL_ACME_EMAIL', ()
     test.setTimeout(180_000);
     // Port 80 cannot be bound on a test machine (or as a non-root user), so the listener gets a free port: the same setting as `-p 80:8081` in the docs. The CA is an
     // address nothing listens on, so no real CA is ever asked; the order fails, which is recorded and shown as a warning while the self-signed certificate keeps serving.
-    const challengePort = await new Promise((resolve) => {
-      const server = net.createServer();
-      server.listen(0, '127.0.0.1', () => {
-        const { port } = server.address();
-        server.close(() => resolve(port));
-      });
-    });
     const stack = await startZeroConfigStack({
       name: 'recipe',
       variables: {
         EGGMAIL_HOSTNAME: 'mail.zero.example',
         EGGMAIL_ACME_EMAIL: 'ops@zero.example',
         EGGMAIL_ACME_DIRECTORY: 'http://127.0.0.1:9/directory',
-        Acme__Http01ListenPort: String(challengePort),
+        Acme__Http01ListenPort: '{challengePort}',
         Acme__Http01BindAddress: '127.0.0.1',
       },
     });
     try {
+      const challengePort = stack.ports.challenge;
       expect((await fetch(`${stack.baseURL}/healthz`)).status).toBe(200);
       const unknownToken = await fetch(`http://127.0.0.1:${challengePort}/.well-known/acme-challenge/abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG`);
       expect(unknownToken.status).toBe(404);                       // the built-in listener is there and knows no such token

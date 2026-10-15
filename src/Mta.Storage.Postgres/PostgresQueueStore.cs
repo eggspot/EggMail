@@ -207,9 +207,10 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
         string sending = message.SendingDomain ?? "";
         string? run = null;
         int count = 0;
-        foreach (AcceptedRecipient r in message.Recipients)
+        IReadOnlyList<AcceptedRecipient> recipients = message.Recipients;
+        for (int i = 0; i < recipients.Count; i++)
         {
-            string domain = r.Address.Domain;
+            string domain = recipients[i].Address.Domain;
             if (run is not null && string.Equals(run, domain, StringComparison.Ordinal))
             {
                 count++;

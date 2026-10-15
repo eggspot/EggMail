@@ -503,6 +503,32 @@ public sealed class ZeroConfigStartupTests : IAsyncLifetime
         Assert.True(StartupChecks.HostnameConfigured(viaAlias.Config, name => name == "Hostname" ? viaAlias.Config.Hostname : null));
     }
 
+    [Fact]
+    public void EGGMAIL_HOSTNAME_says_when_it_overrides_a_different_Hostname_from_a_file_or_the_environment()
+    {
+        string directory = Path.Combine(_dir, "override");
+        Directory.CreateDirectory(directory);
+        string appSettings = Path.Combine(directory, "appsettings.json");
+        File.WriteAllText(appSettings, """{ "Hostname": "from-file.example.com" }""");
+        Func<string, string?> env = name => name == "EGGMAIL_HOSTNAME" ? "alias.example.com" : null;
+        IConfigurationRoot root = ConfigLoader.Build([], dataDirectoryHint: directory, appSettingsPath: appSettings, environment: env);
+        MtaConfig config = ConfigLoader.Load(root).Config;
+
+        Assert.Equal("alias.example.com", config.Hostname);
+        string note = StartupChecks.HostnameOverrideNote(config, root, env)!;
+        Assert.Contains("from-file.example.com", note, StringComparison.Ordinal);
+        Assert.Contains("overrides", note, StringComparison.Ordinal);
+        var log = new RecordingLog();
+        StartupChecks.LogAdvice(config, log, env, root);
+        Assert.Contains(log.Lines, l => l.StartsWith("Warning ", StringComparison.Ordinal) && l.Contains("overrides", StringComparison.Ordinal));
+
+        // The long-form environment variable (exact case), too; the same value, a missing alias and the HOSTNAME of the container runtime say nothing.
+        Assert.Contains("long.example.com", StartupChecks.HostnameOverrideNote(config, null, n => n switch { "EGGMAIL_HOSTNAME" => "alias.example.com", "Hostname" => "long.example.com", _ => null })!, StringComparison.Ordinal);
+        Assert.Null(StartupChecks.HostnameOverrideNote(config, null, n => n switch { "EGGMAIL_HOSTNAME" => "alias.example.com", "Hostname" => "ALIAS.example.com.", _ => null }));
+        Assert.Null(StartupChecks.HostnameOverrideNote(config, root, _ => null));
+        Assert.Null(StartupChecks.HostnameOverrideNote(config, null, n => n switch { "EGGMAIL_HOSTNAME" => "alias.example.com", "HOSTNAME" => "3f2a1b9c0d11", _ => null }));
+    }
+
     [Theory]
     [InlineData("mail.example.com", 0)]
     [InlineData("mail_01.example.com", 1)]
