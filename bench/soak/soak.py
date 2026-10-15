@@ -218,9 +218,9 @@ def directory_mb(path, skip=()):
 # --------------------------------------------------------------------------- PostgreSQL
 
 class Postgres:
-    """A PostgreSQL 17 server for the soak: a docker container (Actions), binaries on PATH (a laptop), or one that already exists."""
+    """A PostgreSQL server for the soak: a postgres:17 container (Actions) or a throwaway cluster from the binaries on PATH (a laptop)."""
 
-    def __init__(self, mode, workdir, port, external=None):
+    def __init__(self, mode, workdir, port):
         self.mode = mode
         self.port = port
         self.workdir = workdir
@@ -229,10 +229,7 @@ class Postgres:
         self.database = "eggmail_soak"
         self.container = "eggmail-soak-pg-%d" % os.getpid()
         self.exec_prefix = []
-        if external:
-            self.host, self.port = external.rsplit(":", 1)[0], int(external.rsplit(":", 1)[1])
-        else:
-            self.host = "127.0.0.1"
+        self.host = "127.0.0.1"
 
     def start(self):
         if self.mode == "docker":
@@ -331,7 +328,6 @@ class Soak:
         self.sink = None
         self.api = None
         self.loader = None
-        self.load_started = 0.0
         self.password = secrets.token_urlsafe(18)
         self.smtp_password = None
         self.rand = random.Random(args.seed)
@@ -422,9 +418,6 @@ class Soak:
                 env[key] = value
         return env
 
-    def main_ports(self):
-        return self.ports
-
     # -- the server process
 
     def start_host(self, timeout=180):
@@ -501,7 +494,6 @@ class Soak:
                 "--json", os.path.join(self.out, "load-result.json"), "--label", "soak"]
         self.load_log = open(os.path.join(self.out, "load.log"), "ab", buffering=0)
         self.loader = subprocess.Popen(argv, stdout=self.load_log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
-        self.load_started = now()
         self.phase = "load"
         self.event("load_start", pid=self.loader.pid, rate=a.rate, size_mix=a.size_mix, connections=a.connections)
 

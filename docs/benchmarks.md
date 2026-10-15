@@ -157,6 +157,21 @@ Needs the .NET 10 SDK and python3. PostgreSQL rows need either `initdb`, `pg_ctl
 
 How little these numbers can be trusted: the same SQLite `Off` configuration measured 4,114, 5,027, 7,184 and now 3,999 msg/s in four runs of this workflow on four runner instances over two days (the code also changed between them), and the same code on a 10-core laptop gave 1,400 to 6,100. Only the allocation columns are stable (within about 1 % across runs of the same code), which is why the regression gate uses them. Read the table for shape, not for values: SQLite `Off` is faster than `Full` and PostgreSQL on this runner; `StatsOnly` is about 25 % faster than `Full` history; `synchronous_commit=off` did not help PostgreSQL measurably here (the runner's disk is fast and the load generator is probably the limit); the durable SQLite row is not comparable with the PostgreSQL durable row (different fsync behaviour, different storage); the ReadyToRun row is inside the noise of the JIT row. Nothing here is a claim about being the fastest, and no other server was run on the same machine. The first run of this section (2026-10-13, before the allocation work) had 7,184 msg/s and 32.7 KB per message for the first row.
 
+## The durable and non-durable matrix on the hosted runner (2026-10-15)
+
+First run of the matrix of "The throughput run" ([workflow run](https://github.com/eggspot/EggMail/actions/runs/38671785477), 14.6 minutes of runner time, 3 interleaved runs of 30,000 messages, 10,000 for delivery). **GitHub-hosted ubuntu-latest 4-core runner, noisy, not publishable** (Ubuntu 24.04, .NET 10.0.13; PostgreSQL 17 in a container on the same runner). Median (min-max) of three runs; ratio = non-durable / durable.
+
+| Backend | History | What | Non-durable | Durable | Ratio |
+|---|---|---|---:|---:|---:|
+| SQLite | Full | ingest msg/s | `Off`: 3,920 (3,916-4,011) | `Full`: 2,248 (2,216-2,253); `Normal`: 3,564 (3,557-3,741) | 1.7x (`Normal`: 1.1x) |
+| SQLite | Full | end-to-end recipients/s | 984 | `Full`: 896 | 1.1x |
+| SQLite | StatsOnly | ingest msg/s | `Off`: 4,759 (4,699-5,241) | `Full`: 3,197 (2,934-3,256) | 1.5x |
+| PostgreSQL 17 | Full | ingest msg/s | `synchronous_commit=off`: 1,803 (1,784-1,854) | default: 1,760 (1,739-1,830) | 1.0x |
+| PostgreSQL 17 | Full | end-to-end recipients/s | 397 | 382 | 1.0x |
+| PostgreSQL 17 | StatsOnly | ingest msg/s | 2,606 (2,366-2,635) | 2,301 (2,301-2,308) | 1.1x |
+
+What the pairs say, and what they do not: on this runner SQLite `Full` costs about 40 % of the throughput of `Off` (the group commit batches the fsync, so the cost is far below one fsync per message), `Normal` costs almost nothing, and PostgreSQL's `synchronous_commit` made no difference that exceeds the run-to-run spread, probably because the container's disk acknowledges a flush cheaply; that is a property of this runner's storage, not of PostgreSQL, and it is why the pair must be measured on the hardware that matters. End-to-end delivery is bound by the delivery path (about 1,000 recipients/s on SQLite, 400 on PostgreSQL here), not by the commit mode. A local run of the same script on an Apple M-series Mac mini (`bench/run-local-matrix.sh --quick`, one run of 10,000, PostgreSQL 16.13 from Homebrew) showed the same shape: SQLite `Full` 2.9x slower than `Off`, `Normal` equal to `Off`, PostgreSQL pair equal; that single run is a check of the script, not a measurement.
+
 ## Pipeline harness and first profile (2026-10-13)
 
 `bench/Mta.Bench.Pipeline` runs the real runtime in one process (SMTP ingest, storage, DKIM signing at delivery, delivery engine), a counting sink as the remote MTA and the separate-process load generator (`mta-tools load`) as the client:
