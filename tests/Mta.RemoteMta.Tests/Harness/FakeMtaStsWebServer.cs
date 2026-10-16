@@ -55,6 +55,11 @@ public sealed class FakeMtaStsWebServer : IAsyncDisposable
 
     public int Requests => _hosts.Count;
 
+    /// <summary>TCP connections accepted, including those whose TLS handshake the client rejected (these never become a request).</summary>
+    public int Connections => Volatile.Read(ref _connections);
+
+    private int _connections;
+
     /// <summary>A handler for <c>MtaStsPolicyFetcher</c> that connects every host name to this server and validates the certificate against <paramref name="trustedRoot"/>.</summary>
     public HttpMessageHandler CreateHandler(X509Certificate2 trustedRoot)
     {
@@ -96,6 +101,7 @@ public sealed class FakeMtaStsWebServer : IAsyncDisposable
                 return;
             }
 
+            Interlocked.Increment(ref _connections);
             _ = Task.Run(() => ServeAsync(socket));
         }
     }

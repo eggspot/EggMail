@@ -217,6 +217,9 @@ public sealed class MtaLab : IAsyncDisposable
         return mta;
     }
 
+    /// <summary>Connections for the host name <paramref name="host"/> go to <paramref name="port"/> (an alias that resolves to another host's address).</summary>
+    public void MapPort(string host, int port) => _ports[host] = port;
+
     /// <summary>Gives <paramref name="host"/> an address record but no listener: connections are refused.</summary>
     public void AddRefusingHost(string host, string address = "127.0.0.1")
     {

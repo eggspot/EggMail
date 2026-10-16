@@ -41,6 +41,15 @@ public static class TlsReportRecorder
         {
             collector.RecordFailure(decision.RecipientDomain, policy, decision.MxHost, validation.Failure ?? TlsResultType.ValidationFailure, sendingIp, receivingIp);
         }
+        else if (validation is { Accepted: true, Verified: false, Failure: { } tolerated })
+        {
+            // MTA-STS testing mode: the certificate failed validation, the policy lets the mail through, and the domain owner asked to hear about it (RFC 8460 section 2).
+            collector.RecordFailure(decision.RecipientDomain, policy, decision.MxHost, tolerated, sendingIp, receivingIp);
+        }
+        else if (decision.ToleratedFailure is { } toleratedByPolicy)
+        {
+            collector.RecordFailure(decision.RecipientDomain, policy, decision.MxHost, toleratedByPolicy, sendingIp, receivingIp);
+        }
         else if (tlsUsed)
         {
             collector.RecordSuccess(decision.RecipientDomain, policy, decision.MxHost, sendingIp, receivingIp);
