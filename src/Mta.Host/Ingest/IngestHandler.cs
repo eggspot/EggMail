@@ -76,6 +76,8 @@ public sealed class IngestHandler : ISmtpServerHandler, IBounceNamespace
     public ValueTask<SmtpReply?> OnConnectedAsync(SmtpSessionContext session, CancellationToken cancellationToken) =>
         InboundOf(session) is { } inbound ? inbound.OnConnectedAsync(session) : ValueTask.FromResult<SmtpReply?>(null);
 
+    public void OnMessageRefused(SmtpSessionContext session, SmtpReply reply) => InboundOf(session)?.OnMessageRefused(session, reply);
+
     public ValueTask<SmtpReply?> OnDataStartAsync(SmtpSessionContext session, MailFromInfo mail, IReadOnlyList<EmailAddress> recipients, CancellationToken cancellationToken) =>
         InboundOf(session) is { } inbound ? inbound.OnDataStartAsync(session) : ValueTask.FromResult<SmtpReply?>(null);
 

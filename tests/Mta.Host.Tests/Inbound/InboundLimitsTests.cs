@@ -1,5 +1,4 @@
 using System.Net;
-using System.Text;
 using Mta.Dns;
 using Mta.Host.Ingest;
 using Mta.Storage;
@@ -377,6 +376,5 @@ public class InboundLimitsTests
 
         Assert.Equal(421, last!.Code);   // harvesting is slowed down by the errors-per-session limit
         Assert.True(await mta.IsClosedByServerAsync());
-        _ = Encoding.ASCII;
     }
 }

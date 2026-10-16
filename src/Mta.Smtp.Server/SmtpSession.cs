@@ -440,6 +440,7 @@ internal sealed class SmtpSession
                     if (tooLarge)
                     {
                         SmtpMetrics.MessagesRejected.Add(1);
+                        _handler.OnMessageRefused(_ctx, SmtpReplies.MessageTooLarge);
                         ResetTransaction();
                         Write(SmtpReplies.MessageTooLarge);
                         continue;
@@ -448,6 +449,7 @@ internal sealed class SmtpSession
                     if (noMemory)
                     {
                         SmtpMetrics.MessagesRejected.Add(1);
+                        _handler.OnMessageRefused(_ctx, SmtpReplies.InsufficientStorage);
                         ResetTransaction();
                         Write(SmtpReplies.InsufficientStorage);
                         continue;
@@ -911,9 +913,11 @@ internal sealed class SmtpSession
         var chunk = cmd;
 
         // The first chunk is the start of the message data: the handler may refuse the message now. The chunks are still read and discarded (RFC 3030: the sequence runs to BDAT LAST).
+        bool refusedByHandler = false;
         if (await _handler.OnDataStartAsync(_ctx, _mail!, _recipients, _stopping).ConfigureAwait(false) is { } dataRefusal)
         {
             failed = true;
+            refusedByHandler = true;
             failure = dataRefusal;
             message.Dispose();
         }
@@ -1018,6 +1022,11 @@ internal sealed class SmtpSession
                     SmtpMetrics.MessagesRejected.Add(1);
                     if (chunk.LastChunk)
                     {
+                        if (!refusedByHandler)
+                        {
+                            _handler.OnMessageRefused(_ctx, failure!);
+                        }
+
                         ResetTransaction();
                         Write(failure!);
                         return;

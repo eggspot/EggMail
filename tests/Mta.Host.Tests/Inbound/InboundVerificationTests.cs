@@ -506,8 +506,8 @@ public class InboundVerificationTests : IAsyncLifetime
     {
         string Hops(int n) => string.Concat(Enumerable.Range(0, n).Select(i => $"Received: from hop{i}.test by hop{i + 1}.test; Fri, 16 Oct 2026 12:00:00 +0000\r\n"));
 
-        Assert.Equal(250, (await DeliverAsync(InboundFixture.Message(extraHeaders: Hops(24)))).Code);   // the one we add makes 25
-        Assert.Equal(250, (await DeliverAsync(InboundFixture.Message(extraHeaders: Hops(25)))).Code);   // 25 received from the sender, plus ours: the limit is on what arrives
+        Assert.Equal(250, (await DeliverAsync(InboundFixture.Message(extraHeaders: Hops(24)))).Code);   // 24 arrive
+        Assert.Equal(250, (await DeliverAsync(InboundFixture.Message(extraHeaders: Hops(25)))).Code);   // 25 arrive: the limit is on what arrives, and 26 is over
         var reply = await DeliverAsync(InboundFixture.Message(extraHeaders: Hops(26)));
 
         Assert.Equal((554, "5.4.6"), (reply.Code, reply.Enhanced));

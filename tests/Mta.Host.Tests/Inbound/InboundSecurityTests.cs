@@ -406,6 +406,19 @@ public class InboundSecurityTests : IAsyncLifetime
     // ------------------------------------------------------------------ header injection through the dialog
 
     [Fact]
+    public async Task Odd_recipient_shapes_never_reach_a_route_by_accident()
+    {
+        await using FakeMta mta = await _f.ConnectedAsync();
+        Assert.Equal(250, (await mta.MailFromAsync("bob@sender.test")).Code);
+
+        foreach (string path in new[] { "postmaster", "support", "support@", "@example.org", "support@example.org@gmail.com", "<support@example.org>", "support@[203.0.113.1]" })
+        {
+            var r = await mta.CommandAsync($"RCPT TO:<{path}>");
+            Assert.NotEqual(250, r.Code);
+        }
+    }
+
+    [Fact]
     public async Task A_helo_name_with_control_or_header_characters_is_refused_by_the_parser_and_the_stored_record_has_a_clean_name()
     {
         await using FakeMta mta = await _f.ConnectAsync();

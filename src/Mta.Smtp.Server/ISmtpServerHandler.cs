@@ -125,5 +125,13 @@ public interface ISmtpServerHandler
     /// </summary>
     ValueTask<SmtpReply> OnMessageAsync(SmtpMessage message, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Called when the server itself refused the message data after it had been announced to the handler (<see cref="OnDataStartAsync"/> went on): the body grew past the size limit (<c>552</c>) or the global
+    /// in-flight budget was exhausted (<c>452</c>). The handler never sees such a message, so this is where it can count it. The default does nothing.
+    /// </summary>
+    void OnMessageRefused(SmtpSessionContext session, SmtpReply reply)
+    {
+    }
+
     void OnDisconnected(SmtpSessionContext session);
 }

@@ -363,6 +363,15 @@ public sealed class InboundReceiver
         return ValueTask.FromResult<SmtpReply?>(null);
     }
 
+    /// <summary>The server refused the body itself (too large, or the in-flight budget): the handler never sees such a message, so it is counted here.</summary>
+    public void OnMessageRefused(SmtpSessionContext session, SmtpReply reply)
+    {
+        if (session.HandlerState is State { Kind: Kind.Inbound })
+        {
+            InboundMetrics.Message(reply.Code == 552 ? "rejected_size" : "rejected_other");
+        }
+    }
+
     // ---------------------------------------------------------------- the message
 
     public async ValueTask<SmtpReply> OnMessageAsync(SmtpMessage message, CancellationToken ct)
