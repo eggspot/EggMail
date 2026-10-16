@@ -328,7 +328,7 @@ public class AcmeServiceMockCaTests
         var renewal = await rig.RenewalAsync();
         Assert.Contains("no active zone found", renewal.LastError);
         Assert.Equal(0, rig.Ca.Count("finalize"));
-        Assert.Equal(0, rig.Ca.Count("challenge", "POST") - rig.Ca.Requests.Count(r => r.Endpoint == "challenge" && r.Payload is null));
+        Assert.DoesNotContain(rig.Ca.Requests, r => r.Endpoint == "challenge" && r.Payload is not null); // no challenge was ever answered
     }
 
     [Fact]

@@ -127,7 +127,7 @@ public class AcmeRunnerMockCaTests
     public async Task More_bad_nonces_than_one_request_retries_repeat_the_whole_order_and_keep_the_account()
     {
         using var rig = new AcmeRig();
-        rig.Ca.RejectNonces(5); // four refusals end the first attempt (one try and three retries); the fifth is absorbed by the second
+        rig.Ca.RejectNonces(5); // two refusals end an attempt (a registration is tried twice), so the order is repeated; the fifth is absorbed by the third attempt
 
         var issued = await rig.IssueAsync();
 
