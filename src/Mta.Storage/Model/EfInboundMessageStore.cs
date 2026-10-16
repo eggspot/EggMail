@@ -52,6 +52,9 @@ public sealed class EfInboundMessageStore<TContext>(IInboundDbAccess<TContext> d
     /// <summary>The pause between the batches of an erasure, so the queue writer serves intake and deliveries in between (settable for tests).</summary>
     internal TimeSpan ErasePause { get; set; } = TimeSpan.FromMilliseconds(25);
 
+    /// <summary>Test seam: how the pause between batches is taken (a test counts the pauses instead of timing them).</summary>
+    internal Func<TimeSpan, CancellationToken, Task> DelayAsync { get; set; } = static (pause, ct) => Task.Delay(pause, ct);
+
     /// <summary>Test seam: runs between the read that finds a batch and the write that deletes it, the window in which a retry or a claim can change the rows.</summary>
     internal Func<Task>? BetweenReadAndWrite { get; set; }
 
@@ -129,7 +132,7 @@ public sealed class EfInboundMessageStore<TContext>(IInboundDbAccess<TContext> d
         EnvelopeFrom = e.EnvelopeFrom, EnvelopeTo = e.EnvelopeTo, Subject = e.Subject, Size = e.Size, Spf = e.Spf, SpfDomain = e.SpfDomain, SpfHelo = e.SpfHelo, Dkim = e.Dkim, DkimDomain = e.DkimDomain,
         Dmarc = e.Dmarc, DmarcPolicy = e.DmarcPolicy, Arc = e.Arc, Disposition = e.Disposition, RouteId = e.RouteId, ActionKind = e.ActionKind, ActionState = e.ActionState,
         ActionAttempts = e.ActionAttempts, RetryGeneration = e.RetryGeneration, ActionNextAttemptAt = e.ActionNextAttemptAt, ActionFinishedAt = e.ActionFinishedAt, ActionLastError = e.ActionLastError, ActionNote = e.ActionNote,
-        ForwardMessageId = e.ForwardMessageId, HasRaw = e.HasRaw, LeaseOwner = e.LeaseOwner, LeaseUntil = e.LeaseUntil, TransferSwitchId = e.TransferSwitchId,
+        ForwardMessageId = e.ForwardMessageId, HasRaw = e.HasRaw, LeaseOwner = e.LeaseOwner, ClaimSequence = e.ClaimSequence, LeaseUntil = e.LeaseUntil, TransferSwitchId = e.TransferSwitchId,
     };
 
     public async ValueTask<Page<InboundMessage>> SearchAsync(InboundMessageQuery query, CancellationToken cancellationToken)
@@ -319,7 +322,7 @@ public sealed class EfInboundMessageStore<TContext>(IInboundDbAccess<TContext> d
             List<InboundMessageEntity> rows = c.InboundMessages.AsNoTracking().Where(x => idArray.Contains(x.Id)).ToList();
             Dictionary<Guid, byte[]> bodies = c.InboundRaw.AsNoTracking().Where(x => idArray.Contains(x.MessageId)).Select(x => new { x.MessageId, x.Raw }).ToList().ToDictionary(x => x.MessageId, x => x.Raw);
             return rows.OrderBy(x => x.ActionNextAttemptAt).ThenBy(x => InboundMapping.IdText(x.Id), StringComparer.Ordinal)
-                .Select(x => new ClaimedInboundAction(x.ToRecord(), bodies.GetValueOrDefault(x.Id))).ToList();
+                .Select(x => new ClaimedInboundAction(x.ToRecord(), bodies.GetValueOrDefault(x.Id), x.ClaimSequence)).ToList();
         }, cancellationToken).ConfigureAwait(false);
     }
 
@@ -343,13 +346,13 @@ public sealed class EfInboundMessageStore<TContext>(IInboundDbAccess<TContext> d
         string? error = outcome.State == InboundActionState.Done ? null : InboundErrorText.Clean(outcome.Error, MaxErrorLength);
         string? note = outcome.State == InboundActionState.Done ? InboundErrorText.CleanNote(outcome.Note) : null;
         Guid? forward = outcome.ForwardMessageId;
-        int? claimedAttempt = outcome.ClaimedAttempt;
+        long? claimToken = outcome.ClaimToken;
         bool free = outcome.FreeBody;
         InboundActionState state = outcome.State;
         return await Write(c =>
         {
-            // The claim counted the attempt; a completion from an earlier claim (the attempt number differs) is refused even under the same owner name.
-            int changed = c.InboundMessages.Where(x => x.Id == messageId && x.LeaseOwner == owner && (claimedAttempt == null || x.ActionAttempts == claimedAttempt)).ExecuteUpdate(s => s
+            // The token grows with every claim and never goes back down: a completion from an earlier claim is refused even under the same owner name, after a release or a retry too.
+            int changed = c.InboundMessages.Where(x => x.Id == messageId && x.LeaseOwner == owner && (claimToken == null || x.ClaimSequence == claimToken)).ExecuteUpdate(s => s
                 .SetProperty(x => x.ActionState, state)
                 .SetProperty(x => x.ActionNextAttemptAt, next)
                 .SetProperty(x => x.ActionFinishedAt, finished)
@@ -527,7 +530,7 @@ public sealed class EfInboundMessageStore<TContext>(IInboundDbAccess<TContext> d
 
             if (pause > TimeSpan.Zero)
             {
-                await Task.Delay(pause, cancellationToken).ConfigureAwait(false);
+                await DelayAsync(pause, cancellationToken).ConfigureAwait(false);
             }
         }
     }

@@ -541,6 +541,13 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
         var route = new InboundRouteRecord(
             id, domain.TenantId, domain.Id, name.Trim(), order, enabled, matchKind, match.LocalPart, match.PlusAddressing ?? false, actionKind, action.WebhookEndpointId, format,
             action.ForwardTo is null ? [] : [.. action.ForwardTo], created, updated);
+        if (!errors.Any && actionKind == InboundActionKind.Forward && actionChanged && !caller.HasScope(ApiScopes.Send))
+        {
+            // A forward route sends every matching message, from now on, to an address of the caller's choosing: that is sending mail, so it takes the send scope as well (design section 11.9).
+            // This comes before the lookup of the target domains below, so a key without `send` learns nothing about which domains this server receives for.
+            throw ApiException.Forbidden($"A forward route also needs the '{ApiScopes.Send}' scope: it sends the mail it receives to the addresses it names.");
+        }
+
         if (!errors.Any)
         {
             // The loop check has one implementation, the validator; the API only supplies the fact it cannot read: which target domains this server receives mail for (design section 11.6).
@@ -560,12 +567,6 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
             {
                 errors.Add(FieldOf(e.Field), e.Message);
             }
-        }
-
-        if (!errors.Any && actionKind == InboundActionKind.Forward && actionChanged && !caller.HasScope(ApiScopes.Send))
-        {
-            // A forward route sends every matching message, from now on, to an address of the caller's choosing: that is sending mail, so it takes the send scope as well (design section 11.9).
-            throw ApiException.Forbidden($"A forward route also needs the '{ApiScopes.Send}' scope: it sends the mail it receives to the addresses it names.");
         }
 
         if (!errors.Any && actionChanged && actionKind == InboundActionKind.Webhook)

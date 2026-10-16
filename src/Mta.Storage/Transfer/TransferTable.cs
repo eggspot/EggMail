@@ -150,6 +150,9 @@ public abstract class TransferTable
     /// <summary>The table has a column that holds a switch hold (a transfer mark on the source, an activation hold on the target).</summary>
     public abstract bool HasHold { get; }
 
+    /// <summary>The hold names a condition (received mail holds its pending actions only): the number of held rows is not the number of rows, so a manifest has to say it (<c>heldRows</c>).</summary>
+    public abstract bool HoldsSome { get; }
+
     /// <summary>Whether this row is held by a switch (every row of a table with a hold, unless the hold names a condition).</summary>
     public abstract bool IsHeld(object row);
 
@@ -251,6 +254,8 @@ public sealed class TransferTable<T> : TransferTable where T : class, new()
     public override bool PerDay => _spec.Day is not null;
 
     public override bool HasHold => _spec.Hold is not null;
+
+    public override bool HoldsSome => _spec.Hold?.Holds is not null;
 
     public override bool IsHeld(object row) => _spec.Hold is { } hold && (hold.Holds is null || hold.Holds((T)row));
 

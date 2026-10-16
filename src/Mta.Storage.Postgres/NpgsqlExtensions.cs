@@ -28,7 +28,7 @@ internal static class PostgresErrors
                 case PostgresException pg:
                     return pg.SqlState is { } state
                         && (state.StartsWith("08", StringComparison.Ordinal)
-                            || state is "53300" or "53400" or "57P01" or "57P02" or "57P03" or "58000" or "58030");
+                            || state is "25006" or "53300" or "53400" or "57P01" or "57P02" or "57P03" or "58000" or "58030");
                 case SocketException:
                 case IOException:
                 case TimeoutException:
@@ -58,6 +58,15 @@ internal static class PostgresErrors
     /// <summary>A failure that will probably not repeat: a serialization failure, a deadlock or a statement timeout. The caller retries later (<c>451</c>).</summary>
     public static bool IsRetryable(Exception exception)
     {
+        // A statement the caller cancelled is reported by the server as 57014 too, but it surfaces as an OperationCanceledException: that is the caller's decision and stays one.
+        for (Exception? e = exception; e is not null; e = e.InnerException)
+        {
+            if (e is OperationCanceledException)
+            {
+                return false;
+            }
+        }
+
         for (Exception? e = exception; e is not null; e = e.InnerException)
         {
             if (e is PostgresException { SqlState: SerializationFailure or DeadlockDetected or "57014" })
