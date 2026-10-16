@@ -443,6 +443,11 @@ public sealed class DeliveryProcessor
                 return Synthetic(RouteAttemptResult.PermanentReply, 550, "5.1.2", mx.Detail ?? "domain has no mail host");
             case MxResolutionStatus.TempFail:
                 return Synthetic(RouteAttemptResult.TemporaryReply, 451, "4.4.3", mx.Detail ?? "temporary DNS failure resolving the mail host");
+            case MxResolutionStatus.AddressesRefused:
+                // Our policy, not a fact about the domain: never a permanent failure (that would bounce the mail and suppress the recipient for good).
+                // The mail waits until it expires, and the bounce then says why. An operator who runs such a mail server sets the switch.
+                _s.Log.Write(MtaLogLevel.Warning, Source, $"delivery to {first.RecipientDomain} is held: its mail hosts resolve only to internal-network or reserved addresses, which are refused unless Delivery:AllowPrivateMxAddresses is true");
+                return Synthetic(RouteAttemptResult.TemporaryReply, 451, "4.4.4", $"the mail hosts of {first.RecipientDomain} resolve only to internal-network or reserved addresses, which this server does not deliver to unless Delivery:AllowPrivateMxAddresses is true");
         }
 
         var domainTls = await _s.Tls.ResolveDomainAsync(first.RecipientDomain, _s.TlsPolicies.For(first.RecipientDomain), ct).ConfigureAwait(false);
