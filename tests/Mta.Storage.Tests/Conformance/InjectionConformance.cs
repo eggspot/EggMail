@@ -46,7 +46,7 @@ public abstract class InjectionConformance : StorageTestBase
         "\r\n",
         "Robert'); DROP TABLE Students;--",
         "ＵＮＩＯＮ ＳＥＬＥＣＴ",     // full-width letters
-        "‮‮",
+        "\u202e\u202e",
         "\ud800",                                  // a lone surrogate
         "x" + "'" + new string('x', 5000),
     ];

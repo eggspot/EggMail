@@ -14,6 +14,13 @@ public static class WebhookUrlValidator
             return false;
         }
 
+        // Uri tolerates (and percent-encodes) line breaks and spaces inside a URL; the stored text would carry them into logs and the dashboard.
+        if (url.Trim().Any(c => char.IsControl(c) || char.IsWhiteSpace(c) || c is '\u2028' or '\u2029' or (>= '\u202A' and <= '\u202E') or (>= '\u2066' and <= '\u2069')))
+        {
+            error = "The URL must not contain spaces or control characters.";
+            return false;
+        }
+
         if (uri.Scheme != Uri.UriSchemeHttps && !(allowHttp && uri.Scheme == Uri.UriSchemeHttp))
         {
             error = allowHttp ? "Only http and https URLs are supported." : "Only https URLs are allowed.";

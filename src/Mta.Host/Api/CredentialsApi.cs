@@ -76,7 +76,7 @@ public sealed partial class CredentialsApi(ApiAuthenticator auth, IStorage stora
         CreateApiKeyRequest body = await ApiJson.ReadBodyAsync<CreateApiKeyRequest>(context, options.MaxBodyBytes).ConfigureAwait(false);
         var errors = new ValidationErrors();
         string name = body.Name?.Trim() ?? "";
-        if (name.Length is 0 or > 80 || name.Any(char.IsControl))
+        if (name.Length is 0 or > 80 || ApiText.HasUnsafeCharacter(name))
         {
             errors.Add("name", "A name of 1 to 80 characters is required.");
         }

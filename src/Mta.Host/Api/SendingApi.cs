@@ -133,7 +133,7 @@ public static class MessageComposer
 
             for (int i = 0; i < tags.Count; i++)
             {
-                if (string.IsNullOrWhiteSpace(tags[i]) || tags[i].Length > 64 || tags[i].Any(char.IsControl))
+                if (string.IsNullOrWhiteSpace(tags[i]) || tags[i].Length > 64 || ApiText.HasUnsafeCharacter(tags[i]))
                 {
                     errors.Add($"tags[{i}]", "A tag is 1 to 64 characters without control characters.");
                 }
