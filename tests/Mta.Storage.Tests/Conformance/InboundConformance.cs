@@ -809,7 +809,8 @@ public abstract class InboundConformance : StorageTestBase
         InboundRouteRecord route = Route(domain, action: InboundActionKind.Webhook, endpoint: endpoint);
         await Inbound.UpsertRouteAsync(route, default);
 
-        await Assert.ThrowsAsync<StorageConflictException>(async () => await Storage.Config.DeleteWebhookEndpointAsync(TenantA, endpoint, default));
+        var inUse = await Assert.ThrowsAsync<StorageConflictException>(async () => await Storage.Config.DeleteWebhookEndpointAsync(TenantA, endpoint, default));
+        Assert.Equal(StorageConflictReasons.WebhookEndpointInUse, inUse.Reason);
         Assert.NotNull(await Storage.Config.GetWebhookEndpointAsync(endpoint, default));
 
         // Another tenant's delete of the same id does nothing and does not fail; once the route is gone the delete works.
@@ -966,11 +967,30 @@ public abstract class InboundConformance : StorageTestBase
         Guid mine = await AddEndpointAsync(TenantA, true, "*");
         Guid theirs = await AddEndpointAsync(TenantB, true, "*");
 
-        await Assert.ThrowsAsync<StorageConflictException>(async () => await Inbound.UpsertRouteAsync(Route(domain, action: InboundActionKind.Webhook, endpoint: Ids.New()), default));
-        await Assert.ThrowsAsync<StorageConflictException>(async () => await Inbound.UpsertRouteAsync(Route(domain, action: InboundActionKind.Webhook, endpoint: theirs), default));
+        var unknown = await Assert.ThrowsAsync<StorageConflictException>(async () => await Inbound.UpsertRouteAsync(Route(domain, action: InboundActionKind.Webhook, endpoint: Ids.New()), default));
+        var foreign = await Assert.ThrowsAsync<StorageConflictException>(async () => await Inbound.UpsertRouteAsync(Route(domain, action: InboundActionKind.Webhook, endpoint: theirs), default));
+        Assert.Equal((StorageConflictReasons.WebhookEndpointMissing, StorageConflictReasons.WebhookEndpointMissing), (unknown.Reason, foreign.Reason));
         Assert.Empty(await Inbound.GetRoutesAsync(domain.Id, default));
 
         await Inbound.UpsertRouteAsync(Route(domain, action: InboundActionKind.Webhook, endpoint: mine), default);
         Assert.Single(await Inbound.GetRoutesAsync(domain.Id, default));
+    }
+
+    [Fact]
+    public async Task Bidirectional_controls_are_removed_and_addresses_are_cut_at_the_path_limit()
+    {
+        DomainRecord domain = await AddDomainAsync(TenantA, "example.com");
+        InboundMessageDraft draft = Draft(domain, Ids.New(), InboundActionKind.Store, subject: "invoice \u202Efdp.exe");
+        draft.Helo = "good\u202E.test\u2066";
+        draft.EnvelopeFrom = new string('A', 400) + "@sender.test";
+        draft.EnvelopeTo = "Support@Example.com";
+        await StoreAsync(draft);
+
+        InboundMessage stored = (await Inbound.GetAsync(TenantA, draft.Id, default))!;
+        Assert.Equal("good.test", stored.Helo);
+        Assert.Equal("invoice fdp.exe", stored.Subject);
+        Assert.Equal(320, stored.EnvelopeFrom.Length);
+        Assert.Equal(new string('a', 320), stored.EnvelopeFrom);
+        Assert.Equal("support@example.com", stored.EnvelopeTo);
     }
 }

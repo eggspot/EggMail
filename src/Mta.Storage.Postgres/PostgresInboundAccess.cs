@@ -62,7 +62,13 @@ internal sealed class PostgresInboundAccess(PostgresRuntime rt, IStorageModelHoo
         return result;
     }
 
-    public Exception? TranslateException(Exception exception) => PostgresErrors.IsUnavailable(exception) ? rt.Unavailable(exception) : null;
+    public Exception? TranslateException(Exception exception) =>
+        PostgresErrors.IsDiskFull(exception) ? new StorageFullException("The disk holding the PostgreSQL data is full (53100).", exception)
+        : PostgresErrors.IsUnavailable(exception) ? rt.Unavailable(exception)
+        : PostgresErrors.IsRetryable(exception) ? PostgresErrors.Unavailable(exception)
+        : null;
+
+    public bool IsConstraintViolation(Exception exception) => PostgresErrors.IsConstraint(exception);
 
     public IReadOnlyList<Guid> ClaimIds(PostgresDbContext context, string owner, int max, DateTimeOffset now, DateTimeOffset until)
     {
@@ -70,7 +76,7 @@ internal sealed class PostgresInboundAccess(PostgresRuntime rt, IStorageModelHoo
         using DbCommand cmd = connection.CreateCommand();
         cmd.Transaction = context.Database.CurrentTransaction?.GetDbTransaction();
         cmd.CommandText =
-            "UPDATE inbound_message SET lease_owner = @owner, lease_until = @until WHERE id IN (" +
+            "UPDATE inbound_message SET lease_owner = @owner, lease_until = @until, action_attempts = action_attempts + 1 WHERE id IN (" +
             "SELECT id FROM inbound_message WHERE transfer_switch_id IS NULL AND action_state = 0 AND action_next_attempt_at <= @now AND lease_until <= @now ORDER BY action_next_attempt_at, id LIMIT @max FOR UPDATE SKIP LOCKED) " +
             "RETURNING id";
         cmd.Parameters.Add(new NpgsqlParameter("owner", NpgsqlDbType.Text) { Value = owner });

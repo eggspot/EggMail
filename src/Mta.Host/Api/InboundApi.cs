@@ -450,9 +450,10 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
 
         errors.ThrowIfAny();
 
-        if ((await Inbound.GetRoutesAsync(domain.Id, ct).ConfigureAwait(false)).Count >= Math.Min(options.MaxInboundRoutesPerDomain, InboundRules.MaxRoutesPerDomain))
+        int routeLimit = Math.Min(options.MaxInboundRoutesPerDomain, InboundRules.MaxRoutesPerDomain);
+        if ((await Inbound.GetRoutesAsync(domain.Id, ct).ConfigureAwait(false)).Count >= routeLimit)
         {
-            throw new ApiException(StatusCodes.Status409Conflict, ApiCodes.Conflict, $"At most {options.MaxInboundRoutesPerDomain} routes per domain.", extensions: new Dictionary<string, object?> { ["reason"] = "route_limit" });
+            throw new ApiException(StatusCodes.Status409Conflict, ApiCodes.Conflict, $"At most {routeLimit} routes per domain.", extensions: new Dictionary<string, object?> { ["reason"] = "route_limit", ["limit"] = routeLimit });
         }
 
         DateTimeOffset now = clock.UtcNow;
@@ -479,7 +480,7 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
 
         InboundRouteRecord updated = await BuildAsync(
             caller, domain, current.Id, body.Name ?? current.Name, body.Order ?? current.Order, body.Enabled ?? current.Enabled, match, action, current.CreatedAt, clock.UtcNow, errors, ct,
-            validateEndpoint: body.Action is not null).ConfigureAwait(false);
+            actionChanged: body.Action is not null).ConfigureAwait(false);
         errors.ThrowIfAny();
         await SaveRouteAsync(updated, ct).ConfigureAwait(false);
         return ApiResults.Ok(ToResponse(updated, await WarningsAsync(domain, updated, ct).ConfigureAwait(false)));
@@ -491,7 +492,7 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
         {
             await Inbound.UpsertRouteAsync(route, ct).ConfigureAwait(false);
         }
-        catch (StorageConflictException ex) when (ex.Message.Contains("webhook endpoint", StringComparison.Ordinal))
+        catch (StorageConflictException ex) when (ex.Reason == StorageConflictReasons.WebhookEndpointMissing)
         {
             throw ApiException.Validation("action.webhookEndpointId", "No such webhook endpoint.");   // deleted while the request ran
         }
@@ -504,7 +505,7 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
     /// <summary>Builds and validates a route from the request members; validation problems are added to <paramref name="errors"/> under the request's member names.</summary>
     private async Task<InboundRouteRecord> BuildAsync(
         ApiCaller caller, DomainRecord domain, Guid id, string name, int order, bool enabled, InboundMatchRequest match, InboundRouteActionRequest action, DateTimeOffset created, DateTimeOffset updated,
-        ValidationErrors errors, CancellationToken ct, bool validateEndpoint = true)
+        ValidationErrors errors, CancellationToken ct, bool actionChanged = true)
     {
         InboundMatchKind matchKind = InboundMatchKind.CatchAll;
         if (match.Kind is null)
@@ -542,33 +543,32 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
             action.ForwardTo is null ? [] : [.. action.ForwardTo], created, updated);
         if (!errors.Any)
         {
-            foreach (InboundValidationError e in InboundRules.ValidateRoute(route, domain.Name))
+            // The loop check has one implementation, the validator; the API only supplies the fact it cannot read: which target domains this server receives mail for (design section 11.6).
+            HashSet<string> localInbound = [];
+            if (actionKind == InboundActionKind.Forward)
+            {
+                foreach (string target in InboundRules.ForwardTargetDomains(route))
+                {
+                    if (await Config.FindDomainByNameAsync(target, ct).ConfigureAwait(false) is { } local && await Inbound.GetSettingsAsync(local.Id, ct).ConfigureAwait(false) is { Enabled: true })
+                    {
+                        localInbound.Add(target);
+                    }
+                }
+            }
+
+            foreach (InboundValidationError e in InboundRules.ValidateRoute(route, domain.Name, localInbound))
             {
                 errors.Add(FieldOf(e.Field), e.Message);
             }
         }
 
-        if (!errors.Any && actionKind == InboundActionKind.Forward && validateEndpoint && !caller.HasScope(ApiScopes.Send))
+        if (!errors.Any && actionKind == InboundActionKind.Forward && actionChanged && !caller.HasScope(ApiScopes.Send))
         {
             // A forward route sends every matching message, from now on, to an address of the caller's choosing: that is sending mail, so it takes the send scope as well (design section 11.9).
             throw ApiException.Forbidden($"A forward route also needs the '{ApiScopes.Send}' scope: it sends the mail it receives to the addresses it names.");
         }
 
-        if (!errors.Any && actionKind == InboundActionKind.Forward)
-        {
-            // A target that this server receives for would bring the copy straight back (design section 11.6); the signed hop marker is the second line of defense.
-            for (int i = 0; i < route.ForwardTo.Count; i++)
-            {
-                if (EmailAddress.TryParse(route.ForwardTo[i], allowUtf8: true, out EmailAddress target)
-                    && await Config.FindDomainByNameAsync(target.Domain, ct).ConfigureAwait(false) is { } local
-                    && await Inbound.GetSettingsAsync(local.Id, ct).ConfigureAwait(false) is { Enabled: true })
-                {
-                    errors.Add($"action.forwardTo[{i}]", "This server receives mail for that domain: the forward would loop. Use an address at another mail provider.");
-                }
-            }
-        }
-
-        if (!errors.Any && validateEndpoint && actionKind == InboundActionKind.Webhook)
+        if (!errors.Any && actionChanged && actionKind == InboundActionKind.Webhook)
         {
             WebhookEndpointRecord? endpoint = await Config.GetWebhookEndpointAsync(route.WebhookEndpointId!.Value, ct).ConfigureAwait(false);
             if (endpoint is null || endpoint.TenantId != caller.TenantId)
@@ -643,8 +643,17 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
         string reply = "550 5.7.1";
         if (enabled)
         {
-            route = InboundRules.MatchRoute(await Inbound.GetRoutesAsync(domain.Id, ct).ConfigureAwait(false), address.LocalPart);
-            reply = route is null ? "550 5.1.1" : "250";
+            // What the receive path answers for a domain that stopped being verified or a suspended tenant: keep the mail waiting (design sections 11.3 and 11.4).
+            Tenant? tenant = await Config.GetTenantAsync(domain.TenantId, ct).ConfigureAwait(false);
+            if (domain.Status is not (DomainStatus.Verified or DomainStatus.TemporaryFailure) || tenant is not { Enabled: true })
+            {
+                reply = "450 4.2.1";
+            }
+            else
+            {
+                route = InboundRules.MatchRoute(await Inbound.GetRoutesAsync(domain.Id, ct).ConfigureAwait(false), address.LocalPart);
+                reply = route is null ? "550 5.1.1" : "250";
+            }
         }
 
         return ApiResults.Ok(new InboundRouteMatchResponse((address.LocalPart + "@" + address.Domain).ToLowerInvariant(), enabled, route is null ? null : ToResponse(route), reply));

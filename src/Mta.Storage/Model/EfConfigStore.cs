@@ -453,7 +453,7 @@ public sealed partial class EfConfigStore<TContext>(IConfigDbAccess<TContext> db
         {
             if (c.InboundRoutes.Any(r => r.ActionKind == InboundActionKind.Webhook && r.WebhookEndpointId == id && c.WebhookEndpoints.Any(w => w.Id == id && w.TenantId == tenantId)))
             {
-                throw new StorageConflictException("The webhook endpoint is the target of inbound routes.");
+                throw new StorageConflictException("The webhook endpoint is the target of inbound routes.", StorageConflictReasons.WebhookEndpointInUse);
             }
 
             return c.WebhookEndpoints.Where(w => w.Id == id && w.TenantId == tenantId).ExecuteDelete();

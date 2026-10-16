@@ -42,7 +42,7 @@ public sealed partial class EfConfigStore<TContext>
             // The endpoint a webhook route names must exist for this tenant, checked in this write (the schema has no foreign keys; DeleteWebhookEndpointAsync checks the other direction).
             if (entity.ActionKind == InboundActionKind.Webhook && !c.WebhookEndpoints.Any(w => w.Id == entity.WebhookEndpointId && w.TenantId == entity.TenantId))
             {
-                throw new StorageConflictException("The webhook endpoint does not exist for this tenant.");
+                throw new StorageConflictException("The webhook endpoint does not exist for this tenant.", StorageConflictReasons.WebhookEndpointMissing);
             }
 
             // A route cannot move to another tenant or domain: that would be a different route.

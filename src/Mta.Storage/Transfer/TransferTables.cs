@@ -226,9 +226,17 @@ public static class TransferTables
         PrepareImport = ClearLease,
         Hold = new TransferHold<InboundMessageEntity>
         {
+            // Only a pending action can be claimed, so only a pending row needs a hold (a message that is done or failed is just data); the claim looks at pending rows only.
             Property = nameof(InboundMessageEntity.TransferSwitchId),
-            Set = (x, id) => x.TransferSwitchId = id,
-            HoldAll = (q, id, ct) => q.Where(x => x.TransferSwitchId == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.TransferSwitchId, (Guid?)id), ct),
+            Holds = x => x.ActionState == InboundActionState.Pending,
+            Set = (x, id) =>
+            {
+                if (x.ActionState == InboundActionState.Pending)
+                {
+                    x.TransferSwitchId = id;
+                }
+            },
+            HoldAll = (q, id, ct) => q.Where(x => x.TransferSwitchId == null && x.ActionState == InboundActionState.Pending).ExecuteUpdateAsync(s => s.SetProperty(x => x.TransferSwitchId, (Guid?)id), ct),
             Release = (q, id, ct) => q.Where(x => x.TransferSwitchId == id).ExecuteUpdateAsync(s => s.SetProperty(x => x.TransferSwitchId, (Guid?)null), ct),
             CountHeld = (q, id, ct) => q.LongCountAsync(x => x.TransferSwitchId == id, ct),
         },

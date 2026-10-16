@@ -93,6 +93,8 @@ CREATE INDEX "IX_inbound_message_tenant_id_envelope_to_id" ON inbound_message (t
 
 CREATE INDEX "IX_inbound_message_domain_id_received_at" ON inbound_message (domain_id, received_at);
 
+CREATE INDEX "IX_inbound_message_domain_id_id" ON inbound_message (domain_id, id);
+
 CREATE INDEX "IX_inbound_message_action_next_attempt_at" ON inbound_message (action_next_attempt_at) WHERE action_state = 0;
 
 CREATE INDEX "IX_inbound_message_received_at" ON inbound_message (received_at) WHERE action_state <> 0;

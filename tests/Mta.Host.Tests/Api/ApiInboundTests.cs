@@ -268,6 +268,8 @@ public class ApiInboundTests : IAsyncLifetime
         Reply r = await _a.PostAsync(_base + "/routes", CatchAll());
         r.Problem(HttpStatusCode.Conflict, "conflict");
         Assert.Equal("route_limit", r["reason"].GetString());
+        Assert.Equal(2, r["limit"].GetInt32());
+        Assert.Contains("At most 2 routes", r.Json.GetProperty("detail").GetString());   // the limit that applies, not the compiled-in one
     }
 
     [Fact]
@@ -316,6 +318,13 @@ public class ApiInboundTests : IAsyncLifetime
         Assert.Equal("support+billing@example.com", hit.Str("address"));
         Assert.Equal("550 5.1.1", (await _a.GetAsync(probe + "other@example.com")).Str("reply"));   // a disabled route does not match
         Assert.Equal(JsonValueKind.Null, (await _a.GetAsync(probe + "other@example.com"))["route"].ValueKind);
+
+        // A domain that stopped being verified, or a suspended tenant, keeps the mail waiting (450), as the receive path does.
+        await _f.Storage.Config.UpsertDomainAsync(_domainA with { Status = DomainStatus.Failed }, default);
+        Assert.Equal("450 4.2.1", (await _a.GetAsync(probe + "support@example.com")).Str("reply"));
+        await _f.Storage.Config.UpsertDomainAsync(_domainA with { Status = DomainStatus.TemporaryFailure }, default);
+        Assert.Equal("250", (await _a.GetAsync(probe + "support@example.com")).Str("reply"));   // temporary_failure keeps receiving
+        await _f.Storage.Config.UpsertDomainAsync(_domainA, default);
 
         (await _a.GetAsync(probe + "someone@elsewhere.test")).Problem(HttpStatusCode.BadRequest, "validation_failed");
         (await _a.GetAsync(probe)).Problem(HttpStatusCode.BadRequest, "validation_failed");
@@ -906,5 +915,27 @@ public class ApiInboundTests : IAsyncLifetime
         JsonElement entry = (await _a.GetAsync("/api/v1/inbound/messages"))["items"][0].GetProperty("action");
         Assert.Equal("route_is_now_store", entry.GetProperty("note").GetString());
         Assert.False(entry.TryGetProperty("currentKind", out _));
+    }
+
+    [Fact]
+    public async Task The_refusal_to_delete_a_domain_with_mail_tells_the_count_only_to_a_key_that_may_read_the_mail()
+    {
+        await EnableAsync();
+        await StoreAsync(ApiFixture.TenantAId, _domainA, InboundActionKind.Store);
+        string url = $"/api/v1/domains/{_domainA.Id:N}";
+
+        ApiClient domainsOnly = await _f.KeyClientAsync(ApiFixture.TenantAId, "domains");
+        Reply blind = await domainsOnly.DeleteAsync(url);
+        blind.Problem(HttpStatusCode.Conflict, "conflict");
+        Assert.Equal("inbound_messages_exist", blind["reason"].GetString());
+        Assert.False(blind.Json.TryGetProperty("messages", out _));
+
+        ApiClient reader = await _f.KeyClientAsync(ApiFixture.TenantAId, "domains", "inbound:read");
+        Assert.Equal(1, (await reader.DeleteAsync(url))["messages"].GetInt64());
+
+        // The purge stops receiving first: by the time the mail is gone the settings say off (checked through a domain that stays: delete the mail by hand, then the domain goes without the flag).
+        Assert.True((await _f.Storage.Inbound.GetSettingsAsync(_domainA.Id, default))!.Enabled);
+        Assert.Equal(HttpStatusCode.NoContent, (await _a.DeleteAsync(url + "?purgeInbound=true")).Status);
+        Assert.Null(await _f.Storage.Config.GetDomainAsync(_domainA.Id, default));
     }
 }
