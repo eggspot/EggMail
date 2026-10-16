@@ -317,6 +317,21 @@ public class InboundWebhookActionTests
     }
 
     [Fact]
+    public async Task A_stored_secret_that_cannot_sign_fails_the_action_at_once_instead_of_crashing_every_attempt()
+    {
+        await using var h = await new InboundActionHarness().InitializeAsync();
+        await h.Storage.Config.UpsertWebhookEndpointAsync(h.Endpoint with { SecretProtected = Encoding.UTF8.GetBytes("whsec_not base64!") }, default);
+        InboundMessageDraft draft = await h.ReceiveAsync();
+
+        await h.RunAsync();
+
+        Assert.Empty(h.Receiver.Requests);
+        InboundMessage stored = await h.GetAsync(draft.Id);
+        Assert.Equal(InboundActionState.Failed, stored.ActionState);
+        Assert.Equal("secret_unreadable", stored.ActionLastError);
+    }
+
+    [Fact]
     public async Task The_ssrf_guard_applies_to_inbound_webhooks_and_the_error_is_a_code_not_an_address()
     {
         // The real handler (no stub), resolving the receiver's name to a loopback address that no allowlist permits.

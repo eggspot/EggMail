@@ -277,6 +277,11 @@ public sealed class InboundActionRunner
         {
             // Stopping: the lease is released with the others at the end of RunAsync.
         }
+        catch (LeaseLostException)
+        {
+            // Another replica took the action over while this one waited for a slot: its attempt decides, this one makes none.
+            _log.Write(MtaLogLevel.Debug, "inbound", $"route action of inbound message {claim.Message.Id:N} was taken over before it started");
+        }
         catch (Exception ex)
         {
             // Not recorded: the lease runs out and the next claim counts the attempt again, so a message that makes the runner fail every time reaches the end of the ladder.
@@ -360,9 +365,14 @@ public sealed class InboundActionRunner
         TimeSpan step = TimeSpan.FromTicks(Math.Max(TimeSpan.FromSeconds(1).Ticks, _options.Lease.Ticks / 3));
         while (!await gate.WaitAsync(step, ct).ConfigureAwait(false))
         {
-            await _storage.Inbound.ExtendActionLeaseAsync(messageId, _owner, _clock.UtcNow + _options.Lease, ct).ConfigureAwait(false);
+            if (!await _storage.Inbound.ExtendActionLeaseAsync(messageId, _owner, _clock.UtcNow + _options.Lease, ct).ConfigureAwait(false))
+            {
+                throw new LeaseLostException();
+            }
         }
     }
+
+    private sealed class LeaseLostException : Exception;
 
     private async ValueTask<InboundActionResult> RunWebhookAsync(InboundMessage message, InboundRouteRecord route, byte[] raw, CancellationToken ct)
     {
@@ -392,6 +402,10 @@ public sealed class InboundActionRunner
         try
         {
             secrets = Encoding.UTF8.GetString(_secrets.Unprotect(endpoint.SecretProtected, SecretPurposes.WebhookSecret)).Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            foreach (string secret in secrets)
+            {
+                StandardWebhooksSigner.ParseSecret(secret);   // a stored secret that is not base64 would otherwise throw while signing, on every attempt
+            }
         }
         catch (Exception ex) when (ex is System.Security.Cryptography.CryptographicException or FormatException)
         {
@@ -443,7 +457,7 @@ public sealed class InboundActionRunner
         }
         else if (result.Outcome == InboundActionResult.Kind.Retry && attempt < _options.MaxAttempts)
         {
-            outcome = new InboundActionOutcome(InboundActionState.Pending, now, now + _options.RetrySchedule[attempt - 1] + result.ExtraDelay, result.Error, ClaimedAttempt: attempt);
+            outcome = new InboundActionOutcome(InboundActionState.Pending, now, now + _options.RetrySchedule[Math.Max(attempt, 1) - 1] + result.ExtraDelay, result.Error, ClaimedAttempt: attempt);
             label = "retry";
         }
         else

@@ -32,7 +32,4 @@ public static class InboundActionMetrics
             yield return new Measurement<long>(usage.Failed, new KeyValuePair<string, object?>("state", "failed"));
         }
     }
-
-    internal static KeyValuePair<string, object?>[] Tags(string kind, string outcome) =>
-        [new KeyValuePair<string, object?>("kind", kind), new KeyValuePair<string, object?>("outcome", outcome)];
 }
