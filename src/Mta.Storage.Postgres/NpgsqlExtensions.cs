@@ -120,6 +120,10 @@ internal static class NpgsqlParameterExtensions
     public static NpgsqlParameterCollection Text(this NpgsqlParameterCollection p, string? value) =>
         Add(p, NpgsqlDbType.Text, (object?)StorageText.Clean(value) ?? DBNull.Value);
 
+    /// <summary>Text for a WHERE clause: exactly as given (never cleaned, so it cannot come to equal stored text it differs from; callers refuse unstorable filters first).</summary>
+    public static NpgsqlParameterCollection TextExact(this NpgsqlParameterCollection p, string? value) =>
+        Add(p, NpgsqlDbType.Text, (object?)value ?? DBNull.Value);
+
     public static NpgsqlParameterCollection Int(this NpgsqlParameterCollection p, int value) =>
         Add(p, NpgsqlDbType.Integer, value);
 
@@ -152,7 +156,21 @@ internal static class NpgsqlParameterExtensions
         Add(p, NpgsqlDbType.Array | NpgsqlDbType.Uuid, value);
 
     public static NpgsqlParameterCollection TextArray(this NpgsqlParameterCollection p, string?[] value) =>
-        Add(p, NpgsqlDbType.Array | NpgsqlDbType.Text, value.Select(StorageText.Clean).ToArray());
+        Add(p, NpgsqlDbType.Array | NpgsqlDbType.Text, CleanedIfNeeded(value));
+
+    /// <summary>The same array when every element can be stored (the usual case allocates nothing), otherwise a copy with the elements cleaned.</summary>
+    internal static string?[] CleanedIfNeeded(string?[] values)
+    {
+        foreach (string? v in values)
+        {
+            if (!StorageText.IsStorable(v))
+            {
+                return values.Select(StorageText.Clean).ToArray();
+            }
+        }
+
+        return values;
+    }
 
     public static NpgsqlParameterCollection IntArray(this NpgsqlParameterCollection p, int[] value) =>
         Add(p, NpgsqlDbType.Array | NpgsqlDbType.Integer, value);

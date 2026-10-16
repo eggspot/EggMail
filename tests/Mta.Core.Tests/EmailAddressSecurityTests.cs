@@ -95,5 +95,56 @@ public class EmailAddressSecurityTests
         Assert.False(EmailAddress.TryParse("\"abc\"def@example.org", false, out _));
     }
 
+    [Fact]
+    public void An_unpaired_surrogate_is_never_part_of_an_address_and_a_real_pair_is()
+    {
+        string high = ((char)0xD800).ToString(), low = ((char)0xDC00).ToString();
+        foreach (string lone in new[] { high, low })
+        {
+            Assert.False(EmailAddress.TryParse("a" + lone + "@b.test", true, out _));
+            Assert.False(EmailAddress.TryParse(lone + "@b.test", true, out _));
+            Assert.False(EmailAddress.TryParse("a" + lone, true, out _));
+            Assert.False(EmailAddress.TryParse("\"a" + lone + "\"@b.test", true, out _));
+            Assert.False(EmailAddress.TryParse("a@b" + lone + ".test", true, out _));
+        }
+
+        Assert.False(EmailAddress.TryParse("a" + low + high + "@b.test", true, out _));            // wrong order
+        Assert.True(EmailAddress.TryParse("a" + high + low + "@b.test", true, out _));              // a pair is a character (an emoji)
+        Assert.False(EmailAddress.TryParse("a" + high + low + "@b.test", false, out _));            // but not without SMTPUTF8
+    }
+
+    [Theory]
+    [InlineData("\u7528\u6237@example.org")]                  // CJK
+    [InlineData("\u05d3\u05d5\u05d0\u05dc@example.org")]    // Hebrew
+    [InlineData("\u0645\u0633\u062a\u062e\u062f\u0645@example.org")]  // Arabic
+    [InlineData("\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645@example.org")]   // Persian with a zero-width non-joiner
+    [InlineData("\u00fc\u00f1\u00ee@example.org")]
+    [InlineData("a\u200eb@example.org")]                       // a left-to-right mark
+    [InlineData("\"\u7528 \u6237\"@example.org")]
+    public void Real_local_parts_in_any_script_are_accepted_with_SMTPUTF8_and_refused_without(string address)
+    {
+        Assert.True(EmailAddress.TryParse(address, true, out var parsed));
+        Assert.True(parsed.RequiresSmtpUtf8 || parsed.LocalPart.StartsWith('"'));
+        Assert.False(EmailAddress.TryParse(address, false, out _));
+    }
+
+    [Theory]
+    [InlineData("\u202a")]
+    [InlineData("\u202b")]
+    [InlineData("\u202c")]
+    [InlineData("\u202d")]
+    [InlineData("\u202e")]
+    [InlineData("\u2066")]
+    [InlineData("\u2067")]
+    [InlineData("\u2068")]
+    [InlineData("\u2069")]
+    [InlineData("\u2028")]
+    [InlineData("\u2029")]
+    public void Every_explicit_embedding_control_and_separator_is_refused_in_a_plain_and_in_a_quoted_local_part(string c)
+    {
+        Assert.False(EmailAddress.TryParse("a" + c + "b@example.org", true, out _));
+        Assert.False(EmailAddress.TryParse("\"a" + c + "b\"@example.org", true, out _));
+    }
+
     private static string Escape(string text) => text.Replace("\r", "\\r", StringComparison.Ordinal).Replace("\n", "\\n", StringComparison.Ordinal).Replace("\0", "\\0", StringComparison.Ordinal);
 }

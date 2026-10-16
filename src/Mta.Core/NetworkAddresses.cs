@@ -31,11 +31,25 @@ public static class NetworkAddresses
         return Classify(address) == AddressClass.Internal;
     }
 
+    /// <summary>
+    /// True when a mail server must not connect to the address of a mail host that the recipient's domain names: everything that is not public
+    /// (internal networks, multicast and reserved space, Teredo, benchmarking, the deprecated and translating IPv6 forms) except the documentation ranges
+    /// (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, 2001:db8::/32, 3fff::/20). Those are never routed on the Internet and nobody runs a network of their own in them
+    /// by accident, so they are left alone: they are what documentation and tests use for "a public mail server", and a connection to them reaches nothing.
+    /// </summary>
+    public static bool IsForbiddenMailTarget(IPAddress address)
+    {
+        ArgumentNullException.ThrowIfNull(address);
+        AddressClass c = Classify(address);
+        return c is AddressClass.Internal or AddressClass.Reserved;
+    }
+
     private enum AddressClass : byte
     {
         Public,
         Internal,
         Reserved,
+        Documentation,
     }
 
     private static AddressClass Classify(IPAddress address)
@@ -68,10 +82,14 @@ public static class NetworkAddresses
         }
 
         if ((a == 192 && c == 0 && b[2] == 2)                      // documentation
-            || (a == 192 && c == 88 && b[2] == 99)                 // 6to4 relay anycast, deprecated
-            || (a == 198 && (c == 18 || c == 19))                  // benchmarking
             || (a == 198 && c == 51 && b[2] == 100)                // documentation
-            || (a == 203 && c == 0 && b[2] == 113)                 // documentation
+            || (a == 203 && c == 0 && b[2] == 113))                // documentation
+        {
+            return AddressClass.Documentation;
+        }
+
+        if ((a == 192 && c == 88 && b[2] == 99)                    // 6to4 relay anycast, deprecated
+            || (a == 198 && (c == 18 || c == 19))                  // benchmarking
             || a >= 224)                                           // multicast, reserved, broadcast
         {
             return AddressClass.Reserved;
@@ -92,7 +110,7 @@ public static class NetworkAddresses
         {
             // ::/96: the unspecified address, ::1, and the deprecated IPv4-compatible form ::a.b.c.d. None of them is a destination.
             AddressClass embedded = ClassifyV4(b.Slice(12, 4));
-            return embedded == AddressClass.Public ? AddressClass.Reserved : AddressClass.Internal;
+            return embedded == AddressClass.Internal ? AddressClass.Internal : AddressClass.Reserved;
         }
 
         if ((b[0] & 0xFE) == 0xFC) { return AddressClass.Internal; }                        // fc00::/7 unique local
@@ -103,10 +121,10 @@ public static class NetworkAddresses
         if (b[0] == 0x20 && b[1] == 0x01)
         {
             if (b[2] == 0x00 && b[3] == 0x00) { return AddressClass.Reserved; }             // 2001::/32 Teredo: a tunnel to an address the packet does not show
-            if (b[2] == 0x0D && b[3] == 0xB8) { return AddressClass.Reserved; }             // 2001:db8::/32 documentation
+            if (b[2] == 0x0D && b[3] == 0xB8) { return AddressClass.Documentation; }         // 2001:db8::/32 documentation
         }
 
-        if (b[0] == 0x3F && b[1] == 0xFF && (b[2] & 0xF0) == 0) { return AddressClass.Reserved; }        // 3fff::/20 documentation (RFC 9637)
+        if (b[0] == 0x3F && b[1] == 0xFF && (b[2] & 0xF0) == 0) { return AddressClass.Documentation; }    // 3fff::/20 documentation (RFC 9637)
         if (b[0] == 0x01 && b[1] == 0x00 && b[2] == 0 && b[3] == 0 && b[4] == 0 && b[5] == 0 && b[6] == 0 && b[7] == 0) { return AddressClass.Reserved; } // 100::/64 discard-only
 
         if (b[0] == 0x20 && b[1] == 0x02)

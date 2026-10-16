@@ -150,6 +150,20 @@ public readonly record struct EmailAddress
             return false;
         }
 
+        // An unpaired surrogate is not text (UTF-8 cannot encode it, and it would be replaced differently by every consumer): never part of an address.
+        for (int i = 0; i < local.Length; i++)
+        {
+            if (char.IsSurrogate(local[i]))
+            {
+                if (!char.IsHighSurrogate(local[i]) || i + 1 >= local.Length || !char.IsLowSurrogate(local[i + 1]))
+                {
+                    return false;
+                }
+
+                i++;
+            }
+        }
+
         // Octet length limit (64) applies to the UTF-8 encoding for SMTPUTF8 addresses.
         if (Encoding.UTF8.GetByteCount(local) > MaxLocalPartLength)
         {

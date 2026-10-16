@@ -1,10 +1,16 @@
 namespace Mta.Storage;
 
 /// <summary>
-/// Text that cannot be stored. PostgreSQL text columns refuse the NUL character (and UTF-8 cannot encode an unpaired surrogate), SQLite stores both:
-/// without a rule, the same input would be a harmless miss on one backend and an exception on the other. The rule, for both: such text never matches a
-/// stored value, and when it must be written (text a remote server controls, such as a reply or a certificate name) it is written with U+FFFD in place
-/// of the characters that cannot be stored.
+/// Text that cannot be stored as it is. PostgreSQL text columns refuse the NUL character and UTF-8 cannot encode an unpaired surrogate; SQLite stores NUL, and
+/// turns an unpaired surrogate into U+FFFD when it binds the text. Without a rule, the same input would be a harmless miss on one backend and an exception on
+/// another. The rules, the same for every backend:
+/// <list type="bullet">
+/// <item>In a <b>lookup or filter</b> such text matches nothing (<see cref="IsStorable"/>, then no row): it is never cleaned first, because a search for
+/// <c>a&lt;NUL&gt;b</c> must not find the stored text <c>a&#xFFFD;b</c>.</item>
+/// <item>A <b>write</b> of such text must not fail. What is stored differs: PostgreSQL stores <see cref="Clean"/> (U+FFFD in place of the characters it cannot
+/// hold); SQLite and the in-memory store keep NUL as it is. Readers therefore compare <c>Clean(value)</c>. In practice only text a remote server controls can reach
+/// a write (a reply, a host name, a certificate name); everything a client sends is refused earlier.</item>
+/// </list>
 /// </summary>
 public static class StorageText
 {
@@ -37,6 +43,10 @@ public static class StorageText
 
         return true;
     }
+
+    /// <summary>True when every text filter of the query can be stored (a query with one that cannot matches nothing).</summary>
+    public static bool IsStorable(MessageQuery query) =>
+        IsStorable(query.Recipient) && IsStorable(query.Sender) && IsStorable(query.SubjectContains) && IsStorable(query.Status) && IsStorable(query.Tag);
 
     /// <summary><paramref name="text"/> with every NUL and unpaired surrogate replaced by U+FFFD (the same instance when there is nothing to replace).</summary>
     public static string? Clean(string? text)

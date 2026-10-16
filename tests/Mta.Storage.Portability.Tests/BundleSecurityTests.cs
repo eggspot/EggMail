@@ -79,6 +79,22 @@ public class BundleSecurityTests : IDisposable
     }
 
     [Fact]
+    public async Task A_bundle_directory_given_with_a_trailing_separator_is_the_same_bundle_and_still_confines_paths()
+    {
+        string root = Path.Combine(_parent, "slash");
+        using (var w = new BundleWriter(root + Path.DirectorySeparatorChar, NewManifest()))
+        {
+            await w.WriteBinaryAsync("queue/a.eml", Encoding.ASCII.GetBytes("Subject: x\r\n\r\nbody\r\n"), default);
+            await w.CompleteAsync(default);
+        }
+
+        BundleReader reader = await BundleReader.OpenAsync(root + Path.DirectorySeparatorChar, default);
+        Assert.True((await reader.VerifyAsync(default)).Ok);
+        Assert.Throws<BundleException>(() => reader.PathOf("../outside"));
+        Assert.EndsWith(Path.Combine("slash", "queue", "a.eml"), reader.PathOf("queue/a.eml"), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task A_file_that_is_in_the_bundle_directory_but_not_in_the_manifest_is_reported_and_a_changed_file_is_too()
     {
         string root = Path.Combine(_parent, "ok");

@@ -230,7 +230,29 @@ public abstract class InjectionConformance : StorageTestBase
 
         MessageDetail? detail = await Storage.History.GetAsync(TenantA, accepted.MessageId, CancellationToken.None);
         Assert.NotNull(detail);
-        Assert.Contains("sub", detail!.Summary.Subject);
+        // What is stored differs by backend (PostgreSQL writes U+FFFD for NUL, SQLite and memory keep it); modulo that replacement every backend reads back the same.
+        Assert.Equal(StorageText.Clean("sub\0ject"), StorageText.Clean(detail!.Summary.Subject));
+    }
+
+    [Fact]
+    public async Task A_search_for_text_that_cannot_be_stored_matches_nothing_even_where_its_cleaned_form_is_stored()
+    {
+        string replacement = new((char)0xFFFD, 1);
+        string lone = new((char)0xD800, 1);
+        await AcceptAsync(Msg(to: ["a-b@example.org"], subject: "a" + replacement + "b", tags: ["t" + replacement]));
+        await AcceptAsync(Msg(to: ["c@example.org"], subject: "x" + replacement + "y"));
+
+        // The text that is there is found; text that would only equal it after cleaning (NUL, an unpaired surrogate) is not text at all and matches nothing.
+        Assert.Single((await Storage.History.SearchAsync(new MessageQuery(TenantId: TenantA, SubjectContains: "a" + replacement + "b"), CancellationToken.None)).Items);
+        foreach (string unstorable in new[] { "a\0b", "x" + lone + "y", "x\0y" })
+        {
+            Assert.Empty((await Storage.History.SearchAsync(new MessageQuery(TenantId: TenantA, SubjectContains: unstorable), CancellationToken.None)).Items);
+        }
+
+        Assert.Empty((await Storage.History.SearchAsync(new MessageQuery(TenantId: TenantA, Tag: "t\0"), CancellationToken.None)).Items);
+        Assert.Empty((await Storage.History.SearchAsync(new MessageQuery(TenantId: TenantA, Tag: "t" + lone), CancellationToken.None)).Items);
+        Assert.Empty((await Storage.History.SearchAsync(new MessageQuery(TenantId: TenantA, Recipient: "a\0b@example.org"), CancellationToken.None)).Items);
+        Assert.Empty((await Storage.History.SearchAsync(new MessageQuery(TenantId: TenantA, Sender: "sender@example.com" + lone), CancellationToken.None)).Items);
     }
 
     [Fact]

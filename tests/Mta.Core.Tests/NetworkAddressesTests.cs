@@ -107,6 +107,39 @@ public class NetworkAddressesTests
     public void Internal_networks_are_the_addresses_an_MX_may_not_name(string address, bool internalNetwork) =>
         Assert.Equal(internalNetwork, NetworkAddresses.IsInternalNetwork(IPAddress.Parse(address)));
 
+    [Theory]
+    [InlineData("93.184.216.34", false)]
+    [InlineData("2606:4700:4700::1111", false)]
+    [InlineData("::ffff:8.8.8.8", false)]
+    [InlineData("64:ff9b::808:808", false)]
+    [InlineData("192.0.2.1", false)]                 // documentation: left alone on purpose
+    [InlineData("198.51.100.7", false)]
+    [InlineData("203.0.113.9", false)]
+    [InlineData("2001:db8::1", false)]
+    [InlineData("3fff::1", false)]
+    [InlineData("10.0.0.1", true)]
+    [InlineData("169.254.169.254", true)]
+    [InlineData("127.0.0.1", true)]
+    [InlineData("198.18.0.1", true)]                 // benchmarking
+    [InlineData("192.88.99.1", true)]
+    [InlineData("224.0.0.1", true)]
+    [InlineData("255.255.255.255", true)]
+    [InlineData("::", true)]
+    [InlineData("::1", true)]
+    [InlineData("::8.8.8.8", true)]
+    [InlineData("::ffff:0:8.8.8.8", false)]            // translated forms inherit the embedded address
+    [InlineData("64:ff9b:1::1", true)]
+    [InlineData("2001::1", true)]
+    [InlineData("100::1", true)]
+    [InlineData("ff02::1", true)]
+    [InlineData("fd00::1", true)]
+    [InlineData("fe80::1", true)]
+    [InlineData("fec0::1", true)]
+    [InlineData("2002:0a00:0001::", true)]
+    [InlineData("64:ff9b::a9fe:a9fe", true)]
+    public void A_mail_host_named_by_a_recipient_domain_may_not_be_anything_but_public_or_documentation(string address, bool forbidden) =>
+        Assert.Equal(forbidden, NetworkAddresses.IsForbiddenMailTarget(IPAddress.Parse(address)));
+
     [Fact]
     public void Every_ipv4_address_of_every_internal_block_is_refused_at_its_edges()
     {

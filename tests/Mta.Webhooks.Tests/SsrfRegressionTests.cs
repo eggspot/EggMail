@@ -101,6 +101,39 @@ public class WebhookUrlRegistrationSecurityTests
         Assert.True(string.IsNullOrEmpty(new Uri(url).UserInfo));
     }
 
+    [Theory]
+    [InlineData("https://hooks.example.com/a b")]
+    [InlineData("https://hooks.example.com/a\tb")]
+    [InlineData("https://hooks.example.com/a\r\nb")]
+    [InlineData("https://hooks.example.com/a\0b")]
+    [InlineData("https://hooks.example.com/a\u0085b")]
+    [InlineData("https://hooks.example.com/a\u00a0b")]
+    [InlineData("https://hooks.example.com/a\u2028b")]
+    [InlineData("https://hooks.example.com/a\u2029b")]
+    [InlineData("https://hooks.example.com/a\u202ab")]
+    [InlineData("https://hooks.example.com/a\u202bb")]
+    [InlineData("https://hooks.example.com/a\u202cb")]
+    [InlineData("https://hooks.example.com/a\u202db")]
+    [InlineData("https://hooks.example.com/a\u202eb")]
+    [InlineData("https://hooks.example.com/a\u2066b")]
+    [InlineData("https://hooks.example.com/a\u2067b")]
+    [InlineData("https://hooks.example.com/a\u2068b")]
+    [InlineData("https://hooks.example.com/a\u2069b")]
+    public void A_URL_with_whitespace_a_control_character_or_a_text_direction_control_inside_is_refused(string url)
+    {
+        Assert.False(WebhookUrlValidator.TryValidate(url, false, [], out string error), url);
+        Assert.Contains("must not contain", error, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("https://hooks.example.com/a%20b")]
+    [InlineData("https://hooks.example.com/%E2%80%AE")]            // percent-encoded: plain ASCII text
+    [InlineData("https://hooks.example.com/\u30d5\u30c3\u30af")]    // Japanese path
+    [InlineData("https://\u4f8b\u3048.jp/hook")]                  // internationalized host
+    [InlineData("  https://hooks.example.com/x  ")]                // surrounding spaces are trimmed away by the caller
+    public void Real_internationalized_and_encoded_URLs_are_accepted(string url) =>
+        Assert.True(WebhookUrlValidator.TryValidate(url, false, [], out string error), error);
+
     [Fact]
     public void An_allowlist_entry_opens_exactly_its_network()
     {
@@ -125,8 +158,11 @@ public class WebhookUrlRegistrationSecurityTests
     [InlineData("LOCALHOST")]
     public async Task Whatever_the_system_resolver_makes_of_a_host_text_the_connection_is_refused_when_it_is_internal(string host)
     {
-        // The connect-time check works on the addresses the resolver returns, so an encoding the URL validator did not know cannot get past it.
-        var allowed = await SsrfGuard.ResolveAllowedAsync(host, async (h, ct) => await Dns.GetHostAddressesAsync(h, ct), [], default);
+        // The connect-time check works on the addresses the resolver returns, so an encoding the URL validator did not know cannot get past it. The resolver is
+        // injected: numeric forms are parsed by the guard itself (the way a socket library would read them), a name is looked up, and "localhost" answers loopback.
+        static ValueTask<IPAddress[]> Resolver(string h, CancellationToken ct) =>
+            ValueTask.FromResult(h.Equals("localhost", StringComparison.OrdinalIgnoreCase) ? new[] { IPAddress.Loopback, IPAddress.IPv6Loopback } : Array.Empty<IPAddress>());
+        var allowed = await SsrfGuard.ResolveAllowedAsync(host, Resolver, [], default);
         Assert.Empty(allowed);
     }
 }
