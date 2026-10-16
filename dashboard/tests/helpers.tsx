@@ -81,6 +81,7 @@ export function makeCapabilities(over: Partial<Capabilities> & { mode?: HistoryM
     history: { mode: mode ?? 'full' },
     content: { retentionDays: 7, storeAttachments: false },
     limits: { maxMessageBytes: 26214400, maxRecipients: 50 },
+    inbound: { enabled: false },
     warnings: [],
     ...rest,
   };
