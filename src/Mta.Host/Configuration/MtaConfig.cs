@@ -33,6 +33,7 @@ public sealed class MtaConfig
     public TlsSection Tls { get; init; } = new();
     public AcmeSection Acme { get; init; } = new();
     public ApiSection Api { get; init; } = new();
+    public InboundSection Inbound { get; init; } = new();
     public DomainsSection Domains { get; init; } = new();
 }
 
@@ -464,6 +465,90 @@ public sealed class ApiSection
 
     /// <summary>SPF <c>include:</c> host suggested to customers in the DNS records of a sending domain.</summary>
     public string? SpfInclude { get; init; } = D.SpfInclude;
+}
+
+/// <summary>
+/// Inbound mail (design section 11, decision 95): the receive path behind the port-25 listener. The values here are the operator's limits: each is both the default and the ceiling of the matching
+/// domain setting (a tenant can only lower it). The retention of received mail (<c>Inbound:RetentionDays</c>, <c>Inbound:MaxRetentionDays</c>) is bound with the storage options.
+/// </summary>
+public sealed class InboundSection
+{
+    /// <summary>The master switch. Off, the port-25 listener only takes bounces, exactly as before.</summary>
+    public bool Enabled { get; init; }
+
+    /// <summary>Largest inbound message, in bytes. Null: <c>Smtp:MaxMessageSize</c>. A domain can lower it, never raise it.</summary>
+    public long? MaxMessageSize { get; init; }
+
+    /// <summary>Recipients per transaction on the port-25 listener.</summary>
+    public int MaxRecipients { get; init; } = 20;
+
+    /// <summary>The most one transaction may store: the message size times the number of recipients (each gets its own copy). Over it the answer is <c>452</c>.</summary>
+    public long MaxTransactionBytes { get; init; } = 256L * 1024 * 1024;
+
+    /// <summary>Messages per minute accepted for one domain.</summary>
+    public int MaxMessagesPerMinute { get; init; } = 600;
+
+    /// <summary>Messages per minute accepted from one client address (an IPv6 /64) for one domain.</summary>
+    public int MaxMessagesPerMinutePerRemote { get; init; } = 60;
+
+    /// <summary>Message bytes kept for one domain; at the limit new mail is refused with <c>452 4.2.2</c>. <c>0</c> is unlimited.</summary>
+    public long MaxStoredBytesPerDomain { get; init; } = 2L * 1024 * 1024 * 1024;
+
+    /// <summary>Message bytes kept for all domains of one tenant together; at the limit new mail is refused with <c>452 4.2.2</c>. <c>0</c> is unlimited.</summary>
+    public long MaxStoredBytesPerTenant { get; init; } = 10L * 1024 * 1024 * 1024;
+
+    /// <summary>The authserv-id of the <c>Authentication-Results</c> header added to received mail. Null: <c>Hostname</c>.</summary>
+    public string? AuthenticationResultsId { get; init; }
+
+    public InboundVerificationSection Verification { get; init; } = new();
+    public InboundArcSection Arc { get; init; } = new();
+    public InboundDnsblSection Dnsbl { get; init; } = new();
+    public InboundSrsSection Srs { get; init; } = new();
+}
+
+/// <summary>Bounds of the SPF, DKIM, DMARC and ARC verification of received mail.</summary>
+public sealed class InboundVerificationSection
+{
+    /// <summary>Total time for the verification of one message; whatever did not finish is a <c>temperror</c>.</summary>
+    public TimeSpan Timeout { get; init; } = TimeSpan.FromSeconds(20);
+
+    /// <summary>Verifications at the same time; with none free a message gets <c>451</c> at once.</summary>
+    public int MaxConcurrency { get; init; } = 32;
+
+    /// <summary>Verifications at the same time for one network (an IPv4 /24 or an IPv6 /64).</summary>
+    public int MaxConcurrencyPerRemote { get; init; } = 4;
+}
+
+public sealed class InboundArcSection
+{
+    /// <summary>Domains (<c>d=</c> of the ARC-Seal) of sealers whose chain may override a DMARC failure. Empty: nothing is trusted. Trusting a sealer is a decision about someone else's reputation.</summary>
+    public List<string> TrustedSealers { get; init; } = [];
+}
+
+public enum InboundDnsblAction : byte
+{
+    /// <summary>Accept and add <c>X-EggMail-Reputation</c> to the message.</summary>
+    Flag = 0,
+
+    /// <summary>Refuse the connection's first inbound recipient with <c>554 5.7.1</c>.</summary>
+    Reject,
+}
+
+public sealed class InboundDnsblSection
+{
+    /// <summary>DNS blocklist zones to ask about the connecting address; empty: off. Every query tells the list operator which addresses connect to this server.</summary>
+    public List<string> Zones { get; init; } = [];
+
+    public InboundDnsblAction Action { get; init; } = InboundDnsblAction.Flag;
+
+    /// <summary>Time to wait for the lists; a list that does not answer is an error and never blocks.</summary>
+    public TimeSpan Timeout { get; init; } = TimeSpan.FromSeconds(2);
+}
+
+public sealed class InboundSrsSection
+{
+    /// <summary>Days an SRS address of a forwarded message stays valid.</summary>
+    public int MaxAgeDays { get; init; } = 21;
 }
 
 /// <summary>

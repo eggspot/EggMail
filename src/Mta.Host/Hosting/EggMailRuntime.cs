@@ -49,6 +49,12 @@ public sealed class EggMailRuntime : IAsyncDisposable
 
     public AcmeRenewalService? Acme { get; init; }
 
+    /// <summary>The MX receiver of inbound mail (null unless <c>Inbound:Enabled</c>).</summary>
+    public InboundReceiver? Inbound { get; init; }
+
+    /// <summary>The receive path's copy of the enabled domains and routes (null unless <c>Inbound:Enabled</c>); the API asks it to reload after it changes something (<see cref="InboundConfigurationCache.RequestRefresh"/>).</summary>
+    public InboundConfigurationCache? InboundConfiguration { get; init; }
+
     /// <summary>The built-in HTTP-01 responder (null unless ACME is on and answers HTTP-01 challenges itself, <c>Acme:Challenge</c>); it runs on every replica.</summary>
     public AcmeHttpChallengeListener? AcmeHttpListener { get; init; }
 
@@ -125,7 +131,22 @@ public sealed class EggMailRuntime : IAsyncDisposable
         DeliveryEngine? engine = null;
         var handler = new IngestHandler(storage, submission, throttle, new IngestOptions { BounceDomain = config.Delivery.BounceDomain, MaxRecipientsPerMessage = config.Smtp.MaxRecipients }, bounces, onAccepted: () => engine?.Wake(), log);
 
-        var listeners = config.Smtp.Listeners.Where(l => l.Value.Enabled).Select(l => l.Value.ToOptions(l.Key)).ToList();
+        // Inbound mail: the port-25 listener becomes an MX receiver. Everything is built only when Inbound:Enabled; off, the server behaves exactly as before.
+        InboundReceiveOptions inboundOptions = InboundReceiveOptions.From(config);
+        InboundReceiver? inbound = null;
+        InboundConfigurationCache? inboundConfiguration = null;
+        if (inboundOptions.Enabled)
+        {
+            inboundConfiguration = new InboundConfigurationCache(storage.Inbound, clock, inboundOptions, log);
+            var srs = new SrsCodec(verp, inboundOptions.SrsMaxAgeDays);
+            inbound = new InboundReceiver(
+                handler, storage.Inbound, inboundConfiguration, new InboundVerifier(dns, inboundOptions, config.Hostname, clock),
+                new VerificationSlots(inboundOptions.VerificationMaxConcurrency, inboundOptions.VerificationMaxConcurrencyPerRemote), new InboundRateLimiter(),
+                new DnsblChecker(dns, inboundOptions.DnsblZones, inboundOptions.DnsblTimeout), srs, new ForwardHopMarker(verp), inboundOptions, config.Hostname, clock, log, onAccepted: () => engine?.Wake());
+            handler.UseInbound(inbound);
+        }
+
+        var listeners = config.Smtp.Listeners.Where(l => l.Value.Enabled).Select(l => InboundListener(l.Value.ToOptions(l.Key), inboundOptions)).ToList();
         var smtp = new SmtpServer(new SmtpServerOptions
         {
             Hostname = config.Hostname,
@@ -231,6 +252,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
             KeysProtectedAtRest = Mta.Host.Secrets.SecretsFactory.KeysProtectedAtRest(config.Secrets, storage.Config),
             Config = config, Storage = storage, Clock = clock, Log = log, Secrets = secrets, Certificates = certificates, Verp = verp,
             Submission = submission, AuthThrottle = throttle, SmtpServer = smtp, Delivery = delivery, Webhooks = webhooks, Dns = dns,
+            Inbound = inbound, InboundConfiguration = inboundConfiguration,
             Pool = pool, Routes = routes, Limits = limits, Acme = acme, AcmeHttpListener = acmeHttpListener, TlsReports = reports, Health = routeHealth, DestinationThrottle = destinationThrottle, ReplicaCoordinator = replicaCoordinator,
             CounterPersistence = counterPersistence, TlsJournal = tlsJournal, TlsCollector = collector,
         };
@@ -249,6 +271,31 @@ public sealed class EggMailRuntime : IAsyncDisposable
         runtime._owned.Add(smtp);
         return runtime;
     }
+
+    /// <summary>
+    /// The listener as the server runs it. With inbound mail on, the port-25 listener (the one of role Bounce, or Inbound) is an MX receiver: role Inbound, the inbound size ceiling and recipient cap, and no
+    /// AUTH. With it off, a listener configured as Inbound is the bounce listener it replaces (nothing receives mail that was not switched on). Submission listeners are never touched.
+    /// </summary>
+    internal static SmtpListenerOptions InboundListener(SmtpListenerOptions listener, InboundReceiveOptions inbound)
+    {
+        if (listener.Role == ListenerRole.Submission)
+        {
+            return listener;
+        }
+
+        if (!inbound.Enabled)
+        {
+            return listener.Role == ListenerRole.Inbound ? CopyWithRole(listener, ListenerRole.Bounce) : listener;
+        }
+
+        return CopyWithRole(listener, ListenerRole.Inbound, inbound.Ceilings.MaxMessageBytes, inbound.MaxRecipients + 1);
+    }
+
+    private static SmtpListenerOptions CopyWithRole(SmtpListenerOptions l, ListenerRole role, long? maxMessageSize = null, int? maxRecipients = null) => new()
+    {
+        Name = l.Name, BindAddress = l.BindAddress, Port = l.Port, Mode = l.Mode, Role = role, AuthRequired = false, Enabled = l.Enabled, AllowInsecureAuth = l.AllowInsecureAuth,
+        MaxMessageSize = maxMessageSize ?? l.MaxMessageSize, MaxRecipients = maxRecipients ?? l.MaxRecipients,
+    };
 
     /// <summary>The built-in ladder unless <c>Delivery:RetryDelays</c> overrides it (used by operators with unusual needs and by the chaos tests).</summary>
     internal static RetryScheduleOptions? BuildRetryOptions(DeliverySection delivery)

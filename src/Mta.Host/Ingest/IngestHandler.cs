@@ -23,7 +23,7 @@ public sealed class IngestOptions
 /// <see cref="SubmissionService"/>; the bounce listener accepts only verified bounce addresses and hands the message to the
 /// <see cref="BounceProcessor"/>. The handler never relays: there is no path for an unauthenticated session to queue mail for delivery.
 /// </summary>
-public sealed class IngestHandler : ISmtpServerHandler
+public sealed class IngestHandler : ISmtpServerHandler, IBounceNamespace
 {
     private sealed class State
     {
@@ -51,6 +51,7 @@ public sealed class IngestHandler : ISmtpServerHandler
     private readonly BounceProcessor? _bounces;
     private readonly Action? _onAccepted;
     private readonly IMtaLog _log;
+    private InboundReceiver? _inbound;
 
     public IngestHandler(IStorage storage, SubmissionService submission, AuthThrottle throttle, IngestOptions? options = null, BounceProcessor? bounces = null, Action? onAccepted = null, IMtaLog? log = null)
     {
@@ -63,10 +64,28 @@ public sealed class IngestHandler : ISmtpServerHandler
         _log = log ?? NullMtaLog.Instance;
     }
 
-    public ValueTask<SmtpReply?> OnConnectedAsync(SmtpSessionContext session, CancellationToken cancellationToken) => ValueTask.FromResult<SmtpReply?>(null);
+    /// <summary>
+    /// Turns the listeners of role <see cref="ListenerRole.Inbound"/> into MX receivers (design section 11). Without it such a listener behaves exactly like the bounce listener: accepting inbound mail
+    /// is something that has to be wired, never a default. The receiver is built after the handler because it asks the handler which recipients are bounce addresses.
+    /// </summary>
+    public void UseInbound(InboundReceiver receiver) => _inbound = receiver;
+
+    /// <summary>Whether the session is one of the inbound MX receiver (and a receiver is wired).</summary>
+    private InboundReceiver? InboundOf(SmtpSessionContext session) => session.Role == ListenerRole.Inbound ? _inbound : null;
+
+    public ValueTask<SmtpReply?> OnConnectedAsync(SmtpSessionContext session, CancellationToken cancellationToken) =>
+        InboundOf(session) is { } inbound ? inbound.OnConnectedAsync(session) : ValueTask.FromResult<SmtpReply?>(null);
+
+    public ValueTask<SmtpReply?> OnDataStartAsync(SmtpSessionContext session, MailFromInfo mail, IReadOnlyList<EmailAddress> recipients, CancellationToken cancellationToken) =>
+        InboundOf(session) is { } inbound ? inbound.OnDataStartAsync(session) : ValueTask.FromResult<SmtpReply?>(null);
 
     public async ValueTask<SmtpAuthResult> AuthenticateAsync(SmtpSessionContext session, string authorizationId, string userName, string password, CancellationToken ct)
     {
+        if (session.Role != ListenerRole.Submission)
+        {
+            return SmtpAuthResult.Failed;   // the server offers no AUTH on these listeners; a handler that is asked anyway never authenticates anybody on a port-25 listener
+        }
+
         string ip = session.RemoteEndPoint.Address.ToString();
         string userKey = "user:" + Mta.Storage.Model.ConfigMapping.NormalizeUserName(userName);   // the same key as the dashboard sign-in: one budget per account, whichever door
         var check = await _throttle.CheckAsync(ct, ip, userKey).ConfigureAwait(false);
@@ -116,9 +135,10 @@ public sealed class IngestHandler : ISmtpServerHandler
 
     public ValueTask<SmtpReply> OnMailFromAsync(SmtpSessionContext session, MailFromInfo mail, CancellationToken ct)
     {
-        if (session.Role == ListenerRole.Bounce)
+        // Every role other than Submission is "not a submitter": it can never reach the submission path (AUTH, relay, sender policy).
+        if (session.Role != ListenerRole.Submission)
         {
-            return ValueTask.FromResult(SmtpReplies.SenderOk);
+            return InboundOf(session) is { } inbound ? inbound.OnMailFromAsync(session, mail) : ValueTask.FromResult(SmtpReplies.SenderOk);
         }
 
         if (session.HandlerState is not State state)
@@ -132,9 +152,9 @@ public sealed class IngestHandler : ISmtpServerHandler
 
     public ValueTask<SmtpReply> OnRcptToAsync(SmtpSessionContext session, MailFromInfo mail, EmailAddress recipient, RcptParameters parameters, CancellationToken ct)
     {
-        if (session.Role == ListenerRole.Bounce)
+        if (session.Role != ListenerRole.Submission)
         {
-            return IsBounceRecipientReplyAsync(recipient, ct);
+            return InboundOf(session) is { } inbound ? inbound.OnRcptToAsync(session, mail, recipient, ct) : IsBounceRecipientReplyAsync(recipient, ct);
         }
 
         if (session.HandlerState is not State state)
@@ -175,9 +195,11 @@ public sealed class IngestHandler : ISmtpServerHandler
     {
         try
         {
-            if (message.Session.Role == ListenerRole.Bounce)
+            if (message.Session.Role != ListenerRole.Submission)
             {
-                return await HandleBounceAsync(message, ct).ConfigureAwait(false);
+                return InboundOf(message.Session) is { } inbound
+                    ? await inbound.OnMessageAsync(message, ct).ConfigureAwait(false)
+                    : await HandleBounceAsync(message, ct).ConfigureAwait(false);
             }
 
             if (message.Session.HandlerState is not State state)
@@ -271,6 +293,28 @@ public sealed class IngestHandler : ISmtpServerHandler
                     ? SmtpReply.Create(r.SmtpCode, r.EnhancedCode, r.Message)
                     : SmtpReply.Create(554, "5.6.0", result.Detail ?? "Message cannot be accepted");
         }
+    }
+
+    ValueTask<SmtpReply> IBounceNamespace.HandleMessageAsync(SmtpMessage message, CancellationToken cancellationToken) => HandleBounceAsync(message, cancellationToken);
+
+    /// <summary>
+    /// Whether a recipient is in the bounce namespace, which the inbound classification must leave alone: the shared bounce domain and the verified return-path hosts of registered domains. Inside it only a valid
+    /// signed token (or <c>postmaster</c>/<c>abuse</c> at the shared bounce domain) is accepted; anything else is <c>550 5.1.1</c> and is never an inbound recipient (decision 92, design section 11.4).
+    /// </summary>
+    async ValueTask<BounceRecipientClass> IBounceNamespace.ClassifyAsync(EmailAddress recipient, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(_options.BounceDomain))
+        {
+            return BounceRecipientClass.NotBounce;
+        }
+
+        bool shared = string.Equals(recipient.Domain, _options.BounceDomain, StringComparison.OrdinalIgnoreCase);
+        if (!shared && !await IsVerifiedReturnPathHostAsync(recipient.Domain, cancellationToken).ConfigureAwait(false))
+        {
+            return BounceRecipientClass.NotBounce;
+        }
+
+        return await IsBounceRecipientAsync(recipient, cancellationToken).ConfigureAwait(false) ? BounceRecipientClass.Accepted : BounceRecipientClass.Refused;
     }
 
     private async ValueTask<SmtpReply> HandleBounceAsync(SmtpMessage message, CancellationToken ct)

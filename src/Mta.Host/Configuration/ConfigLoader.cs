@@ -182,6 +182,9 @@ public static class ConfigLoader
         }
 
         ApplyList(configuration, "Api:MetricsAllowedNetworks", api.MetricsAllowedNetworks);
+        var inbound = Bind<InboundSection>(configuration, "Inbound");
+        ApplyList(configuration, "Inbound:Arc:TrustedSealers", inbound.Arc.TrustedSealers);
+        ApplyList(configuration, "Inbound:Dnsbl:Zones", inbound.Dnsbl.Zones);
 
         return new MtaConfig
         {
@@ -206,6 +209,7 @@ public static class ConfigLoader
             Tls = Bind<TlsSection>(configuration, "Tls"),
             Acme = acme,
             Api = api,
+            Inbound = inbound,
             Domains = domains,
         };
     }
@@ -511,6 +515,74 @@ public static class ConfigLoader
         ValidateTlsAndAcme(c, errors);
         ValidateApi(c.Api, errors);
         ValidateDomains(c, errors);
+        ValidateInbound(c.Inbound, errors);
+    }
+
+    /// <summary>The inbound limits (design section 11.13): checked even while <c>Inbound:Enabled</c> is off, so switching it on later does not start a server with a contradictory configuration.</summary>
+    private static void ValidateInbound(InboundSection i, List<string> errors)
+    {
+        if (i.MaxMessageSize is < 1024)
+        {
+            errors.Add("Inbound:MaxMessageSize must be at least 1024.");
+        }
+
+        if (i.MaxRecipients is < 1 or > 1000)
+        {
+            errors.Add("Inbound:MaxRecipients must be between 1 and 1000.");
+        }
+
+        if (i.MaxTransactionBytes < 1024)
+        {
+            errors.Add("Inbound:MaxTransactionBytes must be at least 1024.");
+        }
+
+        if (i.MaxMessagesPerMinute < 1 || i.MaxMessagesPerMinutePerRemote < 1)
+        {
+            errors.Add("Inbound:MaxMessagesPerMinute and Inbound:MaxMessagesPerMinutePerRemote must be at least 1.");
+        }
+
+        if (i.MaxStoredBytesPerDomain < 0 || i.MaxStoredBytesPerTenant < 0)
+        {
+            errors.Add("Inbound:MaxStoredBytesPerDomain and Inbound:MaxStoredBytesPerTenant must not be negative (0 is unlimited).");
+        }
+
+        if (i.Verification.Timeout <= TimeSpan.Zero || i.Verification.Timeout > TimeSpan.FromMinutes(5))
+        {
+            errors.Add("Inbound:Verification:Timeout must be between 1 millisecond and 5 minutes.");
+        }
+
+        if (i.Verification.MaxConcurrency < 1 || i.Verification.MaxConcurrencyPerRemote < 1)
+        {
+            errors.Add("Inbound:Verification:MaxConcurrency and Inbound:Verification:MaxConcurrencyPerRemote must be at least 1.");
+        }
+
+        if (i.Srs.MaxAgeDays is < 1 or > 500)
+        {
+            errors.Add("Inbound:Srs:MaxAgeDays must be between 1 and 500.");
+        }
+
+        if (i.Dnsbl.Timeout <= TimeSpan.Zero || i.Dnsbl.Timeout > TimeSpan.FromSeconds(30))
+        {
+            errors.Add("Inbound:Dnsbl:Timeout must be between 1 millisecond and 30 seconds.");
+        }
+
+        if (i.Dnsbl.Zones.Count > Mta.Host.Ingest.DnsblChecker.MaxZones)
+        {
+            errors.Add($"Inbound:Dnsbl:Zones lists {i.Dnsbl.Zones.Count} zones; at most {Mta.Host.Ingest.DnsblChecker.MaxZones} (every one is a lookup per connection).");
+        }
+
+        foreach (string zone in i.Dnsbl.Zones.Concat(i.Arc.TrustedSealers))
+        {
+            if (!Mta.Host.Domains.DomainNames.TryNormalize(zone.Trim().TrimEnd('.'), out _))
+            {
+                errors.Add($"Inbound:Dnsbl:Zones and Inbound:Arc:TrustedSealers entries must be domain names; '{zone}' is not.");
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(i.AuthenticationResultsId) && i.AuthenticationResultsId.Any(ch => ch <= ' ' || ch >= 127 || ch is ';' or '(' or ')' or '"' or '\\'))
+        {
+            errors.Add("Inbound:AuthenticationResultsId must be a plain host or domain name.");
+        }
     }
 
     /// <summary>One destination for the <c>rua</c> tag of a DMARC or TLS-RPT record: it must not be able to end the tag or add a second one.</summary>

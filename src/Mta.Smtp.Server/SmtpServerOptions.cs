@@ -24,6 +24,12 @@ public enum ListenerRole : byte
 
     /// <summary>Unauthenticated bounce / DSN receiver (port 25). Policy is the handler's job.</summary>
     Bounce,
+
+    /// <summary>
+    /// Unauthenticated MX receiver (port 25) for the domains tenants enabled for inbound mail (design section 11): a superset of <see cref="Bounce"/>, it still takes the signed bounce
+    /// addresses. Like <see cref="Bounce"/> it offers no AUTH and can never submit mail; every role other than <see cref="Submission"/> is "not a submitter".
+    /// </summary>
+    Inbound,
 }
 
 public sealed class SmtpListenerOptions
@@ -38,6 +44,12 @@ public sealed class SmtpListenerOptions
 
     /// <summary>Permit AUTH on a <see cref="ListenerMode.Plain"/> listener (only sensible on loopback).</summary>
     public bool AllowInsecureAuth { get; init; }
+
+    /// <summary>Largest message this listener takes, advertised as <c>SIZE</c>. Null: <see cref="SmtpServerOptions.MaxMessageSize"/>. The inbound listener uses the operator's ceiling for inbound mail here.</summary>
+    public long? MaxMessageSize { get; init; }
+
+    /// <summary>Recipients per transaction on this listener. Null: <see cref="SmtpServerOptions.MaxRecipients"/>.</summary>
+    public int? MaxRecipients { get; init; }
 }
 
 /// <summary>Supplies the server certificate for a TLS handshake. Implementations hot-reload.</summary>

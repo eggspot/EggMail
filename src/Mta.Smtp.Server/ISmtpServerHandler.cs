@@ -15,6 +15,12 @@ public sealed class SmtpSessionContext
     public required ListenerRole Role { get; init; }
     public DateTimeOffset ConnectedAt { get; init; } = DateTimeOffset.UtcNow;
 
+    /// <summary>
+    /// A lower limit for the message of the open transaction, set by the handler while it accepts recipients (for example the smallest limit among the domains of the accepted recipients).
+    /// The session enforces the lower of this and the listener's limit while it reads the body, with the ordinary <c>552 5.3.4</c>, and clears it when the transaction ends.
+    /// </summary>
+    public long? TransactionMaxMessageSize { get; set; }
+
     public string? HeloName { get; internal set; }
     public bool UsedEhlo { get; internal set; }
     public bool TlsActive { get; internal set; }
@@ -105,6 +111,13 @@ public interface ISmtpServerHandler
     ValueTask<SmtpReply> OnMailFromAsync(SmtpSessionContext session, MailFromInfo mail, CancellationToken cancellationToken);
 
     ValueTask<SmtpReply> OnRcptToAsync(SmtpSessionContext session, MailFromInfo mail, EmailAddress recipient, RcptParameters parameters, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Called when the client starts the message data (<c>DATA</c>, or the first <c>BDAT</c> chunk), after the last <c>RCPT</c> and before any data is read. Return null to go on or a reply
+    /// to refuse the message at once: the transaction ends, nothing is read into memory (a refused <c>BDAT</c> chunk is still read and discarded, as the protocol requires). The default goes on.
+    /// </summary>
+    ValueTask<SmtpReply?> OnDataStartAsync(SmtpSessionContext session, MailFromInfo mail, IReadOnlyList<EmailAddress> recipients, CancellationToken cancellationToken) =>
+        ValueTask.FromResult<SmtpReply?>(null);
 
     /// <summary>
     /// Called with the complete message. Return <c>250</c> only after the message is durably accepted (decision 13/Lite semantics);
