@@ -583,9 +583,16 @@ public sealed class FakeMta : IAsyncDisposable
                     _session.Log("S: <close>");
                     try
                     {
-                        _socket.Shutdown(SocketShutdown.Both);
+                        // A lingering close, like a well behaved server: send FIN, then read what the client still has in flight until it closes. Closing with unread input
+                        // makes TCP send a reset, which can destroy the reply that was just sent (a client that pipelined its envelope would never see the 421).
+                        _socket.Shutdown(SocketShutdown.Send);
+                        using var linger = CancellationTokenSource.CreateLinkedTokenSource(Stopping);
+                        linger.CancelAfter(TimeSpan.FromSeconds(10));
+                        while (await _stream.ReadAsync(_buffer, linger.Token) > 0)
+                        {
+                        }
                     }
-                    catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
+                    catch (Exception ex) when (ex is SocketException or ObjectDisposedException or IOException or OperationCanceledException)
                     {
                     }
 

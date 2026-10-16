@@ -1,4 +1,5 @@
 using Mta.RemoteMta.Tests.Harness;
+using System.Text.Json;
 using Mta.Storage;
 using Mta.Tls;
 using Mta.Tls.TlsRpt;
@@ -151,6 +152,36 @@ public class MtaStsTests
 
         Assert.Equal(0, rogue.ConnectionCount);   // a spoofed MX record with a better preference is not even contacted
         Assert.Single(good.Messages);
+    }
+
+    [Fact]
+    public async Task The_daily_tls_rpt_report_built_from_the_sessions_has_the_rfc_8460_fields_for_a_failure_and_a_success()
+    {
+        var (lab, mx, peer) = Start("enforce", certificate: CertKind.WrongName);
+        await using var _l = lab;
+        var failed = await lab.SendAsync(["one@dest.example"]);
+        var due = await lab.WaitForRetryScheduleAsync(failed);
+        peer.Certificate = _ => Make(lab, CertKind.Valid);
+        lab.Advance(due - lab.Clock.UtcNow);
+        await lab.WaitForEventAsync(failed, MessageEventType.Delivered);
+
+        var data = lab.TlsReports.Snapshot().Single(d => d.PolicyDomain == "dest.example");
+        var report = new TlsRptReportBuilder(new TlsRptReportOptions { OrganizationName = "EggMail Lab", ContactInfo = "postmaster@example.org", SubmitterDomain = "egg.test", ReportIdFactory = () => "report-1" }).Build(data);
+        using var json = JsonDocument.Parse(report.Json);
+        var root = json.RootElement;
+
+        Assert.Equal("EggMail Lab", root.GetProperty("organization-name").GetString());
+        var policy = Assert.Single(root.GetProperty("policies").EnumerateArray());
+        Assert.Equal("sts", policy.GetProperty("policy").GetProperty("policy-type").GetString());
+        Assert.Equal("dest.example", policy.GetProperty("policy").GetProperty("policy-domain").GetString());
+        Assert.Equal(1, policy.GetProperty("summary").GetProperty("total-successful-session-count").GetInt32());
+        Assert.Equal(1, policy.GetProperty("summary").GetProperty("total-failure-session-count").GetInt32());
+        var detail = Assert.Single(policy.GetProperty("failure-details").EnumerateArray());
+        Assert.Equal("certificate-host-mismatch", detail.GetProperty("result-type").GetString());
+        Assert.Equal("mx.dest.example", detail.GetProperty("receiving-mx-hostname").GetString());
+        Assert.Equal(1, detail.GetProperty("failed-session-count").GetInt32());
+        Assert.EndsWith(".json.gz", report.FileName);
+        Assert.Single(mx.Messages);
     }
 
     // ---------------------------------------------------------------------------------------------- testing
