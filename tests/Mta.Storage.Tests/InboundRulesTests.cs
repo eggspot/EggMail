@@ -406,4 +406,19 @@ public class InboundRulesTests
         Assert.NotEqual(baseline, Make(settings, [route], DomainStatus.Failed).ETag);
         Assert.NotEqual(baseline, Make(settings, [route], tenantEnabled: false).ETag);
     }
+
+    [Fact]
+    public void The_loop_check_for_targets_this_server_receives_for_lives_in_the_validator()
+    {
+        InboundRouteRecord route = Route(InboundMatchKind.CatchAll, null, action: InboundActionKind.Forward, forwardTo: ["a@Second.Example", "b@elsewhere.test", "c@xn--bcher-kva.example", "d@SECOND.example"]);
+
+        // What a caller has to look up: the distinct A-label domains of the targets.
+        Assert.Equal(["second.example", "elsewhere.test", "xn--bcher-kva.example"], InboundRules.ForwardTargetDomains(route));
+
+        HashSet<string> local = ["second.example", "xn--bcher-kva.example"];
+        Assert.Equal(["forwardTo[0]", "forwardTo[2]", "forwardTo[3]"], InboundRules.ValidateRoute(route, "own.example", local).Select(e => e.Field).Order().ToArray());
+        Assert.Contains("loop", InboundRules.ValidateRoute(route, "own.example", local).First().Message);
+        Assert.Empty(InboundRules.ValidateRoute(route with { ForwardTo = ["b@elsewhere.test"] }, "own.example", local));
+        Assert.Equal("xn--bcher-kva.example", InboundRules.ALabel("B\u00fcCHER.example."));
+    }
 }

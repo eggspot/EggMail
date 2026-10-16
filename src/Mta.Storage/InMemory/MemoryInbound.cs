@@ -53,7 +53,7 @@ internal sealed class MemoryInbound(MemoryState s) : IInboundMessageStore
     public ValueTask<Page<InboundMessage>> SearchAsync(InboundMessageQuery query, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(query);
-        int limit = Math.Clamp(query.Limit, 1, 500);
+        int limit = Math.Clamp(query.Limit, 1, InboundRules.MaxPageSize);
         string? cursor = null;
         if (query.Cursor is not null)
         {
@@ -219,6 +219,7 @@ internal sealed class MemoryInbound(MemoryState s) : IInboundMessageStore
             {
                 e.LeaseOwner = owner;
                 e.LeaseUntil = until;
+                e.ActionAttempts++;   // the claim counts the attempt: a crash in the middle of it has used it up
                 claimed.Add(new ClaimedInboundAction(e.ToRecord(), s.InboundRaw.TryGetValue(e.Id, out InboundMessageRawEntity? raw) ? raw.Raw.ToArray() : null));
             }
 
@@ -251,12 +252,11 @@ internal sealed class MemoryInbound(MemoryState s) : IInboundMessageStore
         DateTimeOffset at = StorageTime.Normalize(outcome.At);
         lock (s.Gate)
         {
-            if (!s.InboundMessages.TryGetValue(messageId, out InboundMessageEntity? e) || e.LeaseOwner != owner)
+            if (!s.InboundMessages.TryGetValue(messageId, out InboundMessageEntity? e) || e.LeaseOwner != owner || (outcome.ClaimedAttempt is { } claimed && e.ActionAttempts != claimed))
             {
                 return R(false);
             }
 
-            e.ActionAttempts++;
             e.ActionState = outcome.State;
             e.ActionNextAttemptAt = outcome.State == InboundActionState.Pending ? StorageTime.Normalize(outcome.NextAttemptAt) : null;
             e.ActionFinishedAt = outcome.State == InboundActionState.Pending ? null : at;
@@ -286,6 +286,7 @@ internal sealed class MemoryInbound(MemoryState s) : IInboundMessageStore
             int n = 0;
             foreach (InboundMessageEntity e in s.InboundMessages.Values.Where(x => x.LeaseOwner == owner))
             {
+                e.ActionAttempts = Math.Max(0, e.ActionAttempts - 1);   // the attempt the claim counted was not made
                 e.LeaseOwner = null;
                 e.LeaseUntil = InboundMapping.NoLease;
                 n++;
