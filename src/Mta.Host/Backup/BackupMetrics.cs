@@ -28,6 +28,9 @@ public static class BackupMetrics
 
     internal static bool IsAttached(BackupScheduler scheduler) => Live.ContainsKey(scheduler);
 
+    /// <summary>Schedulers the gauges currently read (a leak check: disposing a scheduler must detach it).</summary>
+    internal static int AttachedCount => Live.Count;
+
     internal static IEnumerable<Measurement<long>> ObserveLastSuccess(IEnumerable<BackupScheduler> schedulers)
     {
         long newest = 0;

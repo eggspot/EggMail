@@ -14,6 +14,9 @@
   <ItemGroup>
     <!-- Knobs and the virtual clock of the accelerated lifecycle tests, shared by link. -->
     <Compile Include="..\Support\Accelerated.cs" Link="Support\Accelerated.cs" />
+    <Compile Include="..\Support\LeakProbe.cs" Link="Support\LeakProbe.cs" />
+    <!-- The throwaway PostgreSQL cluster, for the leak checks of the PostgreSQL backend. -->
+    <Compile Include="..\Mta.Storage.Postgres.Tests\Support\PostgresTestServer.cs" Link="Support\PostgresTestServer.cs" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Mta.Host\Mta.Host.csproj" />
