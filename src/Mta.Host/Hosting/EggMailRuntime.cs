@@ -144,6 +144,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
                 new VerificationSlots(inboundOptions.VerificationMaxConcurrency, inboundOptions.VerificationMaxConcurrencyPerRemote), new InboundRateLimiter(),
                 new DnsblChecker(dns, inboundOptions.DnsblZones, inboundOptions.DnsblTimeout), srs, new ForwardHopMarker(verp), inboundOptions, config.Hostname, clock, log, onAccepted: () => engine?.Wake());
             handler.UseInbound(inbound);
+            log.Write(MtaLogLevel.Information, "startup", "Inbound mail is on: the port-25 listener receives mail for the domains tenants enabled. SPF and the per-address limits need the real client address: publish the port without source NAT (see the Inbound mail section of the operations guide); the server warns once an hour if connections look internal.");
         }
 
         var listeners = config.Smtp.Listeners.Where(l => l.Value.Enabled).Select(l => InboundListener(l.Value.ToOptions(l.Key), inboundOptions)).ToList();

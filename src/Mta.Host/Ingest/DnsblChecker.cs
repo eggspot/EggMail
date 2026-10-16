@@ -39,14 +39,8 @@ public sealed class DnsblChecker
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(_timeout);
         Task<bool?>[] lookups = _zones.Select(zone => LookupAsync(reversed + "." + zone, timeout.Token)).ToArray();
-        try
-        {
-            await Task.WhenAll(lookups).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
+        await Task.WhenAll(lookups).ConfigureAwait(false);   // each lookup turns its own failures and timeouts into "could not be told"
+        cancellationToken.ThrowIfCancellationRequested();
 
         string? listed = null;
         for (int i = 0; i < lookups.Length; i++)
