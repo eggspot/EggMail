@@ -51,7 +51,7 @@ public sealed class StorageLeakTests(ITestOutputHelper output)
             {
                 await storage.InitializeAsync(default);
                 using var probe = new LeakProbe(output.WriteLine) { WarmupBatches = 2 };
-                probe.TrackArrayPoolBalance();
+                probe.TrackArrayPoolBalance(ignoreRentalsFrom: ["Microsoft.EntityFrameworkCore"]);   // EF Core rents an array per query (its expression funcletizer) and keeps it; the maintenance run queries through EF
                 probe.Track("prepared SQLite statements", PreparedStatements);
                 probe.Track("native SQLite memory (bytes)", () => SQLitePCL.raw.sqlite3_memory_used(), absolute: 1024 * 1024, relative: 0.25);
                 LeakReport report = await probe.RunAsync(new StorageFlow(storage, clock).RoundAsync, RoundsPerBatch);
@@ -85,7 +85,7 @@ public sealed class StorageLeakTests(ITestOutputHelper output)
         await using var monitor = new NpgsqlConnection(db.ConnectionString);
         await monitor.OpenAsync();
         using var probe = new LeakProbe(output.WriteLine) { WarmupBatches = 1 };
-        probe.TrackArrayPoolBalance();
+        probe.TrackArrayPoolBalance(ignoreRentalsFrom: ["Microsoft.EntityFrameworkCore"]);   // EF Core rents an array per query (its expression funcletizer) and keeps it; the maintenance run queries through EF
         probe.Track("server connections of the database", () => ServerConnections(monitor, db.Name), absolute: 1);
 
         // A round costs a few milliseconds of server time and a virtual day (partition rotation and retention) more, so the default batch is smaller than on the other
