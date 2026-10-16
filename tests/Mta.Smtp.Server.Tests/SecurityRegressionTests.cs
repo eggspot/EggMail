@@ -237,6 +237,53 @@ public class SmtpSmuggling
     }
 }
 
+public class SmtpTraceHeaderSecurity
+{
+    [Theory]
+    [InlineData("a by evil.example with ESMTP id FORGED")]
+    [InlineData("a) by evil.example (")]
+    [InlineData("a;\tby evil.example")]
+    [InlineData("<evil@example.org>")]
+    [InlineData("[1.2.3.4] ([9.9.9.9]) by evil.example")]
+    [InlineData("a\u0001b")]
+    [InlineData("a\u007fb")]
+    [InlineData("a\tb")]
+    [InlineData("\u00fc\u00f1.example")]
+    [InlineData("\"quoted\"")]
+    [InlineData("x")]
+    public async Task A_greeting_name_cannot_forge_a_hop_in_the_received_header_the_server_writes(string name)
+    {
+        await using var f = new ServerFixture();
+        using var c = await RawClient.ConnectAsync(f.OpenPort);
+        await c.ExpectAsync(220);
+        await c.SendBytesAsync(Encoding.UTF8.GetBytes("EHLO " + name + "\r\n"));
+        var reply = await c.ReadReplyAsync();
+        if (reply!.Code != 250)
+        {
+            Assert.InRange(reply.Code, 500, 599);   // refused outright: nothing to forge
+            return;
+        }
+
+        await c.CommandAsync("MAIL FROM:<a@b.example>", 250);
+        await c.CommandAsync("RCPT TO:<c@d.example>", 250);
+        await c.CommandAsync("DATA", 354);
+        await c.SendAsync("Subject: s\r\n\r\nbody\r\n.\r\n");
+        await c.ExpectAsync(250);
+
+        string received = Encoding.UTF8.GetString(Assert.Single(f.Handler.Messages).Received);
+        string[] lines = received.TrimEnd('\r', '\n').Split("\r\n");
+        Assert.StartsWith("Received: from ", lines[0], StringComparison.Ordinal);
+        // The greeting name is one token inside the "from" clause, followed by the address the connection really came from.
+        System.Text.RegularExpressions.Match m = System.Text.RegularExpressions.Regex.Match(lines[0], @"^Received: from (\S+) \(\[127\.0\.0\.1\]\)$");
+        Assert.True(m.Success, "first line: " + lines[0]);
+        Assert.StartsWith("\tby mx.test with ESMTP id ", lines[1], StringComparison.Ordinal);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(received, @"(?m)^Received:"));
+        Assert.DoesNotContain("evil.example", string.Join("", lines.Skip(1)), StringComparison.Ordinal);
+        Assert.DoesNotContain("FORGED", string.Join("", lines.Skip(1)), StringComparison.Ordinal);
+        Assert.All(lines.Skip(1), l => Assert.StartsWith("\t", l, StringComparison.Ordinal));   // continuation lines only
+    }
+}
+
 public class SmtpStartTlsAndAuthentication
 {
     private static SmtpServerOptions Options(SmtpServerOptions o, IReadOnlyList<SmtpListenerOptions>? listeners = null, int? maxMessagesPerSession = null,
