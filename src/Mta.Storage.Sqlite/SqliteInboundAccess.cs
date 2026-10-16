@@ -53,7 +53,24 @@ internal sealed class SqliteInboundAccess(SqliteRuntime rt, IStorageModelHooks h
     /// whatever its extended code) is <see cref="StorageFullException"/> (the receive path answers <c>452 4.3.1</c>, as for the other queue writes), a busy or locked database, an I/O error or
     /// an unreadable file is <see cref="StorageUnavailableException"/>; anything else (a constraint) is not translated and the store reports it as a conflict.
     /// </summary>
-    public Exception? TranslateException(Exception exception)
+    public Exception? TranslateException(Exception exception) => Translate(exception);
+
+    public bool IsConstraintViolation(Exception exception) => IsConstraint(exception);
+
+    internal static bool IsConstraint(Exception exception)
+    {
+        for (Exception? e = exception; e is not null; e = e.InnerException)
+        {
+            if (e is Microsoft.Data.Sqlite.SqliteException sqlite)
+            {
+                return (sqlite.SqliteErrorCode & 0xFF) == 19;   // SQLITE_CONSTRAINT, whatever the extended code
+            }
+        }
+
+        return false;
+    }
+
+    internal static Exception? Translate(Exception exception)
     {
         if (exception is StorageUnavailableException)
         {
@@ -67,7 +84,7 @@ internal sealed class SqliteInboundAccess(SqliteRuntime rt, IStorageModelHooks h
                 return (sqlite.SqliteErrorCode & 0xFF) switch
                 {
                     13 => new StorageFullException("The disk holding the SQLite files is full (SQLITE_FULL).", exception),
-                    5 or 6 or 10 or 11 or 14 => new StorageUnavailableException("SQLite could not complete the inbound write (busy, locked or an I/O error): " + sqlite.Message, exception),
+                    5 or 6 or 8 or 10 or 11 or 14 => new StorageUnavailableException("SQLite could not complete the inbound write (busy, locked, read-only, or an I/O error): " + sqlite.Message, exception),
                     _ => null,
                 };
             }
@@ -83,7 +100,7 @@ internal sealed class SqliteInboundAccess(SqliteRuntime rt, IStorageModelHooks h
         using DbCommand cmd = connection.CreateCommand();
         cmd.Transaction = context.Database.CurrentTransaction?.GetDbTransaction();
         cmd.CommandText =
-            "UPDATE inbound_message SET lease_owner = @owner, lease_until = @until WHERE id IN (" +
+            "UPDATE inbound_message SET lease_owner = @owner, lease_until = @until, action_attempts = action_attempts + 1 WHERE id IN (" +
             "SELECT id FROM inbound_message WHERE transfer_switch_id IS NULL AND action_state = 0 AND action_next_attempt_at <= @now AND lease_until <= @now ORDER BY action_next_attempt_at, id LIMIT @max) " +
             "RETURNING id";
         Add(cmd, "@owner", owner);

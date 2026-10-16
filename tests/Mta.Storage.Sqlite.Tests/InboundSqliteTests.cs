@@ -1,3 +1,4 @@
+using Mta.Storage.Tests;
 using Microsoft.Data.Sqlite;
 using Mta.Core;
 
@@ -186,5 +187,38 @@ public class InboundSqliteTests : SqliteTestBase
     public async Task The_retention_pass_for_the_server_default_has_an_index_on_settled_messages()
     {
         Assert.Equal(1, ScalarLong(PathOf("queue.db"), "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'IX_inbound_message_received_at' AND sql LIKE '%action_state%<>%'"));
+    }
+
+    [Fact]
+    public Task Retention_keeps_a_message_that_a_retry_made_pending_between_the_read_and_the_write() =>
+        InboundBatchScenarios.Retention_keeps_a_message_that_a_retry_made_pending_between_the_read_and_the_write(Storage, Sql.Runtime.InboundMessages, Clock);
+
+    [Fact]
+    public Task An_erasure_deletes_in_batches_bounded_by_rows_and_bytes_with_a_pause() =>
+        InboundBatchScenarios.An_erasure_deletes_in_batches_bounded_by_rows_and_bytes_with_a_pause(Storage, Sql.Runtime.InboundMessages, Clock);
+
+    [Fact]
+    public void Only_a_constraint_is_a_conflict_and_a_full_or_busy_database_is_unavailable()
+    {
+        static SqliteException Failure(int code) => new("failure", code);
+        static Exception Wrapped(int code) => new Microsoft.EntityFrameworkCore.DbUpdateException("update failed", Failure(code));
+
+        Assert.True(SqliteInboundAccess.IsConstraint(Wrapped(19)));
+        Assert.True(SqliteInboundAccess.IsConstraint(Wrapped(19 | (5 << 8))));   // SQLITE_CONSTRAINT_UNIQUE
+        Assert.False(SqliteInboundAccess.IsConstraint(Wrapped(13)));
+        Assert.False(SqliteInboundAccess.IsConstraint(new InvalidOperationException("bug")));
+
+        Assert.IsType<StorageFullException>(SqliteInboundAccess.Translate(Wrapped(13)));
+        Assert.IsType<StorageFullException>(SqliteInboundAccess.Translate(Wrapped(13 | (3 << 8))));
+        foreach (int code in new[] { 5, 6, 8, 10, 11, 14 })   // busy, locked, readonly, I/O error, corrupt, cannot open
+        {
+            Exception? translated = SqliteInboundAccess.Translate(Wrapped(code));
+            Assert.NotNull(translated);
+            Assert.IsNotType<StorageFullException>(translated);
+            Assert.IsAssignableFrom<StorageUnavailableException>(translated);
+        }
+
+        Assert.Null(SqliteInboundAccess.Translate(Wrapped(19)));
+        Assert.Null(SqliteInboundAccess.Translate(new InvalidOperationException("bug")));
     }
 }

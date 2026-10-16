@@ -1,3 +1,4 @@
+using Mta.Storage.Tests;
 using Mta.Core;
 
 namespace Mta.Storage.Postgres.Tests;
@@ -118,5 +119,35 @@ public class InboundPostgresTests : PgTestBase
 
         string definition = await ScalarAsync<string>("SELECT indexdef FROM pg_indexes WHERE indexname = 'IX_inbound_message_action_next_attempt_at'");
         Assert.Contains("WHERE (action_state = 0)", definition, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public Task Retention_keeps_a_message_that_a_retry_made_pending_between_the_read_and_the_write() =>
+        InboundBatchScenarios.Retention_keeps_a_message_that_a_retry_made_pending_between_the_read_and_the_write(Storage, ((PostgresStorage)Storage).Runtime.InboundMessages, Clock);
+
+    [Fact]
+    public Task An_erasure_deletes_in_batches_bounded_by_rows_and_bytes_with_a_pause() =>
+        InboundBatchScenarios.An_erasure_deletes_in_batches_bounded_by_rows_and_bytes_with_a_pause(Storage, ((PostgresStorage)Storage).Runtime.InboundMessages, Clock);
+
+    [Fact]
+    public void Errors_are_classified_a_constraint_a_full_disk_a_retryable_failure()
+    {
+        static Exception Wrapped(string state) => new Microsoft.EntityFrameworkCore.DbUpdateException("update failed", new Npgsql.PostgresException("failure", "ERROR", "ERROR", state));
+
+        Assert.True(PostgresErrors.IsConstraint(Wrapped("23505")));
+        Assert.True(PostgresErrors.IsConstraint(Wrapped("23503")));
+        Assert.False(PostgresErrors.IsConstraint(Wrapped("53100")));
+        Assert.False(PostgresErrors.IsConstraint(new InvalidOperationException("bug")));
+
+        Assert.True(PostgresErrors.IsDiskFull(Wrapped("53100")));
+        Assert.False(PostgresErrors.IsDiskFull(Wrapped("23505")));
+
+        foreach (string state in new[] { "40001", "40P01", "57014" })
+        {
+            Assert.True(PostgresErrors.IsRetryable(Wrapped(state)));
+        }
+
+        Assert.False(PostgresErrors.IsRetryable(Wrapped("23505")));
+        Assert.False(PostgresErrors.IsRetryable(Wrapped("42601")));   // bad SQL is a bug, not a moment to wait out
     }
 }

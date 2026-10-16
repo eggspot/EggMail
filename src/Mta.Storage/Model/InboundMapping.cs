@@ -76,6 +76,15 @@ public static class InboundMapping
         }
     });
 
+    /// <summary>The longest address stored (RFC 5321 path limit).</summary>
+    public const int MaxAddressLength = 320;
+
+    /// <summary>
+    /// The invisible characters that reorder or isolate text (the Unicode bidirectional controls): in a HELO name, an address or a subject they make a hostile value read as another one in a
+    /// dashboard, so they are removed on the way in. Other format characters (the joiners of emoji and scripts) are left alone.
+    /// </summary>
+    public static bool IsBidiControl(char c) => c is '\u061C' or '\u200E' or '\u200F' or (>= '\u202A' and <= '\u202E') or (>= '\u2066' and <= '\u2069');
+
     /// <summary>The longest stored client-supplied text (HELO name, address, domains in the verdicts): the SMTP limits are looser than this and the values reach the dashboard and webhooks.</summary>
     public const int MaxTextLength = 255;
 
@@ -95,7 +104,7 @@ public static class InboundMapping
                 break;
             }
 
-            if (!char.IsControl(c))
+            if (!char.IsControl(c) && !IsBidiControl(c))
             {
                 sb.Append(c);
             }
@@ -128,6 +137,11 @@ public static class InboundMapping
             if (n == buffer.Length)
             {
                 break;
+            }
+
+            if (IsBidiControl(c))
+            {
+                continue;
             }
 
             if (c is '\r' or '\n' or '\t')
@@ -163,13 +177,13 @@ public static class InboundMapping
             Id = d.Id,
             TenantId = d.TenantId,
             DomainId = d.DomainId,
-            Domain = d.Domain.ToLowerInvariant(),
+            Domain = (CleanText(d.Domain, MaxTextLength) ?? string.Empty).ToLowerInvariant(),
             ReceivedAt = received,
             RemoteAddress = CleanText(d.RemoteAddress, MaxTextLength) ?? string.Empty,
             Helo = CleanText(d.Helo, MaxTextLength),
             TlsUsed = d.TlsUsed,
-            EnvelopeFrom = d.EnvelopeFrom.ToLowerInvariant(),
-            EnvelopeTo = d.EnvelopeTo.ToLowerInvariant(),
+            EnvelopeFrom = (CleanText(d.EnvelopeFrom, MaxAddressLength) ?? string.Empty).ToLowerInvariant(),
+            EnvelopeTo = (CleanText(d.EnvelopeTo, MaxAddressLength) ?? string.Empty).ToLowerInvariant(),
             Subject = CleanSubject(d.Subject),
             Size = d.Raw.Length,
             Spf = d.Auth.Spf,

@@ -41,6 +41,48 @@ internal static class PostgresErrors
         return false;
     }
 
+    /// <summary>The server has no room to write (SQLSTATE 53100, disk full): the receive path answers <c>452 4.3.1</c>, like a full SQLite disk.</summary>
+    public static bool IsDiskFull(Exception exception)
+    {
+        for (Exception? e = exception; e is not null; e = e.InnerException)
+        {
+            if (e is PostgresException { SqlState: "53100" })
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>A failure that will probably not repeat: a serialization failure, a deadlock or a statement timeout. The caller retries later (<c>451</c>).</summary>
+    public static bool IsRetryable(Exception exception)
+    {
+        for (Exception? e = exception; e is not null; e = e.InnerException)
+        {
+            if (e is PostgresException { SqlState: SerializationFailure or DeadlockDetected or "57014" })
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>A constraint violation (SQLSTATE class 23: unique, foreign key, check, not null).</summary>
+    public static bool IsConstraint(Exception exception)
+    {
+        for (Exception? e = exception; e is not null; e = e.InnerException)
+        {
+            if (e is PostgresException { SqlState: { } state })
+            {
+                return state.StartsWith("23", StringComparison.Ordinal);
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>
     /// True when the server stopped a statement because it ran past <c>statement_timeout</c> (SQLSTATE 57014, as on the read-only role). A statement the <i>caller</i> cancelled
     /// (a cancelled token, a closed request) is also reported by the server as 57014 but surfaces as an <see cref="OperationCanceledException"/>: that is the caller's decision

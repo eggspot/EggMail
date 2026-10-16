@@ -19,8 +19,14 @@ public interface IInboundDbAccess<TContext> where TContext : DbContext, IQueueDb
     /// <summary>The backend switch gate: the store neither accepts mail nor hands out actions while it is closed.</summary>
     Transfer.SwitchGate Fence { get; }
 
-    /// <summary>Lets a provider turn its connectivity failures into <see cref="StorageUnavailableException"/>. Null leaves the exception alone.</summary>
+    /// <summary>
+    /// Lets a provider turn its availability failures into <see cref="StorageUnavailableException"/> (and a full disk into <see cref="StorageFullException"/>, a subclass, so the receive path can
+    /// answer <c>452 4.3.1</c>). Null leaves the exception alone.
+    /// </summary>
     Exception? TranslateException(Exception exception) => null;
+
+    /// <summary>True only for a constraint violation (SQLite <c>SQLITE_CONSTRAINT</c>, PostgreSQL class 23): the one failure a write reports as a <see cref="StorageConflictException"/>. Everything else is rethrown as it is.</summary>
+    bool IsConstraintViolation(Exception exception) => false;
 
     /// <summary>
     /// Leases up to <paramref name="max"/> pending actions that are due at <paramref name="now"/> and not held by a backend switch, oldest due first, and returns their
@@ -37,14 +43,20 @@ public sealed class EfInboundMessageStore<TContext>(IInboundDbAccess<TContext> d
 {
     private const int MaxErrorLength = 1000;
 
-    /// <summary>The most rows one erasure or retention write deletes.</summary>
-    private const int MaxBatchRows = 100;
+    /// <summary>The most rows one erasure or retention write deletes (settable for tests).</summary>
+    internal int MaxBatchRows { get; set; } = InboundRules.MaxBatchRows;
 
-    /// <summary>The most stored body bytes one erasure or retention write deletes (a few large messages are a batch of their own).</summary>
-    private const long MaxBatchBytes = 64L << 20;
+    /// <summary>The most stored body bytes one erasure or retention write deletes; a few large messages are a batch of their own (settable for tests).</summary>
+    internal long MaxBatchBytes { get; set; } = InboundRules.MaxBatchBytes;
 
-    /// <summary>The pause between the batches of an erasure, so the queue writer serves intake and deliveries in between.</summary>
-    private static readonly TimeSpan ErasePause = TimeSpan.FromMilliseconds(25);
+    /// <summary>The pause between the batches of an erasure, so the queue writer serves intake and deliveries in between (settable for tests).</summary>
+    internal TimeSpan ErasePause { get; set; } = TimeSpan.FromMilliseconds(25);
+
+    /// <summary>Test seam: runs between the read that finds a batch and the write that deletes it, the window in which a retry or a claim can change the rows.</summary>
+    internal Func<Task>? BetweenReadAndWrite { get; set; }
+
+    /// <summary>Test seam: counts the batches (writes) an erasure or a retention pass made.</summary>
+    internal int BatchesWritten { get; private set; }
 
     private async ValueTask<T> Read<T>(Func<TContext, T> query)
     {
@@ -64,13 +76,13 @@ public sealed class EfInboundMessageStore<TContext>(IInboundDbAccess<TContext> d
         {
             return await db.WriteAsync(work, cancellationToken).ConfigureAwait(false);
         }
-        catch (DbUpdateException ex) when (db.TranslateException(ex) is null)
-        {
-            throw new StorageConflictException("An inbound write violated a constraint: " + (ex.InnerException?.Message ?? ex.Message), ex);
-        }
         catch (Exception ex) when (db.TranslateException(ex) is { } translated)
         {
             throw translated;
+        }
+        catch (Exception ex) when (db.IsConstraintViolation(ex))
+        {
+            throw new StorageConflictException("An inbound write violated a constraint: " + (ex.InnerException?.Message ?? ex.Message), ex);
         }
     }
 
@@ -123,7 +135,7 @@ public sealed class EfInboundMessageStore<TContext>(IInboundDbAccess<TContext> d
     public async ValueTask<Page<InboundMessage>> SearchAsync(InboundMessageQuery query, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(query);
-        int limit = Math.Clamp(query.Limit, 1, 500);
+        int limit = Math.Clamp(query.Limit, 1, InboundRules.MaxPageSize);
         Guid? cursor = null;
         if (query.Cursor is not null)
         {
@@ -227,7 +239,7 @@ public sealed class EfInboundMessageStore<TContext>(IInboundDbAccess<TContext> d
             throw new ArgumentException("An erasure needs at least one filter besides the tenant.", nameof(query));
         }
 
-        return await DeleteInBatchesAsync(q => Filter(q, query), settledOnly: false, MaxBatchRows, ErasePause, cancellationToken).ConfigureAwait(false);
+        return await DeleteInBatchesAsync(q => Filter(q, query), settledOnly: false, byId: true, MaxBatchRows, ErasePause, cancellationToken).ConfigureAwait(false);
     }
 
     public async ValueTask<InboundMessage?> GetAsync(Guid tenantId, Guid messageId, CancellationToken cancellationToken) =>
@@ -275,7 +287,13 @@ public sealed class EfInboundMessageStore<TContext>(IInboundDbAccess<TContext> d
                 .SetProperty(x => x.ActionNote, (string?)null)
                 .SetProperty(x => x.LeaseOwner, (string?)null)
                 .SetProperty(x => x.LeaseUntil, InboundMapping.NoLease));
-            return changed == 0 ? InboundRetryResult.AlreadyPending : InboundRetryResult.Queued;
+            if (changed > 0)
+            {
+                return InboundRetryResult.Queued;
+            }
+
+            // Nothing changed: either another retry or a claim made it pending first, or the message was deleted (retention, an erasure) after the read above.
+            return c.InboundMessages.AsNoTracking().Any(x => x.Id == messageId && x.TenantId == tenantId) ? InboundRetryResult.AlreadyPending : InboundRetryResult.NotFound;
         }, cancellationToken).ConfigureAwait(false);
     }
 
@@ -325,12 +343,13 @@ public sealed class EfInboundMessageStore<TContext>(IInboundDbAccess<TContext> d
         string? error = outcome.State == InboundActionState.Done ? null : InboundErrorText.Clean(outcome.Error, MaxErrorLength);
         string? note = outcome.State == InboundActionState.Done ? InboundErrorText.CleanNote(outcome.Note) : null;
         Guid? forward = outcome.ForwardMessageId;
+        int? claimedAttempt = outcome.ClaimedAttempt;
         bool free = outcome.FreeBody;
         InboundActionState state = outcome.State;
         return await Write(c =>
         {
-            int changed = c.InboundMessages.Where(x => x.Id == messageId && x.LeaseOwner == owner).ExecuteUpdate(s => s
-                .SetProperty(x => x.ActionAttempts, x => x.ActionAttempts + 1)
+            // The claim counted the attempt; a completion from an earlier claim (the attempt number differs) is refused even under the same owner name.
+            int changed = c.InboundMessages.Where(x => x.Id == messageId && x.LeaseOwner == owner && (claimedAttempt == null || x.ActionAttempts == claimedAttempt)).ExecuteUpdate(s => s
                 .SetProperty(x => x.ActionState, state)
                 .SetProperty(x => x.ActionNextAttemptAt, next)
                 .SetProperty(x => x.ActionFinishedAt, finished)
@@ -359,7 +378,8 @@ public sealed class EfInboundMessageStore<TContext>(IInboundDbAccess<TContext> d
     }
 
     public async ValueTask<int> ReleaseOwnedActionLeasesAsync(string owner, CancellationToken cancellationToken) =>
-        await Write(c => c.InboundMessages.Where(x => x.LeaseOwner == owner).ExecuteUpdate(s => s
+        await Write(c => c.InboundMessages.Where(x => x.LeaseOwner == owner && x.ActionState == InboundActionState.Pending).ExecuteUpdate(s => s
+            .SetProperty(x => x.ActionAttempts, x => x.ActionAttempts > 0 ? x.ActionAttempts - 1 : 0)   // the attempt the claim counted was not made
             .SetProperty(x => x.LeaseOwner, (string?)null)
             .SetProperty(x => x.LeaseUntil, InboundMapping.NoLease)), cancellationToken).ConfigureAwait(false);
 
@@ -402,7 +422,7 @@ public sealed class EfInboundMessageStore<TContext>(IInboundDbAccess<TContext> d
     public async ValueTask<long> PurgeExpiredAsync(IReadOnlyDictionary<Guid, int?> domainRetentionDays, int defaultDays, int ceilingDays, DateTimeOffset now, int batchSize, TimeSpan pause, CancellationToken cancellationToken)
     {
         long total = 0;
-        int rows = Math.Clamp(batchSize, 1, MaxBatchRows);
+        int rows = Math.Clamp(batchSize, 1, Math.Max(1, MaxBatchRows));
         Guid[] explicitDomains = [.. domainRetentionDays.Where(d => d.Value is not null).Select(d => d.Key)];
         foreach (var (domainId, days) in domainRetentionDays)
         {
@@ -411,14 +431,14 @@ public sealed class EfInboundMessageStore<TContext>(IInboundDbAccess<TContext> d
             {
                 Guid domain = domainId;
                 DateTimeOffset when = StorageTime.Normalize(cutoff);
-                total += await DeleteInBatchesAsync(q => q.Where(x => x.DomainId == domain && x.ReceivedAt < when), settledOnly: true, rows, pause, cancellationToken).ConfigureAwait(false);
+                total += await DeleteInBatchesAsync(q => q.Where(x => x.DomainId == domain && x.ReceivedAt < when), settledOnly: true, byId: false, rows, pause, cancellationToken).ConfigureAwait(false);
             }
         }
 
         if (InboundRules.RetentionCutoff(now, InboundRules.ResolveRetentionDays(null, defaultDays, ceilingDays)) is { } defaultCutoff)
         {
             DateTimeOffset when = StorageTime.Normalize(defaultCutoff);
-            total += await DeleteInBatchesAsync(q => q.Where(x => !explicitDomains.Contains(x.DomainId) && x.ReceivedAt < when), settledOnly: true, rows, pause, cancellationToken).ConfigureAwait(false);
+            total += await DeleteInBatchesAsync(q => q.Where(x => !explicitDomains.Contains(x.DomainId) && x.ReceivedAt < when), settledOnly: true, byId: false, rows, pause, cancellationToken).ConfigureAwait(false);
         }
 
         return total;
@@ -430,7 +450,7 @@ public sealed class EfInboundMessageStore<TContext>(IInboundDbAccess<TContext> d
     /// after the last one handled (a sparse filter is scanned once, not once per batch); the delete is a short write by id. <paramref name="settledOnly"/> (retention) adds the pending guard to
     /// the delete itself, so an action made pending by a retry between the read and the write keeps its message and its body.
     /// </summary>
-    private async ValueTask<long> DeleteInBatchesAsync(Func<IQueryable<InboundMessageEntity>, IQueryable<InboundMessageEntity>> scope, bool settledOnly, int rows, TimeSpan pause, CancellationToken cancellationToken)
+    private async ValueTask<long> DeleteInBatchesAsync(Func<IQueryable<InboundMessageEntity>, IQueryable<InboundMessageEntity>> scope, bool settledOnly, bool byId, int rows, TimeSpan pause, CancellationToken cancellationToken)
     {
         long deleted = 0;
         (DateTimeOffset At, Guid Id)? after = null;
@@ -446,6 +466,19 @@ public sealed class EfInboundMessageStore<TContext>(IInboundDbAccess<TContext> d
                     q = q.Where(x => x.ActionState != InboundActionState.Pending);
                 }
 
+                if (byId)
+                {
+                    // Erasure walks the ids (UUIDv7, the (tenant_id, id) and (domain_id, id) indexes): no sort of the matches in a temporary B-tree for every batch.
+                    if (position is { } lastId)
+                    {
+                        Guid id = lastId.Id;
+                        q = q.Where(x => x.Id.CompareTo(id) > 0);
+                    }
+
+                    return q.OrderBy(x => x.Id).Select(x => new { x.Id, x.ReceivedAt, x.Size }).Take(rows).ToList();
+                }
+
+                // Retention walks the age (the received_at indexes), continuing after the last row handled.
                 if (position is { } last)
                 {
                     DateTimeOffset at = last.At;
@@ -471,6 +504,12 @@ public sealed class EfInboundMessageStore<TContext>(IInboundDbAccess<TContext> d
 
             Guid[] ids = [.. found.Take(take).Select(x => x.Id)];
             after = (found[take - 1].ReceivedAt, found[take - 1].Id);
+            if (BetweenReadAndWrite is { } hook)
+            {
+                await hook().ConfigureAwait(false);
+            }
+
+            BatchesWritten++;
             deleted += await Write(c =>
             {
                 // The message first, with its guard; a body goes only when its message is gone, so a message that survives the guard never loses its body.

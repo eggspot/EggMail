@@ -109,6 +109,9 @@ public sealed class BundleTable
     public string Part { get; set; } = "";
     public long Rows { get; set; }
 
+    /// <summary>The rows a switch holds back from dispatch (received mail holds its pending actions only). Null in a bundle written before this member existed: every row of a table with a hold.</summary>
+    public long? HeldRows { get; set; }
+
     /// <summary>Hex of the 256-bit sum of the row hashes (secret columns excluded).</summary>
     public string Checksum { get; set; } = "";
 

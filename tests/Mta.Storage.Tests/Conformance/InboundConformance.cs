@@ -481,9 +481,75 @@ public abstract class InboundConformance : StorageTestBase
         Assert.Empty(await ClaimActionsAsync(owner: "worker-2", now: Clock.UtcNow.AddMinutes(5))); // extended past the original minute
 
         Assert.Equal(0, await Inbound.ReleaseOwnedActionLeasesAsync("worker-2", default));
+        Assert.Equal(1, (await Inbound.GetAsync(TenantA, draft.Id, default))!.ActionAttempts);   // the claim counted it
         Assert.Equal(1, await Inbound.ReleaseOwnedActionLeasesAsync(Owner, default));
-        Assert.Single(await ClaimActionsAsync(owner: "worker-2"));
+        Assert.Equal(0, (await Inbound.GetAsync(TenantA, draft.Id, default))!.ActionAttempts);   // a graceful release gives the attempt back
+        Assert.Equal(1, Assert.Single(await ClaimActionsAsync(owner: "worker-2")).Message.ActionAttempts);
+    }
+
+    [Fact]
+    public async Task The_claim_counts_the_attempt_so_a_message_that_crashes_its_runner_every_time_reaches_the_end_of_the_ladder()
+    {
+        DomainRecord domain = await AddDomainAsync(TenantA, "example.com");
+        InboundMessageDraft draft = await StoreAsync(Draft(domain, Ids.New(), InboundActionKind.Webhook));
+
+        // Three runners claim it and die without completing or releasing: the leases run out, the attempts stay used up.
+        for (int attempt = 1; attempt <= 3; attempt++)
+        {
+            var claimed = Assert.Single(await ClaimActionsAsync(owner: "runner-" + attempt, lease: TimeSpan.FromMinutes(1), now: Clock.UtcNow.AddMinutes(attempt * 2)));
+            Assert.Equal(attempt, claimed.Message.ActionAttempts);
+        }
+
+        Assert.Equal(3, (await Inbound.GetAsync(TenantA, draft.Id, default))!.ActionAttempts);
+
+        // Completing does not count a second time; a manual retry starts the count again.
+        Assert.True(await Inbound.CompleteActionAsync(draft.Id, "runner-3", new InboundActionOutcome(InboundActionState.Failed, Clock.UtcNow, null, "attempts used up", ClaimedAttempt: 3), default));
+        Assert.Equal(3, (await Inbound.GetAsync(TenantA, draft.Id, default))!.ActionAttempts);
+        Assert.Equal(InboundRetryResult.Queued, await Inbound.RetryActionAsync(TenantA, draft.Id, Clock.UtcNow, default));
         Assert.Equal(0, (await Inbound.GetAsync(TenantA, draft.Id, default))!.ActionAttempts);
+    }
+
+    [Fact]
+    public async Task A_completion_from_an_earlier_claim_is_refused_even_when_the_same_owner_claimed_the_row_again()
+    {
+        DomainRecord domain = await AddDomainAsync(TenantA, "example.com");
+        InboundMessageDraft draft = await StoreAsync(Draft(domain, Ids.New(), InboundActionKind.Webhook));
+        var first = Assert.Single(await ClaimActionsAsync(lease: TimeSpan.FromMinutes(1)));
+        var second = Assert.Single(await ClaimActionsAsync(lease: TimeSpan.FromMinutes(1), now: Clock.UtcNow.AddMinutes(5)));   // the lease ran out: the same owner name claims it again
+        Assert.Equal((1, 2), (first.Message.ActionAttempts, second.Message.ActionAttempts));
+
+        var done = new InboundActionOutcome(InboundActionState.Done, Clock.UtcNow, null, null);
+        Assert.False(await Inbound.CompleteActionAsync(draft.Id, Owner, done with { ClaimedAttempt = first.Message.ActionAttempts }, default));   // the stale attempt
+        Assert.Equal(InboundActionState.Pending, (await Inbound.GetAsync(TenantA, draft.Id, default))!.ActionState);
+        Assert.False(await Inbound.CompleteActionAsync(draft.Id, "someone-else", done with { ClaimedAttempt = 2 }, default));
+        Assert.True(await Inbound.CompleteActionAsync(draft.Id, Owner, done with { ClaimedAttempt = second.Message.ActionAttempts }, default));
+        Assert.Equal(InboundActionState.Done, (await Inbound.GetAsync(TenantA, draft.Id, default))!.ActionState);
+    }
+
+    [Fact]
+    public async Task A_completion_after_the_lease_ran_out_is_accepted_while_nobody_claimed_the_row_since()
+    {
+        DomainRecord domain = await AddDomainAsync(TenantA, "example.com");
+        InboundMessageDraft draft = await StoreAsync(Draft(domain, Ids.New(), InboundActionKind.Webhook));
+        var claim = Assert.Single(await ClaimActionsAsync(lease: TimeSpan.FromSeconds(30)));
+        Clock.Advance(TimeSpan.FromMinutes(10));   // the attempt took longer than its lease, but no other runner took the row
+
+        Assert.True(await Inbound.CompleteActionAsync(draft.Id, Owner, new InboundActionOutcome(InboundActionState.Done, Clock.UtcNow, null, null, ClaimedAttempt: claim.Message.ActionAttempts), default));
+    }
+
+    [Fact]
+    public async Task A_search_page_is_never_larger_than_200()
+    {
+        DomainRecord domain = await AddDomainAsync(TenantA, "example.com");
+        for (int i = 0; i < 205; i++)
+        {
+            await StoreAsync(Draft(domain, Ids.New(), InboundActionKind.Store, size: 40, at: Clock.UtcNow.AddMilliseconds(i)));
+        }
+
+        var page = await Inbound.SearchAsync(new InboundMessageQuery(TenantA, Limit: 1000), default);
+        Assert.Equal(200, page.Items.Count);
+        Assert.NotNull(page.NextCursor);
+        Assert.Equal(5, (await Inbound.SearchAsync(new InboundMessageQuery(TenantA, Limit: 1000, Cursor: page.NextCursor), default)).Items.Count);
     }
 
     [Fact]
@@ -743,7 +809,8 @@ public abstract class InboundConformance : StorageTestBase
         InboundRouteRecord route = Route(domain, action: InboundActionKind.Webhook, endpoint: endpoint);
         await Inbound.UpsertRouteAsync(route, default);
 
-        await Assert.ThrowsAsync<StorageConflictException>(async () => await Storage.Config.DeleteWebhookEndpointAsync(TenantA, endpoint, default));
+        var inUse = await Assert.ThrowsAsync<StorageConflictException>(async () => await Storage.Config.DeleteWebhookEndpointAsync(TenantA, endpoint, default));
+        Assert.Equal(StorageConflictReasons.WebhookEndpointInUse, inUse.Reason);
         Assert.NotNull(await Storage.Config.GetWebhookEndpointAsync(endpoint, default));
 
         // Another tenant's delete of the same id does nothing and does not fail; once the route is gone the delete works.
@@ -900,11 +967,30 @@ public abstract class InboundConformance : StorageTestBase
         Guid mine = await AddEndpointAsync(TenantA, true, "*");
         Guid theirs = await AddEndpointAsync(TenantB, true, "*");
 
-        await Assert.ThrowsAsync<StorageConflictException>(async () => await Inbound.UpsertRouteAsync(Route(domain, action: InboundActionKind.Webhook, endpoint: Ids.New()), default));
-        await Assert.ThrowsAsync<StorageConflictException>(async () => await Inbound.UpsertRouteAsync(Route(domain, action: InboundActionKind.Webhook, endpoint: theirs), default));
+        var unknown = await Assert.ThrowsAsync<StorageConflictException>(async () => await Inbound.UpsertRouteAsync(Route(domain, action: InboundActionKind.Webhook, endpoint: Ids.New()), default));
+        var foreign = await Assert.ThrowsAsync<StorageConflictException>(async () => await Inbound.UpsertRouteAsync(Route(domain, action: InboundActionKind.Webhook, endpoint: theirs), default));
+        Assert.Equal((StorageConflictReasons.WebhookEndpointMissing, StorageConflictReasons.WebhookEndpointMissing), (unknown.Reason, foreign.Reason));
         Assert.Empty(await Inbound.GetRoutesAsync(domain.Id, default));
 
         await Inbound.UpsertRouteAsync(Route(domain, action: InboundActionKind.Webhook, endpoint: mine), default);
         Assert.Single(await Inbound.GetRoutesAsync(domain.Id, default));
+    }
+
+    [Fact]
+    public async Task Bidirectional_controls_are_removed_and_addresses_are_cut_at_the_path_limit()
+    {
+        DomainRecord domain = await AddDomainAsync(TenantA, "example.com");
+        InboundMessageDraft draft = Draft(domain, Ids.New(), InboundActionKind.Store, subject: "invoice \u202Efdp.exe");
+        draft.Helo = "good\u202E.test\u2066";
+        draft.EnvelopeFrom = new string('A', 400) + "@sender.test";
+        draft.EnvelopeTo = "Support@Example.com";
+        await StoreAsync(draft);
+
+        InboundMessage stored = (await Inbound.GetAsync(TenantA, draft.Id, default))!;
+        Assert.Equal("good.test", stored.Helo);
+        Assert.Equal("invoice fdp.exe", stored.Subject);
+        Assert.Equal(320, stored.EnvelopeFrom.Length);
+        Assert.Equal(new string('a', 320), stored.EnvelopeFrom);
+        Assert.Equal("support@example.com", stored.EnvelopeTo);
     }
 }

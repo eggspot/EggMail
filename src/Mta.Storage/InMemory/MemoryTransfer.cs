@@ -252,7 +252,7 @@ internal sealed class MemoryTransfer(MemoryState s) : IStorageTransfer
                     s.Idempotency[(k.TenantId, k.IdempotencyKey)] = k;
                     break;
                 case InboundMessageEntity m:
-                    m.TransferSwitchId = hold;
+                    m.TransferSwitchId = m.ActionState == InboundActionState.Pending ? hold : null;
                     s.InboundMessages[m.Id] = m;
                     break;
                 case InboundMessageRawEntity raw:
@@ -375,7 +375,7 @@ internal sealed class MemoryTransfer(MemoryState s) : IStorageTransfer
                 n++;
             }
 
-            foreach (InboundMessageEntity m in s.InboundMessages.Values.Where(m => m.TransferSwitchId is null))
+            foreach (InboundMessageEntity m in s.InboundMessages.Values.Where(m => m.TransferSwitchId is null && m.ActionState == InboundActionState.Pending))
             {
                 m.TransferSwitchId = switchId;
                 n++;

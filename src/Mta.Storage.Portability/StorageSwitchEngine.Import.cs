@@ -373,7 +373,7 @@ public sealed partial class StorageSwitchEngine
             long held = await transfer.CountHeldQueueRowsAsync(state.SwitchId, ct).ConfigureAwait(false);
             if (!active)
             {
-                long expectedHeld = manifest.Tables.Where(t => TransferTables.ByName(t.Name) is { HasHold: true }).Sum(t => t.Rows);
+                long expectedHeld = manifest.Tables.Where(t => TransferTables.ByName(t.Name) is { HasHold: true }).Sum(t => t.HeldRows ?? t.Rows);
                 if (held != expectedHeld)
                 {
                     problems.Add($"queue: {held} rows are held in the target, the bundle has {expectedHeld}");

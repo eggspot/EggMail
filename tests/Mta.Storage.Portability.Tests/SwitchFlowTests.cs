@@ -111,7 +111,11 @@ public class SwitchFlowTests : SwitchTestBase
 
         StorageSwitchEngine engine = NewEngine(source, target, activator: new RecordingActivator());
         ExportResult export = await SwitchToConfirmedAsync(engine, BundleDir());
-        Assert.Equal(10 + (await ReadAsync<WebhookOutboxEntity>(source, TransferTables.WebhookOutbox)).Count + 3, export.QueueRowsMarked);   // the 3 are the inbound messages
+        // Of the 3 inbound messages only the pending action is held: a message that is done or failed is just data.
+        Assert.Equal(3, (await source.Storage.Inbound.SearchAsync(new InboundMessageQuery(TenantId: Seed.TenantA), default)).Items.Count);
+        long pendingInbound = (await source.Storage.Inbound.SearchAsync(new InboundMessageQuery(TenantId: Seed.TenantA, ActionState: InboundActionState.Pending), default)).Items.Count;
+        Assert.Equal(1, pendingInbound);
+        Assert.Equal(10 + (await ReadAsync<WebhookOutboxEntity>(source, TransferTables.WebhookOutbox)).Count + pendingInbound, export.QueueRowsMarked);
 
         // The source rows are marked and fenced: it can neither claim them nor accept.
         Assert.Empty(await source.Storage.Deliveries.ClaimAsync("late", 100, DateTimeOffset.UtcNow.AddDays(3), TimeSpan.FromMinutes(1), default));
