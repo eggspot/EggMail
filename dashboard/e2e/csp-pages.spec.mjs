@@ -6,6 +6,7 @@ import { createRecipientDomain, createVerifiedDomain, expect, sendViaApi, test, 
 const PAGES = [
   ['/', 'Overview'],
   ['/messages', 'Messages'],
+  ['/inbound', 'Inbound mail'],
   ['/send', 'Send test message'],
   ['/domains', 'Domains'],
   ['/webhooks', 'Webhooks'],

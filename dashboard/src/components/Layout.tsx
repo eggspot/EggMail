@@ -10,11 +10,14 @@ interface NavItem {
   href: string;
   label: string;
   admin?: boolean;
+  /** Shown only while the server accepts inbound mail (`capabilities.inbound.enabled`). */
+  inbound?: boolean;
 }
 
 export const NAV_ITEMS: NavItem[] = [
   { href: '/', label: 'Overview' },
   { href: '/messages', label: 'Messages' },
+  { href: '/inbound', label: 'Inbound mail', inbound: true },
   { href: '/send', label: 'Send test' },
   { href: '/domains', label: 'Domains' },
   { href: '/webhooks', label: 'Webhooks' },
@@ -76,7 +79,7 @@ export function Layout({ children }: { children: ComponentChildren }) {
 
   // With a temporary password there is nothing to navigate to: the one page is the password change.
   const forced = me?.mustChangePassword === true;
-  const items = NAV_ITEMS.filter((i) => !i.admin || isAdmin);
+  const items = NAV_ITEMS.filter((i) => (!i.admin || isAdmin) && (!i.inbound || capabilities?.inbound?.enabled === true));
 
   return (
     <div class="shell">

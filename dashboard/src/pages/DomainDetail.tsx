@@ -8,11 +8,13 @@ import type { DkimKeyInfo } from '../api/types';
 import { Button, Card, Chip, ConfirmDialog, CopyButton, EmptyState, ErrorNotice, KeyValue, Loading, Notice, PageHeader } from '../components/ui';
 import { formatDateTime, formatRelative } from '../lib/format';
 import { useAction, useApi, useCooldown, useDocumentTitle, usePolling } from '../lib/hooks';
+import { useApp } from '../state/app';
 
 const VERIFY_COOLDOWN_SECONDS = 30;
 
 export default function DomainDetail({ id }: { id?: string }) {
   const domainId = id ?? '';
+  const { capabilities } = useApp();
   const { data: domain, error, loading, reload, setData } = useApi(() => api.domain(domainId), [domainId]);
   // The text to publish (zone file, MTA-STS policy file) is loaded again whenever the domain changed: a check, a DKIM rotation.
   const recordsState = useApi(async () => (domain ? api.domainRecords(domainId) : undefined), [domainId, domain?.lastCheckedAt, domain?.dkimKeys?.length, domain?.dkim?.selector, domain?.status]);
@@ -155,6 +157,15 @@ export default function DomainDetail({ id }: { id?: string }) {
           ]}
         />
       </Card>
+
+      {capabilities?.inbound?.enabled && (
+        <Card title="Inbound mail" id="inbound">
+          <p>
+            Receive the mail sent to <strong>{domain.name}</strong> on this server: choose what happens to each address (store, webhook, forward) and where senders deliver.{' '}
+            <a href={`/domains/${domainId}/inbound`}>Open the inbound settings</a>
+          </p>
+        </Card>
+      )}
 
       <Card title="DNS records">
         <DnsRecordsTable records={domain.records} />

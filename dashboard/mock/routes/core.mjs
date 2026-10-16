@@ -11,6 +11,7 @@ export function capabilities(state) {
     history: { mode: o.history },
     content: { retentionDays: 7, storeAttachments: false },
     limits: { maxMessageBytes: 26214400, maxRecipients: 50 },
+    inbound: { enabled: o.inbound === true },
     warnings: o.warnings.map((code) => ({ code, message: WARNING_TEXT[code] || `Warning: ${code}` })),
   };
 }

@@ -7,7 +7,7 @@ import { Button, Card, Chip, ConfirmDialog, EmptyState, ErrorNotice, Loading, No
 import { formatDateTime, formatDuration } from '../lib/format';
 import { useAction, useApi, useDocumentTitle, usePolling } from '../lib/hooks';
 
-export const WEBHOOK_EVENT_TYPES = ['message.delivered', 'message.deferred', 'message.bounced', 'message.complained', 'message.expired', 'message.suppressed', 'message.cancelled', 'webhook.endpoint.disabled'] as const;
+export const WEBHOOK_EVENT_TYPES = ['message.delivered', 'message.deferred', 'message.bounced', 'message.complained', 'message.expired', 'message.suppressed', 'message.cancelled', 'inbound.action.failed', 'webhook.endpoint.disabled'] as const;
 
 /* ---------- attempts log ---------- */
 

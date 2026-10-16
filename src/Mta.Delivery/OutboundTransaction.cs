@@ -32,13 +32,19 @@ internal sealed class OutboundTransaction : IDisposable
     private readonly DkimSigner? _signer;
     private readonly List<byte[]> _rented = [];
     private readonly bool _bodyEightBit;
+    private readonly bool _byteExact;
     private ReadOnlyMemory<byte>? _asStored;
     private ReadOnlyMemory<byte>? _downgraded;
     private string? _downgradeFailure;
 
-    public OutboundTransaction(byte[] raw, DkimSigner? signer, bool headersUtf8Stored, EmailAddress from, IReadOnlyList<EmailAddress> recipients)
+    /// <summary>
+    /// <c>byteExact</c>: the message is delivered byte for byte (a forward of received mail, design section 11.7). It is never converted to 7-bit, because that would change the body and break the
+    /// original DKIM signatures that carry DMARC for the forwarded copy; a server without 8BITMIME (or, as always, without SMTPUTF8 where the message needs it) is a permanent failure of that server, not a rewrite.
+    /// </summary>
+    public OutboundTransaction(byte[] raw, DkimSigner? signer, bool headersUtf8Stored, EmailAddress from, IReadOnlyList<EmailAddress> recipients, bool byteExact = false)
     {
         _raw = raw;
+        _byteExact = byteExact;
         _signer = signer;
         From = from;
         Recipients = recipients;
@@ -51,6 +57,7 @@ internal sealed class OutboundTransaction : IDisposable
         _raw = source._raw;
         _signer = source._signer;
         _bodyEightBit = source._bodyEightBit;
+        _byteExact = source._byteExact;
         HeadersUtf8 = source.HeadersUtf8;
         From = source.From;
         Recipients = recipients;
@@ -112,6 +119,11 @@ internal sealed class OutboundTransaction : IDisposable
         ReadOnlyMemory<byte> message;
         if (_bodyEightBit && !caps.EightBitMime)
         {
+            if (_byteExact)
+            {
+                return Refused(SmtpReply.Create(554, "5.6.1", "the receiving server does not support 8BITMIME and the message is forwarded unchanged (converting it to 7-bit would break its signatures); it cannot be delivered there"));
+            }
+
             var downgraded = Downgraded();
             if (downgraded is null)
             {

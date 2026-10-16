@@ -16,6 +16,15 @@ public static class WebhookEventFactory
     public const string Cancelled = "message.cancelled";
     public const string EndpointDisabled = "webhook.endpoint.disabled";
 
+    /// <summary>The payload type of a received message posted by an inbound <c>webhook</c> route (design section 11.7). Sent by the route action itself, never fanned out through subscriptions, so it is not an event type an endpoint can subscribe to.</summary>
+    public const string InboundMessageReceived = "inbound.message.received";
+
+    /// <summary>A route action gave up (attempts used up, route deleted, a permanent failure): published to the tenant's endpoints that subscribe to it (or to <c>*</c>).</summary>
+    public const string InboundActionFailed = "inbound.action.failed";
+
+    /// <summary>The inbound event types an endpoint can subscribe to.</summary>
+    public static IReadOnlyList<string> InboundEventTypes { get; } = [InboundActionFailed];
+
     public static IReadOnlyList<string> AllEventTypes { get; } = [Delivered, Deferred, Bounced, Expired, Suppressed, Complained, Cancelled];
 
     public static string? EventTypeFor(DeliveryOutcome outcome) => outcome switch
@@ -102,6 +111,20 @@ public static class WebhookEventFactory
         }
 
         return new WebhookEventDraft(id, Cancelled, System.Text.Encoding.UTF8.GetString(ms.GetBuffer(), 0, (int)ms.Length));
+    }
+
+    /// <summary>The <c>inbound.action.failed</c> event: a route action of a received message ended in <c>failed</c>. <paramref name="error"/> is a short code, never a URL or a response body.</summary>
+    public static WebhookEventDraft InboundActionFailedEvent(Guid inboundId, Guid? routeId, string action, string error, int attempts, DateTimeOffset at)
+    {
+        var id = Ids.New(at);
+        string json = JsonSerializer.Serialize(new
+        {
+            id = $"evt_{Ids.ToCompact(id)}",
+            type = InboundActionFailed,
+            timestamp = at.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", System.Globalization.CultureInfo.InvariantCulture),
+            data = new { inbound_id = Ids.ToCompact(inboundId), route_id = routeId is { } route ? Ids.ToCompact(route) : null, action, error, attempts },
+        });
+        return new WebhookEventDraft(id, InboundActionFailed, json);
     }
 
     public static WebhookEventDraft EndpointDisabledEvent(Guid endpointId, string url, string reason, DateTimeOffset at)

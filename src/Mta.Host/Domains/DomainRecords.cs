@@ -28,6 +28,9 @@ public enum DomainRecordPurpose
 
     /// <summary>Reverse DNS of the sending IP: advice only, it is set at whoever owns the IP address, not in the domain's zone.</summary>
     Ptr,
+
+    /// <summary>MX of the domain itself, pointing at this server: how senders reach it with mail for the domain. Advice, listed only while inbound mail is enabled for the domain (design section 11.3).</summary>
+    InboundMx,
 }
 
 /// <summary>Result of looking one expected record up in DNS (the API <c>status</c> field).</summary>
@@ -206,6 +209,7 @@ public static class DomainRecordPurposes
         DomainRecordPurpose.TlsRpt => "tls_rpt",
         DomainRecordPurpose.MtaSts => "mta_sts",
         DomainRecordPurpose.MtaStsHost => "mta_sts_host",
+        DomainRecordPurpose.InboundMx => "inbound_mx",
         _ => "ptr",
     };
 
@@ -220,6 +224,7 @@ public static class DomainRecordPurposes
         DomainRecordPurpose.TlsRpt => "TLS-RPT",
         DomainRecordPurpose.MtaSts => "MTA-STS",
         DomainRecordPurpose.MtaStsHost => "MTA-STS host",
+        DomainRecordPurpose.InboundMx => "Inbound MX",
         _ => "Reverse DNS",
     };
 }
@@ -230,7 +235,8 @@ public static class DomainRecordPlanner
     public static string ReturnPathHost(string domain, DomainRecordOptions options) =>
         options.ReturnPathLabel + "." + Normalize(domain);
 
-    public static IReadOnlyList<ExpectedDomainRecord> Plan(string domain, IEnumerable<DomainDkimKey> dkimKeys, DomainRecordOptions options)
+    /// <param name="inboundEnabled">Inbound mail is enabled for the domain: the MX record that makes senders deliver the domain's mail here is added to the list (advice, never required).</param>
+    public static IReadOnlyList<ExpectedDomainRecord> Plan(string domain, IEnumerable<DomainDkimKey> dkimKeys, DomainRecordOptions options, bool inboundEnabled = false)
     {
         ArgumentNullException.ThrowIfNull(dkimKeys);
         ArgumentNullException.ThrowIfNull(options);
@@ -266,6 +272,12 @@ public static class DomainRecordPlanner
                 $"Announces the MTA-STS policy that EggMail serves at {MtaStsPolicyDocument.UrlFor(name)}. The id changes when the policy changes. Publish it only if this server receives the domain's mail."));
             records.Add(new ExpectedDomainRecord("CNAME", MtaStsPolicyDocument.HostFor(name), server, options.Ttl, DomainRecordPurpose.MtaStsHost, false,
                 $"Must lead to this server ({server}) so it can serve the policy over HTTPS; its certificate has to cover mta-sts.{name}."));
+        }
+
+        if (inboundEnabled && options.ServerHostname is { } inboundHost)
+        {
+            records.Add(new ExpectedDomainRecord("MX", name, "10 " + inboundHost, options.Ttl, DomainRecordPurpose.InboundMx, false,
+                $"Makes senders deliver mail for {name} to this server. Replace the domain's existing MX records (or keep this one at the lowest preference number to make it the first choice); {inboundHost} needs an A or AAAA record, and port 25 must be reachable from the Internet. With MTA-STS the mx: line of the policy has to name {inboundHost} too."));
         }
 
         if (bounceDomain is not null && options.ServerHostname is { } mailHost)

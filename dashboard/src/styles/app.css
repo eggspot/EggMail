@@ -1062,3 +1062,9 @@ details summary {
   padding-top: 0.5rem;
   border-top: 1px solid var(--border);
 }
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}

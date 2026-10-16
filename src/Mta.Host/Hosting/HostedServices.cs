@@ -75,6 +75,12 @@ internal sealed class WebhookService(EggMailRuntime runtime) : BackgroundService
     protected override Task ExecuteAsync(CancellationToken stoppingToken) => runtime.Webhooks.RunAsync(stoppingToken);
 }
 
+/// <summary>Runs the route actions of received mail (inbound webhook and forward actions).</summary>
+internal sealed class InboundActionService(EggMailRuntime runtime) : BackgroundService
+{
+    protected override Task ExecuteAsync(CancellationToken stoppingToken) => runtime.InboundActions.RunAsync(stoppingToken);
+}
+
 /// <summary>Certificate hot reload from the database and (when enabled) ACME renewal.</summary>
 internal sealed class CertificateService(EggMailRuntime runtime) : BackgroundService
 {
