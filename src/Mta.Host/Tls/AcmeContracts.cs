@@ -106,7 +106,23 @@ public sealed class AcmeListenerUnavailableException(string message) : Exception
 
 public sealed class AcmeException : Exception
 {
-    public AcmeException(string message, Exception? inner = null, bool transient = false) : base(message, inner) => Transient = transient;
+    public AcmeException(string message, Exception? inner = null, bool transient = false, TimeSpan? retryAfter = null) : base(message, inner)
+    {
+        Transient = transient;
+        RetryAfter = retryAfter;
+    }
+
+    /// <summary>
+    /// The CA does not know the account key the order was signed with (<c>accountDoesNotExist</c>: a reset test CA, a CA that lost its database). The key is
+    /// useless; the renewal service registers a new account once instead of failing for ever.
+    /// </summary>
+    public bool AccountUnknown { get; init; }
+
+    /// <summary>
+    /// What the CA's refusal asked for in <c>Retry-After</c> (a rate limit says when asking again can work); null when it said nothing. The renewal service
+    /// waits at least this long, within bounds, instead of asking again on its own schedule.
+    /// </summary>
+    public TimeSpan? RetryAfter { get; }
 
     /// <summary>
     /// A server error or a network failure (the CA may recover on its own), as opposed to the CA answering with a refusal. Asking for renewal advice backs

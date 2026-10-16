@@ -229,7 +229,8 @@ public sealed class EggMailRuntime : IAsyncDisposable
             if (acmeDnsOverride is null && config.Acme.HasDnsCredentials())
             {
                 string token = config.Acme.CloudflareApiToken ?? File.ReadAllText(config.Acme.CloudflareApiTokenFile!).Trim();
-                acmeDnsOverride = new CloudflareDnsChallengeProvider(new HttpClient(), token);
+                // 30 seconds per request (the HttpClient default is 100): the provider retries, and a stalled API must not hold an order for minutes.
+                acmeDnsOverride = new CloudflareDnsChallengeProvider(new HttpClient { Timeout = TimeSpan.FromSeconds(30) }, token);
             }
 
             Http01Challenges? http01 = null;
