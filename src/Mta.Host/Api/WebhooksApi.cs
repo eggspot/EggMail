@@ -54,7 +54,7 @@ public sealed class WebhooksApi(ApiAuthenticator auth, IStorage storage, ISecret
 {
     public const string TestEventType = "webhook.test";
 
-    private static readonly HashSet<string> KnownEventTypes = new(WebhookEventFactory.AllEventTypes.Concat([WebhookEventFactory.EndpointDisabled, TestEventType, "*"]), StringComparer.Ordinal);
+    private static readonly HashSet<string> KnownEventTypes = new(WebhookEventFactory.AllEventTypes.Concat(WebhookEventFactory.InboundEventTypes).Concat([WebhookEventFactory.EndpointDisabled, TestEventType, "*"]), StringComparer.Ordinal);
 
     public void Map(RouteGroupBuilder api)
     {

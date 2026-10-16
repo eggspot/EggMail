@@ -5,6 +5,7 @@ using Mta.Dns;
 using Mta.Dsn;
 using Mta.Host.Configuration;
 using Mta.Host.Ingest;
+using Mta.Host.Inbound;
 using Mta.Host.Security;
 using Mta.Host.Submission;
 using Mta.Host.Tls;
@@ -40,6 +41,9 @@ public sealed class EggMailRuntime : IAsyncDisposable
     public required SmtpServer SmtpServer { get; init; }
     public required DeliveryEngine Delivery { get; init; }
     public required WebhookDispatcher Webhooks { get; init; }
+
+    /// <summary>Carries out the webhook and forward actions of received mail (inbound routes, design section 11.7).</summary>
+    public required InboundActionRunner InboundActions { get; init; }
     public required IDnsResolver Dns { get; init; }
     public required SmtpConnectionPool Pool { get; init; }
     public required RoutePlanner Routes { get; init; }
@@ -197,7 +201,13 @@ public sealed class EggMailRuntime : IAsyncDisposable
         var delivery = new DeliveryEngine(new DeliveryProcessor(services, deliveryOptions, new DsnService(storage, clock, deliveryOptions)), services, deliveryOptions);
         engine = delivery;
 
-        var webhooks = new WebhookDispatcher(storage.Webhooks, storage.Config, secrets, config.Webhooks, clock, log, new EndpointDisabledNotifier(storage, clock, log));
+        // One HTTP stack (signing, SSRF guard, no proxy, allowlist) for the outbox events and for the webhook actions of inbound routes.
+        var webhookTransport = new WebhookTransport(config.Webhooks, clock);
+        var endpointNotifier = new EndpointDisabledNotifier(storage, clock, log);
+        var webhooks = new WebhookDispatcher(storage.Webhooks, storage.Config, secrets, config.Webhooks, clock, log, endpointNotifier, transport: webhookTransport);
+        var inboundActions = new InboundActionRunner(
+            storage, webhookTransport, new WebhookEndpointHealth(storage.Config, config.Webhooks, log, endpointNotifier), secrets, InboundActionOptionsFrom(config), clock, log,
+            () => config.Inbound.Enabled, new StorageWebhookPublisher(storage));
 
         var tlsJournal = collector is null ? null : new TlsReportJournal(collector, storage.Config, clock, log);
         TlsReportSender? reports = tlsJournal is null
@@ -230,7 +240,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
         {
             KeysProtectedAtRest = Mta.Host.Secrets.SecretsFactory.KeysProtectedAtRest(config.Secrets, storage.Config),
             Config = config, Storage = storage, Clock = clock, Log = log, Secrets = secrets, Certificates = certificates, Verp = verp,
-            Submission = submission, AuthThrottle = throttle, SmtpServer = smtp, Delivery = delivery, Webhooks = webhooks, Dns = dns,
+            Submission = submission, AuthThrottle = throttle, SmtpServer = smtp, Delivery = delivery, Webhooks = webhooks, InboundActions = inboundActions, Dns = dns,
             Pool = pool, Routes = routes, Limits = limits, Acme = acme, AcmeHttpListener = acmeHttpListener, TlsReports = reports, Health = routeHealth, DestinationThrottle = destinationThrottle, ReplicaCoordinator = replicaCoordinator,
             CounterPersistence = counterPersistence, TlsJournal = tlsJournal, TlsCollector = collector,
         };
@@ -247,7 +257,31 @@ public sealed class EggMailRuntime : IAsyncDisposable
 
         runtime._owned.Add(pool);
         runtime._owned.Add(smtp);
+        runtime._owned.Add(new DisposableAdapter(webhookTransport));
         return runtime;
+    }
+
+    /// <summary>The runner's settings from <c>Inbound:Action:*</c>, <c>Inbound:Webhook:*</c> and <c>Inbound:ApiBaseUrl</c> (an empty <c>RetrySchedule</c> is the webhook ladder).</summary>
+    internal static InboundActionOptions InboundActionOptionsFrom(MtaConfig config) => new()
+    {
+        Concurrency = config.Inbound.Action.Concurrency,
+        MaxConcurrencyPerTenant = config.Inbound.Action.MaxConcurrencyPerTenant,
+        PollInterval = config.Inbound.Action.PollInterval,
+        Lease = config.Inbound.Action.Lease,
+        RetrySchedule = config.Inbound.Action.RetrySchedule.Count > 0 ? config.Inbound.Action.RetrySchedule.ToArray() : InboundActionOptions.DefaultRetrySchedule,
+        WebhookMaxTextBytes = config.Inbound.Webhook.MaxTextBytes,
+        WebhookMaxRawMessageBytes = config.Inbound.Webhook.MaxRawMessageBytes,
+        ApiBaseUrl = string.IsNullOrWhiteSpace(config.Inbound.ApiBaseUrl) ? null : config.Inbound.ApiBaseUrl.Trim(),
+        ThrottleExtraDelay = config.Webhooks.ThrottleExtraDelay,
+    };
+
+    private sealed class DisposableAdapter(IDisposable inner) : IAsyncDisposable
+    {
+        public ValueTask DisposeAsync()
+        {
+            inner.Dispose();
+            return ValueTask.CompletedTask;
+        }
     }
 
     /// <summary>The built-in ladder unless <c>Delivery:RetryDelays</c> overrides it (used by operators with unusual needs and by the chaos tests).</summary>

@@ -72,6 +72,7 @@ public sealed class HostSwitchControl(EggMailRuntime runtime, SwitchRuntimeState
     public ValueTask PauseDispatchAsync(CancellationToken cancellationToken)
     {
         runtime.Delivery.Pause();
+        runtime.InboundActions.Pause();   // the route actions of received mail are held with the rest of the queue
         return default;
     }
 
@@ -80,6 +81,7 @@ public sealed class HostSwitchControl(EggMailRuntime runtime, SwitchRuntimeState
         if (state.Decision.Dispatch)
         {
             runtime.Delivery.Resume();
+            runtime.InboundActions.Resume();
         }
 
         return default;
@@ -91,6 +93,7 @@ public sealed class HostSwitchControl(EggMailRuntime runtime, SwitchRuntimeState
         try
         {
             await runtime.Delivery.QuiesceAsync(timeout, cancellationToken).ConfigureAwait(false);
+            await runtime.InboundActions.QuiesceAsync(timeout, cancellationToken).ConfigureAwait(false);
             await runtime.FlushRuntimeStateAsync(cancellationToken).ConfigureAwait(false);   // the sending and TLS-RPT counters of the last seconds belong in the bundle
         }
         finally
