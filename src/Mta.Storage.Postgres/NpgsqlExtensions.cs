@@ -115,8 +115,10 @@ internal static class NpgsqlParameterExtensions
     public static NpgsqlParameterCollection Uuid(this NpgsqlParameterCollection p, Guid? value) =>
         Add(p, NpgsqlDbType.Uuid, value is { } v ? v : DBNull.Value);
 
+    // PostgreSQL text cannot hold NUL, and UTF-8 cannot encode an unpaired surrogate: text from a client or a remote server is written with U+FFFD in their place
+    // (StorageText), so a hostile character is never an exception in the middle of recording a delivery result.
     public static NpgsqlParameterCollection Text(this NpgsqlParameterCollection p, string? value) =>
-        Add(p, NpgsqlDbType.Text, (object?)value ?? DBNull.Value);
+        Add(p, NpgsqlDbType.Text, (object?)StorageText.Clean(value) ?? DBNull.Value);
 
     public static NpgsqlParameterCollection Int(this NpgsqlParameterCollection p, int value) =>
         Add(p, NpgsqlDbType.Integer, value);
@@ -150,7 +152,7 @@ internal static class NpgsqlParameterExtensions
         Add(p, NpgsqlDbType.Array | NpgsqlDbType.Uuid, value);
 
     public static NpgsqlParameterCollection TextArray(this NpgsqlParameterCollection p, string?[] value) =>
-        Add(p, NpgsqlDbType.Array | NpgsqlDbType.Text, value);
+        Add(p, NpgsqlDbType.Array | NpgsqlDbType.Text, value.Select(StorageText.Clean).ToArray());
 
     public static NpgsqlParameterCollection IntArray(this NpgsqlParameterCollection p, int[] value) =>
         Add(p, NpgsqlDbType.Array | NpgsqlDbType.Integer, value);

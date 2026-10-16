@@ -107,3 +107,8 @@ public class InMemoryTransferStatsOnly : TransferConformance
 
     protected override Task<IStorage> CreateAsync(StorageOptions options) => Task.FromResult<IStorage>(new InMemoryStorage(options, Clock, null, TimeSpan.Zero));
 }
+
+public class InMemoryInjection : InjectionConformance
+{
+    protected override Task<IStorage> CreateAsync(StorageOptions options) => Task.FromResult<IStorage>(new InMemoryStorage(options, Clock, null, TimeSpan.Zero));
+}

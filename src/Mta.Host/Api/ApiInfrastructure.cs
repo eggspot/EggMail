@@ -131,6 +131,13 @@ public sealed class QueryReader(HttpRequest request, ValidationErrors errors)
             return null;
         }
 
+        if (value.Any(char.IsControl) || !StorageText.IsStorable(value))
+        {
+            // A NUL or an unpaired surrogate is no filter anybody means, and PostgreSQL could not even be asked about it.
+            errors.Add(name, "Must not contain control characters.");
+            return null;
+        }
+
         return value;
     }
 
