@@ -145,7 +145,15 @@ public sealed class DatabaseCertificateProvider : IServerCertificateProvider
             }
             catch (Exception ex) when (ex is System.Security.Cryptography.CryptographicException or FormatException or ArgumentException)
             {
-                _log.Write(MtaLogLevel.Error, "tls", $"certificate '{record.Name}' is unusable and was skipped", ex);
+                // A damaged or mismatched replacement (the row of a renewed certificate is replaced in place) must not take the working certificate of the same name out of
+                // service: keep serving what was loaded before, if anything.
+                var served = _snapshot.Entries.FirstOrDefault(e => e.Name == record.Name && e.Source != "file");
+                if (served is not null)
+                {
+                    entries.Add(served);
+                }
+
+                _log.Write(MtaLogLevel.Error, "tls", $"certificate '{record.Name}' is unusable and was skipped" + (served is null ? "" : "; the certificate of that name loaded before stays in use"), ex);
             }
         }
 
