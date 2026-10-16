@@ -85,6 +85,8 @@ dotnet run --project fuzz/Mta.Fuzz.Harness -c Release -- replay mime path/to/cra
 
 Tests never assert elapsed time, throughput or process memory (they measure the load of the machine, not the code): waits are signals or polls with a deadline far above any plausible load, "no hang" is a generous limit that only turns a hang into a failure, and "bounded work" is asserted on results and on the allocated bytes of the running thread. Throughput belongs to `bench/`.
 
+The accelerated lifecycle, crash-loop and leak tests (`--filter "FullyQualifiedName~Lifecycle"` or `~Leak`; days to a year of virtual time on both backends in seconds) are described in [testing-offline-coverage.md](testing-offline-coverage.md#accelerated-lifecycle-and-leaks); `EGGMAIL_ACCEL_SCALE=10` makes the loops ten times longer for a local run and `EGGMAIL_ACCEL_SEED` replays a randomized one. They do not replace a wall-clock soak.
+
 ## Conventions
 
 - Branch per milestone (`feat/<slug>`), pull request into `main`, squash merge after the diff has been reviewed twice (correctness, then style/tests/leftovers). Commit messages end with the co-author trailer.

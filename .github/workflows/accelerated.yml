@@ -1,0 +1,88 @@
+name: accelerated
+
+# The accelerated lifecycle, crash-loop and leak tests (docs/testing-offline-coverage.md, "Accelerated lifecycle and leaks") at a larger scale than the pull request
+# run, with a RANDOM seed that is printed first, so a failure can be replayed locally with the same EGGMAIL_ACCEL_SEED and EGGMAIL_ACCEL_SCALE. Pull requests already run
+# these tests at the default scale with fixed seeds; this workflow is where the long and randomized variants run.
+#
+#   gh workflow run accelerated --ref <branch> -f scale=10 -f seed=12345
+#
+# BILLING. One job on one standard ubuntu-latest runner (Linux, 1x), billed for its wall time rounded up to the minute, limited to 90 minutes. Nothing here runs on a push or a
+# pull request. The scheduled run is OFF until the repository variable ACCELERATED_SCHEDULE_ENABLED is set to 'true' (Settings, Secrets and variables, Actions, Variables);
+# with it unset the schedule starts the workflow, the job is skipped and nothing is billed. When on, it runs once a week.
+
+on:
+  workflow_dispatch:
+    inputs:
+      scale:
+        description: EGGMAIL_ACCEL_SCALE, the multiplier of the iteration counts and virtual spans (1 is what a pull request runs)
+        default: '10'
+      seed:
+        description: EGGMAIL_ACCEL_SEED, to replay a failure; empty draws a random one
+        default: ''
+  schedule:
+    - cron: '41 4 * * 0'
+
+concurrency:
+  group: accelerated-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: 1
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+
+jobs:
+  accelerated:
+    if: github.event_name != 'schedule' || vars.ACCELERATED_SCHEDULE_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Scale and seed
+        id: knobs
+        env:
+          INPUT_SCALE: ${{ github.event.inputs.scale }}
+          INPUT_SEED: ${{ github.event.inputs.seed }}
+        run: |
+          scale="${INPUT_SCALE:-10}"
+          case "$scale" in ''|*[!0-9]*) echo "::error::scale must be a whole number: $scale"; exit 1 ;; esac
+          seed="${INPUT_SEED:-$(( (RANDOM * 32768 + RANDOM) % 2000000000 ))}"
+          case "$seed" in ''|*[!0-9-]*) echo "::error::seed must be a whole number: $seed"; exit 1 ;; esac
+          echo "scale=$scale" >> "$GITHUB_OUTPUT"
+          echo "seed=$seed" >> "$GITHUB_OUTPUT"
+          echo "EGGMAIL_ACCEL_SCALE=$scale EGGMAIL_ACCEL_SEED=$seed"
+          { echo "### Accelerated lifecycle tests"; echo; echo "Replay: \`EGGMAIL_ACCEL_SCALE=$scale EGGMAIL_ACCEL_SEED=$seed dotnet test --filter \"FullyQualifiedName~Lifecycle|FullyQualifiedName~Leak\"\`"; } >> "$GITHUB_STEP_SUMMARY"
+      - name: PostgreSQL 17 for the tests
+        run: |
+          docker run -d --name pg -p 5432:5432 -e POSTGRES_USER=eggmail -e POSTGRES_PASSWORD=eggmail -e POSTGRES_DB=postgres postgres:17 \
+            -c max_connections=600 -c fsync=off -c synchronous_commit=off -c full_page_writes=off
+          for i in $(seq 1 30); do docker exec pg pg_isready -U eggmail && break || sleep 1; done
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('Directory.Packages.props', 'global.json') }}
+          restore-keys: nuget-${{ runner.os }}-
+      - name: Build
+        run: dotnet build EggMail.slnx -c Release
+      - name: Test (the Lifecycle and Leak families, one project after the other)
+        env:
+          EGGMAIL_TEST_POSTGRES: Host=localhost;Port=5432;Username=eggmail;Password=eggmail;Database=postgres
+          EGGMAIL_REQUIRE_EXTERNAL_TESTS: '1'
+          EGGMAIL_ACCEL_SCALE: ${{ steps.knobs.outputs.scale }}
+          EGGMAIL_ACCEL_SEED: ${{ steps.knobs.outputs.seed }}
+        run: |
+          status=0
+          for project in Mta.Storage.Tests Mta.Storage.Sqlite.Tests Mta.Storage.Postgres.Tests Mta.Host.Tests Mta.Tls.Tests Mta.Dns.Tests Mta.Integration.Tests; do
+            echo "::group::$project"
+            dotnet test "tests/$project" -c Release --no-build --filter "FullyQualifiedName~Lifecycle|FullyQualifiedName~Leak" || status=1
+            echo "::endgroup::"
+          done
+          exit $status

@@ -43,6 +43,9 @@ public static class SqliteMetrics
 
     internal static bool IsAttached(SqliteStorage storage) => Live.ContainsKey(storage);
 
+    /// <summary>Storages the gauges currently read (a leak check: closing a storage must detach it).</summary>
+    internal static int AttachedCount => Live.Count;
+
     internal static IEnumerable<Measurement<long>> ObserveQueueDepth(IEnumerable<SqliteStorage> storages)
     {
         foreach (SqliteStorage storage in storages)
