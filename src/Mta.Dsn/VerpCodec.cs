@@ -66,6 +66,24 @@ public sealed class VerpCodec
 
     public static byte[] GenerateKey() => RandomNumberGenerator.GetBytes(32);
 
+    /// <summary>The ids of the keys of the ring, the active one included (for the stateless codecs derived from it: <see cref="SrsCodec"/>, <see cref="ForwardHopMarker"/>).</summary>
+    public IReadOnlyCollection<int> KeyIds => _keys.Keys.ToArray();
+
+    /// <summary>
+    /// A 32-byte key for another purpose, derived from key <paramref name="keyId"/> of the ring with HKDF-SHA256 (<paramref name="purpose"/> is the info). The derived key is a different
+    /// key from the one that signs bounce addresses, so a token of one codec can never be accepted by another, and there is no new secret to deploy or back up: rotating the ring rotates all of them.
+    /// </summary>
+    /// <exception cref="ArgumentException">There is no key with this id.</exception>
+    public byte[] DeriveKey(int keyId, string purpose)
+    {
+        if (!_keys.TryGetValue(keyId, out byte[]? key))
+        {
+            throw new ArgumentException("No such key id.", nameof(keyId));
+        }
+
+        return HKDF.DeriveKey(HashAlgorithmName.SHA256, key, 32, salt: [], info: System.Text.Encoding.ASCII.GetBytes(purpose));
+    }
+
     /// <summary>
     /// The hour (counted from the codec's epoch) a token made at <paramref name="now"/> carries. Everything else in an address is fixed for a tenant, sending domain, return-path host and destination domain, so
     /// the address is the same for every message of the same hour: a caller may keep it per (tenant, domain, host, destination, hour stamp) instead of signing again for every message.
