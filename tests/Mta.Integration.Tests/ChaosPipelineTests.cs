@@ -72,6 +72,9 @@ internal sealed class ChaosInternet(int seed, RecordingLog? log = null) : ISmtpS
 
     public TimeSpan SlowDelay { get; set; } = TimeSpan.FromSeconds(4);
 
+    /// <summary>The final reply of every accepted message is held back this long after the message was recorded as accepted (zero: none).</summary>
+    public TimeSpan ReplyDelay { get; set; }
+
     public async ValueTask<SmtpReply> OnMessageAsync(SmtpMessage message, CancellationToken ct)
     {
         L(message.Session, "message");
@@ -91,6 +94,18 @@ internal sealed class ChaosInternet(int seed, RecordingLog? log = null) : ISmtpS
         foreach (var r in message.Recipients)
         {
             Accepted.Enqueue((subject, r.ToString()));
+        }
+
+        if (ReplyDelay > TimeSpan.Zero)
+        {
+            // The message is accepted, the answer is on its way: a sender killed now never learns that it was.
+            try
+            {
+                await Task.Delay(ReplyDelay, ct);
+            }
+            catch (OperationCanceledException)
+            {
+            }
         }
 
         return SmtpReply.Create(250, "2.0.0", "Accepted");
