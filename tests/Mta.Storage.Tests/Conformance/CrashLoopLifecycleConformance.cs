@@ -19,6 +19,9 @@ namespace Mta.Storage.Tests;
 /// configuration writes are readable; webhook outbox rows are neither lost nor delivered twice. <b>Statistics are write-behind</b>: the stored count of every counter is exactly what was
 /// flushed (a crash loses precisely the unflushed window, an increment is never counted twice); operations still in flight at the kill can add at most their own increments.
 /// </para>
+/// The history of a write that was still in flight at a kill is best effort: the SQLite backend writes it to its own file after the queue commit and
+/// keeps the message queued (and acknowledged) when that fails, so the entry may be missing for exactly those messages; <c>CrashLoopLifecycleHistoryGapTests</c> (SQLite tests) proves such a message
+/// is delivered and reported like any other.
 /// A failure prints the seed and the operation trace; replay with <c>EGGMAIL_ACCEL_SEED=&lt;seed&gt;</c>.
 /// </summary>
 public abstract class CrashLoopLifecycleConformance : StorageTestBase
@@ -103,6 +106,7 @@ public abstract class CrashLoopLifecycleConformance : StorageTestBase
         public bool Final { get; set; }
         public MessageEventType FinalType { get; set; }
         public bool Held { get; set; }
+        public string Owner { get; set; } = "worker-1";
         public DateTimeOffset LeaseUntil { get; set; }
         public bool Lost { get; set; }
         public int Attempt { get; set; }
@@ -116,6 +120,9 @@ public abstract class CrashLoopLifecycleConformance : StorageTestBase
         public required DateTimeOffset At { get; init; }
         public required List<Rcpt> Rcpts { get; init; }
         public string? Key { get; init; }
+
+        /// <summary>The write was in flight when the process was killed: its history entry is best effort (see <see cref="CrashLoopLifecycleConformance"/>).</summary>
+        public bool HistoryBestEffort { get; set; }
     }
 
     private sealed class OutboxEntry
@@ -129,6 +136,7 @@ public abstract class CrashLoopLifecycleConformance : StorageTestBase
     {
         private const int CounterCount = 9;
         private static readonly TimeSpan Lease = TimeSpan.FromMinutes(5);
+        private static readonly TimeSpan ReaperLease = TimeSpan.FromMinutes(5);
         private static readonly TimeSpan KeyLifetime = TimeSpan.FromHours(24);
 
         private readonly CrashLoopLifecycleConformance _t;
@@ -195,6 +203,7 @@ public abstract class CrashLoopLifecycleConformance : StorageTestBase
                 for (_step = 0; _step < steps; _step++)
                 {
                     await StepAsync();
+
                     if (_step % 40 == 39)
                     {
                         await VerifyAsync(full: false, "periodic");
@@ -417,6 +426,7 @@ public abstract class CrashLoopLifecycleConformance : StorageTestBase
 
                 Check(c.Attempt == r.Attempt && c.MessageId == r.MessageId && c.TenantId == r.Tenant && c.Recipient.ToString() == r.Address, "the claimed delivery differs from what was accepted");
                 r.Held = true;
+                r.Owner = "worker-1";
                 r.LeaseUntil = now + Lease;
                 r.LastClaim = c;
                 _touched.Add(r.MessageId);
@@ -489,7 +499,7 @@ public abstract class CrashLoopLifecycleConformance : StorageTestBase
 
         private async Task RecordOpAsync()
         {
-            List<Rcpt> held = _byDelivery.Values.Where(r => r.Held && !r.Final && r.LastClaim is not null).ToList();
+            List<Rcpt> held = _byDelivery.Values.Where(r => r.Held && r.Owner == "worker-1" && !r.Final && r.LastClaim is not null).ToList();
             if (held.Count == 0)
             {
                 Note("record skipped (nothing held)");
@@ -545,7 +555,7 @@ public abstract class CrashLoopLifecycleConformance : StorageTestBase
             return Task.CompletedTask;
         }
 
-        private async Task ExpirySweepOpAsync()
+        private async Task ExpirySweepOpAsync(bool mayAbandon = true)
         {
             DateTimeOffset now = Now;
             var expected = _byDelivery.Values.Where(r => !r.Final && r.ExpiresAt <= now && (!r.Held || r.LeaseUntil <= now)).Select(r => r.DeliveryId).ToHashSet();
@@ -555,6 +565,17 @@ public abstract class CrashLoopLifecycleConformance : StorageTestBase
             foreach (ClaimedDelivery c in got)
             {
                 Rcpt r = _byDelivery[c.DeliveryId];
+                if (mayAbandon && _rng.NextDouble() < 0.3)
+                {
+                    // The reaper died between claiming the expired delivery and reporting it.
+                    r.Held = true;
+                    r.Owner = "reaper";
+                    r.LeaseUntil = now + ReaperLease;
+                    r.LastClaim = c;
+                    Note($"reaper abandons {r.Address} of {r.MessageId:N}");
+                    continue;
+                }
+
                 r.Held = false;
                 await ApplyRecordAsync(r, c, DeliveryOutcome.Expired, null, true, stale: false);
             }
@@ -577,7 +598,7 @@ public abstract class CrashLoopLifecycleConformance : StorageTestBase
             }
             else
             {
-                var held = _byDelivery.Values.Where(r => !r.Final && r.Held).ToList();
+                var held = _byDelivery.Values.Where(r => !r.Final && r.Held && r.Owner == "worker-1").ToList();
                 int n = await S.Deliveries.ReleaseOwnedLeasesAsync("worker-1", default);
                 Note($"graceful release of own leases: {n} (expected {held.Count})");
                 Check(n == held.Count, $"ReleaseOwnedLeases released {n}, expected {held.Count}");
@@ -606,7 +627,7 @@ public abstract class CrashLoopLifecycleConformance : StorageTestBase
         private async Task ExtendOpAsync()
         {
             DateTimeOffset now = Now;
-            var live = _byDelivery.Values.Where(r => !r.Final && r.Held && r.LeaseUntil > now).ToList();
+            var live = _byDelivery.Values.Where(r => !r.Final && r.Held && r.Owner == "worker-1" && r.LeaseUntil > now).ToList();
             if (live.Count == 0)
             {
                 return;
@@ -953,7 +974,8 @@ public abstract class CrashLoopLifecycleConformance : StorageTestBase
                 if (exists)
                 {
                     Note($"in-flight message {message.MessageId:N} survived (acknowledged: {acked})");
-                    Register(message, to, key);
+                    Mdl late = Register(message, to, key);
+                    late.HistoryBestEffort = true;
                     _uncertain[(int)StatCounter.Accepted] += to.Length;
                 }
             }
@@ -1035,7 +1057,7 @@ public abstract class CrashLoopLifecycleConformance : StorageTestBase
                 bool open = m.Rcpts.Any(r => !r.Final);
                 byte[]? raw = await S.Deliveries.GetRawAsync(m.Id, default);
                 Check(open == (raw is not null), $"{when}: message {m.Id:N} is {(open ? "open but its raw message is gone" : "final but its raw message is still stored")}");
-                if (_t.IsFull)
+                if (_t.IsFull && !m.HistoryBestEffort)
                 {
                     MessageDetail? detail = await S.History.GetAsync(m.Tenant, m.Id, default);
                     Check(detail is not null, $"{when}: history lost message {m.Id:N}");
@@ -1095,7 +1117,7 @@ public abstract class CrashLoopLifecycleConformance : StorageTestBase
                 _t.Clock.Advance(Lease + TimeSpan.FromMinutes(2));
                 if (round % 6 == 5)
                 {
-                    await ExpirySweepOpAsync();
+                    await ExpirySweepOpAsync(mayAbandon: false);
                 }
 
                 var claimed = await ClaimAsync(10_000, exact: true);
@@ -1118,7 +1140,7 @@ public abstract class CrashLoopLifecycleConformance : StorageTestBase
             }
 
             _t.Clock.Advance(TimeSpan.FromDays(7));
-            await ExpirySweepOpAsync();
+            await ExpirySweepOpAsync(mayAbandon: false);
             Check(_byDelivery.Values.All(r => r.Final), "the drain left deliveries in the model that the store never handed out");
             await FlushAsync();
             await VerifyAsync(full: true, "after the drain");
