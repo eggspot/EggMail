@@ -48,6 +48,7 @@ public sealed class Step
     internal bool IsPositive => What switch
     {
         Kind.Reply => Code is >= 200 and < 300,
+        Kind.Raw => Bytes.Length >= 3 && Bytes[0] == (byte)'2' && char.IsAsciiDigit((char)Bytes[1]) && char.IsAsciiDigit((char)Bytes[2]),   // raw text that starts like a 2xx reply counts as one
         Kind.Gated or Kind.Sequence => Steps.Length > 0 && Steps[0].IsPositive,
         _ => false,
     };

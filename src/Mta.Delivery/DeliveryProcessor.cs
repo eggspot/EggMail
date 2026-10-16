@@ -810,6 +810,8 @@ public sealed class DeliveryProcessor
             }
             catch (Exception ex) when (ex is IOException or SocketException or SmtpProtocolException or ObjectDisposedException)
             {
+                // A reply that is not SMTP where the verdict on the message should be is as good as no verdict: the server may have accepted the data.
+                bool endOfDataStarted = pooled.Connection.EndOfDataStarted;
                 pooled.Discard();
                 return new AttemptResult
                 {
@@ -817,6 +819,7 @@ public sealed class DeliveryProcessor
                     Reply = SmtpReply.Create(421, "4.4.2", "connection lost: " + ex.Message),
                     Error = ex.Message,
                     Tls = tlsSession,
+                    EndOfDataSent = endOfDataStarted,
                     Stage = ClientSmtpStage.Data,
                     Duration = Stopwatch.GetElapsedTime(started),
                     SendingIp = sendingIp,
