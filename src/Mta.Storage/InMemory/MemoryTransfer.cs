@@ -62,6 +62,8 @@ internal sealed class MemoryTransfer(MemoryState s) : IStorageTransfer
                         "delivery_queue" => Copies(s.Deliveries.Values.OrderBy(x => MemoryState.IdText(x.Id), StringComparer.Ordinal)),
                         "message_spool" => Copies(s.Spool.Values.OrderBy(x => MemoryState.IdText(x.MessageId), StringComparer.Ordinal)),
                         "webhook_outbox" => Copies(s.Outbox.Values.OrderBy(x => MemoryState.IdText(x.Id), StringComparer.Ordinal)),
+                        "inbound_message" => Copies(s.InboundMessages.Values.OrderBy(x => MemoryState.IdText(x.Id), StringComparer.Ordinal)),
+                        "inbound_message_raw" => Copies(s.InboundRaw.Values.OrderBy(x => MemoryState.IdText(x.MessageId), StringComparer.Ordinal)),
                         "api_idempotency_key" => Copies(s.Idempotency.Values.OrderBy(x => MemoryState.IdText(x.TenantId), StringComparer.Ordinal).ThenBy(x => x.IdempotencyKey, StringComparer.Ordinal)),
                         _ => throw new ArgumentOutOfRangeException(nameof(table), table.Name, "not a queue table"),
                     };
@@ -249,6 +251,13 @@ internal sealed class MemoryTransfer(MemoryState s) : IStorageTransfer
                 case IdempotencyKeyEntity k:
                     s.Idempotency[(k.TenantId, k.IdempotencyKey)] = k;
                     break;
+                case InboundMessageEntity m:
+                    m.TransferSwitchId = m.ActionState == InboundActionState.Pending ? hold : null;
+                    s.InboundMessages[m.Id] = m;
+                    break;
+                case InboundMessageRawEntity raw:
+                    s.InboundRaw[raw.MessageId] = raw;
+                    break;
                 default:
                     throw new ArgumentOutOfRangeException(nameof(rows), table, "not a queue row");
             }
@@ -318,6 +327,8 @@ internal sealed class MemoryTransfer(MemoryState s) : IStorageTransfer
             s.Spool.Clear();
             s.Outbox.Clear();
             s.Idempotency.Clear();
+            s.InboundMessages.Clear();
+            s.InboundRaw.Clear();
             s.Index.Clear();
             s.Recipients.Clear();
             s.Events.Clear();
@@ -364,6 +375,12 @@ internal sealed class MemoryTransfer(MemoryState s) : IStorageTransfer
                 n++;
             }
 
+            foreach (InboundMessageEntity m in s.InboundMessages.Values.Where(m => m.TransferSwitchId is null && m.ActionState == InboundActionState.Pending))
+            {
+                m.TransferSwitchId = switchId;
+                n++;
+            }
+
             return ValueTask.FromResult(n);
         }
     }
@@ -385,6 +402,12 @@ internal sealed class MemoryTransfer(MemoryState s) : IStorageTransfer
                 n++;
             }
 
+            foreach (InboundMessageEntity m in s.InboundMessages.Values.Where(m => m.TransferSwitchId == switchId))
+            {
+                m.TransferSwitchId = null;
+                n++;
+            }
+
             return ValueTask.FromResult(n);
         }
     }
@@ -393,7 +416,7 @@ internal sealed class MemoryTransfer(MemoryState s) : IStorageTransfer
     {
         lock (s.Gate)
         {
-            return ValueTask.FromResult((long)(s.Deliveries.Values.Count(d => d.TransferSwitchId == switchId) + s.Outbox.Values.Count(o => o.TransferSwitchId == switchId)));
+            return ValueTask.FromResult((long)(s.Deliveries.Values.Count(d => d.TransferSwitchId == switchId) + s.Outbox.Values.Count(o => o.TransferSwitchId == switchId) + s.InboundMessages.Values.Count(m => m.TransferSwitchId == switchId)));
         }
     }
 }

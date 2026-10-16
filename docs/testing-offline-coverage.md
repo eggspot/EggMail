@@ -2,11 +2,11 @@
 
 Some things can only be proven against systems nobody on the project controls: real mail servers, real DNS and DNSSEC, real certificate authorities, a week of wall-clock time. This document lists what the automated tests *do* establish about them offline, and, for each area, what they **do not** prove. It is not a substitute for the checks in [progress.md](progress.md) ("Not verified"); it makes the boundary explicit.
 
-All tests here run in `dotnet test`, use ephemeral loopback ports only (no fixed ports), assert no wall-clock time (decision 73: waits are polls with minutes-long hang guards, retry timing is read off a fake clock), and need no Docker, no network and no root.
+All tests here run in `dotnet test`, use ephemeral loopback ports only (no fixed ports) and need no Docker, no network and no root. They assert no elapsed time or throughput (decision 73): retry timing is read off a fake clock and waits are polls with hang guards. The hung-peer scenarios (`SlowAndHungPeerTests`, the MTA-STS fetch time-out) do use real protocol time-outs of one second for the single stage under test, because a time-out is the behaviour being tested; they assert outcomes, not durations.
 
 ## 1. Remote mail servers: `tests/Mta.RemoteMta.Tests`
 
-Run: `dotnet test tests/Mta.RemoteMta.Tests -c Release` (about 30 s, 190 tests).
+Run: `dotnet test tests/Mta.RemoteMta.Tests -c Release` (about 30 s, 194 tests).
 
 ### What it is
 
@@ -46,7 +46,7 @@ Greylisting (450 at RCPT and after the data, with and without enhanced codes, se
 
 ## 2. Authentication: `tests/Mta.Authentication.Tests`
 
-Run: `dotnet test tests/Mta.Authentication.Tests -c Release` (about 5 s, 223 tests). The three older suites stay as they are: `Mta.Dkim.Tests` (MimeKit differential, canonicalization, fuzzing), `Mta.Auth.Tests` (SPF case table in the style of the openspf suite, DMARC, ARC with a MimeKit cross-check, Authentication-Results).
+Run: `dotnet test tests/Mta.Authentication.Tests -c Release` (about 10 s, 223 tests). The test RSA key in `Fixtures/keys/` is public on purpose (it protects nothing; a secret scanner that flags it should be told to allow that path), so that the signatures, and with them the expected `header.b=` values, are reproducible. The three older suites stay as they are: `Mta.Dkim.Tests` (MimeKit differential, canonicalization, fuzzing), `Mta.Auth.Tests` (SPF case table in the style of the openspf suite, DMARC, ARC with a MimeKit cross-check, Authentication-Results).
 
 - **`DkimCrossCheckTests`**: 15 message shapes (folded and tabbed headers, trailing and leading blank lines, empty and CRLF-only bodies, no final newline, empty header values, repeated headers, long lines, 8-bit text, two `From`) x 4 canonicalization pairs. Each signature made by `Mta.Dkim` is judged by four code paths: `Mta.Dkim`'s verifier; MimeKit (BouncyCastle); `IndependentDkim`, a from-scratch reading of RFC 6376 using only strings and the BCL, which also **signs again and must reproduce `b=` byte for byte** (PKCS#1 v1.5 is deterministic); and the `openssl dgst -verify` command line (skipped with a reason where `openssl` is absent). Tampering (nine kinds) must be rejected by all readings in all canonicalizations. `l=` handling, canonicalization-insensitive edits, and added `From` headers (oversigning) are cross-checked the same way.
 - **`Rfc6376VectorTests`**: the appendix A body hash, and the published SHA-256 constants of empty bodies under simple and relaxed canonicalization. **The signature of RFC 6376 appendix A.2 cannot be used as a vector**: the RFC's typesetting changed the text (the body printed with two spaces hashes to the printed `bh=` with one) and no variant of the folding white space verifies against the printed key; the RFC has no private key to sign it again. The test says so.

@@ -255,11 +255,25 @@ public class MxSelectionTests
     public async Task With_ipv4_first_a_dead_ipv4_address_falls_back_to_the_ipv6_address_of_the_same_host()
     {
         await using var lab = new MtaLab(new LabSettings { AddressPreference = MxAddressPreference.Ipv4First });
-        var v6 = lab.AddMta("mx.dest.example", Personalities.Plain("mx.dest.example"), "::1");
-        if (!Ipv4PortIsFree(v6.Port))
+        // The scenario needs the same port to be free on the IPv4 loopback address: take a fresh port until it is.
+        FakeMta? v6 = null;
+        for (int attempt = 0; attempt < 20 && v6 is null; attempt++)
         {
-            return;   // another process holds that port on IPv4 loopback right now; the scenario needs it free
+            var candidate = new FakeMta(Personalities.Plain("mx.dest.example"), IPAddress.IPv6Loopback);
+            if (Ipv4PortIsFree(candidate.Port))
+            {
+                v6 = candidate;
+            }
+            else
+            {
+                await candidate.DisposeAsync();
+            }
         }
+
+        Assert.NotNull(v6);
+        await using var v6Owner = v6;
+        lab.MapPort("mx.dest.example", v6.Port);
+        lab.Dns.Aaaa("mx.dest.example", "::1");
 
         lab.Dns.A("mx.dest.example", "127.0.0.1");   // the IPv4 address answers nothing on this port
         lab.Mx("dest.example", 10, "mx.dest.example");
@@ -274,12 +288,24 @@ public class MxSelectionTests
     public async Task With_ipv6_first_a_dead_ipv6_address_falls_back_to_ipv4()
     {
         await using var lab = new MtaLab(new LabSettings { AddressPreference = MxAddressPreference.Ipv6First });
-        var v4 = lab.AddMta("mx.dest.example", Personalities.Plain("mx.dest.example"));
-        if (!Ipv6PortIsFree(v4.Port))
+        FakeMta? v4 = null;
+        for (int attempt = 0; attempt < 20 && v4 is null; attempt++)
         {
-            return;
+            var candidate = new FakeMta(Personalities.Plain("mx.dest.example"), IPAddress.Loopback);
+            if (Ipv6PortIsFree(candidate.Port))
+            {
+                v4 = candidate;
+            }
+            else
+            {
+                await candidate.DisposeAsync();
+            }
         }
 
+        Assert.NotNull(v4);
+        await using var v4Owner = v4;
+        lab.MapPort("mx.dest.example", v4.Port);
+        lab.Dns.A("mx.dest.example", "127.0.0.1");
         lab.Dns.Aaaa("mx.dest.example", "::1");
         lab.Mx("dest.example", 10, "mx.dest.example");
 

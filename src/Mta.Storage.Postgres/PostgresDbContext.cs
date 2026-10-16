@@ -34,12 +34,16 @@ public class PostgresDbContext : DbContext, IConfigDbSets, IQueueDbSets, IStatsD
     public DbSet<AcmeRenewalEntity> AcmeRenewals => Set<AcmeRenewalEntity>();
     public DbSet<LeaseEntity> Leases => Set<LeaseEntity>();
     public DbSet<SwitchStateEntity> SwitchStates => Set<SwitchStateEntity>();
+    public DbSet<InboundDomainSettingsEntity> InboundSettings => Set<InboundDomainSettingsEntity>();
+    public DbSet<InboundRouteEntity> InboundRoutes => Set<InboundRouteEntity>();
     public DbSet<DataProtectionKey> DataProtectionKeys => Set<DataProtectionKey>();
 
     public DbSet<QueuedDeliveryEntity> Deliveries => Set<QueuedDeliveryEntity>();
     public DbSet<SpoolMessageEntity> Spool => Set<SpoolMessageEntity>();
     public DbSet<WebhookOutboxEntity> WebhookOutbox => Set<WebhookOutboxEntity>();
     public DbSet<IdempotencyKeyEntity> IdempotencyKeys => Set<IdempotencyKeyEntity>();
+    public DbSet<InboundMessageEntity> InboundMessages => Set<InboundMessageEntity>();
+    public DbSet<InboundMessageRawEntity> InboundRaw => Set<InboundMessageRawEntity>();
 
     public DbSet<StatAggregateEntity> StatAggregates => Set<StatAggregateEntity>();
     public DbSet<StatMetaEntity> StatMeta => Set<StatMetaEntity>();

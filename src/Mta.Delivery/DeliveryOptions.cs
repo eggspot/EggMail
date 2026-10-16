@@ -36,6 +36,7 @@ public sealed class DeliveryOptions
     /// <summary>
     /// Decides the destination port per MX host name when set (it also names the DANE TLSA record, <c>_port._tcp.host</c>). Null (production) means
     /// <see cref="RemotePort"/> for every host. A lab or test that runs several loopback servers behind one DNS zone needs a port per host name.
+    /// <para>A delegate, so it cannot be bound from configuration, and it must stay that way: never expose it in <c>MtaConfig</c> or the API (it would let configuration redirect mail for a host name to any local port).</para>
     /// </summary>
     public Func<string, int>? RemotePortResolver { get; init; }
 

@@ -184,11 +184,10 @@ public class GreylistingAndRateLimitTests
         await Wait.UntilAsync(() => mx.ConnectionCount >= 2, "two connections to be open");
         await lab.SettleAsync();
 
+        // The engine hands the surplus groups back one by one; wait for the settled state instead of reading it once.
+        await Wait.UntilAsync(async () => await lab.QueueAsync() is { Leased: 2, Queued: 3 }, "two leased deliveries and three held in the queue");   // held: back in the queue with a later due time, no attempt counted
         Assert.Equal(2, mx.ConnectionCount);   // the other three groups were held by the throttle, not refused by the peer
         Assert.Equal(2, mx.MaxConcurrentConnectionsSeen);
-        var queue = await lab.QueueAsync();
-        Assert.Equal(2, queue.Leased);
-        Assert.Equal(3, queue.Queued);   // held: back in the queue with a later due time, no attempt counted
         foreach (var id in ids)
         {
             Assert.DoesNotContain(await lab.EventsAsync(id), e => e.Type is MessageEventType.Deferred or MessageEventType.Bounced);   // a throttle hold is not an attempt

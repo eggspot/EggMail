@@ -184,6 +184,25 @@ public class MtaStsTests
         Assert.Single(mx.Messages);
     }
 
+    [Theory]
+    [InlineData(StartTlsBehaviour.ClosesAfter220)]
+    [InlineData(StartTlsBehaviour.PlainTextAfter220)]
+    [InlineData(StartTlsBehaviour.ResetsMidHandshake)]
+    [InlineData(StartTlsBehaviour.InjectsAfter220)]
+    public async Task Enforce_never_falls_back_to_plaintext_when_the_handshake_breaks_and_reports_it(StartTlsBehaviour behaviour)
+    {
+        var (lab, mx, peer) = Start("enforce");
+        await using var _l = lab;
+        peer.StartTls = behaviour;
+
+        var id = await lab.SendAsync(["rcpt@dest.example"]);
+        await lab.WaitForEventAsync(id, MessageEventType.Deferred);
+
+        Assert.Empty(mx.Messages);
+        Assert.Equal(1, mx.ConnectionCount);   // no second, plaintext connection
+        Assert.Equal((0L, 1L), (Report(lab).Success, Report(lab).Failure));
+    }
+
     // ---------------------------------------------------------------------------------------------- testing
 
     [Fact]

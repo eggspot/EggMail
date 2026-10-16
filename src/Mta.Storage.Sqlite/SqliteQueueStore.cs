@@ -93,6 +93,9 @@ internal static class QueueSql
     public static readonly Stmt ClearOutboxLeases = new(
         "UPDATE webhook_outbox SET lease_owner = NULL, lease_until = 0 WHERE lease_owner IS NOT NULL OR lease_until <> 0");
 
+    public static readonly Stmt ClearInboundLeases = new(
+        "UPDATE inbound_message SET lease_owner = NULL, lease_until = 0 WHERE lease_owner IS NOT NULL OR lease_until <> 0");
+
     public static readonly Stmt OutboxClaim = new(
         "UPDATE webhook_outbox SET lease_owner = @owner, lease_until = @until WHERE id IN (" +
         "SELECT id FROM webhook_outbox WHERE transfer_switch_id IS NULL AND state = 0 AND next_attempt_at <= @now AND lease_until <= @now ORDER BY next_attempt_at, id LIMIT @max) " +
@@ -650,6 +653,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
         await rt.QueueWriter.SubmitAsync(0, static (ctx, _) =>
         {
             ctx.Command(QueueSql.ClearDeliveryLeases).ExecuteNonQuery();
+            ctx.Command(QueueSql.ClearInboundLeases).ExecuteNonQuery();
             return ctx.Command(QueueSql.ClearOutboxLeases).ExecuteNonQuery();
         }, cancellationToken).ConfigureAwait(false);
 

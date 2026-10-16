@@ -279,9 +279,12 @@ public sealed class MtaLab : IAsyncDisposable
         {
             events = await EventsAsync(messageId);
             return events.Count(e => e.Type == type) >= count;
-        }, $"{count} {type} event(s) for message {messageId:N}");
+        }, $"{count} {type} event(s) for message {messageId:N}", ExpectedQuickly(type));
         return events;
     }
+
+    /// <summary>A deferral is always an answer the engine gets within moments (the slowest scenario uses a one second protocol time-out), so a red run should not wait a minute and a half for one.</summary>
+    private static TimeSpan? ExpectedQuickly(MessageEventType type) => type == MessageEventType.Deferred ? TimeSpan.FromSeconds(20) : null;
 
     /// <summary>Waits until the message has been through <paramref name="attempts"/> deferrals, then returns when the engine will try again (the due time on the fake clock).</summary>
     public async Task<DateTimeOffset> WaitForRetryScheduleAsync(Guid messageId, int deferrals = 1)

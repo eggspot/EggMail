@@ -148,7 +148,7 @@ public sealed partial class StorageSwitchEngine
                         rowsTotal += sum.Rows;
                         if (table.HasHold)
                         {
-                            queueRows += sum.Rows;
+                            queueRows += sum.HeldRows;
                         }
                     }
 
@@ -228,6 +228,11 @@ public sealed partial class StorageSwitchEngine
             table.PrepareForExport(copy);
             string canonical = table.Canonical(copy);
             sum.AddRow(canonical);
+            if (table.IsHeld(row))
+            {
+                sum.HeldRows++;
+            }
+
             foreach (ITransferSecret secret in table.Secrets)
             {
                 byte[]? stored = secret.Get(copy);
@@ -287,7 +292,7 @@ public sealed partial class StorageSwitchEngine
         var sums = TransferTables.Of(TransferPart.History).ToDictionary(t => t.Name, t =>
         {
             BundleTable? saved = manifest.Tables.FirstOrDefault(x => x.Name == t.Name);
-            return saved is null ? new TableChecksum() : TableChecksum.Resume(saved.Rows, saved.Checksum, saved.SecretDigest);
+            return saved is null ? new TableChecksum() : TableChecksum.Resume(saved.Rows, saved.Checksum, saved.SecretDigest, saved.HeldRows);
         });
 
         int done = 0;

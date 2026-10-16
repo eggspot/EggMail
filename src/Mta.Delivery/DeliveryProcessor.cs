@@ -41,6 +41,7 @@ public sealed class DeliveryServices
     /// <summary>
     /// How the certificate of an MX host is validated when the policy asks for PKIX validation: private trust anchors instead of the system store, and the
     /// clock used for validity. Null (the default, and what production uses) means the system store and the system time. Tests and labs with a private CA set it.
+    /// <para>Never expose this in configuration (<c>MtaConfig</c>, the stored settings or the API): trust anchors that an operator or a tenant can add here would let a forged certificate pass a validated policy.</para>
     /// </summary>
     public RemoteCertificateValidatorOptions? CertificateValidation { get; init; }
 }
@@ -537,6 +538,7 @@ public sealed class DeliveryProcessor
                         // Opportunistic TLS (RFC 7435): a server whose STARTTLS upgrade breaks (an old TLS stack, a middlebox, a half-configured certificate) must not keep mail
                         // from being delivered, since the message could have been sent in clear had the server not offered TLS at all. The failure has been reported; the
                         // message is offered again on a new connection that does not try STARTTLS. Policies that require TLS (encrypt, verify, MTA-STS enforce, DANE) never get here.
+                        Trace($"{exchanger.Host} [{address}] broke the STARTTLS upgrade; retrying in plaintext (opportunistic TLS)");
                         var clearTarget = new SmtpRemoteTarget { Host = exchanger.Host, Address = address, Port = port, Tls = SmtpTlsPolicy.Disabled };
                         var clear = await SendOnceAsync(clearTarget, current, ct).ConfigureAwait(false);
                         clear.MxHost = exchanger.Host;

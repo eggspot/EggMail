@@ -69,14 +69,14 @@ public class RuntimeStateTests : PgTestBase
         var old = await AcceptAsync(Msg(to: ["a@example.org"]));
         await Storage.DisposeAsync();
 
-        // Turn the database back into what version 3 created: no runtime state tables, no header or tags column, no headers_utf8 column, no replica coordination tables, no message_id index on the queue, no version 4, 5, 6 or 7 row.
+        // Turn the database back into what version 3 created: no runtime state tables, no header or tags column, no headers_utf8 column, no replica coordination tables, no message_id index on the queue, no inbound mail tables, no version 4, 5, 6, 7 or 8 row.
         await using (var c = new NpgsqlConnection(Db.ConnectionString))
         {
             await c.OpenAsync();
             await using var cmd = new NpgsqlCommand(
-                "DROP TABLE domain_record_check; DROP TABLE tls_rpt_bucket; DROP TABLE sending_counter; DROP TABLE replica_heartbeat; DROP TABLE replica_signal; DROP TABLE auth_failure; " +
+                "DROP TABLE inbound_message_raw; DROP TABLE inbound_message; DROP TABLE inbound_route; DROP TABLE inbound_domain_settings; DROP TABLE domain_record_check; DROP TABLE tls_rpt_bucket; DROP TABLE sending_counter; DROP TABLE replica_heartbeat; DROP TABLE replica_signal; DROP TABLE auth_failure; " +
                 "DROP INDEX \"IX_message_index_tenant_id_message_id_header\"; ALTER TABLE message_index DROP COLUMN message_id_header; ALTER TABLE message_index DROP COLUMN tags; " +
-                "ALTER TABLE delivery_queue DROP COLUMN headers_utf8; DROP INDEX \"IX_delivery_queue_message_id\"; DELETE FROM eggmail_schema_version WHERE version IN (4, 5, 6, 7)", c);
+                "ALTER TABLE delivery_queue DROP COLUMN headers_utf8; DROP INDEX \"IX_delivery_queue_message_id\"; DELETE FROM eggmail_schema_version WHERE version IN (4, 5, 6, 7, 8)", c);
             await cmd.ExecuteNonQueryAsync();
         }
 
@@ -85,7 +85,8 @@ public class RuntimeStateTests : PgTestBase
         await upgraded.InitializeAsync(CancellationToken.None);
         try
         {
-            Assert.Equal(7, PostgresMigrator.CurrentVersion);
+            Assert.Equal(8, PostgresMigrator.CurrentVersion);
+            Assert.Empty(await upgraded.Inbound.LoadEnabledDomainsAsync(default));   // the version 8 tables exist
             Assert.Equal(["a"], await upgraded.Replicas!.HeartbeatAsync("a", TimeSpan.FromSeconds(20), default));   // the version 6 tables exist
             Assert.NotNull(await upgraded.History.GetAsync(TenantA, old.MessageId, default));
             Assert.Null((await upgraded.History.GetAsync(TenantA, old.MessageId, default))!.Summary.Tags);
