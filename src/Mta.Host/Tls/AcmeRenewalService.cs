@@ -356,6 +356,18 @@ public sealed class AcmeRenewalService
         }
     }
 
+    /// <summary>Renews the lease with its fencing token; false (and a Warning saying <paramref name="what"/>) when another replica took it over.</summary>
+    private async Task<bool> StillHoldsLeaseAsync(string name, LeaseRecord lease, string what, CancellationToken ct)
+    {
+        if (await _config.RenewLeaseAsync(LeaseName(name), _owner, lease.FencingToken, LeaseDuration, _clock.UtcNow, ct).ConfigureAwait(false))
+        {
+            return true;
+        }
+
+        _log.Write(MtaLogLevel.Warning, "acme", $"the renewal lease of '{name}' was taken over by another replica; {what}, and nothing is recorded for it");
+        return false;
+    }
+
     private async Task<bool> RenewAsync(string name, IReadOnlyList<string> domains, bool force, CancellationToken ct)
     {
         var now = _clock.UtcNow;
@@ -466,6 +478,11 @@ public sealed class AcmeRenewalService
         catch (AcmeListenerUnavailableException ex) when (!ct.IsCancellationRequested)
         {
             // The CA was not asked: record why, count it, and try again soon (the listener retries its bind every minute).
+            if (!await StillHoldsLeaseAsync(name, lease, "the order was not started", ct).ConfigureAwait(false))
+            {
+                return false;
+            }
+
             int failures = (renewal?.Failures ?? 0) + 1;
             var retryAt = now + ListenerRetry;
             await _config.UpsertAcmeRenewalAsync(new AcmeRenewalRecord(name, "failed", now, retryAt, failures, ex.Message, null, renewal?.AriJson), ct).ConfigureAwait(false);
@@ -476,6 +493,13 @@ public sealed class AcmeRenewalService
         {
             // Any failure of the attempt (the CA refusing, unreachable or too slow, the DNS provider failing, an unreadable chain) is recorded and
             // backed off, never thrown: an exception escaping here would end the renewal loop until the next restart.
+            // The renewal row belongs to whoever holds the lease: a replica that lost it (its order outlasted 20 minutes) must not write its failure over the result
+            // of the replica that took over.
+            if (!await StillHoldsLeaseAsync(name, lease, $"the order failed ({ex.Message})", ct).ConfigureAwait(false))
+            {
+                return false;
+            }
+
             int failures = (renewal?.Failures ?? 0) + 1;
             var retryAt = now + WaitAfterFailure(failures, ex);
             await _config.UpsertAcmeRenewalAsync(new AcmeRenewalRecord(name, "failed", now, retryAt, failures, ex.Message, null, renewal?.AriJson), ct).ConfigureAwait(false);

@@ -97,7 +97,7 @@ internal sealed class AcmeServiceRig : IDisposable
 }
 
 /// <summary>A DNS provider that stops in <c>CreateTxtAsync</c> until the test lets it go: an order that is in flight at the CA while the test does other things.</summary>
-internal sealed class GatedDnsProvider(IDnsChallengeProvider inner) : IDnsChallengeProvider
+internal sealed class GatedDnsProvider(IDnsChallengeProvider inner, Exception? failAfterRelease = null) : IDnsChallengeProvider
 {
     private readonly TaskCompletionSource _reached = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -111,6 +111,11 @@ internal sealed class GatedDnsProvider(IDnsChallengeProvider inner) : IDnsChalle
     {
         _reached.TrySetResult();
         await _release.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        if (failAfterRelease is not null)
+        {
+            throw failAfterRelease;
+        }
+
         return await inner.CreateTxtAsync(fqdn, value, cancellationToken).ConfigureAwait(false);
     }
 

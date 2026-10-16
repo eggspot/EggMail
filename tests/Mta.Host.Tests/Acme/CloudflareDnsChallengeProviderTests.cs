@@ -570,14 +570,60 @@ public class CloudflareDnsChallengeProviderTests
     }
 
     [Fact]
-    public async Task An_answer_larger_than_a_megabyte_is_not_read_into_memory_and_is_a_failure()
+    public async Task An_enormous_answer_is_not_read_beyond_a_megabyte_and_is_a_failure()
     {
         _cf.AddZone(Zone);
-        _cf.Respond("zones", _ => FakeCloudflare.Raw(HttpStatusCode.OK, "{\"success\":true,\"result\":[],\"pad\":\"" + new string('x', 3 * 1024 * 1024) + "\"}"), times: 5);
+        var served = new CountingZeroStream(512L * 1024 * 1024); // 512 MiB on offer, produced only as it is read
+        _cf.Respond("zones", _ =>
+        {
+            var content = new StreamContent(served);
+            content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = content };
+        }, times: 5);
 
         var ex = await Assert.ThrowsAsync<AcmeException>(() => Provider().CreateTxtAsync(Name("mx.example.com"), "v", default).AsTask());
 
         Assert.Contains("the answer was not a Cloudflare JSON envelope", ex.Message);
+        Assert.InRange(served.BytesRead, 1, 2 * 1024 * 1024); // it stopped reading at the cap instead of buffering what the server kept sending
+    }
+
+    private sealed class CountingZeroStream(long length) : Stream
+    {
+        private long _read;
+
+        public long BytesRead => Interlocked.Read(ref _read);
+
+        public override bool CanRead => true;
+
+        public override bool CanSeek => false;
+
+        public override bool CanWrite => false;
+
+        public override long Length => length;
+
+        public override long Position { get => _read; set => throw new NotSupportedException(); }
+
+        public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+
+        public override int Read(Span<byte> buffer)
+        {
+            int n = (int)Math.Min(buffer.Length, length - _read);
+            buffer[..n].Fill((byte)'x');
+            Interlocked.Add(ref _read, n);
+            return n;
+        }
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) => ValueTask.FromResult(Read(buffer.Span));
+
+        public override void Flush()
+        {
+        }
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     [Fact]

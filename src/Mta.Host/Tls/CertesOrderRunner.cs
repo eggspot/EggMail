@@ -439,6 +439,13 @@ public sealed class CertesOrderRunner : IAcmeOrderRunner
             }
         }
 
+        if (download.Error?.Type?.EndsWith(":badNonce", StringComparison.Ordinal) == true)
+        {
+            // Not an AcmeRequestException, so the order is not started again: a new order is a new certificate (duplicate-certificate and new-order rate limits); the
+            // next attempt comes after the back-off.
+            throw new AcmeException("The CA kept rejecting the anti-replay nonce while the certificate was downloaded; the order is not repeated at once.", transient: true);
+        }
+
         if (download.Error is not null)
         {
             throw new AcmeRequestException("The CA refused the certificate download", download.Error);

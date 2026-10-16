@@ -168,7 +168,7 @@ public class CloudflareOrderTests : IDisposable
         var ex = await Assert.ThrowsAsync<AcmeException>(() => Runner().IssueAsync(Order(["mx.example.com"], TimeSpan.Zero), Provider(), default));
 
         Assert.DoesNotContain(FakeCloudflare.ValidToken, ex.Message);
-        Assert.DoesNotContain(FakeCloudflare.ValidToken, ex.ToString().Replace("Bearer " + FakeCloudflare.ValidToken, ""));
+        Assert.DoesNotContain(FakeCloudflare.ValidToken, ex.ToString());
         Assert.All(_log.Lines, l => Assert.DoesNotContain(FakeCloudflare.ValidToken, l));
         Assert.Equal(0, _cf.RecordCount);
     }

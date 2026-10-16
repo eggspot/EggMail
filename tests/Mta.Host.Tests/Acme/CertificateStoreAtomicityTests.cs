@@ -169,6 +169,22 @@ public class CertificateStoreAtomicityTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task The_certificate_kept_after_a_damaged_replacement_is_dropped_once_it_has_expired()
+    {
+        var good = Version(TimeSpan.FromDays(10));
+        await Config.UpsertCertificateAsync(CertificateMaterial.CreateSelfSigned(Host, _protector, _clock.UtcNow), default);
+        await Config.UpsertCertificateAsync(good, default);
+        var provider = Provider();
+        await provider.InitializeAsync(default);
+        _clock.Advance(TimeSpan.FromDays(11)); // the loaded certificate has expired in the meantime
+
+        await Config.UpsertCertificateAsync(good with { ChainPem = "garbage" }, default);
+        await provider.ReloadAsync(force: false, default);
+
+        Assert.True(provider.UsingSelfSignedOnly); // only the self-signed one is left; the expired one is not served on the strength of having been loaded once
+    }
+
+    [Fact]
     public async Task A_replacement_that_cannot_be_loaded_and_is_the_only_certificate_keeps_the_previous_set()
     {
         var good = Version(TimeSpan.FromDays(90));

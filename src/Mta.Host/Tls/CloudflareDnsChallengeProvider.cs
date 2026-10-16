@@ -205,7 +205,8 @@ public sealed class CloudflareDnsChallengeProvider : IDnsChallengeProvider
                     request.Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
                 }
 
-                using var response = await _http.SendAsync(request, ct).ConfigureAwait(false);
+                // Headers first: the body is read by hand up to MaxAnswerBytes; HttpClient would otherwise buffer all of it before the cap could apply.
+                using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
                 answer = await Answer.ReadAsync(response, this, ct).ConfigureAwait(false);
             }
             catch (HttpRequestException ex)

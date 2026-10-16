@@ -347,6 +347,29 @@ public class AcmeServiceMockCaTests
     }
 
     [Fact]
+    public async Task The_Cloudflare_token_is_in_no_renewal_row_log_line_banner_or_exception_of_a_failing_service()
+    {
+        using var rig = new AcmeServiceRig();
+        var cloudflare = new FakeCloudflare(() => rig.Clock.UtcNow);
+        cloudflare.AddZone("service.test");
+        cloudflare.Fail("zones", 403, 9109, "Invalid access token", times: 3);
+        var provider = new CloudflareDnsChallengeProvider(new HttpClient(cloudflare), FakeCloudflare.ValidToken + "\n", pause: (_, _) => Task.CompletedTask);
+        var service = rig.Service(dns: provider);
+        var banner = new CertificateHealthContributor(rig.Storage, rig.Clock, new MtaConfig { Acme = rig.Options() });
+
+        Assert.False(await service.CheckOnceAsync(default));
+        rig.Clock.Advance(TimeSpan.FromMinutes(10));
+        Assert.False(await service.CheckOnceAsync(default));
+
+        var renewal = await rig.RenewalAsync();
+        Assert.Contains("9109: Invalid access token", renewal.LastError);
+        Assert.DoesNotContain(FakeCloudflare.ValidToken, renewal.LastError);
+        Assert.All(rig.Log.Lines, l => Assert.DoesNotContain(FakeCloudflare.ValidToken, l));
+        Assert.All((await banner.CheckAsync(default)).Warnings, w => Assert.DoesNotContain(FakeCloudflare.ValidToken, w.Message));
+        Assert.Equal("the DNS provider (Cloudflare) could not publish or remove the challenge record", AcmeFailureCategory.Describe(renewal.LastError));
+    }
+
+    [Fact]
     public async Task An_http_order_with_a_listener_that_is_not_running_never_reaches_the_CA()
     {
         using var rig = new AcmeServiceRig();
@@ -427,6 +450,41 @@ public class AcmeServiceMockCaTests
         Assert.Equal(("issued", 0), ((await rig.RenewalAsync()).Status, (await rig.RenewalAsync()).Failures));
         Assert.Contains(rig.Log.Lines, l => l.Contains("was taken over by another replica", StringComparison.Ordinal));
         Assert.Equal(2, rig.Ca.OrdersCreated.Count); // the CA saw both orders; only one result is kept
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_slow_replica_whose_lease_was_taken_over_and_whose_order_then_fails_does_not_overwrite_the_other_replicas_issued_row(bool listenerProblem)
+    {
+        using var rig = new AcmeServiceRig();
+        Exception failure = listenerProblem ? new AcmeListenerUnavailableException("ACME HTTP-01: port 80 is already in use") : new AcmeException("Cloudflare: could not create the TXT record (HTTP 500)");
+        var gate = new GatedDnsProvider(rig.Dns, failure);
+        var slow = rig.Service(dns: gate);
+        var other = rig.Service();
+        var running = Task.Run(() => slow.CheckOnceAsync(default));
+        await gate.Reached;
+        rig.Clock.Advance(AcmeRenewalService.LeaseDuration + TimeSpan.FromSeconds(1));
+        Assert.True(await other.CheckOnceAsync(default));
+        gate.Release();
+
+        Assert.False(await running);
+
+        var renewal = await rig.RenewalAsync();
+        Assert.Equal(("issued", 0, null), (renewal.Status, renewal.Failures, renewal.LastError)); // the other replica's row is untouched
+        Assert.Contains(rig.Log.Lines, l => l.Contains("was taken over by another replica; the order", StringComparison.Ordinal));
+        Assert.DoesNotContain(rig.Log.Lines, l => l.StartsWith("Error acme: certificate order for 'default' failed", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task A_replica_that_still_holds_its_lease_records_its_failure()
+    {
+        using var rig = new AcmeServiceRig();
+        rig.Dns.FailCreate[1] = new AcmeException("Cloudflare: could not create the TXT record (HTTP 500)");
+
+        Assert.False(await rig.Service().CheckOnceAsync(default));
+
+        Assert.Equal(("failed", 1), ((await rig.RenewalAsync()).Status, (await rig.RenewalAsync()).Failures));
     }
 
     [Fact]
@@ -637,6 +695,56 @@ public class AcmeServiceMockCaTests
     [InlineData("The CA marked the order invalid after it was finalized: CAA record prohibits issuance", "the CA did not finish the order")]
     [InlineData("ACME server error: slow down (rateLimited)", "the CA refused the request")]
     public void The_new_failure_messages_have_a_category_for_the_banner(string error, string expected) => Assert.Equal(expected, AcmeFailureCategory.Describe(error));
+
+    // ---------------------------------------------------------------------------------------------------------------------------------
+    // The service does not trust a runner: what it is handed is checked again
+
+    [Theory]
+    [InlineData("wrong-names", "does not cover 'mx.service.test'")]
+    [InlineData("wrong-key", "does not belong to the certificate")]
+    [InlineData("empty", "The CA sent no certificate")]
+    [InlineData("garbage", "The CA sent no certificate")]
+    public async Task A_runner_that_hands_back_a_certificate_that_is_not_the_orders_is_a_recorded_failure_and_nothing_is_stored(string kind, string expected)
+    {
+        using var rig = new AcmeServiceRig();
+        var service = new AcmeRenewalService(rig.Config, rig.Protector, new BadAnswerRunner(kind), rig.Dns, rig.Options(), rig.Clock, rig.Log);
+
+        Assert.False(await service.CheckOnceAsync(default));
+
+        Assert.Empty(await rig.Config.GetCertificatesAsync(default));
+        var renewal = await rig.RenewalAsync();
+        Assert.Equal("failed", renewal.Status);
+        Assert.Contains(expected, renewal.LastError);
+    }
+
+    [Fact]
+    public async Task The_same_fake_runner_with_a_correct_answer_is_stored_so_the_checks_above_are_what_refuse_it()
+    {
+        using var rig = new AcmeServiceRig();
+        var service = new AcmeRenewalService(rig.Config, rig.Protector, new BadAnswerRunner("correct"), rig.Dns, rig.Options(), rig.Clock, rig.Log);
+
+        Assert.True(await service.CheckOnceAsync(default));
+
+        Assert.Single(await rig.Config.GetCertificatesAsync(default));
+    }
+
+    private sealed class BadAnswerRunner(string kind) : IAcmeOrderRunner
+    {
+        public Task<AcmeIssuedCertificate> IssueAsync(AcmeOrderRequest request, IDnsChallengeProvider dns, CancellationToken cancellationToken)
+        {
+            using var key = System.Security.Cryptography.ECDsa.Create(System.Security.Cryptography.ECCurve.NamedCurves.nistP256);
+            using var other = System.Security.Cryptography.ECDsa.Create(System.Security.Cryptography.ECCurve.NamedCurves.nistP256);
+            string name = kind == "wrong-names" ? "someone-else.service.test" : request.Domains[0];
+            var certificateRequest = new System.Security.Cryptography.X509Certificates.CertificateRequest("CN=" + name, key, System.Security.Cryptography.HashAlgorithmName.SHA256);
+            var san = new System.Security.Cryptography.X509Certificates.SubjectAlternativeNameBuilder();
+            san.AddDnsName(name);
+            certificateRequest.CertificateExtensions.Add(san.Build());
+            using var certificate = certificateRequest.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddDays(90));
+            string chain = kind switch { "empty" => "", "garbage" => "-----BEGIN CERTIFICATE-----\n!!!\n-----END CERTIFICATE-----\n", _ => certificate.ExportCertificatePem() };
+            byte[] pkcs8 = (kind == "wrong-key" ? other : key).ExportPkcs8PrivateKey();
+            return Task.FromResult(new AcmeIssuedCertificate(chain, pkcs8, "-----BEGIN PRIVATE KEY-----\nQUNNRQ==\n-----END PRIVATE KEY-----", "https://ca.example/acct/1", certificate.NotAfter.ToUniversalTime()));
+        }
+    }
 
     // ---------------------------------------------------------------------------------------------------------------------------------
     // The cost of a call: nothing is slept

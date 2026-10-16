@@ -50,7 +50,6 @@ public class AcmeRunnerMockCaTests
     [InlineData("soon")]
     [InlineData("-5")]
     [InlineData("99999999999999")]
-    [InlineData("Wed, 21 Oct 2099 07:28:00 GMT")]
     [InlineData("")]
     public async Task A_retry_after_nobody_can_use_is_no_retry_after_and_never_breaks_the_refusal(string retryAfter)
     {
@@ -60,7 +59,19 @@ public class AcmeRunnerMockCaTests
         var ex = await Assert.ThrowsAsync<AcmeException>(() => rig.IssueAsync());
 
         Assert.Contains("slow down", ex.Message);
-        Assert.True(ex.RetryAfter is null or { Ticks: > 0 }, $"RetryAfter was {ex.RetryAfter}");
+        Assert.Null(ex.RetryAfter); // Certes does not parse these, so the CA's wish is unknown and the plain back-off applies
+    }
+
+    [Fact]
+    public async Task A_retry_after_date_far_in_the_future_is_taken_literally_by_Certes_and_bounded_to_a_day_by_the_service()
+    {
+        using var rig = new AcmeRig();
+        rig.Ca.Fail("newOrder", 429, "rateLimited", "slow down", retryAfterRaw: "Wed, 21 Oct 2099 07:28:00 GMT");
+
+        var ex = await Assert.ThrowsAsync<AcmeException>(() => rig.IssueAsync());
+
+        Assert.Equal(TimeSpan.FromSeconds(int.MaxValue), ex.RetryAfter); // Certes turns the date into seconds against the real clock and caps at int.MaxValue
+        Assert.Equal(AcmeRenewalService.MaxRetryAfter, AcmeRenewalService.WaitAfterFailure(1, ex));
     }
 
     [Theory]
@@ -145,7 +156,7 @@ public class AcmeRunnerMockCaTests
         var ex = await Assert.ThrowsAsync<AcmeException>(() => rig.IssueAsync());
 
         Assert.Contains("(badNonce)", ex.Message);
-        Assert.Equal(8, rig.Ca.Count("newAccount")); // four attempts of two requests (Certes retries a registration once), then it gives up
+        Assert.InRange(rig.Ca.Count("newAccount"), 4, 16); // four attempts of one request plus whatever Certes retries itself (a registration once today), then it gives up
         Assert.Equal(0, rig.Ca.AccountCount);
         Assert.Equal(0, rig.Ca.Count("newOrder"));
     }
@@ -160,6 +171,8 @@ public class AcmeRunnerMockCaTests
 
         Assert.NotNull(issued);
         Assert.Equal(3, rig.Ca.Count("certificate"));
+        Assert.Equal(1, rig.Ca.Count("newOrder")); // the download was retried with fresh nonces, the order was not started again
+        Assert.Equal(1, rig.Ca.Count("finalize"));
     }
 
     // ---------------------------------------------------------------------------------------------------------------------------------
@@ -632,6 +645,20 @@ public class AcmeRunnerMockCaTests
 
         Assert.Equal("ACME server error: certificate storage is down (serverInternal)", ex.Message);
         Assert.True(ex.Transient);
+    }
+
+    [Fact]
+    public async Task A_nonce_the_CA_keeps_rejecting_at_the_download_fails_the_attempt_without_ordering_again()
+    {
+        using var rig = new AcmeRig();
+        rig.Ca.Fail("certificate", 400, "badNonce", "JWS has an invalid anti-replay nonce", times: 20);
+
+        var ex = await Assert.ThrowsAsync<AcmeException>(() => rig.IssueAsync());
+
+        Assert.Contains("kept rejecting the anti-replay nonce", ex.Message);
+        Assert.True(ex.Transient);
+        Assert.Equal(1, rig.Ca.Count("newOrder")); // a second order would be a second certificate (duplicate-certificate rate limit)
+        Assert.Equal(1, rig.Ca.Count("finalize"));
     }
 
     [Fact]

@@ -306,7 +306,15 @@ internal sealed class MockAcmeServer : HttpMessageHandler, IDisposable
                     throw exception;
                 }
 
-                response = scripted is { Response: { } make } ? make(request) : Handle(request, endpoint, path, body, out payload);
+                // A CA checks the anti-replay nonce before it looks at anything else, so a scripted failure never hides a client that reuses a nonce.
+                Jws? jws = null;
+                if (request.Method == HttpMethod.Post && endpoint is not ("directory" or "newNonce" or "renewalInfo" or "unknown"))
+                {
+                    jws = CheckJws(request, body);
+                    payload = jws.Payload;
+                }
+
+                response = scripted is { Response: { } make } ? make(request) : Handle(request, endpoint, path, jws);
             }
             catch (ProblemException problem)
             {
@@ -357,26 +365,9 @@ internal sealed class MockAcmeServer : HttpMessageHandler, IDisposable
         _ => "unknown",
     };
 
-    private HttpResponseMessage Handle(HttpRequestMessage request, string endpoint, string path, string body, out JsonNode? payload)
+    /// <summary>Parses the JWS and consumes its nonce (one use), and checks the signed URL.</summary>
+    private Jws CheckJws(HttpRequestMessage request, string body)
     {
-        payload = null;
-        switch (endpoint)
-        {
-            case "directory":
-                return Json(HttpStatusCode.OK, Directory());
-            case "newNonce":
-                return new HttpResponseMessage(request.Method == HttpMethod.Head ? HttpStatusCode.OK : HttpStatusCode.NoContent);
-            case "renewalInfo":
-                return RenewalInfo is { } ari ? ari(path["/renewal-info/".Length..]) : Problem(404, "malformed", "no such certificate");
-            case "unknown":
-                return new HttpResponseMessage(HttpStatusCode.NotFound);
-        }
-
-        if (request.Method != HttpMethod.Post)
-        {
-            throw new ProblemException(405, "malformed", "ACME resources are POST-as-GET");
-        }
-
         var jws = Jws.Parse(body);
         if (_badNonceRemaining > 0)
         {
@@ -394,7 +385,33 @@ internal sealed class MockAcmeServer : HttpMessageHandler, IDisposable
             throw new ProblemException(401, "unauthorized", $"JWS header parameter 'url' ({jws.Url}) does not match the request URL");
         }
 
-        payload = jws.Payload;
+        return jws;
+    }
+
+    private HttpResponseMessage Handle(HttpRequestMessage request, string endpoint, string path, Jws? jws)
+    {
+        switch (endpoint)
+        {
+            case "directory":
+                return Json(HttpStatusCode.OK, Directory());
+            case "newNonce":
+                return new HttpResponseMessage(request.Method == HttpMethod.Head ? HttpStatusCode.OK : HttpStatusCode.NoContent);
+            case "renewalInfo":
+                return RenewalInfo is { } ari ? ari(path["/renewal-info/".Length..]) : Problem(404, "malformed", "no such certificate");
+            case "unknown":
+                return new HttpResponseMessage(HttpStatusCode.NotFound);
+        }
+
+        if (request.Method != HttpMethod.Post)
+        {
+            throw new ProblemException(405, "malformed", "ACME resources are POST-as-GET");
+        }
+
+        if (jws is null)
+        {
+            throw new ProblemException(400, "malformed", "a signed request is required");
+        }
+
         if (endpoint == "newAccount")
         {
             return NewAccount(jws);

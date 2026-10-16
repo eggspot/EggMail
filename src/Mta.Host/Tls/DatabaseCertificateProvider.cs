@@ -148,12 +148,12 @@ public sealed class DatabaseCertificateProvider : IServerCertificateProvider
                 // A damaged or mismatched replacement (the row of a renewed certificate is replaced in place) must not take the working certificate of the same name out of
                 // service: keep serving what was loaded before, if anything.
                 var served = _snapshot.Entries.FirstOrDefault(e => e.Name == record.Name && e.Source != "file");
-                if (served is not null)
+                if (served is not null && served.Leaf.NotAfter.ToUniversalTime() > _clock.UtcNow.UtcDateTime)
                 {
                     entries.Add(served);
                 }
 
-                _log.Write(MtaLogLevel.Error, "tls", $"certificate '{record.Name}' is unusable and was skipped" + (served is null ? "" : "; the certificate of that name loaded before stays in use"), ex);
+                _log.Write(MtaLogLevel.Error, "tls", $"certificate '{record.Name}' is unusable and was skipped" + (served is not null && served.Leaf.NotAfter.ToUniversalTime() > _clock.UtcNow.UtcDateTime ? "; the certificate of that name loaded before stays in use" : ""), ex);
             }
         }
 
