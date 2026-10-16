@@ -30,13 +30,17 @@ public class ApiInboundMxRecordTests
         Assert.False(mx.GetProperty("required").GetBoolean());
         Assert.True(mx.GetProperty("publishable").GetBoolean());
         Assert.Equal("pending", mx.GetProperty("status").GetString());
+        Assert.Equal("pending", (await a.GetAsync($"/api/v1/domains/{id}/inbound"))["mx"].GetProperty("status").GetString());   // the settings carry the same status
 
         f.Dns.AddMx("inbound.example", 10, "mta.egg.test");
         f.Clock.Advance(TimeSpan.FromSeconds(31));
         Reply checkedDomain = await a.PostAsync($"/api/v1/domains/{id}/verify");
         Assert.Equal("ok", checkedDomain["records"].EnumerateArray().Single(r => r.GetProperty("purpose").GetString() == "inbound_mx").GetProperty("status").GetString());
 
+        Assert.Equal("ok", (await a.GetAsync($"/api/v1/domains/{id}/inbound"))["mx"].GetProperty("status").GetString());
+
         await a.PatchAsync($"/api/v1/domains/{id}/inbound", new { enabled = false });
+        Assert.False((await a.GetAsync($"/api/v1/domains/{id}/inbound"))["mx"].TryGetProperty("status", out _));   // no record is planned while inbound is off
         Reply after = await a.GetAsync($"/api/v1/domains/{id}/records");
         Assert.DoesNotContain(after["records"].EnumerateArray(), r => r.GetProperty("purpose").GetString() == "inbound_mx");
     }
