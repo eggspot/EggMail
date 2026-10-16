@@ -118,14 +118,21 @@ public static class AcmeRenewalSchedule
 
     /// <summary>
     /// Asking failed. RFC 9773 section 4.3.3: after a server error or a network failure (<paramref name="transient"/>) back off exponentially (5 minutes,
-    /// doubling, at most 6 hours); after any other error wait 6 hours. An earlier window of the same certificate stays valid.
+    /// doubling, at most 6 hours); after any other error wait 6 hours. An earlier window of the same certificate stays valid. A <c>Retry-After</c> on the refusal
+    /// (<paramref name="retryAfter"/>) lengthens the wait when it is longer, up to a day.
     /// </summary>
-    public static AcmeRenewalAdvice FromFailure(string thumbprint, AcmeRenewalAdvice? previous, DateTimeOffset now, string error, bool transient)
+    public static AcmeRenewalAdvice FromFailure(string thumbprint, AcmeRenewalAdvice? previous, DateTimeOffset now, string error, bool transient, TimeSpan? retryAfter = null)
     {
         int failures = Math.Min((previous?.Failures ?? 0) + 1, 30);
         var wait = transient
             ? TimeSpan.FromTicks(Math.Min(ErrorCheckInterval.Ticks, TransientErrorCheckInterval.Ticks << Math.Min(failures - 1, 10)))
             : ErrorCheckInterval;
+        if (retryAfter is { } asked && asked > wait)
+        {
+            // The CA's refusal (a rate limit, a 503) said when to ask again: not before, within the usual bounds (at most a day).
+            wait = Clamp(asked);
+        }
+
         return new AcmeRenewalAdvice(thumbprint, previous?.WindowStart, previous?.WindowEnd, previous?.RenewAt, now, now + wait, previous?.ExplanationUrl,
             error.Length <= MaxErrorLength ? error : error[..MaxErrorLength], Failures: failures);
     }

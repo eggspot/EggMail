@@ -16,6 +16,10 @@ dotnet test tests/Mta.Smtp.Server.Tests  # one project
 
 Postgres-backed tests read `EGGMAIL_TEST_POSTGRES` (a connection string to an existing server and a database the test user may create schemas in). Without it the tests start a throwaway cluster from the PostgreSQL binaries on `PATH` (`initdb`, `pg_ctl`), and are skipped when those are not installed.
 
+## ACME and Cloudflare tests without a CA
+
+`tests/Mta.Host.Tests/Acme` runs in every `dotnet test` and needs nothing: a scriptable mock CA (`MockAcmeServer`), a fake Cloudflare (`FakeCloudflare`) and the real `CertesOrderRunner`, `CloudflareDnsChallengeProvider` and `AcmeRenewalService` with a fake clock. The runner and the provider take a pause function, so no test sleeps. To add a failure case, script the double (`Ca.Fail("newOrder", 429, "rateLimited", ..., retryAfterSeconds: 3600)`, `Ca.CertificateMode`, `cf.Fail("zones", 403, 9109, "...")`) and assert on the exception, the renewal row and the pauses. What these tests do not prove is in [testing-offline-coverage.md](testing-offline-coverage.md).
+
 ## ACME tests (Pebble)
 
 `tests/Mta.Integration.Tests/Acme` runs the certificate issuance and renewal flow against [Pebble](https://github.com/letsencrypt/pebble), Let's Encrypt's ACME test server, and `pebble-challtestsrv` (the DNS server Pebble validates DNS-01 against and resolves the test names with; HTTP-01 is validated against the listener of the tests). They are **skipped** unless `EGGMAIL_TEST_ACME_DIRECTORY` is set. CI runs both as containers; locally, without Docker, use the release binaries from the Pebble releases page (pinned in CI to 2.10.1) and the test certificates in the Pebble source tree:

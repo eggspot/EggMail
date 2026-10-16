@@ -17,7 +17,7 @@ workflow refuses a stable tag without a non-empty section for that exact version
 
 ### Added
 
-- Inbound mail, receive path (decision 97): with `Inbound:Enabled` the port-25 listener (container port 2526) is an MX receiver for the domains tenants enabled. RCPT-time classification (signed bounce, SRS, inbound domain with a route, else refused: no open relay, no backscatter), size, recipient, transaction-budget, rate and quota limits, SPF/DKIM/DMARC/ARC verification with the per-domain DMARC action, `Authentication-Results` and `Received`, optional DNSBL, one stored copy per recipient, `mta_inbound_*` metrics, `inbound.enabled` in capabilities. New server hooks (`OnDataStartAsync`, per-transaction size limit, per-listener limits), `SrsCodec` and `ForwardHopMarker`. Route actions are a separate change.
+- Inbound mail, receive path (decision 100): with `Inbound:Enabled` the port-25 listener (container port 2526) is an MX receiver for the domains tenants enabled. RCPT-time classification (signed bounce, SRS, inbound domain with a route, else refused: no open relay, no backscatter), size, recipient, transaction-budget, rate and quota limits, SPF/DKIM/DMARC/ARC verification with the per-domain DMARC action, `Authentication-Results` and `Received`, optional DNSBL, one stored copy per recipient, `mta_inbound_*` metrics, `inbound.enabled` in capabilities. New server hooks (`OnDataStartAsync`, per-transaction size limit, per-listener limits), `SrsCodec` and `ForwardHopMarker`. Route actions are a separate change.
 - Inbound mail, design and storage contracts (decision 95, [design.md section 11](docs/design.md#11-inbound-mail)): receiving for domains a tenant enables, SPF/DKIM/DMARC/ARC verification, per-domain routes (webhook, forward with SRS, store, discard), retention, the `inbound:read` and `inbound:write` API scopes. Storage on all backends (schema version 8, bundle format 1.3), the retention job `inbound_retention`, and the HTTP API (settings, routes, received messages, downloads, retry; scopes `inbound:read` and `inbound:write`, `Inbound:*` and `Api:MaxInboundRoutesPerDomain` keys) are in; the SMTP receive path, the route actions and the dashboard pages follow in later changes.
 - Outbound SMTP server and client written on the .NET base class library only (STARTTLS, implicit TLS, AUTH, pipelining, BDAT, request
   smuggling and STARTTLS-injection defences), with a CI guard that the protocol assemblies have no package references.
@@ -84,6 +84,17 @@ workflow refuses a stable tag without a non-empty section for that exact version
 
 - `Delivery:Throttle:MaxMessagesPerConnection` is documented as reserved: it is read and validated but the delivery engine never enforces it.
 - Webhook deliveries need direct network access to the receivers: a proxy configured through `HTTP_PROXY`/`HTTPS_PROXY` is ignored (see Security).
+
+### Fixed
+
+- ACME: a certificate the CA sends for other names, for another key, empty, cut off or already expired is no longer stored (it is a recorded failure and the old certificate keeps serving); a chain in the wrong order is corrected. A rate limit's `Retry-After` lengthens the wait before the next order (at most a day). An account the CA no longer knows is replaced once instead of failing every order. A registration the CA refused (rate limit, wrong external account binding) is reported as the CA's refusal, not as "could not be reached". A refused certificate download is the CA's refusal, not a `NullReferenceException`, and the wait for a finalizing order is bounded (decision 99).
+- ACME with several replicas: replica names were the first 12 hex digits of a version 7 id (a millisecond timestamp), so two replicas started in the same millisecond shared a lease owner; the webhook dispatcher had the same line. A replica whose renewal lease was taken over while its order ran no longer overwrites the other replica's certificate or its renewal row (neither a result nor a failure is written without the lease).
+- A damaged replacement of a certificate row no longer takes the working certificate of the same name out of the served set, and a DNS provider that fails to delete a challenge record in any way no longer turns an issued certificate into a failure.
+- Cloudflare DNS-01: rate limits, server errors and timeouts are retried, Cloudflare's error codes and messages are shown, an identical record that is already there is adopted, a token with a line end works, and the token is in no message.
+
+### Added
+
+- Offline tests for ACME and Cloudflare (a scriptable mock CA and a fake Cloudflare in `tests/Mta.Host.Tests/Acme`) and [docs/testing-offline-coverage.md](docs/testing-offline-coverage.md), which says what they prove and what they do not.
 
 ### Security
 

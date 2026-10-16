@@ -31,14 +31,34 @@ public static class AcmeFailureCategory
             return "the CA needs or refused external account binding";
         }
 
-        if (Has("Authorization for") && Has("ended as"))
+        if (Has("Cloudflare: "))
+        {
+            return "the DNS provider (Cloudflare) could not publish or remove the challenge record";
+        }
+
+        if (Has("Authorization for") && (Has("ended as") || Has("is still")))
         {
             return "the CA could not validate the challenge";
+        }
+
+        if (Has("The CA issued a certificate") || Has("The CA sent no certificate") || Has("certificate chain") || Has("no certificate for the key"))
+        {
+            return "the CA sent a certificate that does not match the order";
         }
 
         if (Has("could not be reached") || Has("did not answer in time"))
         {
             return "the CA could not be reached";
+        }
+
+        if (Has("answer this client cannot read") || Has("does not offer an endpoint"))
+        {
+            return "the CA's answer could not be understood";
+        }
+
+        if (Has("The order is still") || Has("The CA marked the order invalid"))
+        {
+            return "the CA did not finish the order";
         }
 
         if (Has("ACME server error") || Has("ACME error"))
