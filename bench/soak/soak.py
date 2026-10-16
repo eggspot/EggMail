@@ -1008,7 +1008,8 @@ def _i(value):
     return "" if value is None else int(value)
 
 
-def main():
+def build_parser():
+    """The command line of soak.py, separate from main() so that plan.py can check that the workflow's arguments are accepted."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--hours", type=float, default=2.0, help="how long the load runs (the 6 h limit of a hosted-runner job applies in Actions)")
     parser.add_argument("--backend", choices=["sqlite", "postgres"], default="sqlite")
@@ -1040,6 +1041,11 @@ def main():
     parser.add_argument("--extra-env", action="append", help="NAME=value passed to the server (repeatable), for example Delivery__Workers=16")
     for name, (default, meaning) in evaluate.THRESHOLDS.items():
         parser.add_argument("--" + name.replace("_", "-"), type=float, default=default, help="verdict threshold: " + meaning)
+    return parser
+
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
 
     if args.host_exe is None:
