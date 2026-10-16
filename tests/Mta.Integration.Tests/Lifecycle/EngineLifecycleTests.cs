@@ -11,20 +11,13 @@ namespace Mta.Integration.Tests.Lifecycle;
 /// the webhook fan-out and the storage are the production ones; the remote MTA is a scripted loopback server and time is a <see cref="Mta.TestSupport.VirtualClock"/> the test moves to the next due instant.
 /// This is accelerated: it proves the schedule, the exactly-once bookkeeping and the state carried across restarts, not how the process behaves in 5 real days.
 /// </summary>
-public abstract partial class EngineLifecycleTests : IAsyncLifetime
+public abstract partial class EngineLifecycleTests(LifecycleBackend backend) : IAsyncLifetime
 {
-    protected bool Unavailable;
     private readonly List<LifecycleHarness> _harnesses = [];
 
-    protected abstract StorageOptions NewStorageOptions();
+    private bool Unavailable => backend.Unavailable;
 
-    protected abstract IStorage CreateStorage(StorageOptions options, IClock clock);
-
-    protected virtual Task PrepareAsync() => Task.CompletedTask;
-
-    protected virtual Task CleanupAsync() => Task.CompletedTask;
-
-    public async Task InitializeAsync() => await PrepareAsync();
+    public async Task InitializeAsync() => await backend.PrepareAsync();
 
     public async Task DisposeAsync()
     {
@@ -33,12 +26,12 @@ public abstract partial class EngineLifecycleTests : IAsyncLifetime
             await h.DisposeAsync();
         }
 
-        await CleanupAsync();
+        await backend.CleanupAsync();
     }
 
     internal async Task<LifecycleHarness> NewHarnessAsync(Action<MtaConfigBuilder>? tune = null, Func<IStorage, IStorage>? wrap = null, bool startRemote = true, bool flakyProxy = false)
     {
-        var h = new LifecycleHarness(NewStorageOptions(), CreateStorage, wrap, flakyProxy) { Tune = tune };
+        var h = new LifecycleHarness(backend.NewStorageOptions(), backend.CreateStorage, wrap, flakyProxy) { Tune = tune };
         _harnesses.Add(h);
         if (startRemote)
         {
@@ -176,49 +169,6 @@ public abstract partial class EngineLifecycleTests : IAsyncLifetime
     }
 }
 
-public sealed class EngineLifecycleOnSqlite : EngineLifecycleTests
-{
-    private readonly string _dir = Directory.CreateTempSubdirectory("eggmail-lifecycle-").FullName;
+public sealed class EngineLifecycleOnSqlite() : EngineLifecycleTests(new SqliteLifecycleBackend());
 
-    protected override StorageOptions NewStorageOptions() => new() { Sqlite = new SqliteOptions { DataDirectory = _dir, StatsFlushInterval = TimeSpan.Zero } };
-
-    protected override IStorage CreateStorage(StorageOptions options, IClock clock) => SqliteStorage.Create(options, clock);
-
-    protected override Task CleanupAsync()
-    {
-        Directory.Delete(_dir, recursive: true);
-        return Task.CompletedTask;
-    }
-}
-
-public sealed class EngineLifecycleOnPostgres : EngineLifecycleTests
-{
-    private Mta.Storage.Postgres.Tests.TestDatabase? _database;
-
-    protected override async Task PrepareAsync()
-    {
-        if (Mta.Storage.Postgres.Tests.PostgresTestServer.UnavailableReason is not null)
-        {
-            Unavailable = true;
-            return;
-        }
-
-        _database = await Mta.Storage.Postgres.Tests.PostgresTestServer.Instance.CreateDatabaseAsync();
-    }
-
-    protected override async Task CleanupAsync()
-    {
-        if (_database is not null)
-        {
-            await _database.DisposeAsync();
-        }
-    }
-
-    protected override StorageOptions NewStorageOptions() => new()
-    {
-        Backend = StorageBackend.Postgres,
-        Postgres = new PostgresOptions { OwnerConnectionString = _database!.ConnectionString, RuntimeConnectionString = _database.ConnectionString, StatsFlushInterval = TimeSpan.Zero },
-    };
-
-    protected override IStorage CreateStorage(StorageOptions options, IClock clock) => Mta.Storage.Postgres.PostgresStorage.Create(options, clock);
-}
+public sealed class EngineLifecycleOnPostgres() : EngineLifecycleTests(new PostgresLifecycleBackend());

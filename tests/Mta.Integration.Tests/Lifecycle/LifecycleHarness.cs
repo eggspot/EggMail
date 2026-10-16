@@ -97,18 +97,33 @@ internal sealed class LifecycleHarness : IAsyncDisposable
     private readonly Func<StorageOptions, IClock, IStorage> _createStorage;
     private readonly StorageOptions _storageOptions;
     private readonly Func<IStorage, IStorage>? _wrap;
-    private readonly Guid _domainId = Ids.New();
+    private readonly Guid _domainId;
+    private readonly LifecycleHarness? _sharedWith;
     private SmtpServer? _remoteServer;
     private CancellationTokenSource? _stop;
     private Task _engine = Task.CompletedTask;
     private long _lastMaintenanceDay = long.MinValue;
 
-    public LifecycleHarness(StorageOptions storageOptions, Func<StorageOptions, IClock, IStorage> createStorage, Func<IStorage, IStorage>? wrap = null, bool flakyProxy = false)
+    public LifecycleHarness(StorageOptions storageOptions, Func<StorageOptions, IClock, IStorage> createStorage, Func<IStorage, IStorage>? wrap = null, bool flakyProxy = false, LifecycleHarness? sharedWith = null)
     {
+        _sharedWith = sharedWith;
+        _domainId = sharedWith?._domainId ?? Ids.New();
+        Clock = sharedWith?.Clock ?? new VirtualClock();
+        Dns = sharedWith?.Dns ?? new StaticDnsResolver();
         _storageOptions = storageOptions;
         _createStorage = createStorage;
         _wrap = wrap;
-        Started = Clock.UtcNow;
+        Started = sharedWith?.Started ?? Clock.UtcNow;
+        if (sharedWith is not null)
+        {
+            // A second process over the same database, talking to the same remote with the same virtual time.
+            Remote = sharedWith.Remote;
+            ServerPort = sharedWith.ServerPort;
+            Proxy = sharedWith.Proxy;
+            RemotePort = sharedWith.RemotePort;
+            return;
+        }
+
         Remote = new ScriptedRemote(Clock);
         Dns.AddMx("dest.example", 10, "mx.dest.example").AddA("mx.dest.example", "127.0.0.1");
         Dns.AddMx("example.org", 10, "mx.example.org").AddA("mx.example.org", "127.0.0.1");
@@ -120,13 +135,13 @@ internal sealed class LifecycleHarness : IAsyncDisposable
         RemotePort = Proxy?.Port ?? ServerPort;
     }
 
-    public VirtualClock Clock { get; } = new();
+    public VirtualClock Clock { get; }
 
     public RecordingLog Log { get; } = new();
 
     public ScriptedRemote Remote { get; }
 
-    public StaticDnsResolver Dns { get; } = new();
+    public StaticDnsResolver Dns { get; }
 
     /// <summary>The port the delivery engine connects to: the remote's own, or the flaky proxy's in front of it.</summary>
     public int RemotePort { get; }
@@ -136,7 +151,7 @@ internal sealed class LifecycleHarness : IAsyncDisposable
     /// <summary>Cuts the connection after the end of the data was forwarded (set <see cref="FlakyProxy.DropProbability"/>); null unless asked for.</summary>
     public FlakyProxy? Proxy { get; }
 
-    public bool RemoteIsUp => _remoteServer is not null;
+    public bool RemoteIsUp => (_sharedWith ?? this)._remoteServer is not null;
 
     public EggMailRuntime Runtime { get; private set; } = null!;
 
@@ -151,6 +166,12 @@ internal sealed class LifecycleHarness : IAsyncDisposable
 
     public void StartRemote()
     {
+        if (_sharedWith is not null)
+        {
+            _sharedWith.StartRemote();
+            return;
+        }
+
         if (_remoteServer is not null)
         {
             return;
@@ -168,6 +189,12 @@ internal sealed class LifecycleHarness : IAsyncDisposable
     /// <summary>Nobody listens on the port any more: the next connection is refused.</summary>
     public async Task StopRemoteAsync()
     {
+        if (_sharedWith is not null)
+        {
+            await _sharedWith.StopRemoteAsync();
+            return;
+        }
+
         if (_remoteServer is { } server)
         {
             _remoteServer = null;
@@ -236,6 +263,11 @@ internal sealed class LifecycleHarness : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await StopRuntimeAsync();
+        if (_sharedWith is not null)
+        {
+            return;   // the remote and the proxy belong to the first process
+        }
+
         await StopRemoteAsync();
         if (Proxy is not null)
         {
