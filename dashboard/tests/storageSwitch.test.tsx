@@ -45,7 +45,7 @@ function setup(initial: SwitchStatus, extra: Record<string, unknown> = {}, advis
   const m = mockFetch({
     [`GET ${SW}`]: () => current,
     'GET /api/v1/admin/status': () => adminStatus(advisory),
-    'GET /api/v1/capabilities': () => ({ version: '0.1.0', backend: 'sqlite', history: { mode: 'full' }, content: {}, limits: {}, warnings: [] }),
+    'GET /api/v1/capabilities': () => ({ version: '0.1.0', backend: 'sqlite', history: { mode: 'full' }, content: {}, limits: {}, inbound: { enabled: false }, warnings: [] }),
     ...extra,
   });
   return { m, set: (s: SwitchStatus) => (current = s) };
