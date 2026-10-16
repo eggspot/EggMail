@@ -34,8 +34,8 @@ on:
       sync:
         description: SQLite Sqlite:SyncMode; for PostgreSQL off sets synchronous_commit=off, normal and full keep the durable default
         type: choice
-        options: [off, normal, full]
-        default: off
+        options: ['off', normal, full]
+        default: 'off'
       rate:
         description: Messages per second submitted, in total
         default: '30'
@@ -96,27 +96,14 @@ jobs:
           key: nuget-${{ runner.os }}-${{ hashFiles('Directory.Packages.props', 'global.json') }}
           restore-keys: nuget-${{ runner.os }}-
 
-      - name: Plan (does it fit in one job?)
+      # Validates every input (clear annotation and a summary page when one is wrong), applies the declared defaults in one place, checks that the plan fits
+      # in one job, and writes the arguments for soak.py to soak-args.txt. No `${{ inputs.x || 'default' }}` anywhere: a falsy value would become the default.
+      # bench/soak/plan.py --self-test (run by ci) checks this file for that and for YAML 1.1 traps such as an unquoted `off`.
+      - name: Plan (validate the inputs, does it fit in one job?)
         id: plan
         env:
-          HOURS: ${{ inputs.hours || '2' }}
-          BACKEND: ${{ inputs.backend || 'sqlite' }}
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import math, os, sys
-          hours = float(os.environ["HOURS"])
-          backend = os.environ["BACKEND"]
-          runs = 2 if backend == "both" else 1
-          # 8 minutes of checkout, publish and start-up, 3 minutes of shutdown and reporting per run, and a drain of at least 5 minutes per run
-          minutes = 8 + runs * (hours * 60 + 3 + 5)
-          print("load per backend: %.2f h, runs: %d, planned job time without a long drain: %.0f min (limit 358)" % (hours, runs, minutes))
-          if not math.isfinite(hours) or hours <= 0 or minutes > 340:
-              sys.exit("This does not fit in one hosted job (6 h limit). Lower hours, run the backends in separate dispatches, or use a self-hosted runner (docs/soak.md).")
-          with open(os.environ["GITHUB_OUTPUT"], "a") as handle:
-              handle.write("runs=%d\n" % runs)
-              handle.write("load_minutes=%d\n" % round(hours * 60 * runs))
-          PY
+          INPUTS_JSON: ${{ toJSON(inputs) }}
+        run: python3 bench/soak/plan.py --github
 
       - name: Machine
         run: |
@@ -126,45 +113,39 @@ jobs:
       - name: Soak
         timeout-minutes: 345
         env:
-          HOURS: ${{ inputs.hours || '2' }}
-          BACKEND: ${{ inputs.backend || 'sqlite' }}
-          HISTORY: ${{ inputs.history || 'full' }}
-          SYNC: ${{ inputs.sync || 'off' }}
-          RATE: ${{ inputs.rate || '30' }}
-          SIZE_MIX: ${{ inputs.size_mix || '1024:55,8192:30,65536:12,524288:3' }}
-          CONNECTIONS: ${{ inputs.connections || '8' }}
-          CRASH_INTERVAL_MIN: ${{ inputs.crash_interval_min || '20' }}
-          BACKUP_INTERVAL_MIN: ${{ inputs.backup_interval_min || '30' }}
-          QUIET_TAIL: ${{ inputs.quiet_tail || '0.25' }}
-          SAMPLE_INTERVAL_S: ${{ inputs.sample_interval_s || '60' }}
-          CLAIM_LEASE_MIN: ${{ inputs.claim_lease_min || '0' }}
+          BACKENDS: ${{ steps.plan.outputs.backends }}
+          LOAD_MINUTES: ${{ steps.plan.outputs.load_minutes }}
         run: |
           set -uo pipefail
           started=$(date +%s)
-          backends=("$BACKEND"); [ "$BACKEND" != both ] || backends=(sqlite postgres)
-          mkdir -p soak-results
+          read -r -a backends <<< "$BACKENDS"
+          mapfile -t common < soak-args.txt
+          mkdir -p soak-results soak-logs
           status=0
-          this_load=$(python3 -c "import math, os; v = float(os.environ['HOURS']); assert math.isfinite(v) and v > 0; print(int(v * 60))") || exit 2
           index=0
           for b in "${backends[@]}"; do
             # The drain after the load may take up to 30 minutes in the worst case. Never more than the step has left (345 minute limit) after
             # reserving what the backends still to run need: their load, 8 minutes of start-up and shutdown, and a 6 minute drain.
             used=$(( ($(date +%s) - started) / 60 ))
             later=$(( ${#backends[@]} - 1 - index ))
-            drain=$(( 335 - used - this_load - 8 - later * (this_load + 14) ))
+            drain=$(( 335 - used - LOAD_MINUTES - 8 - later * (LOAD_MINUTES + 14) ))
             [ "$drain" -le 30 ] || drain=30; [ "$drain" -ge 5 ] || drain=5
-            echo "::group::soak $b ($HOURS h, drain limit $drain min)"
-            bench/soak/run-soak.sh --skip-build --strict --hours "$HOURS" --backend "$b" --history "$HISTORY" --sync "$SYNC" --rate "$RATE" --size-mix "$SIZE_MIX" \
-              --connections "$CONNECTIONS" --crash-interval-min "$CRASH_INTERVAL_MIN" --backup-interval-min "$BACKUP_INTERVAL_MIN" --quiet-tail "$QUIET_TAIL" \
-              --sample-interval-s "$SAMPLE_INTERVAL_S" --claim-lease-min "$CLAIM_LEASE_MIN" --drain-timeout-min "$drain" --pg-mode docker --out "soak-results/$b" \
-              || status=1
+            echo "::group::soak $b (drain limit $drain min)"
+            bench/soak/run-soak.sh --skip-build "${common[@]}" --backend "$b" --drain-timeout-min "$drain" --out "soak-results/$b" 2>&1 | tee "soak-logs/$b.log"
+            code=${PIPESTATUS[0]}
             echo "::endgroup::"
+            if [ "$code" -ne 0 ]; then status=1; fi
+            # Whatever happened, leave a summary to read: a run that failed before it could write one (a bad argument, a publish error) is still a result.
+            if [ ! -s "soak-results/$b/summary.md" ]; then
+              mkdir -p "soak-results/$b"
+              { echo "## Soak $b did not produce a summary (exit code $code)"; echo; echo '```'; tail -n 40 "soak-logs/$b.log"; echo '```'; } > "soak-results/$b/summary.md"
+            fi
             index=$(( index + 1 ))
           done
           exit $status
 
       - name: Summary
-        if: ${{ !cancelled() }}
+        if: always()
         run: |
           label="GitHub-hosted ubuntu-latest $(nproc)-core runner, noisy, not publishable"
           echo "**$label**" >> "$GITHUB_STEP_SUMMARY"
@@ -175,14 +156,16 @@ jobs:
           ls soak-results/*/ 2>/dev/null || true
 
       - name: Upload the CSV, logs and summary
-        if: ${{ !cancelled() }}
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: soak-results-${{ github.run_id }}
           # The data directories, restored copies and the throwaway password are not evidence; everything else (samples.csv, events.jsonl,
-          # ack.log, load-stats.jsonl, host.log, load.log, verification.json, verdict.json, summary.md, config.json) is.
+          # ack.log, load-stats.jsonl, host.log, load.log, verification.json, verdict.json, summary.md, config.json, and the console log of each run in
+          # soak-logs) is.
           path: |
             soak-results
+            soak-logs
             !soak-results/*/data/**
             !soak-results/*/restore-*/**
             !soak-results/*/restore-*.dump
