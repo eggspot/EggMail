@@ -120,7 +120,8 @@ public abstract partial class LifecycleConformance(ITestOutputHelper output) : S
         Clock.Advance(Day);
         IReadOnlyList<MaintenanceReport> second = await MaintainAsync();
 
-        foreach (string job in RetentionJobs)
+        bool inbound = SupportsInbound();   // a backend that does not implement inbound mail yet has no inbound retention job
+        foreach (string job in RetentionJobs.Where(j => inbound || j != "inbound_retention"))
         {
             Assert.Contains(first, r => r.Job == job);
             Assert.Contains(second, r => r.Job == job);
