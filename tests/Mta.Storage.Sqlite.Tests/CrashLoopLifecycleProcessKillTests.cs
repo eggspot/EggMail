@@ -115,14 +115,26 @@ public class CrashLoopLifecycleProcessKillTests : IAsyncLifetime
         Assert.DoesNotContain(done, d => inQueue.ContainsKey(d));
         Assert.True(inQueue.Keys.Count(d => !ackedDeliveries.Contains(d)) <= 1, "more deliveries than were ever accepted (one accept may have been in flight)");
 
+        // A delivery whose claim the child saw return was leased when it died: flagged. The claim that was in flight at the kill (at most two deliveries) may have leased more.
+        int flaggedWithoutPrintedClaim = 0;
         foreach (ClaimedDelivery c in queue)
         {
-            bool heldByDeadWorker = claimed.Contains(c.DeliveryId);
-            if (ackedDeliveries.Contains(c.DeliveryId))
+            if (!ackedDeliveries.Contains(c.DeliveryId))
             {
-                Assert.Equal(heldByDeadWorker, c.PossibleDuplicate);
+                continue;
+            }
+
+            if (claimed.Contains(c.DeliveryId))
+            {
+                Assert.True(c.PossibleDuplicate, "a delivery the dead worker held must be flagged possible_duplicate when it is claimed again");
+            }
+            else if (c.PossibleDuplicate)
+            {
+                flaggedWithoutPrintedClaim++;
             }
         }
+
+        Assert.True(flaggedWithoutPrintedClaim <= 2, $"{flaggedWithoutPrintedClaim} deliveries nobody was seen to hold are flagged possible_duplicate (only the claim in flight at the kill may explain two)");
 
         // The messages the dead worker held are claimable again right away: the lease was not honoured. Report everything and leave an empty queue for the next cycle.
         foreach (ClaimedDelivery c in queue)
