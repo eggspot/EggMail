@@ -40,6 +40,7 @@ public sealed class StorageOptions
     public PostgresOptions Postgres { get; init; } = new();
     public ContentOptions Content { get; init; } = new();
     public QueueOptions Queue { get; init; } = new();
+    public InboundStorageOptions Inbound { get; init; } = new();
 }
 
 public sealed class HistoryOptions
@@ -57,6 +58,22 @@ public sealed class QueueOptions
 
     /// <summary>How long an API idempotency key is remembered (addition; default 24 hours).</summary>
     public TimeSpan IdempotencyKeyLifetime { get; init; } = TimeSpan.FromHours(24);
+}
+
+/// <summary>Storage side of inbound mail (design section 11). The receive path has its own <c>Inbound:*</c> limits.</summary>
+public sealed class InboundStorageOptions
+{
+    /// <summary>
+    /// Days a received message (row and body) is kept when its domain sets no value (<c>Inbound:RetentionDays</c>). <c>0</c> keeps forever, like every
+    /// retention knob (design section 5.1); negative is invalid.
+    /// </summary>
+    public int RetentionDays { get; init; } = 7;
+
+    /// <summary>
+    /// The longest retention any domain gets (<c>Inbound:MaxRetentionDays</c>): a domain's own value (and the default) is cut to it, and "forever" (0) becomes it. <c>0</c>: no ceiling.
+    /// The operator's guard against a tenant keeping other people's mail without limit.
+    /// </summary>
+    public int MaxRetentionDays { get; init; }
 }
 
 public sealed class ContentOptions

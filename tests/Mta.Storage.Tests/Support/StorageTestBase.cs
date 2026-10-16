@@ -89,6 +89,20 @@ public abstract class StorageTestBase : IAsyncLifetime
         Postgres = o.Postgres,
         Content = o.Content,
         Queue = o.Queue,
+        Inbound = o.Inbound,
+    };
+
+    /// <summary>The same options with another server default for the retention of received mail.</summary>
+    protected static StorageOptions WithInbound(StorageOptions o, int retentionDays, int maxRetentionDays = 0) => new()
+    {
+        Backend = o.Backend,
+        History = o.History,
+        Retention = o.Retention,
+        Sqlite = o.Sqlite,
+        Postgres = o.Postgres,
+        Content = o.Content,
+        Queue = o.Queue,
+        Inbound = new InboundStorageOptions { RetentionDays = retentionDays, MaxRetentionDays = maxRetentionDays },
     };
 
     protected StorageOptions Opts(
@@ -107,6 +121,7 @@ public abstract class StorageTestBase : IAsyncLifetime
             Postgres = b.Postgres,
             Content = content ?? b.Content,
             Queue = queue ?? b.Queue,
+            Inbound = b.Inbound,
         };
     }
 
