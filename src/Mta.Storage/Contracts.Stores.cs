@@ -19,6 +19,12 @@ public interface IStorage : IAsyncDisposable
     IStorageMaintenance Maintenance { get; }
 
     /// <summary>
+    /// Inbound mail: per-domain settings and routes, received messages and the state of their route actions (design section 11). A provider that has
+    /// not implemented it throws <see cref="NotSupportedException"/> (a default interface member, so older providers keep compiling).
+    /// </summary>
+    IInboundStore Inbound => throw new NotSupportedException("This storage provider does not implement inbound mail.");
+
+    /// <summary>
     /// Export, import, fence and transfer marks for the backend switch (design §4.6). Null for a backend that has not
     /// implemented it; the switch engine then refuses to use the backend as source or target.
     /// </summary>

@@ -45,8 +45,9 @@ jobs:
         run: |
           shellcheck deploy/smoke/*.sh .github/scripts/*.sh bench/run-local-matrix.sh bench/soak/*.sh
           GITHUB_EVENT_NAME=push .github/scripts/test-changed-code.sh   # as on main: the self-test must not depend on the event it runs in
-          python3 -m py_compile deploy/smoke/smoke.py bench/compare-allocations.py bench/measure-startup.py bench/summarize-throughput.py bench/compare/provision_eggmail.py bench/soak/soak.py bench/soak/evaluate.py bench/soak/sink.py
+          python3 -m py_compile deploy/smoke/smoke.py bench/compare-allocations.py bench/measure-startup.py bench/summarize-throughput.py bench/compare/provision_eggmail.py bench/soak/soak.py bench/soak/evaluate.py bench/soak/sink.py bench/soak/plan.py
           python3 bench/soak/evaluate.py --self-test
+          python3 bench/soak/plan.py --self-test   # the workflow inputs: YAML 1.1 traps, defaults, a minimal dispatch, all through soak.py's own parser
           export EGGMAIL_HOSTNAME=mail.example.com EGGMAIL_DB_PASSWORD=x EGGMAIL_IMAGE=ghcr.io/eggspot/eggmail:nightly SMOKE_HOST_IP=127.0.0.1
           docker compose -f deploy/compose/compose.yaml config --quiet
           docker compose -f deploy/compose/compose.postgres.yaml config --quiet

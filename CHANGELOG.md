@@ -17,6 +17,7 @@ workflow refuses a stable tag without a non-empty section for that exact version
 
 ### Added
 
+- Inbound mail, design and storage contracts (decision 95, [design.md section 11](docs/design.md#11-inbound-mail)): receiving for domains a tenant enables, SPF/DKIM/DMARC/ARC verification, per-domain routes (webhook, forward with SRS, store, discard), retention, the `inbound:read` and `inbound:write` API scopes. This change is the design, the storage contracts, the pure rules, the in-memory reference store and the abstract conformance suite (`InboundConformance`) that the SQLite and PostgreSQL implementations, the receive path and the route actions are built against; those follow in later changes.
 - Outbound SMTP server and client written on the .NET base class library only (STARTTLS, implicit TLS, AUTH, pipelining, BDAT, request
   smuggling and STARTTLS-injection defences), with a CI guard that the protocol assemblies have no package references.
 - Message handling: MIME parser/builder/editor, DKIM signing and verification, SPF, DMARC, Authentication-Results, ARC, DSN/ARF, VERP,

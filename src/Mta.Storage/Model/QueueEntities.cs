@@ -107,3 +107,70 @@ public sealed class IdempotencyKeyEntity
     /// <summary>Digest of the request that used the key (addition); null when the caller did not supply one.</summary>
     public string? Fingerprint { get; set; }
 }
+
+/// <summary>
+/// One received message for one recipient (<c>inbound_message</c>, queue part): the metadata, the verification results and the state of the route
+/// action. The body is in <see cref="InboundMessageRawEntity"/>. Queue-like: pending actions are claimed with a lease, and the switch holds rows
+/// with <see cref="TransferSwitchId"/> like deliveries.
+/// </summary>
+public sealed class InboundMessageEntity
+{
+    public Guid Id { get; set; }
+    public Guid TenantId { get; set; }
+    public Guid DomainId { get; set; }
+    public string Domain { get; set; } = "";
+    public DateTimeOffset ReceivedAt { get; set; }
+    public string RemoteAddress { get; set; } = "";
+    public string? Helo { get; set; }
+    public bool TlsUsed { get; set; }
+
+    /// <summary>Lower-case <c>local@domain</c>; empty for the null reverse-path.</summary>
+    public string EnvelopeFrom { get; set; } = "";
+
+    /// <summary>Lower-case <c>local@domain</c>.</summary>
+    public string EnvelopeTo { get; set; } = "";
+    public string? Subject { get; set; }
+    public long Size { get; set; }
+    public InboundVerdict Spf { get; set; }
+    public string? SpfDomain { get; set; }
+    public InboundVerdict SpfHelo { get; set; }
+    public InboundVerdict Dkim { get; set; }
+    public string? DkimDomain { get; set; }
+    public InboundVerdict Dmarc { get; set; }
+    public string? DmarcPolicy { get; set; }
+    public InboundVerdict Arc { get; set; }
+    public InboundDmarcDisposition Disposition { get; set; }
+    public Guid? RouteId { get; set; }
+    public InboundActionKind ActionKind { get; set; }
+    public InboundActionState ActionState { get; set; }
+    public int ActionAttempts { get; set; }
+
+    /// <summary>Incremented by every manual retry; part of the webhook id.</summary>
+    public int RetryGeneration { get; set; }
+    public DateTimeOffset? ActionNextAttemptAt { get; set; }
+    public DateTimeOffset? ActionFinishedAt { get; set; }
+    public string? ActionLastError { get; set; }
+
+    /// <summary>A short code for a completion the tenant should know about (see <see cref="InboundActionOutcome.Note"/>).</summary>
+    public string? ActionNote { get; set; }
+    public Guid? ForwardMessageId { get; set; }
+
+    /// <summary>The body row exists.</summary>
+    public bool HasRaw { get; set; }
+    public string? LeaseOwner { get; set; }
+
+    /// <summary>Unix epoch when not leased; an action is claimable when this is not after "now".</summary>
+    public DateTimeOffset LeaseUntil { get; set; }
+
+    /// <summary>Backend switch hold, see <see cref="QueuedDeliveryEntity.TransferSwitchId"/>.</summary>
+    public Guid? TransferSwitchId { get; set; }
+}
+
+/// <summary>The stored message of an <see cref="InboundMessageEntity"/> (<c>inbound_message_raw</c>), separate so lists and claims never read it.</summary>
+public sealed class InboundMessageRawEntity
+{
+    public Guid MessageId { get; set; }
+    public Guid TenantId { get; set; }
+    public byte[] Raw { get; set; } = [];
+}
+

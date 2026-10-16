@@ -144,7 +144,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
 
         rt.Fence.ThrowIfClosed();
         DateTimeOffset now = rt.Clock.UtcNow;
-        var state = new AcceptState(message, StorageTime.ToUnixMs(now), StorageTime.ToUnixMs(now + rt.Options.Queue.IdempotencyKeyLifetime));
+        var state = new AcceptState(message, StorageTime.ToUnixMs(now), StorageTime.ToUnixMs(now + (message.IdempotencyKeyLifetime ?? rt.Options.Queue.IdempotencyKeyLifetime)));
         IntakeResult result;
         try
         {

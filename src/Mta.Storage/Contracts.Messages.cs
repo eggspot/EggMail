@@ -9,6 +9,13 @@ public enum MessageSource : byte
     Api,
     Bounce,
     System,
+
+    /// <summary>
+    /// A copy of received mail forwarded by an inbound route (decision 95). Unlike <see cref="Api"/> mail it never gets a bounce message of any kind, not even a delay notice, whatever
+    /// <c>Delivery:GenerateDsnFor*</c> says: a failure is visible to the tenant only, as events and webhooks of the outbound message. The body is delivered byte for byte, and the message is
+    /// DKIM-signed only with the key of the SRS envelope domain, never with the original From domain (design section 11.7).
+    /// </summary>
+    Forward,
 }
 
 public readonly record struct AcceptedRecipient(Guid DeliveryId, EmailAddress Address);
@@ -104,6 +111,12 @@ public sealed class AcceptedMessage
     /// <see cref="IntakeResult.IdempotencyFingerprint"/> on a duplicate, so the caller can tell a safe retry from key reuse with another body.
     /// </summary>
     public string? IdempotencyFingerprint { get; set; }
+
+    /// <summary>
+    /// How long <see cref="IdempotencyKey"/> is remembered. Null: <c>Queue:IdempotencyKeyLifetime</c> (24 h, the API's promise). A forward of received mail (decision 95) sets a year,
+    /// because its key must outlive the retry ladder and every manual retry, not just a client's retry window.
+    /// </summary>
+    public TimeSpan? IdempotencyKeyLifetime { get; set; }
 
     public string? RemoteAddress { get; set; }
     public string? Authenticated { get; set; }
