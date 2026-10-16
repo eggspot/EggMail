@@ -149,5 +149,17 @@ public class InboundPostgresTests : PgTestBase
 
         Assert.False(PostgresErrors.IsRetryable(Wrapped("23505")));
         Assert.False(PostgresErrors.IsRetryable(Wrapped("42601")));   // bad SQL is a bug, not a moment to wait out
+
+        // A statement the caller cancelled is 57014 on the server and an OperationCanceledException here: it stays a cancellation, not an outage.
+        var cancelled = new Microsoft.EntityFrameworkCore.DbUpdateException("update failed", new OperationCanceledException("cancelled", new Npgsql.PostgresException("canceling statement", "ERROR", "ERROR", "57014")));
+        Assert.False(PostgresErrors.IsRetryable(cancelled));
+        Assert.True(PostgresErrors.IsRetryable(Wrapped("57014")));   // a statement_timeout the server enforced is retryable
+
+        // A read-only transaction (a standby or a database set to read-only) is unavailability for a writer.
+        Assert.True(PostgresErrors.IsUnavailable(Wrapped("25006")));
     }
+
+    [Fact]
+    public Task An_erasure_walks_the_ids_not_the_receive_times() =>
+        InboundBatchScenarios.An_erasure_walks_the_ids_not_the_receive_times(Storage, ((PostgresStorage)Storage).Runtime.InboundMessages, Clock);
 }

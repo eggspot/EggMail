@@ -85,6 +85,9 @@ public static class InboundMapping
     /// </summary>
     public static bool IsBidiControl(char c) => c is '\u061C' or '\u200E' or '\u200F' or (>= '\u202A' and <= '\u202E') or (>= '\u2066' and <= '\u2069');
 
+    /// <summary>U+2028 and U+2029, the Unicode line and paragraph separators: they break a line in a browser and a log the way a newline does, and are not control characters to <see cref="char.IsControl"/>.</summary>
+    public static bool IsLineSeparator(char c) => c is '\u2028' or '\u2029';
+
     /// <summary>The longest stored client-supplied text (HELO name, address, domains in the verdicts): the SMTP limits are looser than this and the values reach the dashboard and webhooks.</summary>
     public const int MaxTextLength = 255;
 
@@ -104,7 +107,7 @@ public static class InboundMapping
                 break;
             }
 
-            if (!char.IsControl(c) && !IsBidiControl(c))
+            if (!char.IsControl(c) && !IsBidiControl(c) && !IsLineSeparator(c))
             {
                 sb.Append(c);
             }
@@ -144,7 +147,7 @@ public static class InboundMapping
                 continue;
             }
 
-            if (c is '\r' or '\n' or '\t')
+            if (c is '\r' or '\n' or '\t' || IsLineSeparator(c))
             {
                 if (n > 0 && buffer[n - 1] != ' ')
                 {

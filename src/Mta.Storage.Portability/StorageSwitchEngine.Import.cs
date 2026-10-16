@@ -373,8 +373,34 @@ public sealed partial class StorageSwitchEngine
             long held = await transfer.CountHeldQueueRowsAsync(state.SwitchId, ct).ConfigureAwait(false);
             if (!active)
             {
-                long expectedHeld = manifest.Tables.Where(t => TransferTables.ByName(t.Name) is { HasHold: true }).Sum(t => t.HeldRows ?? t.Rows);
-                if (held != expectedHeld)
+                // A table that holds every row (deliveries, the webhook outbox) holds `rows` of them when the manifest does not say (a bundle written before heldRows existed); a table that holds only
+                // some (received mail: pending actions) cannot be guessed, so a manifest without heldRows for it is a problem of its own and the total is not compared.
+                long expectedHeld = 0;
+                bool known = true;
+                foreach (BundleTable t in manifest.Tables)
+                {
+                    TransferTable table = TransferTables.ByName(t.Name);
+                    if (!table.HasHold)
+                    {
+                        continue;
+                    }
+
+                    if (t.HeldRows is { } heldRows)
+                    {
+                        expectedHeld += heldRows;
+                    }
+                    else if (table.HoldsSome)
+                    {
+                        problems.Add($"{t.Name}: the manifest does not say how many rows are held (heldRows), so the held rows of the target cannot be checked");
+                        known = false;
+                    }
+                    else
+                    {
+                        expectedHeld += t.Rows;
+                    }
+                }
+
+                if (known && held != expectedHeld)
                 {
                     problems.Add($"queue: {held} rows are held in the target, the bundle has {expectedHeld}");
                 }

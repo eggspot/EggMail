@@ -221,4 +221,8 @@ public class InboundSqliteTests : SqliteTestBase
         Assert.Null(SqliteInboundAccess.Translate(Wrapped(19)));
         Assert.Null(SqliteInboundAccess.Translate(new InvalidOperationException("bug")));
     }
+
+    [Fact]
+    public Task An_erasure_walks_the_ids_not_the_receive_times() =>
+        InboundBatchScenarios.An_erasure_walks_the_ids_not_the_receive_times(Storage, Sql.Runtime.InboundMessages, Clock);
 }
