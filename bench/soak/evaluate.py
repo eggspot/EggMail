@@ -383,12 +383,19 @@ def evaluate(run_dir, thresholds, strict=None):
             "median p99 %.1f ms in the first quarter, %.1f ms in the last (x%.2f; advisory limit x%.1f)" % (a, b, ratio, thresholds["p99_growth_ratio"]))
 
     # drills
+    def expected_drills(key):
+        interval = config.get(key, 0)
+        return int(config.get("duration_s", 0) * (1.0 - config.get("quiet_tail", 0.25)) / (interval * 60.0)) if interval > 0 else 0
+
     drills = [e for e in events if e.get("type") in ("crash_ready", "crash_failed", "backup_drill", "restore_failed")]
     crash_ok = [e for e in events if e.get("type") == "crash_ready"]
     crash_bad = [e for e in events if e.get("type") == "crash_failed"]
     if config.get("crash_interval_min", 0) > 0 or crash_ok or crash_bad:
         if not crash_ok and not crash_bad:
-            add("crash drills recover", "FAIL", "crash drills were configured but none ran")
+            if expected_drills("crash_interval_min") >= 1:
+                add("crash drills recover", "FAIL", "crash drills were configured but none ran")
+            else:
+                add("crash drills recover", "SKIP", "no crash drill was due: one every %g minutes does not fit in the drill part of a %s run" % (config.get("crash_interval_min", 0), fmt_duration(config.get("duration_s", 0))))
         else:
             slow = [e for e in crash_ok if e.get("ready_after_s", 0) > e.get("limit_s", 120)]
             stalled = [e for e in events if e.get("type") == "crash_check" and e.get("missing", 0) > 0]
@@ -399,7 +406,10 @@ def evaluate(run_dir, thresholds, strict=None):
         done = [e for e in events if e.get("type") == "backup_drill"]
         ok = [e for e in done if e.get("ok")]
         if not done:
-            add("backup and restore drills", "FAIL", "backup drills were configured but none completed")
+            if expected_drills("backup_interval_min") >= 1:
+                add("backup and restore drills", "FAIL", "backup drills were configured but none completed")
+            else:
+                add("backup and restore drills", "SKIP", "no backup drill was due: one every %g minutes does not fit in the drill part of a %s run" % (config.get("backup_interval_min", 0), fmt_duration(config.get("duration_s", 0))))
         else:
             add("backup and restore drills", "PASS" if len(ok) == len(done) else "FAIL",
                 "%d backup+restore drill(s), %d restored and served correctly%s" % (
@@ -601,6 +611,7 @@ def self_test():
         ("dropped replies without any duplicate fail", {"duplicates": 0, "dropped": 4}, "FAIL", "duplicate path exercised", None),
         ("once-received messages flagged on a large scale fail", {"singles_flagged": 200}, "FAIL", "possible_duplicate is not sprayed", None),
         ("a few flagged once-received messages after one kill pass", {"singles_flagged": 3}, "PASS", None, ("possible_duplicate is not sprayed", "PASS")),
+        ("a short run in which no crash drill was due passes", {"minutes": 20, "no_crash_drill": True}, "PASS", None, ("crash drills recover", "SKIP")),
         ("a non-zero generator exit fails", {"load_exit_code": 1}, "FAIL", "load generator exit code", None),
     ]
     failures = 0

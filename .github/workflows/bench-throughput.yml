@@ -58,6 +58,20 @@ jobs:
           key: nuget-${{ runner.os }}-${{ hashFiles('Directory.Packages.props', 'global.json') }}
           restore-keys: nuget-${{ runner.os }}-
 
+      # The inputs reach the steps below as plain `${{ inputs.x }}` (no `||` default: a falsy value would silently become the default; the boolean inputs
+      # are real booleans). bench/soak/plan.py --self-test, run by ci, checks this file for unquoted YAML 1.1 words such as `off`.
+      - name: Check the inputs
+        env:
+          MESSAGES: ${{ inputs.messages }}
+          RUNS: ${{ inputs.runs }}
+        run: |
+          for pair in "messages=$MESSAGES" "runs=$RUNS"; do
+            case "${pair#*=}" in ''|*[!0-9]*) echo "::error title=bench-throughput inputs::${pair%%=*} must be a whole number, got '${pair#*=}'"; exit 2 ;; esac
+          done
+          if [ "$MESSAGES" -lt 3000 ] || [ "$RUNS" -lt 1 ] || [ "$RUNS" -gt 10 ]; then
+            echo "::error title=bench-throughput inputs::messages must be at least 3000 and runs from 1 to 10 (got $MESSAGES and $RUNS)"; exit 2
+          fi
+
       - name: Build the harness and the load generator
         run: dotnet build bench/Mta.Bench.Pipeline -c Release
 

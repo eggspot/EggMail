@@ -279,3 +279,45 @@ public sealed class SwitchStateEntity
     public DateTimeOffset UpdatedAt { get; set; }
     public string? Detail { get; set; }
 }
+
+/// <summary>Inbound settings of one domain (<c>inbound_domain_settings</c>, config part). A domain with no row has inbound off. Null members mean "the server default".</summary>
+public sealed class InboundDomainSettingsEntity
+{
+    public Guid DomainId { get; set; }
+    public Guid TenantId { get; set; }
+    public bool Enabled { get; set; }
+    public InboundDmarcAction DmarcAction { get; set; }
+    public long? MaxMessageBytes { get; set; }
+    public int? MaxMessagesPerMinute { get; set; }
+    public int? MaxMessagesPerMinutePerRemote { get; set; }
+    public long? MaxStoredBytes { get; set; }
+
+    /// <summary>0 keeps messages forever; null is the server default.</summary>
+    public int? RetentionDays { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+}
+
+/// <summary>A route of a domain (<c>inbound_route</c>, config part). Column names avoid SQL keywords: the evaluation order is <c>sort_order</c>.</summary>
+public sealed class InboundRouteEntity
+{
+    public Guid Id { get; set; }
+    public Guid TenantId { get; set; }
+    public Guid DomainId { get; set; }
+    public string Name { get; set; } = "";
+    public int SortOrder { get; set; }
+    public bool Enabled { get; set; }
+    public InboundMatchKind MatchKind { get; set; }
+
+    /// <summary>Lower-case local part or pattern; null for a catch-all.</summary>
+    public string? LocalPart { get; set; }
+    public bool PlusAddressing { get; set; }
+    public InboundActionKind ActionKind { get; set; }
+    public Guid? WebhookEndpointId { get; set; }
+    public InboundWebhookFormat WebhookFormat { get; set; }
+
+    /// <summary>JSON array of forward targets.</summary>
+    public string ForwardToJson { get; set; } = "[]";
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+}
+
