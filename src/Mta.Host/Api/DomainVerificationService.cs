@@ -226,13 +226,20 @@ public sealed class DomainVerificationService : BackgroundService
         keys.Where(k => k.Active || k.RetiredAt is null || now < k.RetiredAt.Value + retirementGrace).OrderBy(k => k.CreatedAt).ThenBy(k => k.Id).ToList();
 
     /// <summary>The records the customer has to publish for <paramref name="domain"/> (required ones decide verification; the rest is advice).</summary>
-    public IReadOnlyList<ExpectedDomainRecord> PlanRecords(DomainRecord domain, IReadOnlyList<StoredDkimKey> keys, DateTimeOffset now) =>
-        PlanRecords(domain, keys, now, _recordOptions, _options.DkimRetirementGrace);
+    public IReadOnlyList<ExpectedDomainRecord> PlanRecords(DomainRecord domain, IReadOnlyList<StoredDkimKey> keys, DateTimeOffset now, bool inboundEnabled = false) =>
+        PlanRecords(domain, keys, now, _recordOptions, _options.DkimRetirementGrace, inboundEnabled);
 
-    public static IReadOnlyList<ExpectedDomainRecord> PlanRecords(DomainRecord domain, IReadOnlyList<StoredDkimKey> keys, DateTimeOffset now, DomainRecordOptions recordOptions, TimeSpan retirementGrace)
+    /// <summary>The records of <paramref name="domain"/> including the inbound MX while inbound mail is enabled for it (read from the domain's inbound settings).</summary>
+    public async ValueTask<IReadOnlyList<ExpectedDomainRecord>> PlanRecordsAsync(DomainRecord domain, IReadOnlyList<StoredDkimKey> keys, DateTimeOffset now, CancellationToken ct)
+    {
+        InboundDomainSettings? inbound = await ((IInboundConfigStore)Config).GetSettingsAsync(domain.Id, ct).ConfigureAwait(false);
+        return PlanRecords(domain, keys, now, inbound is { Enabled: true });
+    }
+
+    public static IReadOnlyList<ExpectedDomainRecord> PlanRecords(DomainRecord domain, IReadOnlyList<StoredDkimKey> keys, DateTimeOffset now, DomainRecordOptions recordOptions, TimeSpan retirementGrace, bool inboundEnabled = false)
     {
         var published = PublishedKeys(keys, now, retirementGrace);
-        var plan = DomainRecordPlanner.Plan(domain.Name, published.Select(k => new DomainDkimKey(k.Selector, k.PublicKeyBase64)), recordOptions);
+        var plan = DomainRecordPlanner.Plan(domain.Name, published.Select(k => new DomainDkimKey(k.Selector, k.PublicKeyBase64)), recordOptions, inboundEnabled);
         var signing = published.Where(k => k.Active).Select(k => DkimKeyTools.GetDnsName(domain.Name, k.Selector).ToLowerInvariant()).ToHashSet(StringComparer.Ordinal);
         if (signing.Count == 0 && published.Count > 0)
         {
@@ -254,7 +261,7 @@ public sealed class DomainVerificationService : BackgroundService
 
         var keys = await Config.GetDkimKeysAsync(domain.Id, ct).ConfigureAwait(false);
         DateTimeOffset started = _clock.UtcNow;
-        var plan = PlanRecords(domain, keys, started);
+        var plan = await PlanRecordsAsync(domain, keys, started, ct).ConfigureAwait(false);
         DomainCheckResult result;
         try
         {

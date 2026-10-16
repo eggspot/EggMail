@@ -96,7 +96,7 @@ public sealed class DomainChecker
         DomainRecordPurpose.TlsRpt => CheckTlsRptAsync(record, ct),
         DomainRecordPurpose.MtaSts => CheckMtaStsAsync(record, ct),
         DomainRecordPurpose.MtaStsHost => CheckMtaStsHostAsync(record, ct),
-        DomainRecordPurpose.BounceMx => CheckMxAsync(record, ct),
+        DomainRecordPurpose.BounceMx or DomainRecordPurpose.InboundMx => CheckMxAsync(record, ct),
         _ => CheckPtrAsync(record, ct),
     };
 

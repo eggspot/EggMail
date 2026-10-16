@@ -80,6 +80,10 @@ Received mail is attacker-controlled input that the server hands to customer sys
 * **SRS.** An SRS address is accepted only from the null sender with a valid hash and age, then dropped (no relay, no backscatter, no open relay by forging); the hash is 40 bits and comparisons are constant time over every key of the ring; the local part never exceeds 64 octets whatever the original address.
 * **Targets come from the route only**, never from the message (`Reply-To`, `Bcc`, `Resent-*` are ignored; a test pins it).
 
+## Inbound mail in the dashboard
+
+Received mail is hostile content. The dashboard shows every field of a message (subject, addresses, header values, the text part) as text nodes of a framework that escapes them; the HTML part only in the sandboxed frame used for outbound mail (empty `sandbox`, `default-src 'none'` in its own CSP, remote images and styles blocked, so a tracking pixel does not report that the mail was read); the raw message and attachments are never opened, only saved (a Blob and a `download` attribute with a file name reduced to letters, digits and `. _ - ( )`). The e2e spec for hostile mail checks that nothing of a message becomes an element of the page, that no script of it runs, and that no CSP violation is reported. Deleting by filter needs a filter and the typed word; there is no button that empties a tenant.
+
 ## Operational guidance
 
 - Run the container as the non-root user it is built with, read-only root file system, drop all capabilities, publish only the ports you enable (`docs/design.md` section 7).
