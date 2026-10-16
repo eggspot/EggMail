@@ -1,0 +1,18 @@
+# SPF passes only for the provider's domain and nothing is signed: DMARC fails and the policy says reject.
+client-ip: 192.0.2.3
+helo: mail.example.com
+mail-from: bounce@esp.example.net
+authserv-id: mx.receiver.example
+[zone]
+esp.example.net TXT v=spf1 ip4:192.0.2.3 -all
+_dmarc.example.com TXT v=DMARC1; p=reject
+[message]
+From: Alice <alice@example.com>
+To: Bob <bob@receiver.example>
+Subject: Fixture
+Date: Mon, 12 Oct 2026 12:00:00 +0000
+Message-ID: <fx1@example.com>
+
+Hello Bob.
+[expect]
+mx.receiver.example; spf=pass smtp.mailfrom=bounce@esp.example.net; dkim=none; dmarc=fail (p=REJECT sp=REJECT dis=REJECT) header.from=example.com

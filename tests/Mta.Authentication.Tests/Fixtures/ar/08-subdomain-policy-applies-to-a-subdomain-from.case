@@ -1,0 +1,19 @@
+# From a subdomain without its own record and nothing aligned: the organizational domain's sp= applies.
+client-ip: 198.51.100.9
+helo: mail.news.example.com
+mail-from: alice@news.example.com
+authserv-id: mx.receiver.example
+[zone]
+news.example.com TXT v=spf1 ip4:192.0.2.3 -all
+_dmarc.example.com TXT v=DMARC1; p=none; sp=quarantine
+[message]
+From: Alice <alice@news.example.com>
+To: Bob <bob@receiver.example>
+Subject: Fixture
+Date: Mon, 12 Oct 2026 12:00:00 +0000
+Message-ID: <fx1@example.com>
+
+Hello Bob.
+[sign domain=other.example selector=s1]
+[expect]
+mx.receiver.example; spf=fail smtp.mailfrom=alice@news.example.com; dkim=pass (2048-bit key) header.d=other.example header.s=s1 header.b=VP95LvdO; dmarc=fail (p=NONE sp=QUARANTINE dis=QUARANTINE) header.from=news.example.com

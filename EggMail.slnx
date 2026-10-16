@@ -24,6 +24,7 @@
   <Folder Name="/tests/">
     <Project Path="tests/Mta.ArchitectureTests/Mta.ArchitectureTests.csproj" />
     <Project Path="tests/Mta.Auth.Tests/Mta.Auth.Tests.csproj" />
+    <Project Path="tests/Mta.Authentication.Tests/Mta.Authentication.Tests.csproj" />
     <Project Path="tests/Mta.Core.Tests/Mta.Core.Tests.csproj" />
     <Project Path="tests/Mta.Delivery.Tests/Mta.Delivery.Tests.csproj" />
     <Project Path="tests/Mta.Dkim.Tests/Mta.Dkim.Tests.csproj" />
