@@ -116,7 +116,7 @@ internal sealed class FlakyProxy : IAsyncDisposable
 {
     private readonly System.Net.Sockets.TcpListener _listener = new(IPAddress.Loopback, 0);
     private readonly int _targetPort;
-    private readonly double _dropProbability;
+    private double _dropProbability;
     private readonly Random _random;
     private readonly CancellationTokenSource _cts = new();
     private readonly Task _accept;
@@ -132,6 +132,12 @@ internal sealed class FlakyProxy : IAsyncDisposable
     }
 
     public int Port => ((IPEndPoint)_listener.LocalEndpoint).Port;
+
+    /// <summary>The chance that a message is cut after its end-of-data was forwarded (the lifecycle tests switch it on and off).</summary>
+    /// <summary>When set, the remote's answer to a message that is cut is held back until the remote has given it, so the sender certainly never sees it (the default is a 30 ms head start that usually, not always, loses the race).</summary>
+    public bool SwallowReply { get; set; }
+
+    public double DropProbability { get => Volatile.Read(ref _dropProbability); set => Volatile.Write(ref _dropProbability, value); }
 
     private async Task AcceptLoopAsync()
     {
@@ -156,7 +162,38 @@ internal sealed class FlakyProxy : IAsyncDisposable
             await upstream.ConnectAsync(IPAddress.Loopback, _targetPort, _cts.Token);
             var c = client.GetStream();
             var u = upstream.GetStream();
-            var down = Task.Run(async () => { try { await u.CopyToAsync(c, _cts.Token); } catch { } finally { client.Dispose(); } });
+            bool cutting = false;
+            var replySeen = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var down = Task.Run(async () =>
+            {
+                try
+                {
+                    byte[] reply = new byte[16 * 1024];
+                    while (true)
+                    {
+                        int read = await u.ReadAsync(reply, _cts.Token);
+                        if (read == 0)
+                        {
+                            break;
+                        }
+
+                        if (Volatile.Read(ref cutting))
+                        {
+                            replySeen.TrySetResult();   // the remote has answered; the sender will never hear it
+                            continue;
+                        }
+
+                        await c.WriteAsync(reply.AsMemory(0, read), _cts.Token);
+                    }
+                }
+                catch
+                {
+                }
+                finally
+                {
+                    client.Dispose();
+                }
+            });
             byte[] buffer = new byte[16 * 1024];
             byte[] tail = [];
             while (true)
@@ -167,13 +204,27 @@ internal sealed class FlakyProxy : IAsyncDisposable
                     break;
                 }
 
-                await u.WriteAsync(buffer.AsMemory(0, n), _cts.Token);
-                await u.FlushAsync(_cts.Token);
                 byte[] window = [.. tail, .. buffer.AsSpan(0, n).ToArray()];
                 tail = window.Length > 4 ? window[^4..] : window;
-                if (window.AsSpan().IndexOf("\r\n.\r\n"u8) >= 0 && NextDrop())
+                bool drop = window.AsSpan().IndexOf("\r\n.\r\n"u8) >= 0 && NextDrop();
+                if (drop && SwallowReply)
                 {
-                    await Task.Delay(30);   // let the remote finish and accept the message
+                    Volatile.Write(ref cutting, true);   // before the data is forwarded: the remote's answer must not get through
+                }
+
+                await u.WriteAsync(buffer.AsMemory(0, n), _cts.Token);
+                await u.FlushAsync(_cts.Token);
+                if (drop)
+                {
+                    if (SwallowReply)
+                    {
+                        await Task.WhenAny(replySeen.Task, Task.Delay(TimeSpan.FromSeconds(10)));   // the remote has accepted (or refused) the message
+                    }
+                    else
+                    {
+                        await Task.Delay(30);   // let the remote finish and accept the message
+                    }
+
                     Interlocked.Increment(ref Drops);
                     client.Client.LingerState = new System.Net.Sockets.LingerOption(true, 0);
                     break;
@@ -193,7 +244,7 @@ internal sealed class FlakyProxy : IAsyncDisposable
     {
         lock (_random)
         {
-            return _random.NextDouble() < _dropProbability;
+            return _random.NextDouble() < DropProbability;
         }
     }
 

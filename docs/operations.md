@@ -287,7 +287,7 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | `Webhooks:BatchSize` | 64 | Deliveries claimed at once |
 | `Webhooks:PollInterval` | `00:00:00.500` | |
 | `Webhooks:Lease` | `00:02:00` | |
-| `Webhooks:DisableAfter` | `5.00:00:00` | An endpoint failing for this long is disabled and the tenant notified |
+| `Webhooks:DisableAfter` | `5.00:00:00` | An endpoint failing for this long is disabled and the tenant notified (once: `IConfigStore.DisableWebhookEndpointAsync` reports whether the call switched it off, so attempts that fail side by side or on several replicas send one `webhook.endpoint.disabled` event) |
 | `Webhooks:RetrySchedule` | 5 s, 5 m, 30 m, 2 h, 5 h, 10 h, 10 h | Delays after attempt 1, 2, ... |
 | `Webhooks:ThrottleExtraDelay` | `00:01:00` | Extra delay when the receiver answers 429/502/504 |
 | `Webhooks:MaxResponseSnippetBytes` | 1024 | Response bytes kept in the attempt log |

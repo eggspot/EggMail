@@ -261,8 +261,13 @@ public sealed class WebhookDispatcher : IAsyncDisposable
 
     private async ValueTask DisableAsync(WebhookEndpointRecord endpoint, string reason, DateTimeOffset now, CancellationToken ct)
     {
+        // Items of one endpoint fail side by side (and so do replicas): only the attempt that really switched the endpoint off counts it and tells the tenant.
+        if (!await _config.DisableWebhookEndpointAsync(endpoint.Id, reason, now, ct).ConfigureAwait(false))
+        {
+            return;
+        }
+
         WebhookMetrics.EndpointsDisabled.Add(1);
-        await _config.DisableWebhookEndpointAsync(endpoint.Id, reason, now, ct).ConfigureAwait(false);
         _log.Write(MtaLogLevel.Warning, "webhooks", $"endpoint {endpoint.Id} of tenant {endpoint.TenantId} disabled: {reason}");
         if (_notifier is not null)
         {
