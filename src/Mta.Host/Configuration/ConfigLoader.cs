@@ -285,6 +285,7 @@ public static class ConfigLoader
                 RecentEvents = c.GetValue("History:RecentEvents", d.History.RecentEvents),
             },
             Queue = new QueueOptions { MaxLifetime = QueueMaxLifetime(c, d.Queue.MaxLifetime) },
+            Inbound = new InboundStorageOptions { RetentionDays = c.GetValue("Inbound:RetentionDays", d.Inbound.RetentionDays), MaxRetentionDays = c.GetValue("Inbound:MaxRetentionDays", d.Inbound.MaxRetentionDays) },
             Content = new ContentOptions
             {
                 Retain = !string.Equals(c["Content:Mode"], "None", StringComparison.OrdinalIgnoreCase),
@@ -368,13 +369,23 @@ public static class ConfigLoader
         foreach (var (name, value) in new[]
         {
             ("Retention:MetadataDays", r.MetadataDays), ("Stats:HourlyRetentionDays", r.StatsHourlyDays), ("Stats:DailyRetentionDays", r.StatsDailyDays),
-            ("Webhooks:OutboxRetentionDays", r.WebhookOutboxDays), ("Webhooks:AttemptLogDays", r.WebhookAttemptLogDays),
+            ("Webhooks:OutboxRetentionDays", r.WebhookOutboxDays), ("Webhooks:AttemptLogDays", r.WebhookAttemptLogDays), ("Inbound:RetentionDays", c.Storage.Inbound.RetentionDays), ("Inbound:MaxRetentionDays", c.Storage.Inbound.MaxRetentionDays),
         })
         {
             if (value < 0)
             {
                 errors.Add($"{name} must be 0 (keep forever) or a positive number of days, not {value}.");
             }
+        }
+
+        if (c.Storage.Inbound.MaxRetentionDays > 0 && (c.Storage.Inbound.RetentionDays == 0 || c.Storage.Inbound.RetentionDays > c.Storage.Inbound.MaxRetentionDays))
+        {
+            errors.Add("Inbound:RetentionDays must be between 1 and Inbound:MaxRetentionDays when that ceiling is set.");
+        }
+
+        if (c.Inbound.MaxMessagesPerMinute < 1 || c.Inbound.MaxMessagesPerMinutePerRemote < 1 || c.Inbound.MaxStoredBytesPerDomain < 0 || c.Inbound.MaxStoredBytesPerTenant < 0 || c.Inbound.MaxMessageSize is < 1024)
+        {
+            errors.Add("Inbound:MaxMessagesPerMinute and MaxMessagesPerMinutePerRemote must be at least 1, MaxMessageSize at least 1024, and the stored-bytes limits not negative (0 is unlimited).");
         }
 
         if (c.Storage.Content.RetentionDays is < 6 or > 30)

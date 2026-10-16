@@ -60,6 +60,14 @@ public class TenantIsolationTests : IAsyncLifetime
         ("POST", "/api/v1/domains/{id}/verify", "{}"),
         ("POST", "/api/v1/domains/{id}/dkim/rotate", "{}"),
         ("DELETE", "/api/v1/domains/{id}/dkim/rotate", null),
+        ("GET", "/api/v1/domains/{id}/inbound", null),
+        ("PATCH", "/api/v1/domains/{id}/inbound", """{"enabled":true}"""),
+        ("GET", "/api/v1/domains/{id}/inbound/routes", null),
+        ("POST", "/api/v1/domains/{id}/inbound/routes", "{}"),
+        ("GET", "/api/v1/domains/{id}/inbound/routes/match?address=x%40example.com", null),
+        ("GET", "/api/v1/domains/{id}/inbound/routes/{routeId}", null),
+        ("PATCH", "/api/v1/domains/{id}/inbound/routes/{routeId}", "{}"),
+        ("DELETE", "/api/v1/domains/{id}/inbound/routes/{routeId}", null),
         ("GET", "/api/v1/messages/{id}", null),
         ("GET", "/api/v1/messages/{id}/events", null),
         ("GET", "/api/v1/messages/{id}/content", null),
@@ -82,6 +90,7 @@ public class TenantIsolationTests : IAsyncLifetime
     private string Real(string pattern) => pattern
         .Replace("{address}", Uri.EscapeDataString(_suppressed), StringComparison.Ordinal)
         .Replace("{outboxId}", _outboxId, StringComparison.Ordinal)
+        .Replace("{routeId}", Guid.NewGuid().ToString("N"), StringComparison.Ordinal)
         .Replace("{id}", pattern.Contains("/domains/", StringComparison.Ordinal) ? _domainId
             : pattern.Contains("/messages/", StringComparison.Ordinal) ? _messageId
             : pattern.Contains("/api-keys/", StringComparison.Ordinal) ? _keyId
@@ -91,6 +100,7 @@ public class TenantIsolationTests : IAsyncLifetime
     private static string Missing(string pattern) => pattern
         .Replace("{address}", Uri.EscapeDataString("nobody-" + Guid.NewGuid().ToString("N") + "@example.org"), StringComparison.Ordinal)
         .Replace("{outboxId}", Guid.NewGuid().ToString("N"), StringComparison.Ordinal)
+        .Replace("{routeId}", Guid.NewGuid().ToString("N"), StringComparison.Ordinal)
         .Replace("{id}", Guid.NewGuid().ToString("N"), StringComparison.Ordinal);
 
     private async Task<IReadOnlyList<ApiClient>> OutsidersAsync() =>

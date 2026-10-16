@@ -97,6 +97,12 @@ internal static class ApiRouteTable
 
         if (p.StartsWith("/stats", StringComparison.Ordinal)) { return (AccessPolicy.TenantScoped, ApiScopes.Read); }
         if (p == "/settings") { return method == "GET" ? (AccessPolicy.TenantScoped, ApiScopes.Read) : (AccessPolicy.TenantSessionForWrites, null); }
+        // Received mail (decision 95): reading needs inbound:read, every change (settings, routes, delete, erase, retry) inbound:write.
+        if (p.StartsWith("/inbound", StringComparison.Ordinal) || (p.StartsWith("/domains/", StringComparison.Ordinal) && p.Contains("/inbound", StringComparison.Ordinal)))
+        {
+            return (AccessPolicy.TenantScoped, method == "GET" ? ApiScopes.InboundRead : ApiScopes.InboundWrite);
+        }
+
         if (p.StartsWith("/domains", StringComparison.Ordinal)) { return (AccessPolicy.TenantScoped, ApiScopes.Domains); }
         if (p.StartsWith("/webhook", StringComparison.Ordinal)) { return (AccessPolicy.TenantScoped, ApiScopes.Webhooks); }
         if (p.StartsWith("/suppressions", StringComparison.Ordinal)) { return (AccessPolicy.TenantScoped, ApiScopes.Suppressions); }

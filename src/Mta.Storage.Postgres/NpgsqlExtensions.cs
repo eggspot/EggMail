@@ -28,13 +28,64 @@ internal static class PostgresErrors
                 case PostgresException pg:
                     return pg.SqlState is { } state
                         && (state.StartsWith("08", StringComparison.Ordinal)
-                            || state is "53300" or "53400" or "57P01" or "57P02" or "57P03" or "58000" or "58030");
+                            || state is "25006" or "53300" or "53400" or "57P01" or "57P02" or "57P03" or "58000" or "58030");
                 case SocketException:
                 case IOException:
                 case TimeoutException:
                     return true;
                 case NpgsqlException n when n.IsTransient:
                     return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>The server has no room to write (SQLSTATE 53100, disk full): the receive path answers <c>452 4.3.1</c>, like a full SQLite disk.</summary>
+    public static bool IsDiskFull(Exception exception)
+    {
+        for (Exception? e = exception; e is not null; e = e.InnerException)
+        {
+            if (e is PostgresException { SqlState: "53100" })
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>A failure that will probably not repeat: a serialization failure, a deadlock or a statement timeout. The caller retries later (<c>451</c>).</summary>
+    public static bool IsRetryable(Exception exception)
+    {
+        // A statement the caller cancelled is reported by the server as 57014 too, but it surfaces as an OperationCanceledException: that is the caller's decision and stays one.
+        for (Exception? e = exception; e is not null; e = e.InnerException)
+        {
+            if (e is OperationCanceledException)
+            {
+                return false;
+            }
+        }
+
+        for (Exception? e = exception; e is not null; e = e.InnerException)
+        {
+            if (e is PostgresException { SqlState: SerializationFailure or DeadlockDetected or "57014" })
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>A constraint violation (SQLSTATE class 23: unique, foreign key, check, not null).</summary>
+    public static bool IsConstraint(Exception exception)
+    {
+        for (Exception? e = exception; e is not null; e = e.InnerException)
+        {
+            if (e is PostgresException { SqlState: { } state })
+            {
+                return state.StartsWith("23", StringComparison.Ordinal);
             }
         }
 

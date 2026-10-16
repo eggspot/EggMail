@@ -54,6 +54,8 @@ internal sealed class SqliteRuntime
 
     public EfConfigStore<ConfigDbContext> ConfigStore { get; set; } = null!;
 
+    public EfInboundMessageStore<QueueDbContext> InboundMessages { get; set; } = null!;
+
     public StatsBucketer Bucketer { get; set; } = null!;
 
     public IEnumerable<SqliteFileWriter> Writers

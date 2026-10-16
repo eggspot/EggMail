@@ -205,8 +205,8 @@ public class PortabilityUnitTests : IDisposable
         Assert.Equal(TransferTables.All.Count, TransferTables.All.Select(t => t.Name).Distinct().Count());
         Assert.All(TransferTables.All.Where(t => t.PerDay), t => Assert.Equal(TransferPart.History, t.Part));
         Assert.All(TransferTables.Of(TransferPart.History), t => Assert.True(t.PerDay));
-        Assert.Equal(["delivery_queue", "webhook_outbox"], TransferTables.All.Where(t => t.HasHold).Select(t => t.Name));
-        Assert.Equal(["message_spool", "message_raw_retained"], TransferTables.All.Where(t => t.Body is not null).Select(t => t.Name));
+        Assert.Equal(["delivery_queue", "webhook_outbox", "inbound_message"], TransferTables.All.Where(t => t.HasHold).Select(t => t.Name));
+        Assert.Equal(["message_spool", "inbound_message_raw", "message_raw_retained"], TransferTables.All.Where(t => t.Body is not null).Select(t => t.Name));
         Assert.Equal(["dkim_key", "webhook_endpoint", "relay_route", "certificate", "acme_account"], TransferTables.All.Where(t => t.Secrets.Count > 0).Select(t => t.Name));
         Assert.Equal(TransferTables.All.OrderBy(t => (int)t.Part).Select(t => t.Name), TransferTables.All.Select(t => t.Name)); // import order: config, stats, queue, history
         Assert.Throws<KeyNotFoundException>(() => TransferTables.ByName("lease"));

@@ -122,6 +122,32 @@ public abstract class InjectionConformance : StorageTestBase
     }
 
     [Fact]
+    public async Task Received_mail_is_searched_and_erased_by_filters_that_are_literals_and_text_that_cannot_be_stored_matches_nothing()
+    {
+        foreach (string payload in Payloads)
+        {
+            foreach (InboundMessageQuery query in new[]
+            {
+                new InboundMessageQuery(TenantA, Recipient: payload),
+                new InboundMessageQuery(TenantA, Sender: payload),
+                new InboundMessageQuery(TenantA, SubjectContains: payload),
+            })
+            {
+                Page<InboundMessage> page = await Storage.Inbound.SearchAsync(query, CancellationToken.None);
+                Assert.Empty(page.Items);   // nothing is stored, and a filter never widens to match everything
+                try
+                {
+                    Assert.Equal(0, await Storage.Inbound.DeleteMatchingAsync(query, CancellationToken.None));
+                }
+                catch (ArgumentException)
+                {
+                    // A filter that is blank once trimmed is "no filter", which an erasure refuses (documented): the same on every backend.
+                }
+            }
+        }
+    }
+
+    [Fact]
     public async Task A_cursor_is_never_executed_and_never_leaks_another_tenants_rows()
     {
         var (a, b) = await SeedAsync();

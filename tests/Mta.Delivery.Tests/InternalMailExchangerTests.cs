@@ -5,7 +5,7 @@ using Mta.Storage;
 namespace Mta.Delivery.Tests;
 
 /// <summary>
-/// Security regression tests (docs/security-test-map.md, RELAY-6; decision 96): a mail exchanger the server refuses to talk to because it is in an internal network
+/// Security regression tests (docs/security-test-map.md, RELAY-6; decision 97): a mail exchanger the server refuses to talk to because it is in an internal network
 /// is the operator's policy, not a verdict on the recipient. The mail waits (and bounces at expiry saying why); the recipient is never bounced at once or suppressed.
 /// </summary>
 public class InternalMailExchangerTests

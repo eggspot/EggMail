@@ -27,6 +27,7 @@ public static class ApiCodes
     public const string UnsupportedMediaType = "unsupported_media_type";
     public const string ServerError = "server_error";
     public const string TenantDisabled = "tenant_disabled";
+    public const string InboundBodyGone = "inbound_body_gone";
     public const string PasswordChangeRequired = "password_change_required";
 
     /// <summary>Short human title per code (RFC 9457 <c>title</c>).</summary>
@@ -51,6 +52,7 @@ public static class ApiCodes
         Conflict => "Conflict",
         UnsupportedMediaType => "Unsupported media type",
         TenantDisabled => "Account disabled",
+        InboundBodyGone => "Message body is gone",
         PasswordChangeRequired => "Password change required",
         _ => status >= 500 ? "Internal server error" : "Request failed",
     };
