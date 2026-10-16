@@ -124,6 +124,66 @@ public sealed class AcmeRenewalService
     public static TimeSpan Backoff(int failures) =>
         TimeSpan.FromMinutes(Math.Min(360, 10 * Math.Pow(2, Math.Max(0, failures - 1))));
 
+    /// <summary>The lease that makes one replica at a time order the certificate called <paramref name="certificateName"/>.</summary>
+    internal static string LeaseName(string certificateName) => $"acme-renew:{certificateName}";
+
+    /// <summary>The longest a CA's <c>Retry-After</c> postpones the next attempt (a rate limit can ask for days; a day keeps a wrong or hostile value harmless).</summary>
+    public static readonly TimeSpan MaxRetryAfter = TimeSpan.FromDays(1);
+
+    /// <summary>
+    /// The wait after the <paramref name="failures"/>-th failure in a row: the back-off, or what the CA asked for in <c>Retry-After</c> (up to <see cref="MaxRetryAfter"/>)
+    /// when that is longer, since asking earlier cannot work and a rate-limited client that keeps asking is the one that stays limited.
+    /// </summary>
+    internal static TimeSpan WaitAfterFailure(int failures, Exception error)
+    {
+        var wait = Backoff(failures);
+        if (error is AcmeException { RetryAfter: { } asked } && asked > wait)
+        {
+            wait = asked < MaxRetryAfter ? asked : MaxRetryAfter;
+        }
+
+        return wait;
+    }
+
+    /// <summary>
+    /// Is what the CA sent the answer to this order? The leaf (first certificate) must go with the private key we hold, cover every name ordered (the runner also
+    /// refuses an expired one; it judges by its own clock): a CA bug or a mixed-up answer must end as a recorded failure with the old certificate still served, never as a
+    /// stored certificate that fails every handshake (or is served for names it does not carry).
+    /// </summary>
+    private static void VerifyIssued(AcmeIssuedCertificate issued, IReadOnlyList<string> domains)
+    {
+        var chain = new System.Security.Cryptography.X509Certificates.X509Certificate2Collection();
+        try
+        {
+            chain.ImportFromPem(issued.ChainPem);
+        }
+        catch (System.Security.Cryptography.CryptographicException ex)
+        {
+            throw new AcmeException($"The certificate chain the CA sent cannot be read: {ex.Message}", ex);
+        }
+
+        if (chain.Count == 0)
+        {
+            throw new AcmeException("The CA sent no certificate.");
+        }
+
+        var leaf = chain[0];
+        var covered = CertificateMaterial.SubjectsOf(leaf);
+        if (domains.FirstOrDefault(d => !AcmeNames.IsCovered(covered, d)) is { } missing)
+        {
+            throw new AcmeException($"The CA issued a certificate that does not cover '{missing}' (it covers {string.Join(", ", covered)}).");
+        }
+
+        try
+        {
+            using var withKey = System.Security.Cryptography.X509Certificates.X509Certificate2.CreateFromPem(leaf.ExportCertificatePem(), System.Security.Cryptography.PemEncoding.WriteString("PRIVATE KEY", issued.PrivateKeyPkcs8));
+        }
+        catch (Exception ex) when (ex is System.Security.Cryptography.CryptographicException or ArgumentException)
+        {
+            throw new AcmeException("The private key of the order does not belong to the certificate the CA sent.", ex);
+        }
+    }
+
     public async Task RunAsync(CancellationToken ct)
     {
         try
@@ -289,10 +349,23 @@ public sealed class AcmeRenewalService
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            var failed = AcmeRenewalSchedule.FromFailure(current.Thumbprint, previous, now, ex.Message, transient: ex is AcmeException { Transient: true } or HttpRequestException or TimeoutException);
+            var failed = AcmeRenewalSchedule.FromFailure(current.Thumbprint, previous, now, ex.Message, transient: ex is AcmeException { Transient: true } or HttpRequestException or TimeoutException,
+                (ex as AcmeException)?.RetryAfter);
             _log.Write(MtaLogLevel.Warning, "acme", $"renewal information for certificate '{current.Name}' is unavailable ({ex.Message}); using the {(previous is { HasWindow: true } ? "earlier window" : "lifetime rule")}, asking again at {failed.NextCheckAt:u}", ex);
             return failed;
         }
+    }
+
+    /// <summary>Renews the lease with its fencing token; false (and a Warning saying <paramref name="what"/>) when another replica took it over.</summary>
+    private async Task<bool> StillHoldsLeaseAsync(string name, LeaseRecord lease, string what, CancellationToken ct)
+    {
+        if (await _config.RenewLeaseAsync(LeaseName(name), _owner, lease.FencingToken, LeaseDuration, _clock.UtcNow, ct).ConfigureAwait(false))
+        {
+            return true;
+        }
+
+        _log.Write(MtaLogLevel.Warning, "acme", $"the renewal lease of '{name}' was taken over by another replica; {what}, and nothing is recorded for it");
+        return false;
     }
 
     private async Task<bool> RenewAsync(string name, IReadOnlyList<string> domains, bool force, CancellationToken ct)
@@ -315,7 +388,7 @@ public sealed class AcmeRenewalService
             return false;
         }
 
-        var lease = await _config.TryAcquireLeaseAsync($"acme-renew:{name}", _owner, LeaseDuration, now, ct).ConfigureAwait(false);
+        var lease = await _config.TryAcquireLeaseAsync(LeaseName(name), _owner, LeaseDuration, now, ct).ConfigureAwait(false);
         if (lease is null)
         {
             _log.Write(MtaLogLevel.Debug, "acme", $"another replica is renewing '{name}'");
@@ -345,23 +418,48 @@ public sealed class AcmeRenewalService
             string? accountKey = account is null ? null : Encoding.UTF8.GetString(_protector.Unprotect(account.AccountKeyProtected, SecretPurposes.AcmeAccountKey));
             // The account is stored the moment the CA has created it, not after the order: a failed order (a DNS record that never appears) must
             // not strand an account whose key is lost, because every retry would then register another one and CAs rate-limit registrations.
+            // A replacement of an account the CA forgot takes over the row of the old one, so the directory never has two.
             bool accountSaved = account is not null;
             async Task SaveAccountAsync(AcmeAccountCreated created, CancellationToken token)
             {
-                await _config.UpsertAcmeAccountAsync(new AcmeAccountRecord(Ids.New(), CaDirectoryUrl, _options.Email ?? "",
+                await _config.UpsertAcmeAccountAsync(new AcmeAccountRecord(account?.Id ?? Ids.New(), CaDirectoryUrl, _options.Email ?? "",
                     _protector.Protect(Encoding.UTF8.GetBytes(created.AccountKeyPem), SecretPurposes.AcmeAccountKey), created.AccountUrl, now), token).ConfigureAwait(false);
                 accountSaved = true;
             }
 
             // A certificate that shares a name with the order is the one this order renews: say so (ARI "replaces"); the runner does it where the CA supports it.
             string? replaces = current is not null && current.Subjects.Intersect(domains, StringComparer.OrdinalIgnoreCase).Any() ? current.ChainPem : null;
-            var request = new AcmeOrderRequest(CaDirectoryUrl, _options.Email ?? "", domains, accountKey, _options.PropagationDelay, SaveAccountAsync, replaces,
-                challenge, _http, name, accountKey is null ? _options.EabKeyId : null, accountKey is null ? ReadEabHmacKey() : null);
-            var issued = await _runner.IssueAsync(request, _dns ?? NoDnsChallengeProvider.Instance, ct).ConfigureAwait(false);
+            AcmeOrderRequest OrderFor(string? key) => new(CaDirectoryUrl, _options.Email ?? "", domains, key, _options.PropagationDelay, SaveAccountAsync, replaces,
+                challenge, _http, name, key is null ? _options.EabKeyId : null, key is null ? ReadEabHmacKey() : null);
+            AcmeIssuedCertificate issued;
+            try
+            {
+                issued = await _runner.IssueAsync(OrderFor(accountKey), _dns ?? NoDnsChallengeProvider.Instance, ct).ConfigureAwait(false);
+            }
+            catch (AcmeException ex) when (ex.AccountUnknown && accountKey is not null)
+            {
+                // The CA has no account for the stored key (a test CA that was reset, a CA that lost its database): the key is useless and no order can ever succeed with it.
+                // Register a new account once, in place of the old one; any other refusal of the account (deactivated, unauthorized) is for the operator.
+                _log.Write(MtaLogLevel.Warning, "acme", $"the CA does not know the stored ACME account for {CaDirectoryUrl}; registering a new one for certificate '{name}'");
+                accountKey = null;
+                accountSaved = false;
+                issued = await _runner.IssueAsync(OrderFor(null), _dns ?? NoDnsChallengeProvider.Instance, ct).ConfigureAwait(false);
+            }
+
             if (!accountSaved)
             {
                 // A runner that does not report accounts as they are created (the fake in tests): store it with the result.
                 await SaveAccountAsync(new AcmeAccountCreated(issued.AccountKeyPem, issued.AccountUrl), ct).ConfigureAwait(false);
+            }
+
+            VerifyIssued(issued, domains);
+
+            // The order can outlast the lease (a stalled process, a CA that took minutes): when it expired and another replica took over, that replica's result stands and
+            // this one is dropped without touching the renewal row (the other replica's status is the truth). Renewing here also extends the lease over the write.
+            if (!await _config.RenewLeaseAsync(LeaseName(name), _owner, lease.FencingToken, LeaseDuration, _clock.UtcNow, ct).ConfigureAwait(false))
+            {
+                _log.Write(MtaLogLevel.Warning, "acme", $"the renewal lease of '{name}' was taken over by another replica while the CA was issuing; the certificate of this order is discarded");
+                return false;
             }
 
             var leaf = new System.Security.Cryptography.X509Certificates.X509Certificate2Collection();
@@ -380,6 +478,11 @@ public sealed class AcmeRenewalService
         catch (AcmeListenerUnavailableException ex) when (!ct.IsCancellationRequested)
         {
             // The CA was not asked: record why, count it, and try again soon (the listener retries its bind every minute).
+            if (!await StillHoldsLeaseAsync(name, lease, "the order was not started", ct).ConfigureAwait(false))
+            {
+                return false;
+            }
+
             int failures = (renewal?.Failures ?? 0) + 1;
             var retryAt = now + ListenerRetry;
             await _config.UpsertAcmeRenewalAsync(new AcmeRenewalRecord(name, "failed", now, retryAt, failures, ex.Message, null, renewal?.AriJson), ct).ConfigureAwait(false);
@@ -390,15 +493,22 @@ public sealed class AcmeRenewalService
         {
             // Any failure of the attempt (the CA refusing, unreachable or too slow, the DNS provider failing, an unreadable chain) is recorded and
             // backed off, never thrown: an exception escaping here would end the renewal loop until the next restart.
+            // The renewal row belongs to whoever holds the lease: a replica that lost it (its order outlasted 20 minutes) must not write its failure over the result
+            // of the replica that took over.
+            if (!await StillHoldsLeaseAsync(name, lease, $"the order failed ({ex.Message})", ct).ConfigureAwait(false))
+            {
+                return false;
+            }
+
             int failures = (renewal?.Failures ?? 0) + 1;
-            var retryAt = now + Backoff(failures);
+            var retryAt = now + WaitAfterFailure(failures, ex);
             await _config.UpsertAcmeRenewalAsync(new AcmeRenewalRecord(name, "failed", now, retryAt, failures, ex.Message, null, renewal?.AriJson), ct).ConfigureAwait(false);
             _log.Write(MtaLogLevel.Error, "acme", $"certificate order for '{name}' failed (attempt {failures}); next try {retryAt:u}", ex);
             return false;
         }
         finally
         {
-            await _config.ReleaseLeaseAsync($"acme-renew:{name}", _owner, CancellationToken.None).ConfigureAwait(false);
+            await _config.ReleaseLeaseAsync(LeaseName(name), _owner, CancellationToken.None).ConfigureAwait(false);
         }
     }
 }
