@@ -466,6 +466,7 @@ public class ClientTests
             await cts.CancelAsync();
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => send);
             Assert.False(conn.EndOfDataStarted);
+            Assert.False(conn.IsReusable);   // out of step with the peer: never pooled again, never asked to QUIT (which would wait for a reply that is not coming)
         }
 
         // Cancelled while waiting for the final reply: the server may have accepted the message.
@@ -479,6 +480,7 @@ public class ClientTests
             await cts.CancelAsync();
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => send);
             Assert.True(conn.EndOfDataStarted);
+            Assert.False(conn.IsReusable);
         }
     }
 
