@@ -37,6 +37,12 @@ public sealed class DeliveryServices
 
     /// <summary>Collects TLS-RPT data about sessions to MTA-STS / DANE domains; null disables reporting.</summary>
     public Mta.Tls.TlsRpt.TlsRptCollector? TlsReports { get; init; }
+
+    /// <summary>
+    /// How the certificate of an MX host is validated when the policy asks for PKIX validation: private trust anchors instead of the system store, and the
+    /// clock used for validity. Null (the default, and what production uses) means the system store and the system time. Tests and labs with a private CA set it.
+    /// </summary>
+    public RemoteCertificateValidatorOptions? CertificateValidation { get; init; }
 }
 
 /// <summary>
@@ -483,7 +489,8 @@ public sealed class DeliveryProcessor
                 }
 
                 hosts++;
-                var decision = await _s.Tls.ResolveForMxAsync(domainTls, exchanger.Host, mx.MxAuthenticated, _options.RemotePort, ct).ConfigureAwait(false);
+                int port = _options.RemotePortFor(exchanger.Host);
+                var decision = await _s.Tls.ResolveForMxAsync(domainTls, exchanger.Host, mx.MxAuthenticated, port, ct).ConfigureAwait(false);
                 if (decision.IsBlocked)
                 {
                     TlsReportRecorder.RecordBlocked(_s.TlsReports, decision, ReportableSendingIp(ProbeSourceAddress(exchanger.Addresses.FirstOrDefault())));
@@ -516,7 +523,7 @@ public sealed class DeliveryProcessor
                     {
                         Host = exchanger.Host,
                         Address = address,
-                        Port = _options.RemotePort,
+                        Port = port,
                         Tls = BuildTlsPolicy(decision, exchanger.Host, out var validator),
                     };
                     var result = await SendOnceAsync(target, current, ct).ConfigureAwait(false);
@@ -705,7 +712,7 @@ public sealed class DeliveryProcessor
         };
     }
 
-    private static SmtpTlsPolicy BuildTlsPolicy(TlsPolicyDecision decision, string mxHost, out RemoteCertificateValidator? validator)
+    private SmtpTlsPolicy BuildTlsPolicy(TlsPolicyDecision decision, string mxHost, out RemoteCertificateValidator? validator)
     {
         validator = null;
         if (!decision.AttemptTls)
@@ -713,7 +720,7 @@ public sealed class DeliveryProcessor
             return SmtpTlsPolicy.Disabled;
         }
 
-        validator = new RemoteCertificateValidator(decision);
+        validator = new RemoteCertificateValidator(decision, _s.CertificateValidation);
         return new SmtpTlsPolicy
         {
             Mode = SmtpTlsMode.StartTls,

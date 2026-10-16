@@ -33,6 +33,14 @@ public sealed class DeliveryOptions
     /// <summary>Destination port for direct MX delivery. 25 in production; tests point it at a loopback server.</summary>
     public int RemotePort { get; init; } = 25;
 
+    /// <summary>
+    /// Decides the destination port per MX host name when set (it also names the DANE TLSA record, <c>_port._tcp.host</c>). Null (production) means
+    /// <see cref="RemotePort"/> for every host. A lab or test that runs several loopback servers behind one DNS zone needs a port per host name.
+    /// </summary>
+    public Func<string, int>? RemotePortResolver { get; init; }
+
+    internal int RemotePortFor(string mxHost) => RemotePortResolver?.Invoke(mxHost) ?? RemotePort;
+
     /// <summary>Most recipients in one SMTP transaction to one domain (RFC 5321 minimum for a server is 100).</summary>
     public int MaxRecipientsPerTransaction { get; init; } = 100;
 

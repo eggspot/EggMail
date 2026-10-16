@@ -35,6 +35,7 @@
     <Project Path="tests/Mta.Mime.Tests/Mta.Mime.Tests.csproj" />
     <Project Path="tests/Mta.Observability.Tests/Mta.Observability.Tests.csproj" />
     <Project Path="tests/Mta.Policy.Tests/Mta.Policy.Tests.csproj" />
+    <Project Path="tests/Mta.RemoteMta.Tests/Mta.RemoteMta.Tests.csproj" />
     <Project Path="tests/Mta.Smtp.Client.Tests/Mta.Smtp.Client.Tests.csproj" />
     <Project Path="tests/Mta.Smtp.Protocol.Tests/Mta.Smtp.Protocol.Tests.csproj" />
     <Project Path="tests/Mta.Smtp.Server.Tests/Mta.Smtp.Server.Tests.csproj" />
