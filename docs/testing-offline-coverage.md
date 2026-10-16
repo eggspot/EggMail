@@ -42,7 +42,7 @@ Run the family with `dotnet test --filter "FullyQualifiedName~Lifecycle"` (or `~
 - A crash between queueing the expiry notice and recording the expiry produced a second notice; notices now carry an idempotency key.
 - A cancelled outbound SMTP connection waited 5 s for the reply to QUIT (every connection cut by a quiesce or shutdown).
 - `webhook.endpoint.disabled` was sent once per failing item of the endpoint instead of once.
-- The SMTP server kept a 2 s timer alive after every closed session.
+- The SMTP server kept a 2 s timer alive after every closed session, and `StopAsync` kept its grace timer alive for the whole grace period.
 - `GET /messages/{id}` answered 500 for ids whose time field is outside the supported range (about one random GUID in ten).
 
 ### What is NOT proven

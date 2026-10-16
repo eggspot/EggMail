@@ -177,13 +177,18 @@ public sealed class SmtpServer : IAsyncDisposable
         }
 
         var grAll = Task.WhenAll(_sessions.Keys);
-        if (await Task.WhenAny(grAll, Task.Delay(grace)).ConfigureAwait(false) != grAll)
+        // The waits are cancelled as soon as the sessions are done: a bare Task.Delay keeps its timer alive for the whole grace period after every stop.
+        using var graceTimer = new CancellationTokenSource();
+        if (await Task.WhenAny(grAll, Task.Delay(grace, graceTimer.Token)).ConfigureAwait(false) != grAll)
         {
             await _stoppingCts.CancelAsync().ConfigureAwait(false);
-            await Task.WhenAny(grAll, Task.Delay(TimeSpan.FromSeconds(5))).ConfigureAwait(false);
+            using var forceTimer = new CancellationTokenSource();
+            await Task.WhenAny(grAll, Task.Delay(TimeSpan.FromSeconds(5), forceTimer.Token)).ConfigureAwait(false);
+            await forceTimer.CancelAsync().ConfigureAwait(false);
         }
         else
         {
+            await graceTimer.CancelAsync().ConfigureAwait(false);
             await _stoppingCts.CancelAsync().ConfigureAwait(false);
         }
 
