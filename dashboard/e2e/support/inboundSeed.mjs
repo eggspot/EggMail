@@ -14,7 +14,7 @@ const STATE = { pending: 0, done: 1, failed: 2 };
 const COLUMNS = [
   'id', 'tenant_id', 'domain_id', 'domain', 'received_at', 'remote_address', 'helo', 'tls_used', 'envelope_from', 'envelope_to', 'subject', 'size', 'spf', 'spf_domain', 'spf_helo',
   'dkim', 'dkim_domain', 'dmarc', 'dmarc_policy', 'arc', 'disposition', 'route_id', 'action_kind', 'action_state', 'action_attempts', 'retry_generation', 'action_next_attempt_at',
-  'action_finished_at', 'action_last_error', 'action_note', 'forward_message_id', 'has_raw', 'lease_owner', 'lease_until', 'transfer_switch_id',
+  'action_finished_at', 'action_last_error', 'action_note', 'forward_message_id', 'has_raw', 'lease_owner', 'lease_until', 'claim_sequence', 'transfer_switch_id',
 ];
 
 /** A UUIDv7 for the given time: ids sort by time, and the list shows newest first. */
@@ -86,6 +86,7 @@ export function seedInboundMessage(stack, { tenantId, domainId, domain, to, from
       has_raw: 1,
       lease_owner: null,
       lease_until: 0,
+      claim_sequence: 0,
       transfer_switch_id: null,
     };
     db.prepare(`INSERT INTO inbound_message (${COLUMNS.join(', ')}) VALUES (${COLUMNS.map(() => '?').join(', ')})`).run(...COLUMNS.map((c) => values[c]));
