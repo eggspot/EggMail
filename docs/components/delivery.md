@@ -82,7 +82,7 @@ The processor needs no change: it never sees a cancelled delivery, because the r
 
 ## Behaviour pinned by the fake-remote-MTA suite
 
-See decision 97 and [../testing-offline-coverage.md](../testing-offline-coverage.md). In short: a `421` anywhere in the envelope is the verdict and closes the connection; under opportunistic TLS a broken STARTTLS upgrade is reported and the message is retried in plaintext on a new connection; a temporary answer from the preferred MX (greylisting, 4xx) is the answer and the next MX is not tried, only connection, banner and TLS-policy failures move on; a peer that closes a reused connection with `421` after N messages costs the next message a deferral (known limitation: it is not retried at once on a fresh connection).
+See decision 100 and [../testing-offline-coverage.md](../testing-offline-coverage.md). In short: a `421` anywhere in the envelope is the verdict and closes the connection; under opportunistic TLS a broken STARTTLS upgrade is reported and the message is retried in plaintext on a new connection; a temporary answer from the preferred MX (greylisting, 4xx) is the answer and the next MX is not tried, only connection, banner and TLS-policy failures move on; a peer that closes a reused connection with `421` after N messages costs the next message a deferral (known limitation: it is not retried at once on a fresh connection).
 
 ## Known gaps
 
