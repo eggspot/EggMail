@@ -146,7 +146,11 @@ public static class Personalities
     {
         public static Step AdministrativeProhibition => Step.Reply(550, null, "Administrative prohibition");
 
-        public static Step UnroutableAddress => Step.Reply(550, null, "Verification failed for <nobody@dest.example>", "Unrouteable address", "Sender verify failed");
+        /// <summary>The answer to an unknown recipient.</summary>
+        public static Step UnroutableAddress => Step.Reply(550, null, "Unrouteable address");
+
+        /// <summary>The three line answer of Exim's sender verification ACL, which is about the envelope sender, not the recipient.</summary>
+        public static Step SenderVerifyFailed => Step.Reply(550, null, "Verification failed for <sender@example.org>", "Unrouteable address", "Sender verify failed");
 
         public static Step TemporaryLocalProblem => Step.Reply(451, null, "Temporary local problem - please try later");
 

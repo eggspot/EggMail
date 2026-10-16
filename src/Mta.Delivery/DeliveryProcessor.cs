@@ -532,6 +532,24 @@ public sealed class DeliveryProcessor
                     result.Validator = validator;
                     result.ReceivingIp = address.ToString();
                     ReportTls(first.RecipientDomain, decision, result);
+                    if (result.Route == RouteAttemptResult.TlsPolicyFailure && result.TlsFailure == TlsFailure.HandshakeFailed && decision.AllowsPlaintextFallback)
+                    {
+                        // Opportunistic TLS (RFC 7435): a server whose STARTTLS upgrade breaks (an old TLS stack, a middlebox, a half-configured certificate) must not keep mail
+                        // from being delivered, since the message could have been sent in clear had the server not offered TLS at all. The failure has been reported; the
+                        // message is offered again on a new connection that does not try STARTTLS. Policies that require TLS (encrypt, verify, MTA-STS enforce, DANE) never get here.
+                        var clearTarget = new SmtpRemoteTarget { Host = exchanger.Host, Address = address, Port = port, Tls = SmtpTlsPolicy.Disabled };
+                        var clear = await SendOnceAsync(clearTarget, current, ct).ConfigureAwait(false);
+                        clear.MxHost = exchanger.Host;
+                        clear.Decision = decision;
+                        clear.ReceivingIp = address.ToString();
+                        if (clear.Tls is { } clearSession)
+                        {
+                            clear.Tls = clearSession with { StartTlsAdvertised = true, PlaintextFallback = true };
+                        }
+
+                        result = clear;
+                    }
+
                     if (result.Route is RouteAttemptResult.ConnectTimeout or RouteAttemptResult.ConnectRefused)
                     {
                         _s.Routes.ReportMxHost(exchanger.Host, result.Route);
@@ -1270,6 +1288,9 @@ public sealed class DeliveryProcessor
             return null;
         }
 
+        // The policy's own verdict decides: the platform alone knows only the system trust store, so a DANE-authenticated server (usually a self-signed
+        // certificate pinned in DNS) or one that chains to a configured private CA would show as unverified.
+        bool verified = a.Validator?.Outcome is { } outcome ? outcome.Verified && s.Used : s.Verified;
         return new TlsInfo(
             s.Used,
             s.Protocol,
@@ -1278,7 +1299,7 @@ public sealed class DeliveryProcessor
             s.PeerIssuer,
             s.PeerSha256,
             s.PolicyErrors == System.Net.Security.SslPolicyErrors.None ? null : s.PolicyErrors.ToString(),
-            s.Verified,
+            verified,
             a.Decision?.Kind.ToString(),
             null,
             s.StartTlsAdvertised,
