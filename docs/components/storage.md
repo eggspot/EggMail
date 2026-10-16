@@ -112,7 +112,7 @@ Idempotent, safe to call repeatedly. In order: flush statistics; metadata retent
 
 **Statistics:** `Add` is a dictionary lookup and an interlocked add; the buffer is drained into `INSERT … ON CONFLICT DO UPDATE` upserts about every 10 s, on `FlushAsync` and on dispose. While writing, each (hour, tenant, sending domain) group admits the first `RecipientDomainTopNHourly` recipient domains (largest first within a flush) and buckets the rest as `other`; once an hour has `MaxSeriesPerHour` series new domains also go to `other`. This write-time top-N is approximate across flushes of one hour (documented gap); the daily rollup re-ranks by real volume. Reads see flushed data only. The recent-events ring keeps the newest `History:RecentEvents` outcome events (no content; no `queued` events).
 
-**Backup:** `BackupAsync(dir)` creates `dir/eggmail-backup-<utc>/` and runs `VACUUM INTO` per file on its own connection (a consistent snapshot while the writer keeps committing; the memory queue is skipped). Restoring is copying the files into a data directory.
+**Backup:** `BackupAsync(dir)` writes `dir/eggmail-backup-<utc>.partial/` with `VACUUM INTO` per file on its own connection (a consistent snapshot while the writer keeps committing; the memory queue is skipped) and renames it to `dir/eggmail-backup-<utc>/` when every file is done, so a backup that is cancelled, fails or is killed half-way never has the name of a backup (the scheduler would count it as the newest and skip the next one); a failure removes its work directory and the scheduler sweeps the leftovers of a kill. Restoring is copying the files into a data directory.
 
 ## Backend switch support
 

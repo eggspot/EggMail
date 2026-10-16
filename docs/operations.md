@@ -495,7 +495,7 @@ Checklist for the first real-CA run, HTTP-01: a public host name whose A/AAAA re
 
 ## Backups and restore (SQLite)
 
-Backups run while the server runs (`VACUUM INTO` per file) every `Backup:IntervalHours` into `<data>/backups/eggmail-backup-<UTC>/`; the newest `Backup:Keep` are kept. Put `Backup:Directory` on another disk when possible and copy backups off the host.
+Backups run while the server runs (`VACUUM INTO` per file) every `Backup:IntervalHours` into `<data>/backups/eggmail-backup-<UTC>/` (written as `….partial` and renamed when complete; leftovers of an interrupted backup are removed at the next check; a directory dated later than the clock is ignored and never deleted); the newest `Backup:Keep` are kept. Put `Backup:Directory` on another disk when possible and copy backups off the host.
 
 To restore: stop EggMail, copy the files of one backup directory over the data directory (replace `config.db`, `queue.db`, `stats.db`, `history.db` together), start. The state returns to the moment of the backup; mail accepted since is lost. If a file is found corrupt at start (possible after power loss with `Sqlite:SyncMode=Off`) it is moved aside (quarantined), the instance starts with a fresh file, and a warning is shown. If `config.db` is quarantined the instance starts without tenants and keys: restore it from a backup. PostgreSQL: use `pg_dump` or your platform's backups.
 
