@@ -85,7 +85,7 @@ public class TlsMaterialTests
             Assert.Equal("Bearer tok", request.Headers.Authorization!.ToString());
             string json;
             if (request.Method == HttpMethod.Get && !path.Contains("name=example.com")) { json = "{\"result\":[]}"; }
-            else if (request.Method == HttpMethod.Get) { json = "{\"result\":[{\"id\":\"zone1\"}]}"; }
+            else if (request.Method == HttpMethod.Get) { json = "{\"result\":[{\"id\":\"zone1\",\"name\":\"example.com\"}]}"; }
             else if (request.Method == HttpMethod.Post) { json = "{\"result\":{\"id\":\"rec9\"}}"; }
             else { json = "{}"; }
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(json) };

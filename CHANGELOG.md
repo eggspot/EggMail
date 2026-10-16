@@ -84,6 +84,17 @@ workflow refuses a stable tag without a non-empty section for that exact version
 - `Delivery:Throttle:MaxMessagesPerConnection` is documented as reserved: it is read and validated but the delivery engine never enforces it.
 - Webhook deliveries need direct network access to the receivers: a proxy configured through `HTTP_PROXY`/`HTTPS_PROXY` is ignored (see Security).
 
+### Fixed
+
+- ACME: a certificate the CA sends for other names, for another key, empty, cut off or already expired is no longer stored (it is a recorded failure and the old certificate keeps serving); a chain in the wrong order is corrected. A rate limit's `Retry-After` lengthens the wait before the next order (at most a day). An account the CA no longer knows is replaced once instead of failing every order. A registration the CA refused (rate limit, wrong external account binding) is reported as the CA's refusal, not as "could not be reached". A refused certificate download is the CA's refusal, not a `NullReferenceException`, and the wait for a finalizing order is bounded (decision 99).
+- ACME with several replicas: replica names were the first 12 hex digits of a version 7 id (a millisecond timestamp), so two replicas started in the same millisecond shared a lease owner; the webhook dispatcher had the same line. A replica whose renewal lease was taken over while its order ran no longer overwrites the other replica's certificate or its renewal row (neither a result nor a failure is written without the lease).
+- A damaged replacement of a certificate row no longer takes the working certificate of the same name out of the served set, and a DNS provider that fails to delete a challenge record in any way no longer turns an issued certificate into a failure.
+- Cloudflare DNS-01: rate limits, server errors and timeouts are retried, Cloudflare's error codes and messages are shown, an identical record that is already there is adopted, a token with a line end works, and the token is in no message.
+
+### Added
+
+- Offline tests for ACME and Cloudflare (a scriptable mock CA and a fake Cloudflare in `tests/Mta.Host.Tests/Acme`) and [docs/testing-offline-coverage.md](docs/testing-offline-coverage.md), which says what they prove and what they do not.
+
 ### Security
 
 - A forged bounce or complaint report could get any address suppressed for a tenant: every message carries a valid bounce address in its Return-Path and the report body decided which address was suppressed. Bounce addresses are now bound to the destination domain of the message and reports naming addresses elsewhere are ignored (decision 92). Bounce addresses issued before the change keep their old behaviour until they expire (14 days). Residual risk: the binding is to the destination domain, not the address, so someone who received one message to `gmail.com` can still get another `gmail.com` address suppressed for that tenant. Upgrading: replicas of an older build refuse the new bounce addresses (`550`), so run mixed versions only during a rollout; new builds accept old ones for 14 days.
