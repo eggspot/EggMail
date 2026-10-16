@@ -74,7 +74,9 @@ public sealed class AcmeRenewalService
     private readonly IClock _clock;
     private readonly IMtaLog _log;
     private readonly Func<double> _random;
-    private readonly string _owner = "acme-" + Ids.ToCompact(Ids.New())[..12];
+    // The whole random id: the first 12 hex digits of a UUIDv7 are only its millisecond timestamp, so two replicas created in the same millisecond would
+    // share an owner name and both be let into the renewal lease.
+    private readonly string _owner = "acme-" + Guid.NewGuid().ToString("N");
 
     /// <param name="dns">The DNS-01 provider; null when the server has no DNS credentials (HTTP-01 only).</param>
     /// <param name="random">Position inside a CA's renewal window (a number in [0, 1)); tests fix it.</param>
