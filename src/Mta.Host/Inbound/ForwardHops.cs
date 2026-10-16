@@ -1,9 +1,21 @@
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
+using Mta.Dsn;
 using Mta.Mime;
 
-namespace Mta.Dsn;
+namespace Mta.Host.Inbound;
+
+/// <summary>The hop marker of a forward at the level of a whole message: read the count a message proves, and write the copy's marker (design section 11.7).</summary>
+public interface IForwardHops
+{
+    /// <summary>The highest count among the markers that verify for this message's body; 0 when none does.</summary>
+    int ReadValidHops(ReadOnlySpan<byte> message);
+
+    /// <summary>The message with every marker removed and exactly one, for <paramref name="hops"/>, at the top.</summary>
+    byte[] Apply(ReadOnlyMemory<byte> message, int hops);
+}
+
 
 /// <summary>
 /// The signed hop marker of a forwarded message (design section 11.7): the header <c>X-EggMail-Hops: &lt;n&gt;; &lt;signature&gt;</c> where <c>signature</c> is the first 16 hex digits of
@@ -14,7 +26,7 @@ namespace Mta.Dsn;
 /// with <c>n + 1</c>; a message that arrives with <c>n</c> at <see cref="MaxHops"/> is not forwarded. A sender can therefore neither lower the count (it would have to forge the signature) nor raise it to block a victim's forwarding
 /// (a forged high count is invalid and ignored).</para>
 /// </summary>
-public sealed class ForwardHopMarker
+public sealed class ForwardHops : IForwardHops
 {
     public const string HeaderName = "X-EggMail-Hops";
 
@@ -28,7 +40,7 @@ public sealed class ForwardHopMarker
     private readonly Dictionary<int, byte[]> _keys = [];
     private readonly int _activeKeyId;
 
-    public ForwardHopMarker(VerpCodec ring)
+    public ForwardHops(VerpCodec ring)
     {
         ArgumentNullException.ThrowIfNull(ring);
         _activeKeyId = ring.ActiveKeyId;
@@ -38,9 +50,25 @@ public sealed class ForwardHopMarker
         }
     }
 
-    /// <summary>The value of the header for <paramref name="hops"/> hops on a message whose body is <paramref name="body"/>.</summary>
-    public string CreateValue(int hops, ReadOnlySpan<byte> body) =>
-        hops.ToString(CultureInfo.InvariantCulture) + "; " + Signature(_keys[_activeKeyId], hops, BodyHash(body));
+    /// <summary>The SHA-256 of the body as lower-case hex: compute it once per message.</summary>
+    public static string BodyHash(ReadOnlySpan<byte> body) => Convert.ToHexString(SHA256.HashData(body)).ToLowerInvariant();
+
+    /// <summary>The field value for a body with the hash <paramref name="bodyHash"/> that has been forwarded <paramref name="hops"/> times (this hop included): <c>3; 0123456789abcdef</c>.</summary>
+    public string CreateValue(int hops, string bodyHash) =>
+        hops.ToString(CultureInfo.InvariantCulture) + "; " + Signature(_keys[_activeKeyId], hops, bodyHash);
+
+    /// <summary>Checks the value of one <c>X-EggMail-Hops</c> field against the body hash: true with the count when the shape is right and the signature verifies under a key of the ring.</summary>
+    public bool TryVerify(string fieldValue, string bodyHash, out int hops)
+    {
+        hops = 0;
+        if (!TryParse(fieldValue, out int n, out string signature) || !IsValid(n, signature, bodyHash))
+        {
+            return false;
+        }
+
+        hops = n;
+        return true;
+    }
 
     /// <summary>
     /// The number of hops the message proves: the highest <c>n</c> among the markers with a valid signature for this message body, 0 when there is none valid. Markers with an invalid signature are ignored.
@@ -51,13 +79,8 @@ public sealed class ForwardHopMarker
         string? bodyHash = null;
         foreach (string value in MarkerValues(message, out int bodyStart))
         {
-            if (!TryParse(value, out int hops, out string signature))
-            {
-                continue;
-            }
-
             bodyHash ??= BodyHash(message[bodyStart..]);
-            if (hops > highest && IsValid(hops, signature, bodyHash))
+            if (TryVerify(value, bodyHash, out int hops) && hops > highest)
             {
                 highest = hops;
             }
@@ -70,7 +93,7 @@ public sealed class ForwardHopMarker
     public byte[] Apply(ReadOnlyMemory<byte> message, int hops)
     {
         int bodyStart = BodyStart(message.Span);
-        string value = CreateValue(hops, message.Span[bodyStart..]);
+        string value = CreateValue(hops, BodyHash(message.Span[bodyStart..]));
         return new MessageHeaderEditor(message).Remove(HeaderName).Prepend(HeaderName, value).ToArray();
     }
 
@@ -93,7 +116,6 @@ public sealed class ForwardHopMarker
     private static string Signature(byte[] key, int hops, string bodyHash) =>
         Convert.ToHexStringLower(HMACSHA256.HashData(key, Encoding.ASCII.GetBytes(Purpose + "\n" + hops.ToString(CultureInfo.InvariantCulture) + "\n" + bodyHash)))[..SignatureHexChars];
 
-    private static string BodyHash(ReadOnlySpan<byte> body) => Convert.ToHexStringLower(SHA256.HashData(body));
 
     private static bool TryParse(string value, out int hops, out string signature)
     {

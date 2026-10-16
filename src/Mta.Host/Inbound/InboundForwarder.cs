@@ -3,7 +3,6 @@ using System.Security.Cryptography;
 using Mta.Auth.Arc;
 using Mta.Auth.Domains;
 using Mta.Core;
-using Mta.Dsn;
 using Mta.Mime;
 using Mta.Storage;
 using Mta.Storage.Logic;
@@ -99,7 +98,7 @@ public sealed record InboundForwarderOptions
 /// The forward action (design section 11.7): queues a copy of a received message for the route's targets through the outbound queue as source <see cref="MessageSource.Forward"/>.
 /// <list type="bullet">
 /// <item>The targets are fixed in the route (never taken from the message) and none may be in a domain this server receives for or in the bounce domain, whatever the route said when it was written (a loop closed at run time too).</item>
-/// <item>The signed hop marker stops loops: a message that has been forwarded <see cref="ForwardHopMarker.MaxHops"/> times is not forwarded (<c>loop_detected</c>); the copy carries one marker with the count plus one.</item>
+/// <item>The signed hop marker stops loops: a message that has been forwarded <see cref="InboundRules.MaxForwardHops"/> times is not forwarded (<c>loop_detected</c>); the copy carries one marker with the count plus one.</item>
 /// <item>The suppression list is consulted here for every target (suppressed targets are left out; all of them: nothing is queued, the action is <c>done</c> with the note <c>all_targets_suppressed</c>).</item>
 /// <item>The envelope sender is an SRS0 address at the route's domain, or the null reverse-path when the message arrived with one.</item>
 /// <item>The copy is the stored message with headers added on top only (hop marker, ARC set), so the original DKIM signatures stay valid. The ARC set is sealed with the route domain's key; <c>cv=fail</c> when the chain does not validate, <c>cv=none</c> without a chain, <c>cv=pass</c> with a valid one. No key: unsealed.</item>
@@ -110,8 +109,8 @@ public sealed record InboundForwarderOptions
 public sealed class InboundForwarder : IInboundForwarder
 {
     private readonly IStorage _storage;
-    private readonly SrsCodec _srs;
-    private readonly ForwardHopMarker _hops;
+    private readonly IForwardSrs _srs;
+    private readonly IForwardHops _hops;
     private readonly ArcValidator? _arcValidator;
     private readonly IForwardArcSealerProvider? _sealers;
     private readonly InboundForwarderOptions _options;
@@ -122,7 +121,7 @@ public sealed class InboundForwarder : IInboundForwarder
     private HashSet<string>? _localDomains;
 
     public InboundForwarder(
-        IStorage storage, SrsCodec srs, ForwardHopMarker hops, ArcValidator? arcValidator, IForwardArcSealerProvider? sealers, InboundForwarderOptions options, IClock clock, IMtaLog log, Action? onQueued = null)
+        IStorage storage, IForwardSrs srs, IForwardHops hops, ArcValidator? arcValidator, IForwardArcSealerProvider? sealers, InboundForwarderOptions options, IClock clock, IMtaLog log, Action? onQueued = null)
     {
         _storage = storage;
         _srs = srs;
@@ -165,7 +164,7 @@ public sealed class InboundForwarder : IInboundForwarder
         }
 
         int hops = _hops.ReadValidHops(raw);
-        if (hops >= ForwardHopMarker.MaxHops)
+        if (hops >= InboundRules.MaxForwardHops)
         {
             InboundActionMetrics.ForwardLoops.Add(1);
             return InboundActionResult.Failed("loop_detected");
@@ -305,16 +304,21 @@ public sealed class InboundForwarder : IInboundForwarder
         try
         {
             MimeMessage parsed = MimeMessage.Parse(raw, MimeLimits.Default);
-            if (!parsed.Headers.TryGetFirst("From", out MimeHeader from))
+            // Every From header counts, not only the first: with two of them (which DMARC treats as an error) a mail client may show the second, and the verdict recorded at receipt is not the whole story.
+            foreach (MimeHeader from in parsed.Headers)
             {
-                return true;
-            }
-
-            foreach (Mailbox mailbox in AddressList.Parse(from).Mailboxes)
-            {
-                if (mailbox.Domain is { } domain && PublicSuffixList.Default.HaveSameOrganizationalDomain(domain, message.Domain))
+                if (!from.Name.Equals("From", StringComparison.OrdinalIgnoreCase))
                 {
-                    return false;
+                    continue;
+                }
+
+                foreach (Mailbox mailbox in AddressList.Parse(from).Mailboxes)
+                {
+                    // An address that does not parse could still be read as ours by a client: it cannot be shown to be foreign.
+                    if (!mailbox.IsValid || (mailbox.Domain is { } domain && PublicSuffixList.Default.HaveSameOrganizationalDomain(domain, message.Domain)))
+                    {
+                        return false;
+                    }
                 }
             }
         }

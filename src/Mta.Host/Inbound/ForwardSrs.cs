@@ -1,7 +1,19 @@
 using System.Security.Cryptography;
 using System.Text;
+using Mta.Dsn;
 
-namespace Mta.Dsn;
+namespace Mta.Host.Inbound;
+
+/// <summary>The SRS envelope sender of a forward and the check of the recipients that carry one (design section 11.7). A thin seam: <see cref="ForwardSrs"/> is the implementation the forward action and the bounce handler use.</summary>
+public interface IForwardSrs
+{
+    /// <summary>The local part (at most 64 octets, plain ASCII) for a message whose envelope sender was <c>originalLocalPart@originalDomain</c>.</summary>
+    string CreateLocalPart(string originalDomain, string originalLocalPart, DateTimeOffset now);
+
+    /// <summary>A recent SRS0 address of ours whose hash verifies under a key of the ring.</summary>
+    bool IsValid(string localPart, DateTimeOffset now);
+}
+
 
 /// <summary>
 /// The envelope sender of a forwarded message: an SRS0 address (Sender Rewriting Scheme) at the forwarding domain, <c>SRS0=&lt;hash&gt;=&lt;tt&gt;=&lt;original domain&gt;=&lt;original local part&gt;</c>
@@ -13,7 +25,7 @@ namespace Mta.Dsn;
 /// atoms), both are replaced by one token: <c>SRS0=&lt;hash&gt;=&lt;tt&gt;=x=&lt;first 32 hex digits of SHA-256(lower-case(domain + "=" + local))&gt;</c> (5 + 8 + 1 + 2 + 1 + 2 + 32 = 51 octets). The hash covers those fields, so the short form is as hard to forge as the
 /// long one. This is safe because an SRS address is never reversed (a bounce to it is dropped, design section 11.7).</para>
 /// </summary>
-public sealed class SrsCodec
+public sealed class ForwardSrs : IForwardSrs
 {
     /// <summary>The HKDF purpose of the key (design section 11.7).</summary>
     public const string Purpose = "EggMail.Srs.v1";
@@ -29,11 +41,13 @@ public sealed class SrsCodec
     private const string Alphabet = "abcdefghijklmnopqrstuvwxyz234567";
     private const int HashChars = 8;
 
+    private readonly int _maxAgeDays;
     private readonly VerpCodec _ring;
     private readonly Dictionary<int, byte[]> _keys = [];
 
-    public SrsCodec(VerpCodec ring)
+    public ForwardSrs(VerpCodec ring, int maxAgeDays = DefaultMaxAgeDays)
     {
+        _maxAgeDays = maxAgeDays;
         ArgumentNullException.ThrowIfNull(ring);
         _ring = ring;
         foreach (int id in ring.KeyIds)
@@ -71,8 +85,9 @@ public sealed class SrsCodec
     /// True when <paramref name="localPart"/> is an SRS0 address this server made with a key of the ring, and it is not older than <paramref name="maxAgeDays"/> days (and not dated in the future). An <c>SRS1=</c> address is
     /// never valid: this server issues none.
     /// </summary>
-    public bool TryVerify(string localPart, DateTimeOffset now, int maxAgeDays = DefaultMaxAgeDays)
+    public bool IsValid(string localPart, DateTimeOffset now)
     {
+        int maxAgeDays = _maxAgeDays;
         if (localPart.Length is < 17 or > 512 || !localPart.StartsWith(Prefix, StringComparison.OrdinalIgnoreCase))
         {
             return false;
