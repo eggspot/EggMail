@@ -33,6 +33,7 @@ public sealed class PostgresStorage : IStorage
     private Task? _flushLoop;
     private PostgresMaintenance? _maintenance;
     private EfStorageTransfer? _transfer;
+    private IInboundStore? _inbound;
     private readonly PostgresReplicaCoordination _replicas;
     private int _initialized;
     private int _disposed;
@@ -81,6 +82,8 @@ public sealed class PostgresStorage : IStorage
 
     public IStorageMaintenance Maintenance => _maintenance ?? throw NotInitialized();
 
+    public IInboundStore Inbound => _inbound ?? throw NotInitialized();
+
     public IStorageTransfer Transfer => _transfer ?? throw NotInitialized();
 
     public IReplicaCoordination? Replicas => _replicas;
@@ -127,6 +130,8 @@ public sealed class PostgresStorage : IStorage
 
             await CheckReadOnlyRoleAsync(cancellationToken).ConfigureAwait(false);
             _rt.ConfigStore = new EfConfigStore<PostgresDbContext>(new PostgresConfigAccess(_rt.Data, PostgresModelHooks.Instance, _options.Postgres.MaxPoolSize));
+            _rt.InboundMessages = new EfInboundMessageStore<PostgresDbContext>(new PostgresInboundAccess(_rt, PostgresModelHooks.Instance));
+            _inbound = new InboundStoreFacade(_rt.ConfigStore, _rt.InboundMessages);
             if (_rt.IsFull)
             {
                 int today = StorageTime.DayNumber(_rt.Clock.UtcNow);

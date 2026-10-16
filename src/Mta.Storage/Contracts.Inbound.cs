@@ -333,9 +333,10 @@ public sealed record InboundMessageQuery(
 
 /// <summary>
 /// An action claimed for an attempt, with the body (null when it is gone, which the runner records as a permanent failure). <c>Message.ActionAttempts</c> already includes this attempt
-/// (1 for the first); pass it back as <see cref="InboundActionOutcome.ClaimedAttempt"/>.
+/// (1 for the first). <paramref name="ClaimToken"/> identifies this claim: it grows with every claim of the row, never goes back down (a release or a manual retry do not touch it), and is
+/// passed back as <see cref="InboundActionOutcome.ClaimToken"/>.
 /// </summary>
-public sealed record ClaimedInboundAction(InboundMessage Message, byte[]? Raw);
+public sealed record ClaimedInboundAction(InboundMessage Message, byte[]? Raw, long ClaimToken = 0);
 
 /// <summary>
 /// The result of one attempt. <see cref="InboundActionState.Pending"/> with a <paramref name="NextAttemptAt"/> schedules a retry; <see cref="InboundActionState.Done"/>
@@ -347,9 +348,9 @@ public sealed record ClaimedInboundAction(InboundMessage Message, byte[]? Raw);
 /// <param name="Error">What failed (kept as <see cref="InboundMessage.ActionLastError"/>; cleared by a success).</param>
 /// <param name="ForwardMessageId">The outbound message id of a forward.</param>
 /// <param name="Note">Only for <see cref="InboundActionState.Done"/>: a short code (letters, digits, <c>_</c>) for a completion the tenant should know about, kept as <see cref="InboundMessage.ActionNote"/>. Known codes: <c>all_targets_suppressed</c> (every forward target is on the tenant's suppression list: nothing was queued), <c>route_is_now_store</c> and <c>route_is_now_discard</c> (the route was changed to an action without delivery while the message waited; the body is kept until retention).</param>
-/// <param name="ClaimedAttempt">The <see cref="InboundMessage.ActionAttempts"/> the claim returned; the completion is refused when the row has been claimed again since. Null: not checked.</param>
+/// <param name="ClaimToken">The <see cref="ClaimedInboundAction.ClaimToken"/> the claim returned; the completion is refused when the row has been claimed again since, whatever happened to the attempt count in between (a release, a retry). Null: not checked.</param>
 /// <param name="FreeBody">Delete the stored body: the runner sets it for a completed forward, whose copy now lives in the outbound queue. A completed webhook keeps the body for the attachment references until retention.</param>
-public sealed record InboundActionOutcome(InboundActionState State, DateTimeOffset At, DateTimeOffset? NextAttemptAt, string? Error, Guid? ForwardMessageId = null, bool FreeBody = false, string? Note = null, int? ClaimedAttempt = null);
+public sealed record InboundActionOutcome(InboundActionState State, DateTimeOffset At, DateTimeOffset? NextAttemptAt, string? Error, Guid? ForwardMessageId = null, bool FreeBody = false, string? Note = null, long? ClaimToken = null);
 
 public enum InboundRetryResult : byte
 {
@@ -414,7 +415,11 @@ public interface IInboundConfigStore
     ValueTask<IReadOnlyList<InboundDomainConfiguration>> LoadEnabledDomainsAsync(CancellationToken cancellationToken);
 }
 
-/// <summary>Received messages and the state of their route actions (the queue part).</summary>
+/// <summary>
+/// Received messages and the state of their route actions (the queue part). While a backend switch closes the store only the operations that start new work are fenced:
+/// <see cref="AcceptAsync"/> throws <see cref="StorageFencedException"/> and <see cref="ClaimActionsAsync"/> returns nothing; completing, extending, releasing, retrying and deleting are allowed
+/// (a completion finishes the attempt in flight that the quiesce waits for, the others act on data that stays in the source until the switch is finalized).
+/// </summary>
 public interface IInboundMessageStore
 {
     /// <summary>
@@ -461,15 +466,15 @@ public interface IInboundMessageStore
 
     /// <summary>
     /// Records the result of an attempt made under the lease of <paramref name="owner"/>; false (nothing changed) when the lease was lost, the message was deleted or it is not leased
-    /// by <paramref name="owner"/>. <b>Lost includes re-claimed by the same owner</b>: pass <see cref="ClaimedInboundAction.Message"/>'s <see cref="InboundMessage.ActionAttempts"/> as
-    /// <see cref="InboundActionOutcome.ClaimedAttempt"/> and a completion from an earlier claim (the lease ran out, the row was claimed again, even under the same owner name) is refused, because
-    /// every claim increments the count. Without <c>ClaimedAttempt</c> only the owner is checked, so a runner that cannot pass it must use a distinct owner name per claim. A completion after the
+    /// by <paramref name="owner"/>. <b>Lost includes re-claimed by the same owner</b>: pass <see cref="ClaimedInboundAction.ClaimToken"/> as
+    /// <see cref="InboundActionOutcome.ClaimToken"/> and a completion from an earlier claim (the lease ran out or was released, the row was claimed again, even under the same owner name) is refused, because
+    /// the token grows with every claim and never goes back down. Without <c>ClaimToken</c> only the owner is checked, so a runner that cannot pass it must use a distinct owner name per claim. A completion after the
     /// lease ran out is accepted while nobody has claimed the row since (the work was done; refusing it would only repeat it). The attempt count is not changed by completing.
     /// <see cref="InboundActionOutcome.FreeBody"/> deletes the body (<see cref="InboundMessage.HasRaw"/> becomes false); an <see cref="InboundActionState.Pending"/> outcome needs <see cref="InboundActionOutcome.NextAttemptAt"/> (<see cref="ArgumentException"/> otherwise).
     /// </summary>
     ValueTask<bool> CompleteActionAsync(Guid messageId, string owner, InboundActionOutcome outcome, CancellationToken cancellationToken);
 
-    /// <summary>Releases the leases held by <paramref name="owner"/> and gives back the attempt each claim counted (graceful shutdown, quiesce: the attempt was not made).</summary>
+    /// <summary>Releases the leases held by <paramref name="owner"/> and gives back the attempt each claim counted (graceful shutdown, quiesce: the attempt was not made); the claim token is not given back.</summary>
     ValueTask<int> ReleaseOwnedActionLeasesAsync(string owner, CancellationToken cancellationToken);
 
     /// <summary>

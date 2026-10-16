@@ -79,3 +79,28 @@ public class SqliteWebhookMemoryQueue : WebhookConformance
         }
     }
 }
+
+public class SqliteInboundMemoryQueue : InboundConformance
+{
+    private string? _dir;
+
+    protected override Task<IStorage> CreateAsync(StorageOptions options)
+    {
+        if (_dir is not null)
+        {
+            SqliteTestStorage.TryDelete(_dir);
+        }
+
+        _dir = SqliteTestStorage.NewDirectory();
+        return Task.FromResult<IStorage>(SqliteStorage.Create(SqliteTestStorage.WithDirectory(options, _dir, b => b.QueuePersistence = QueuePersistence.Memory), Clock));
+    }
+
+    public override async Task DisposeAsync()
+    {
+        await base.DisposeAsync();
+        if (_dir is not null)
+        {
+            SqliteTestStorage.TryDelete(_dir);
+        }
+    }
+}
