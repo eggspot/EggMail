@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using Microsoft.EntityFrameworkCore;
 using Mta.Core;
 using Mta.Storage.Model;
@@ -95,20 +94,68 @@ public static class InboundBatchScenarios
         store.MaxBatchRows = 100;
         store.MaxBatchBytes = 250;
         store.ErasePause = TimeSpan.FromMilliseconds(60);
+        var pauses = new List<TimeSpan>();
+        store.DelayAsync = (pause, _) =>
+        {
+            pauses.Add(pause);
+            return Task.CompletedTask;
+        };
         before = store.BatchesWritten;
-        var clockWatch = Stopwatch.StartNew();
         Assert.Equal(10, await storage.Inbound.DeleteMatchingAsync(query, default));
-        clockWatch.Stop();
         Assert.Equal(5, store.BatchesWritten - before);
-        Assert.True(clockWatch.ElapsedMilliseconds >= 4 * 60 - 20, $"the pause between batches was not taken ({clockWatch.ElapsedMilliseconds} ms)");
+        Assert.Equal(Enumerable.Repeat(TimeSpan.FromMilliseconds(60), 4), pauses);   // a pause between batches, none after the last
 
         // A body larger than the byte cap still goes, alone.
         await storage.Inbound.AcceptAsync([Draft(domain, route, InboundActionKind.Store, clock.UtcNow.AddMinutes(2), 5_000, "bulk@sender.test"), Draft(domain, route, InboundActionKind.Store, clock.UtcNow.AddMinutes(2).AddMilliseconds(1), 5_000, "bulk@sender.test")], default);
         before = store.BatchesWritten;
         store.ErasePause = TimeSpan.Zero;
+        store.DelayAsync = static (pause, ct) => Task.Delay(pause, ct);
         Assert.Equal(2, await storage.Inbound.DeleteMatchingAsync(query, default));
         Assert.Equal(2, store.BatchesWritten - before);
 
         Assert.Equal(1, (await storage.Inbound.GetUsageAsync(Tenant, null, default)).Messages);   // the friend's mail
+    }
+
+    /// <summary>
+    /// Erasure continues by id (UUIDv7: the (tenant_id, id) and (domain_id, id) indexes), not by age: messages whose ids and receive times are in opposite order show which one a batch takes.
+    /// </summary>
+    public static async Task An_erasure_walks_the_ids_not_the_receive_times<TContext>(IStorage storage, EfInboundMessageStore<TContext> store, IClock clock)
+        where TContext : DbContext, IQueueDbSets
+    {
+        (DomainRecord domain, Guid route) = await DomainAsync(storage, clock.UtcNow);
+        var drafts = new List<InboundMessageDraft>();
+        for (int i = 0; i < 4; i++)
+        {
+            // The id comes from an earlier time for the later receive time: id order is 0,1,2,3 and receive order is 3,2,1,0.
+            InboundMessageDraft draft = Draft(domain, route, InboundActionKind.Store, clock.UtcNow.AddMinutes(-10 * (i + 1)), 50, "bulk@sender.test");
+            draft.Id = Ids.New(clock.UtcNow.AddMinutes(i));
+            drafts.Add(draft);
+            await storage.Inbound.AcceptAsync([draft], default);
+        }
+
+        store.MaxBatchRows = 2;
+        store.MaxBatchBytes = long.MaxValue;
+        store.ErasePause = TimeSpan.Zero;
+        var survivorsAtSecondRead = new List<Guid>();
+        int reads = 0;
+        store.BetweenReadAndWrite = async () =>
+        {
+            if (++reads == 2)
+            {
+                // The first batch has been written: which two messages are left?
+                survivorsAtSecondRead.AddRange((await storage.Inbound.SearchAsync(new InboundMessageQuery(Tenant, Limit: 10), default)).Items.Select(m => m.Id));
+            }
+        };
+        try
+        {
+            Assert.Equal(4, await storage.Inbound.DeleteMatchingAsync(new InboundMessageQuery(Tenant, Sender: "bulk@sender.test"), default));
+        }
+        finally
+        {
+            store.BetweenReadAndWrite = null;
+        }
+
+        // The first batch took the two smallest ids (the first two created), whatever their receive times were.
+        Assert.Equal(new[] { drafts[2].Id, drafts[3].Id }.Order(), survivorsAtSecondRead.Order());
     }
 }

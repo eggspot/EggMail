@@ -452,17 +452,17 @@ public sealed class InboundActionRunner
         bool gaveUp = false;
         if (result.Outcome == InboundActionResult.Kind.Done)
         {
-            outcome = new InboundActionOutcome(InboundActionState.Done, now, null, null, result.ForwardMessageId, result.FreeBody, result.Note, attempt);
+            outcome = new InboundActionOutcome(InboundActionState.Done, now, null, null, result.ForwardMessageId, result.FreeBody, result.Note, claim.ClaimToken);
             label = "done";
         }
         else if (result.Outcome == InboundActionResult.Kind.Retry && attempt < _options.MaxAttempts)
         {
-            outcome = new InboundActionOutcome(InboundActionState.Pending, now, now + _options.RetrySchedule[Math.Max(attempt, 1) - 1] + result.ExtraDelay, result.Error, ClaimedAttempt: attempt);
+            outcome = new InboundActionOutcome(InboundActionState.Pending, now, now + _options.RetrySchedule[Math.Max(attempt, 1) - 1] + result.ExtraDelay, result.Error, ClaimToken: claim.ClaimToken);
             label = "retry";
         }
         else
         {
-            outcome = new InboundActionOutcome(InboundActionState.Failed, now, null, result.Error, ClaimedAttempt: attempt);
+            outcome = new InboundActionOutcome(InboundActionState.Failed, now, null, result.Error, ClaimToken: claim.ClaimToken);
             label = "failed";
             gaveUp = true;
         }

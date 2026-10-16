@@ -100,7 +100,7 @@ internal sealed class SqliteInboundAccess(SqliteRuntime rt, IStorageModelHooks h
         using DbCommand cmd = connection.CreateCommand();
         cmd.Transaction = context.Database.CurrentTransaction?.GetDbTransaction();
         cmd.CommandText =
-            "UPDATE inbound_message SET lease_owner = @owner, lease_until = @until, action_attempts = action_attempts + 1 WHERE id IN (" +
+            "UPDATE inbound_message SET lease_owner = @owner, lease_until = @until, action_attempts = action_attempts + 1, claim_sequence = claim_sequence + 1 WHERE id IN (" +
             "SELECT id FROM inbound_message WHERE transfer_switch_id IS NULL AND action_state = 0 AND action_next_attempt_at <= @now AND lease_until <= @now ORDER BY action_next_attempt_at, id LIMIT @max) " +
             "RETURNING id";
         Add(cmd, "@owner", owner);

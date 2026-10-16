@@ -81,6 +81,7 @@ CREATE TABLE inbound_message (
     forward_message_id uuid,
     has_raw boolean NOT NULL,
     lease_owner text COLLATE "C",
+    claim_sequence bigint NOT NULL,
     lease_until timestamp with time zone NOT NULL,
     transfer_switch_id uuid,
     CONSTRAINT "PK_inbound_message" PRIMARY KEY (id)
