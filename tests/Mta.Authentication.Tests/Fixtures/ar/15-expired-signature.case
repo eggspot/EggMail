@@ -1,0 +1,21 @@
+# A signature that expired before it arrived (x= in the past): not accepted, SPF aligns instead.
+client-ip: 192.0.2.3
+helo: mail.example.com
+mail-from: alice@example.com
+authserv-id: mx.receiver.example
+now: 2026-10-12T14:00:00Z
+signed-at: 2026-10-12T12:00:00Z
+[zone]
+example.com TXT v=spf1 ip4:192.0.2.3 -all
+_dmarc.example.com TXT v=DMARC1; p=reject
+[message]
+From: Alice <alice@example.com>
+To: Bob <bob@receiver.example>
+Subject: Fixture
+Date: Mon, 12 Oct 2026 12:00:00 +0000
+Message-ID: <fx1@example.com>
+
+Hello Bob.
+[sign domain=example.com selector=s1 lifetime=3600]
+[expect]
+mx.receiver.example; spf=pass smtp.mailfrom=alice@example.com; dkim=fail reason="signature expired" header.d=example.com header.s=s1 header.b=XoDGkipf; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=example.com
