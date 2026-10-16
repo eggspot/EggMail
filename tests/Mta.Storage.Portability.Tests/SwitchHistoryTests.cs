@@ -265,4 +265,75 @@ public class SwitchHistoryTests : SwitchTestBase
             }
         }
     }
+
+    [Fact]
+    public async Task A_bundle_of_format_1_2_without_inbound_tables_imports_and_the_target_starts_with_no_inbound_mail()
+    {
+        var (source, target, engine) = await SeededAsync();
+        await engine.StartAsync(Quiesce(BundleDir()), null, default);
+        await engine.ExportAsync(new BundleRequest { BundlePath = BundleDir(), Passphrase = Pass }, null, default);
+        Assert.NotEmpty((await source.Storage.Inbound.SearchAsync(new InboundMessageQuery(TenantId: Seed.TenantA), default)).Items);   // the source has inbound mail: it was seeded
+
+        // What an older exporter wrote: format 1.2.0, no inbound files, no inbound entries in the manifest.
+        string manifestPath = Path.Combine(BundleDir(), "manifest.json");
+        var manifest = System.Text.Json.Nodes.JsonNode.Parse(await File.ReadAllTextAsync(manifestPath))!.AsObject();
+        manifest["formatVersion"] = "1.2.0";
+        var files = manifest["files"]!.AsArray();
+        foreach (var file in files.ToList())
+        {
+            string path = file!["path"]!.GetValue<string>();
+            if (path.Contains("inbound", StringComparison.Ordinal))
+            {
+                files.Remove(file);
+                File.Delete(Path.Combine(BundleDir(), path));
+            }
+        }
+
+        var tables = manifest["tables"]!.AsArray();
+        foreach (var table in tables.ToList())
+        {
+            if (table!["name"]!.GetValue<string>().StartsWith("inbound", StringComparison.Ordinal))
+            {
+                tables.Remove(table);
+            }
+        }
+
+        await File.WriteAllTextAsync(manifestPath, manifest.ToJsonString());
+
+        ImportResult import = await engine.ImportAsync(new ImportRequest { BundlePath = BundleDir(), Passphrase = Pass }, null, default);
+        Assert.NotNull(import);
+        Assert.Empty((await target.Storage.Inbound.SearchAsync(new InboundMessageQuery(TenantId: Seed.TenantA), default)).Items);
+        Assert.Empty(await target.Storage.Inbound.GetRoutesAsync((await target.Storage.Config.GetDomainsAsync(Seed.TenantA, default)).First().Id, default));
+        Assert.NotEmpty(await target.Storage.Config.GetDomainsAsync(Seed.TenantA, default));   // everything else came along
+    }
+
+    [Fact]
+    public async Task A_manifest_without_heldRows_is_a_problem_for_received_mail_and_still_fine_for_tables_that_hold_every_row()
+    {
+        var (_, _, engine) = await SeededAsync();
+        await engine.StartAsync(Quiesce(BundleDir()), null, default);
+        await engine.ExportAsync(new BundleRequest { BundlePath = BundleDir(), Passphrase = Pass }, null, default);
+        await engine.ImportAsync(new ImportRequest { BundlePath = BundleDir(), Passphrase = Pass }, null, default);
+        var request = new BundleRequest { BundlePath = BundleDir(), Passphrase = Pass };
+
+        VerifyReport good = await engine.VerifyAsync(request, null, default);
+        Assert.True(good.Ok, string.Join("; ", good.Problems));
+        string manifestPath = Path.Combine(BundleDir(), "manifest.json");
+        var manifest = System.Text.Json.Nodes.JsonNode.Parse(await File.ReadAllTextAsync(manifestPath))!.AsObject();
+        var inbound = manifest["tables"]!.AsArray().Single(t => t!["name"]!.GetValue<string>() == "inbound_message")!.AsObject();
+        Assert.True(inbound["heldRows"]!.GetValue<long>() < inbound["rows"]!.GetValue<long>());   // only the pending action is held
+
+        // A manifest from before heldRows existed says nothing: tables that hold every row fall back to their row count, received mail cannot be guessed.
+        foreach (var table in manifest["tables"]!.AsArray())
+        {
+            table!.AsObject().Remove("heldRows");
+        }
+
+        await File.WriteAllTextAsync(manifestPath, manifest.ToJsonString());
+        VerifyReport bad = await engine.VerifyAsync(request, null, default);
+        string problem = Assert.Single(bad.Problems);
+        Assert.Contains("inbound_message", problem);
+        Assert.Contains("heldRows", problem);
+    }
 }
+

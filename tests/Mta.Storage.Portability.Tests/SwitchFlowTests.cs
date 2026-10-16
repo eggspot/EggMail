@@ -111,7 +111,11 @@ public class SwitchFlowTests : SwitchTestBase
 
         StorageSwitchEngine engine = NewEngine(source, target, activator: new RecordingActivator());
         ExportResult export = await SwitchToConfirmedAsync(engine, BundleDir());
-        Assert.Equal(10 + (await ReadAsync<WebhookOutboxEntity>(source, TransferTables.WebhookOutbox)).Count, export.QueueRowsMarked);
+        // Of the 3 inbound messages only the pending action is held: a message that is done or failed is just data.
+        Assert.Equal(3, (await source.Storage.Inbound.SearchAsync(new InboundMessageQuery(TenantId: Seed.TenantA), default)).Items.Count);
+        long pendingInbound = (await source.Storage.Inbound.SearchAsync(new InboundMessageQuery(TenantId: Seed.TenantA, ActionState: InboundActionState.Pending), default)).Items.Count;
+        Assert.Equal(1, pendingInbound);
+        Assert.Equal(10 + (await ReadAsync<WebhookOutboxEntity>(source, TransferTables.WebhookOutbox)).Count + pendingInbound, export.QueueRowsMarked);
 
         // The source rows are marked and fenced: it can neither claim them nor accept.
         Assert.Empty(await source.Storage.Deliveries.ClaimAsync("late", 100, DateTimeOffset.UtcNow.AddDays(3), TimeSpan.FromMinutes(1), default));
@@ -127,6 +131,14 @@ public class SwitchFlowTests : SwitchTestBase
         Assert.True(await TargetActivation.ActivateAsync(target.Transfer, SystemClock.Instance, default));
         var claimed = await target.Storage.Deliveries.ClaimAsync("after", 100, DateTimeOffset.UtcNow.AddDays(3), TimeSpan.FromMinutes(1), default);
         Assert.Equal(10, claimed.Count);
+
+        // The inbound mail came along: settings, routes, the stored messages, and the pending webhook action runs on the target (and only there).
+        Assert.Equal(3, (await target.Storage.Inbound.SearchAsync(new InboundMessageQuery(TenantId: Seed.TenantA), default)).Items.Count);
+        Assert.Equal(2, (await target.Storage.Inbound.GetRoutesAsync(seeded.DomainId, default)).Count);
+        Assert.True((await target.Storage.Inbound.GetSettingsAsync(seeded.DomainId, default))!.Enabled);
+        InboundMessage movedAction = Assert.Single((await target.Storage.Inbound.ClaimActionsAsync("inbound-after", 10, DateTimeOffset.UtcNow.AddDays(3), TimeSpan.FromMinutes(1), default)).Select(c => c.Message));
+        Assert.Equal(InboundActionKind.Webhook, movedAction.ActionKind);
+        Assert.Empty(await source.Storage.Inbound.ClaimActionsAsync("inbound-before", 10, DateTimeOffset.UtcNow.AddDays(3), TimeSpan.FromMinutes(1), default));
         Assert.Equal(seeded.QueuedDeliveryIds.Order(), claimed.Select(c => c.DeliveryId).Order());
         byte[]? raw = await target.Storage.Deliveries.GetRawAsync(seeded.QueuedMessageIds[1], default);
         Assert.True(raw is { Length: > 100_000 });

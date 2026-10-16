@@ -209,7 +209,7 @@ public interface IRuntimeStateStore
 /// Configuration data: tenants, keys, domains, suppressions, webhook endpoints, settings, TLS state, leases.
 /// One implementation over EF for both providers. Secrets arrive here already protected (Data Protection).
 /// </summary>
-public interface IConfigStore : IRuntimeStateStore
+public interface IConfigStore : IRuntimeStateStore, IInboundConfigStore
 {
     // Tenants and credentials
     ValueTask<IReadOnlyList<Tenant>> GetTenantsAsync(CancellationToken ct);

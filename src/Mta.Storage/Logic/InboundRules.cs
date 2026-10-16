@@ -28,6 +28,12 @@ public static class InboundRules
 
     /// <summary>The most messages one search page holds, on every backend and in the API.</summary>
     public const int MaxPageSize = 200;
+
+    /// <summary>The most messages one erasure or retention write deletes.</summary>
+    public const int MaxBatchRows = 100;
+
+    /// <summary>The most stored body bytes one erasure or retention write deletes (a few large messages are a batch of their own).</summary>
+    public const long MaxBatchBytes = 64L << 20;
     public const int MaxWildcards = 3;
     public const int MaxRouteNameLength = 100;
     public const int MaxSubjectLength = 256;

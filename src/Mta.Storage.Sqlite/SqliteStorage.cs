@@ -34,6 +34,7 @@ public sealed class SqliteStorage : IStorage
     private int _disposed;
     private SqliteMaintenance? _maintenance;
     private EfStorageTransfer? _transfer;
+    private IInboundStore? _inbound;
     private IDisposable? _meters;
 
     private SqliteStorage(StorageOptions options, IClock clock, IMtaLog log)
@@ -67,6 +68,8 @@ public sealed class SqliteStorage : IStorage
     public IWebhookOutbox Webhooks => _queue;
 
     public IStorageMaintenance Maintenance => _maintenance ?? throw NotInitialized();
+
+    public IInboundStore Inbound => _inbound ?? throw NotInitialized();
 
     public IStorageTransfer Transfer => _transfer ?? throw NotInitialized();
 
@@ -119,6 +122,8 @@ public sealed class SqliteStorage : IStorage
 
         var access = new SqliteConfigAccess(_rt.Config, hooks);
         _rt.ConfigStore = new EfConfigStore<ConfigDbContext>(access);
+        _rt.InboundMessages = new EfInboundMessageStore<QueueDbContext>(new SqliteInboundAccess(_rt, hooks));
+        _inbound = new InboundStoreFacade(_rt.ConfigStore, _rt.InboundMessages);
 
         _rt.QueueWriter = new SqliteFileWriter(_rt.Queue, so);
         _rt.StatsWriter = new SqliteFileWriter(_rt.Stats, so, _stats.ResetBucketer);
