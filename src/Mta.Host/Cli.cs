@@ -150,6 +150,7 @@ internal static class Cli
                 Sqlite = options.Sqlite,
                 Content = options.Content,
                 Queue = options.Queue,
+                Inbound = options.Inbound,
                 Postgres = new PostgresOptions
                 {
                     OwnerConnectionString = options.Postgres.OwnerConnectionString,

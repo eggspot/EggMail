@@ -83,6 +83,13 @@ public sealed class TransferHold<T> where T : class
     public required Func<IQueryable<T>, Guid, CancellationToken, Task<int>> Release { get; init; }
 
     public required Func<IQueryable<T>, Guid, CancellationToken, Task<long>> CountHeld { get; init; }
+
+    /// <summary>
+    /// Whether a given row is held at all. Null: every row is (deliveries and the webhook outbox). A table whose rows are only claimable in some state holds only those (received mail holds its
+    /// pending actions: a message that is done or failed is just data). <see cref="Set"/>, <see cref="HoldAll"/> and this must agree; the export counts the rows this says are held, and the
+    /// import verification expects exactly that many held in the target.
+    /// </summary>
+    public Func<T, bool>? Holds { get; init; }
 }
 
 /// <summary>The settings of a <see cref="TransferTable{T}"/>.</summary>
@@ -142,6 +149,12 @@ public abstract class TransferTable
 
     /// <summary>The table has a column that holds a switch hold (a transfer mark on the source, an activation hold on the target).</summary>
     public abstract bool HasHold { get; }
+
+    /// <summary>The hold names a condition (received mail holds its pending actions only): the number of held rows is not the number of rows, so a manifest has to say it (<c>heldRows</c>).</summary>
+    public abstract bool HoldsSome { get; }
+
+    /// <summary>Whether this row is held by a switch (every row of a table with a hold, unless the hold names a condition).</summary>
+    public abstract bool IsHeld(object row);
 
     public abstract IReadOnlyList<ITransferSecret> Secrets { get; }
 
@@ -241,6 +254,10 @@ public sealed class TransferTable<T> : TransferTable where T : class, new()
     public override bool PerDay => _spec.Day is not null;
 
     public override bool HasHold => _spec.Hold is not null;
+
+    public override bool HoldsSome => _spec.Hold?.Holds is not null;
+
+    public override bool IsHeld(object row) => _spec.Hold is { } hold && (hold.Holds is null || hold.Holds((T)row));
 
     public override IReadOnlyList<ITransferSecret> Secrets => _spec.Secrets;
 

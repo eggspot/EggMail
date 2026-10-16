@@ -169,7 +169,25 @@ public sealed class WebhooksApi(ApiAuthenticator auth, IStorage storage, ISecret
     {
         ApiCaller caller = await auth.RequireTenantAsync(context, ApiScopes.Webhooks).ConfigureAwait(false);
         WebhookEndpointRecord endpoint = await FindOwnAsync(caller, id, context.RequestAborted).ConfigureAwait(false);
-        await Config.DeleteWebhookEndpointAsync(caller.TenantId, endpoint.Id, context.RequestAborted).ConfigureAwait(false);
+
+        // An inbound route whose action posts to the endpoint would fail every message from now on: the route has to be changed first (decision 95).
+        var routes = await storage.Inbound.GetRoutesUsingWebhookEndpointAsync(endpoint.Id, context.RequestAborted).ConfigureAwait(false);
+        if (routes.Count > 0)
+        {
+            throw new ApiException(
+                StatusCodes.Status409Conflict, ApiCodes.Conflict, "The endpoint is the target of inbound routes: change or delete those routes first.",
+                extensions: new Dictionary<string, object?> { ["reason"] = "webhook_endpoint_in_use", ["routes"] = routes.Select(r => ApiJson.Id(r.Id)).ToList() });
+        }
+
+        try
+        {
+            await Config.DeleteWebhookEndpointAsync(caller.TenantId, endpoint.Id, context.RequestAborted).ConfigureAwait(false);
+        }
+        catch (StorageConflictException)
+        {
+            // A route was created for the endpoint between the check above and the delete: the storage write refused.
+            throw new ApiException(StatusCodes.Status409Conflict, ApiCodes.Conflict, "The endpoint is the target of inbound routes: change or delete those routes first.", extensions: new Dictionary<string, object?> { ["reason"] = "webhook_endpoint_in_use" });
+        }
         return ApiResults.NoContent();
     }
 

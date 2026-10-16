@@ -456,6 +456,7 @@ public sealed class ApiSection
     public int MaxApiKeysPerTenant { get; init; } = D.MaxApiKeysPerTenant;
     public int MaxSmtpCredentialsPerTenant { get; init; } = D.MaxSmtpCredentialsPerTenant;
     public int MaxWebhooksPerTenant { get; init; } = D.MaxWebhooksPerTenant;
+    public int MaxInboundRoutesPerDomain { get; init; } = D.MaxInboundRoutesPerDomain;
 
     /// <summary>Most rows one statistics query may return.</summary>
     public int MaxStatsRows { get; init; } = D.MaxStatsRows;
@@ -473,6 +474,8 @@ public sealed class ApiSection
 /// </summary>
 public sealed class InboundSection
 {
+    private static readonly InboundApiDefaults D = new();
+
     /// <summary>The master switch. Off, the port-25 listener only takes bounces, exactly as before.</summary>
     public bool Enabled { get; init; }
 
@@ -486,16 +489,16 @@ public sealed class InboundSection
     public long MaxTransactionBytes { get; init; } = 256L * 1024 * 1024;
 
     /// <summary>Messages per minute accepted for one domain.</summary>
-    public int MaxMessagesPerMinute { get; init; } = 600;
+    public int MaxMessagesPerMinute { get; init; } = D.MaxMessagesPerMinute;
 
     /// <summary>Messages per minute accepted from one client address (an IPv6 /64) for one domain.</summary>
-    public int MaxMessagesPerMinutePerRemote { get; init; } = 60;
+    public int MaxMessagesPerMinutePerRemote { get; init; } = D.MaxMessagesPerMinutePerRemote;
 
     /// <summary>Message bytes kept for one domain; at the limit new mail is refused with <c>452 4.2.2</c>. <c>0</c> is unlimited.</summary>
-    public long MaxStoredBytesPerDomain { get; init; } = 2L * 1024 * 1024 * 1024;
+    public long MaxStoredBytesPerDomain { get; init; } = D.MaxStoredBytesPerDomain;
 
     /// <summary>Message bytes kept for all domains of one tenant together; at the limit new mail is refused with <c>452 4.2.2</c>. <c>0</c> is unlimited.</summary>
-    public long MaxStoredBytesPerTenant { get; init; } = 10L * 1024 * 1024 * 1024;
+    public long MaxStoredBytesPerTenant { get; init; } = D.MaxStoredBytesPerTenant;
 
     /// <summary>The authserv-id of the <c>Authentication-Results</c> header added to received mail. Null: <c>Hostname</c>.</summary>
     public string? AuthenticationResultsId { get; init; }

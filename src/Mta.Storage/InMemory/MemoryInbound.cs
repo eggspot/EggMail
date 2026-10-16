@@ -220,7 +220,8 @@ internal sealed class MemoryInbound(MemoryState s) : IInboundMessageStore
                 e.LeaseOwner = owner;
                 e.LeaseUntil = until;
                 e.ActionAttempts++;   // the claim counts the attempt: a crash in the middle of it has used it up
-                claimed.Add(new ClaimedInboundAction(e.ToRecord(), s.InboundRaw.TryGetValue(e.Id, out InboundMessageRawEntity? raw) ? raw.Raw.ToArray() : null));
+                e.ClaimSequence++;
+                claimed.Add(new ClaimedInboundAction(e.ToRecord(), s.InboundRaw.TryGetValue(e.Id, out InboundMessageRawEntity? raw) ? raw.Raw.ToArray() : null, e.ClaimSequence));
             }
 
             return R<IReadOnlyList<ClaimedInboundAction>>(claimed);
@@ -252,7 +253,7 @@ internal sealed class MemoryInbound(MemoryState s) : IInboundMessageStore
         DateTimeOffset at = StorageTime.Normalize(outcome.At);
         lock (s.Gate)
         {
-            if (!s.InboundMessages.TryGetValue(messageId, out InboundMessageEntity? e) || e.LeaseOwner != owner || (outcome.ClaimedAttempt is { } claimed && e.ActionAttempts != claimed))
+            if (!s.InboundMessages.TryGetValue(messageId, out InboundMessageEntity? e) || e.LeaseOwner != owner || (outcome.ClaimToken is { } token && e.ClaimSequence != token))
             {
                 return R(false);
             }
@@ -284,7 +285,7 @@ internal sealed class MemoryInbound(MemoryState s) : IInboundMessageStore
         lock (s.Gate)
         {
             int n = 0;
-            foreach (InboundMessageEntity e in s.InboundMessages.Values.Where(x => x.LeaseOwner == owner))
+            foreach (InboundMessageEntity e in s.InboundMessages.Values.Where(x => x.LeaseOwner == owner && x.ActionState == InboundActionState.Pending))
             {
                 e.ActionAttempts = Math.Max(0, e.ActionAttempts - 1);   // the attempt the claim counted was not made
                 e.LeaseOwner = null;

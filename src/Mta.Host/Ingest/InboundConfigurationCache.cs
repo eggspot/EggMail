@@ -31,6 +31,17 @@ public sealed class InboundDomainView
 }
 
 /// <summary>
+/// Raised by every API path that changes what the receive path decides on (a domain's inbound settings, a route, a domain record: <see cref="Mta.Host.Submission.DomainChangeSignal.Bump"/> raises it
+/// too), so the cache of this process reloads at once instead of at the next interval. Another replica sees the change within the interval.
+/// </summary>
+public static class InboundConfigChangeSignal
+{
+    internal static event Action? Changed;
+
+    public static void Bump() => Changed?.Invoke();
+}
+
+/// <summary>
 /// The receive path's copy of the enabled domains, their settings and routes (design section 11.4): loaded with one set of queries, refreshed every 30 seconds (with jitter) and at once when the API
 /// changes something on this process (<see cref="RequestRefresh"/>); a replica that did not make the change sees it within the interval. A configuration that was never loaded is not "no domains": the
 /// receive path answers <c>451</c> (<see cref="IsAvailable"/>). Derived structures are rebuilt only for the domains whose <see cref="InboundDomainConfiguration.ETag"/> changed.
@@ -113,6 +124,20 @@ public sealed class InboundConfigurationCache
 
     /// <summary>The refresh loop: reload every interval (up to a tenth longer, so replicas do not all ask at once), or when asked. A failure is logged and tried again at the next interval.</summary>
     public async Task RunAsync(CancellationToken stoppingToken)
+    {
+        Action onChange = RequestRefresh;
+        InboundConfigChangeSignal.Changed += onChange;
+        try
+        {
+            await RunLoopAsync(stoppingToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            InboundConfigChangeSignal.Changed -= onChange;
+        }
+    }
+
+    private async Task RunLoopAsync(CancellationToken stoppingToken)
     {
         while (!stoppingToken.IsCancellationRequested)
         {

@@ -60,7 +60,7 @@ internal sealed partial class InMemoryConfigStore
 
             if (entity.ActionKind == InboundActionKind.Webhook && !(entity.WebhookEndpointId is { } endpointId && _endpoints.TryGetValue(endpointId, out WebhookEndpointEntity? endpoint) && endpoint.TenantId == entity.TenantId))
             {
-                throw new StorageConflictException("The webhook endpoint does not exist for this tenant.");
+                throw new StorageConflictException("The webhook endpoint does not exist for this tenant.", StorageConflictReasons.WebhookEndpointMissing);
             }
 
             if (_inboundRoutes.TryGetValue(entity.Id, out InboundRouteEntity? existing) && (existing.TenantId != entity.TenantId || existing.DomainId != entity.DomainId))

@@ -152,6 +152,42 @@ public sealed class DomainsApi(ApiAuthenticator auth, IStorage storage, ISecretP
             throw ApiException.Conflict("A check or rotation of this domain is running; retry in a moment.");
         }
 
+        // Received mail belongs to the domain: deleting the domain would leave it unreachable through the API but kept (and counted) until retention. Refuse unless the caller says to purge it.
+        // "Has mail" is an existence query (one row of the (domain_id, id) index), not a scan.
+        bool hasMail = (await storage.Inbound.SearchAsync(new InboundMessageQuery(caller.TenantId, DomainId: domain.Id, Limit: 1), context.RequestAborted).ConfigureAwait(false)).Items.Count > 0;
+        if (hasMail)
+        {
+            if (!string.Equals(context.Request.Query["purgeInbound"], "true", StringComparison.Ordinal))
+            {
+                var details = new Dictionary<string, object?> { ["reason"] = "inbound_messages_exist" };
+                if (caller.HasScope(ApiScopes.InboundRead))
+                {
+                    // How much mail there is is itself information about the mailbox: only a key that may read the mail is told.
+                    details["messages"] = (await storage.Inbound.GetUsageAsync(caller.TenantId, domain.Id, context.RequestAborted).ConfigureAwait(false)).Messages;
+                }
+
+                throw new ApiException(
+                    StatusCodes.Status409Conflict, ApiCodes.Conflict,
+                    $"The domain still has received messages. Delete them first, or pass purgeInbound=true to delete them with the domain (needs the '{ApiScopes.InboundWrite}' scope).",
+                    extensions: details);
+            }
+
+            if (!caller.HasScope(ApiScopes.InboundWrite))
+            {
+                throw ApiException.Forbidden($"purgeInbound=true deletes received mail and needs the '{ApiScopes.InboundWrite}' scope.");
+            }
+
+            // Stop receiving first (the settings are what the receive path reads), then purge in batches, then delete the domain: no mail arrives while the old mail goes.
+            InboundDomainSettings? settings = await storage.Inbound.GetSettingsAsync(domain.Id, context.RequestAborted).ConfigureAwait(false);
+            if (settings is { Enabled: true })
+            {
+                await storage.Inbound.UpsertSettingsAsync(settings with { Enabled = false, UpdatedAt = clock.UtcNow }, context.RequestAborted).ConfigureAwait(false);
+                Mta.Host.Ingest.InboundConfigChangeSignal.Bump();   // stop receiving before the purge starts
+            }
+
+            await storage.Inbound.DeleteMatchingAsync(new InboundMessageQuery(caller.TenantId, DomainId: domain.Id), context.RequestAborted).ConfigureAwait(false);
+        }
+
         await Config.DeleteDomainAsync(domain.Id, context.RequestAborted).ConfigureAwait(false);
         Mta.Host.Submission.DomainChangeSignal.Bump();
         return ApiResults.NoContent();

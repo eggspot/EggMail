@@ -225,7 +225,7 @@ public class FilesAndPragmaTests : SqliteTestBase
         await ReopenAsync();
         Assert.Equal(SqliteFile.SchemaVersion, ScalarLong(PathOf("config.db"), "PRAGMA user_version"));
         Assert.Equal(SqliteFile.SchemaVersion, ScalarLong(PathOf("queue.db"), "PRAGMA user_version"));
-        Assert.Equal(7, SqliteFile.SchemaVersion);
+        Assert.Equal(8, SqliteFile.SchemaVersion);
         Assert.Equal(0, ScalarLong(PathOf("queue.db"), "SELECT count(*) FROM transfer_chunk_queue")); // the 1 to 2 to 3 path reached the switch tables too
         Assert.Equal(1, ScalarLong(PathOf("queue.db"), "SELECT count(*) FROM pragma_table_info('delivery_queue') WHERE name = 'headers_utf8'")); // and the version 5 column
 
@@ -308,8 +308,8 @@ public class FilesAndPragmaTests : SqliteTestBase
         }
 
         await ReopenAsync();
-        Assert.Equal(7, SqliteFile.SchemaVersion);
-        Assert.Equal(7, ScalarLong(PathOf("queue.db"), "PRAGMA user_version"));
+        Assert.Equal(8, SqliteFile.SchemaVersion);
+        Assert.Equal(8, ScalarLong(PathOf("queue.db"), "PRAGMA user_version"));
         Assert.Equal(1, ScalarLong(PathOf("queue.db"), "SELECT count(*) FROM delivery_queue WHERE headers_utf8 = 0"));
         var claimed = Assert.Single(await ClaimAsync());
         Assert.False(claimed.HeadersUtf8);
@@ -335,7 +335,7 @@ public class FilesAndPragmaTests : SqliteTestBase
         await ReopenAsync();
         foreach (string kind in new[] { "queue", "stats", "config", "history" })
         {
-            Assert.Equal(7, ScalarLong(PathOf(kind + ".db"), "PRAGMA user_version"));
+            Assert.Equal(8, ScalarLong(PathOf(kind + ".db"), "PRAGMA user_version"));
         }
 
         Assert.Equal(1, ScalarLong(PathOf("queue.db"), indexCount));
