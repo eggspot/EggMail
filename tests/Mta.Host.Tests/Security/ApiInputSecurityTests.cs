@@ -152,6 +152,58 @@ public class ApiInputSecurityTests : IAsyncLifetime
         }
     }
 
+    [Theory]
+    [InlineData("a.txt\"; name=\"b.exe")]
+    [InlineData("a;b.txt")]
+    [InlineData("a\\b.txt")]
+    [InlineData("a\"b.txt")]
+    [InlineData("../../etc/passwd")]
+    [InlineData("C:\\Windows\\system32\\x.dll")]
+    [InlineData("\u00fc \u00f1 \u6587\u4ef6.txt")]
+    [InlineData("a%0d%0aBcc: evil@x.test.txt")]
+    [InlineData("=?utf-8?b?QQ==?=.txt")]
+    [InlineData("=?utf-8?q?x=0D=0ABcc:_evil@x.test?=.txt")]
+    [InlineData("a b  c.txt")]
+    [InlineData("name='x'; size=1.txt")]
+    public async Task An_attachment_file_name_cannot_add_parameters_headers_or_parts_and_reads_back_unchanged_in_an_independent_parser(string fileName)
+    {
+        Reply r = await _a.PostAsync("/api/v1/messages", new Dictionary<string, object?>
+        {
+            ["from"] = "noreply@example.com", ["to"] = new[] { "alex@gmail.test" }, ["subject"] = "s", ["text"] = "t",
+            ["attachments"] = new object[] { new Dictionary<string, object?> { ["filename"] = fileName, ["content_type"] = "text/plain", ["content"] = Convert.ToBase64String("data"u8.ToArray()) } },
+        });
+
+        Assert.Equal(HttpStatusCode.Accepted, r.Status);
+        MimeMessage message = await RawOfAsync(r.Str("id"));
+        MimeEntity attachment = Assert.Single(message.Attachments);
+        // MimeKit shows the base name of a path and decodes an encoded word in a file name, as mail clients do; neither is something the sender can prevent.
+        // What the sender must prevent is a file name that changes the structure of the message, which the checks below cover.
+        string shown = attachment.ContentDisposition?.FileName ?? "";
+        bool plainName = !fileName.Contains('/', StringComparison.Ordinal) && !fileName.Contains('\\', StringComparison.Ordinal) && !fileName.Contains("=?", StringComparison.Ordinal);
+        if (plainName) { Assert.Equal(fileName, shown); } else { Assert.NotEmpty(shown); }
+        Assert.Equal(["filename"], attachment.ContentDisposition!.Parameters.Select(p => p.Name.ToLowerInvariant()).Distinct().Order(StringComparer.Ordinal).ToArray());
+        Assert.DoesNotContain(attachment.ContentType.Parameters, p => p.Name.Equals("name", StringComparison.OrdinalIgnoreCase) && p.Value != shown);   // a name parameter says what the file name says
+        Assert.DoesNotContain(message.Headers, h => h.Field.Equals("Bcc", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(1, message.BodyParts.Count(p => p.IsAttachment));
+    }
+
+    [Theory]
+    [InlineData("a\r\nBcc: evil@x.test.txt")]
+    [InlineData("a\0.txt")]
+    [InlineData("a\u202egnp.exe")]
+    [InlineData("a\u2028b.txt")]
+    public async Task An_attachment_file_name_with_a_control_character_or_a_text_direction_override_is_refused(string fileName)
+    {
+        Reply r = await _a.PostAsync("/api/v1/messages", new Dictionary<string, object?>
+        {
+            ["from"] = "noreply@example.com", ["to"] = new[] { "alex@gmail.test" }, ["subject"] = "s", ["text"] = "t",
+            ["attachments"] = new object[] { new Dictionary<string, object?> { ["filename"] = fileName, ["content_type"] = "text/plain", ["content"] = Convert.ToBase64String("data"u8.ToArray()) } },
+        });
+
+        r.Problem(HttpStatusCode.BadRequest, "validation_failed");
+        Assert.Contains("attachments[0].filename", r.ErrorFields);
+    }
+
     [Fact]
     public async Task A_recipient_entry_that_names_more_than_one_address_is_refused_or_counts_as_one()
     {
@@ -411,6 +463,39 @@ public class ApiInputSecurityTests : IAsyncLifetime
             Reply reply = await client.SendRawAsync(HttpMethod.Post, path, body, "application/json");
             Assert.True((int)reply.Status < 500, $"{path} -> {(int)reply.Status} {reply.Body}");
         }
+    }
+
+    // Regular expressions on names: the longest input the API lets through, shaped to make a backtracking matcher work hardest
+
+    [Fact]
+    public async Task Pathological_names_at_the_longest_length_are_refused_at_once_by_every_pattern_check()
+    {
+        string[] hostile =
+        [
+            new string('a', 250) + "!",
+            "a" + new string('-', 250) + "!",
+            string.Concat(Enumerable.Repeat("a-", 120)) + "!",
+            string.Join(".", Enumerable.Repeat("a-a-a-a-a-a-a-a-a", 20)) + "!",
+            string.Join(".", Enumerable.Repeat("a", 120)) + "!",
+            new string('_', 250) + "\n",
+            new string('a', 253) + ".",
+            new string('a', 5000) + "!",
+        ];
+        foreach (string host in hostile)
+        {
+            Reply relay = await _root.PostAsync("/api/v1/admin/relay-routes", new { name = "r", host, domains = new[] { "a.example" } });
+            Assert.Equal(HttpStatusCode.BadRequest, relay.Status);
+            Reply policy = await _root.PostAsync("/api/v1/admin/tls-policies", new { domainPattern = host, level = "may" });
+            Assert.Equal(HttpStatusCode.BadRequest, policy.Status);
+            Reply smtp = await _alice.PostAsync("/api/v1/smtp-credentials", new { username = host });
+            Assert.Equal(HttpStatusCode.BadRequest, smtp.Status);
+            Reply name = await _root.PostAsync("/api/v1/admin/relay-routes", new { name = host, host = "smtp.relay.example", domains = new[] { "a.example" } });
+            Assert.Equal(HttpStatusCode.BadRequest, name.Status);
+            Reply domain = await _alice.PostAsync("/api/v1/domains", new { name = host });
+            Assert.Equal(HttpStatusCode.BadRequest, domain.Status);
+        }
+
+        Assert.Empty(await _f.Storage.Config.GetRelayRoutesAsync(default));
     }
 
     // Filters
