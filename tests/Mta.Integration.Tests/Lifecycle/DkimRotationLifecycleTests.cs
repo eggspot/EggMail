@@ -109,7 +109,11 @@ public class DkimRotationLifecycleTests
             Assert.Equal(old.Id, (await h.KeysAsync()).Single(k => k.Active).Id);
 
             string pendingHost = (await h.PlanAsync()).Single(r => r.Purpose == DomainRecordPurpose.Dkim && r.Host.StartsWith(pending.Selector + ".", StringComparison.Ordinal)).Host;
-            h.Dns.SetTxt(pendingHost, "v=DKIM1; k=rsa; p=" + DkimKeyTools.ExportPublicKeyBase64(OtherKey()));
+            using (var other = DkimKeyTools.GenerateRsa2048())
+            {
+                h.Dns.SetTxt(pendingHost, "v=DKIM1; k=rsa; p=" + DkimKeyTools.ExportPublicKeyBase64(other));
+            }
+
             await h.AdvanceAsync(TimeSpan.FromDays(2), TimeSpan.FromHours(6));
             Assert.Equal(old.Id, (await h.KeysAsync()).Single(k => k.Active).Id);
             h.Dns.Remove(pendingHost);
@@ -190,11 +194,5 @@ public class DkimRotationLifecycleTests
         Assert.Single(await h.PlanAsync(), r => r.Purpose == DomainRecordPurpose.Dkim);
         long checksInYear = h.Checks - checksBeforeYear;
         Assert.InRange(checksInYear, 300, 365 + rotations * 100);
-    }
-
-    private static System.Security.Cryptography.RSA OtherKey()
-    {
-        var rsa = DkimKeyTools.GenerateRsa2048();
-        return rsa;
     }
 }
