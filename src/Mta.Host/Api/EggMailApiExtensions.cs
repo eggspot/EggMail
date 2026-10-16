@@ -110,6 +110,7 @@ public static class EggMailApiExtensions
             MaxWebhooksPerTenant = api.MaxWebhooksPerTenant,
             MaxInboundRoutesPerDomain = api.MaxInboundRoutesPerDomain,
             Inbound = InboundDefaultsFrom(config),
+            InboundEnabled = config.Inbound.Enabled,
             MaxStatsRows = api.MaxStatsRows,
             SpfInclude = domainRecords.SpfInclude,
             DomainRecords = domainRecords,   // the one source of the bounce domain and the SPF include for the suggested records (the two properties above are copies)

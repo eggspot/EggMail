@@ -1,8 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
-using System.Net.Http.Headers;
-using System.Net.Sockets;
 using System.Text;
 using Mta.Core;
 using Mta.Storage;
@@ -21,18 +19,15 @@ public interface IWebhookNotifier
 /// </summary>
 public sealed class WebhookDispatcher : IAsyncDisposable
 {
-    private static readonly HttpRequestOptionsKey<IReadOnlyList<IpNetwork>> AllowlistKey = new("eggmail.allowlist");
-
     private readonly IWebhookOutbox _outbox;
     private readonly IConfigStore _config;
     private readonly ISecretProtector _protector;
     private readonly WebhookOptions _options;
     private readonly IClock _clock;
     private readonly IMtaLog _log;
-    private readonly IWebhookNotifier? _notifier;
-    private readonly Func<string, CancellationToken, ValueTask<IPAddress[]>> _resolve;
-    private readonly HttpMessageHandler? _handlerOverride;
-    private readonly ConcurrentDictionary<string, HttpClient> _clients = new();
+    private readonly WebhookTransport _transport;
+    private readonly bool _ownsTransport;
+    private readonly WebhookEndpointHealth _health;
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _endpointGates = new();
     private readonly SemaphoreSlim _global;
     private readonly string _owner = $"webhooks-{Ids.ToCompact(Ids.New())[..12]}";
@@ -46,7 +41,8 @@ public sealed class WebhookDispatcher : IAsyncDisposable
         IMtaLog? log = null,
         IWebhookNotifier? notifier = null,
         Func<string, CancellationToken, ValueTask<IPAddress[]>>? resolver = null,
-        HttpMessageHandler? handlerOverride = null)
+        HttpMessageHandler? handlerOverride = null,
+        WebhookTransport? transport = null)
     {
         _outbox = outbox;
         _config = config;
@@ -54,9 +50,10 @@ public sealed class WebhookDispatcher : IAsyncDisposable
         _options = options ?? new WebhookOptions();
         _clock = clock ?? SystemClock.Instance;
         _log = log ?? NullMtaLog.Instance;
-        _notifier = notifier;
-        _resolve = resolver ?? (async (h, ct) => await Dns.GetHostAddressesAsync(h, ct).ConfigureAwait(false));
-        _handlerOverride = handlerOverride;
+        // The transport (HTTP, signing, SSRF guard) is shared with the inbound route actions when the host passes one in.
+        _transport = transport ?? new WebhookTransport(_options, _clock, resolver, handlerOverride);
+        _ownsTransport = transport is null;
+        _health = new WebhookEndpointHealth(config, _options, _log, notifier);
         _global = new SemaphoreSlim(_options.MaxConcurrency);
     }
 
@@ -166,49 +163,18 @@ public sealed class WebhookDispatcher : IAsyncDisposable
         }
 
         using Activity? span = WebhookTracing.Start(item);
-        var started = _clock.Timestamp;
-        int? status = null;
-        string? errorClass = null;
-        string? snippet = null;
-        try
-        {
-            using var request = BuildRequest(item, endpoint, secrets, now);
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(_options.Timeout);
-            using var response = await GetClient(Allowlist(endpoint)).SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cts.Token).ConfigureAwait(false);
-            status = (int)response.StatusCode;
-            snippet = await ReadSnippetAsync(response, cts.Token).ConfigureAwait(false);
-            if (status is >= 300 and < 400)
-            {
-                errorClass = "redirect_not_followed";
-            }
-            else if (status is < 200 or >= 300)
-            {
-                errorClass = status switch { 410 => "gone", 429 => "throttled", 502 or 504 => "throttled", _ => $"http_{status}" };
-            }
-        }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-        {
-            errorClass = "timeout";
-        }
-        catch (HttpRequestException ex)
-        {
-            errorClass = ex.InnerException is SsrfBlockedException ? "ssrf_blocked" : ex.InnerException is SocketException ? "connect_failed" : "http_error";
-        }
-
-        var duration = _clock.GetElapsedTime(started);
-        WebhookMetrics.DeliveryDuration.Record(duration.TotalSeconds);
+        string id = $"evt_{Ids.ToCompact(item.EventId)}";
+        WebhookSendResult sent = await _transport.SendAsync(endpoint, id, Encoding.UTF8.GetBytes(item.PayloadJson), "application/json; charset=utf-8", secrets, now, null, ct).ConfigureAwait(false);
+        int? status = sent.Status;
+        string? errorClass = sent.ErrorClass;
+        WebhookMetrics.DeliveryDuration.Record(sent.Duration.TotalSeconds);
         WebhookTracing.Finish(span, status, errorClass);
-        var attempt = new WebhookAttemptRecord(item.Id, now, status, duration, errorClass, snippet);
+        var attempt = new WebhookAttemptRecord(item.Id, now, status, sent.Duration, errorClass, sent.Snippet);
         if (errorClass is null)
         {
             WebhookMetrics.Deliveries.Add(1, new KeyValuePair<string, object?>("outcome", "delivered"));
             await _outbox.CompleteAsync(item.Id, attempt, WebhookOutboxState.Delivered, null, ct).ConfigureAwait(false);
-            if (endpoint.FailingSince is not null)
-            {
-                await _config.UpsertWebhookEndpointAsync(endpoint with { FailingSince = null }, ct).ConfigureAwait(false);
-            }
-
+            await _health.RecordSuccessAsync(endpoint, ct).ConfigureAwait(false);
             return;
         }
 
@@ -216,7 +182,7 @@ public sealed class WebhookDispatcher : IAsyncDisposable
         {
             CountFailed(errorClass);
             await _outbox.CompleteAsync(item.Id, attempt, WebhookOutboxState.Failed, null, ct).ConfigureAwait(false);
-            await DisableAsync(endpoint, "The receiver answered 410 Gone", now, ct).ConfigureAwait(false);
+            await _health.DisableAsync(endpoint, "The receiver answered 410 Gone", now, ct).ConfigureAwait(false);
             return;
         }
 
@@ -241,15 +207,7 @@ public sealed class WebhookDispatcher : IAsyncDisposable
         }
 
         // Endpoint-level health: disable after a continuous failure period.
-        var failingSince = endpoint.FailingSince ?? now;
-        if (now - failingSince >= _options.DisableAfter)
-        {
-            await DisableAsync(endpoint, $"Failing continuously since {failingSince:u}", now, ct).ConfigureAwait(false);
-        }
-        else if (endpoint.FailingSince is null)
-        {
-            await _config.UpsertWebhookEndpointAsync(endpoint with { FailingSince = now }, ct).ConfigureAwait(false);
-        }
+        await _health.RecordFailureAsync(endpoint, now, ct).ConfigureAwait(false);
     }
 
     /// <summary>Counts an attempt that ended the item without delivery (it will not be tried again).</summary>
@@ -259,124 +217,24 @@ public sealed class WebhookDispatcher : IAsyncDisposable
         WebhookMetrics.Failures.Add(1, new KeyValuePair<string, object?>("reason", WebhookMetrics.ReasonOf(errorClass)));
     }
 
-    private async ValueTask DisableAsync(WebhookEndpointRecord endpoint, string reason, DateTimeOffset now, CancellationToken ct)
+    /// <summary>Supplies the tenant's allowlisted networks for internal endpoints; wired by the host from tenant settings (the transport is shared with the inbound route actions).</summary>
+    public Func<Guid, IReadOnlyList<IpNetwork>>? AllowlistProvider
     {
-        WebhookMetrics.EndpointsDisabled.Add(1);
-        await _config.DisableWebhookEndpointAsync(endpoint.Id, reason, now, ct).ConfigureAwait(false);
-        _log.Write(MtaLogLevel.Warning, "webhooks", $"endpoint {endpoint.Id} of tenant {endpoint.TenantId} disabled: {reason}");
-        if (_notifier is not null)
-        {
-            await _notifier.EndpointDisabledAsync(endpoint, reason, ct).ConfigureAwait(false);
-        }
+        get => _transport.AllowlistProvider;
+        set => _transport.AllowlistProvider = value;
     }
-
-    private HttpRequestMessage BuildRequest(WebhookOutboxItem item, WebhookEndpointRecord endpoint, string[] secrets, DateTimeOffset now)
-    {
-        byte[] payload = Encoding.UTF8.GetBytes(item.PayloadJson);
-        string id = $"evt_{Ids.ToCompact(item.EventId)}";
-        long ts = now.ToUnixTimeSeconds();
-        var request = new HttpRequestMessage(HttpMethod.Post, endpoint.Url) { Content = new ByteArrayContent(payload) };
-        request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json") { CharSet = "utf-8" };
-        request.Headers.TryAddWithoutValidation(StandardWebhooksSigner.IdHeader, id);
-        request.Headers.TryAddWithoutValidation(StandardWebhooksSigner.TimestampHeader, ts.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        request.Headers.TryAddWithoutValidation(StandardWebhooksSigner.SignatureHeader, StandardWebhooksSigner.Sign(id, ts, payload, secrets));
-        request.Headers.UserAgent.ParseAdd(_options.UserAgent);
-        request.Options.Set(AllowlistKey, Allowlist(endpoint));
-        return request;
-    }
-
-    /// <summary>Per-tenant allowlist for internal endpoints (settings key <c>webhooks.allowlist</c>, CIDR list).</summary>
-    private IReadOnlyList<IpNetwork> Allowlist(WebhookEndpointRecord endpoint) => AllowlistProvider?.Invoke(endpoint.TenantId) ?? [];
-
-    /// <summary>Supplies the tenant's allowlisted networks; wired by the host from tenant settings.</summary>
-    public Func<Guid, IReadOnlyList<IpNetwork>>? AllowlistProvider { get; set; }
-
-    private async Task<string?> ReadSnippetAsync(HttpResponseMessage response, CancellationToken ct)
-    {
-        try
-        {
-            await using var s = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
-            byte[] buf = new byte[_options.MaxResponseSnippetBytes];
-            int total = 0;
-            while (total < buf.Length)
-            {
-                int n = await s.ReadAsync(buf.AsMemory(total), ct).ConfigureAwait(false);
-                if (n == 0) { break; }
-                total += n;
-            }
-
-            return total == 0 ? null : Encoding.UTF8.GetString(buf, 0, total).Replace('\0', ' ');
-        }
-        catch (Exception ex) when (ex is HttpRequestException or IOException or OperationCanceledException)
-        {
-            return null;
-        }
-    }
-
-    private HttpClient GetClient(IReadOnlyList<IpNetwork> allowlist)
-    {
-        // Connections are pooled per client; clients with different allowlists must not share pooled connections.
-        string key = allowlist.Count == 0 ? "" : string.Join(',', allowlist.Select(n => n.ToString()));
-        return _clients.GetOrAdd(key, _ => CreateClient());
-    }
-
-    private HttpClient CreateClient() =>
-        new(_handlerOverride ?? CreateHandler(), disposeHandler: _handlerOverride is null) { Timeout = Timeout.InfiniteTimeSpan };
 
     /// <summary>The handler of production deliveries (a test can inspect it).</summary>
-    internal SocketsHttpHandler CreateHandler() => new()
-    {
-        AllowAutoRedirect = false,
-        UseCookies = false,
-        // The connect callback below validates the address it connects to. Through a proxy that address would be the proxy's, and the
-        // proxy would reach whatever the URL says: the SSRF guard would check the wrong hop. Never use one, whatever HTTP(S)_PROXY says.
-        UseProxy = false,
-        PooledConnectionLifetime = TimeSpan.FromMinutes(2),
-        ConnectTimeout = _options.Timeout,
-        ConnectCallback = ConnectGuardedAsync,
-        // While our webhook span is the current activity the handler would add traceparent/tracestate to the request, handing customers'
-        // receivers our trace ids. Nothing of ours belongs on a request to a third party.
-        ActivityHeadersPropagator = DistributedContextPropagator.CreateNoOutputPropagator(),
-    };
-
-    private async ValueTask<Stream> ConnectGuardedAsync(SocketsHttpConnectionContext context, CancellationToken ct)
-    {
-        var allowlist = context.InitialRequestMessage.Options.TryGetValue(AllowlistKey, out var a) ? a : [];
-        var addresses = await SsrfGuard.ResolveAllowedAsync(context.DnsEndPoint.Host, _resolve, allowlist, ct).ConfigureAwait(false);
-        if (addresses.Count == 0)
-        {
-            throw new SsrfBlockedException(context.DnsEndPoint.Host);
-        }
-
-        Exception? last = null;
-        foreach (var address in addresses)
-        {
-            var socket = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
-            try
-            {
-                await socket.ConnectAsync(new IPEndPoint(address, context.DnsEndPoint.Port), ct).ConfigureAwait(false);
-                return new NetworkStream(socket, ownsSocket: true);
-            }
-            catch (Exception ex) when (ex is SocketException)
-            {
-                socket.Dispose();
-                last = ex;
-            }
-        }
-
-        throw last ?? new SocketException((int)SocketError.HostNotFound);
-    }
+    internal SocketsHttpHandler CreateHandler() => _transport.CreateHandler();
 
     public async ValueTask DisposeAsync()
     {
-        foreach (var c in _clients.Values) { c.Dispose(); }
+        if (_ownsTransport)
+        {
+            _transport.Dispose();
+        }
+
         _global.Dispose();
         await ValueTask.CompletedTask.ConfigureAwait(false);
     }
-}
-
-/// <summary>Raised inside the connect callback when every resolved address is in a blocked range.</summary>
-public sealed class SsrfBlockedException : Exception
-{
-    public SsrfBlockedException(string host) : base($"No permitted address for {host}") { }
 }

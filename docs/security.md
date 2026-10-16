@@ -61,6 +61,25 @@ Reproduce a finding locally (no fuzzer needed): `dotnet run --project fuzz/Mta.F
 
 The `smtp-session` target also showed that a long loopback run exhausts the ephemeral ports (an environment limit, not a server bug); the target resets its connections and backs off.
 
+## Inbound route actions
+
+Received mail is attacker-controlled input that the server hands to customer systems. The route actions ([components/delivery.md](components/delivery.md#inbound-route-actions-mtahostinbound), design section 11.7):
+
+* **SSRF.** An inbound webhook goes through the same `WebhookTransport` as every event: the address actually connected to is validated (public ranges only, DNS rebinding cannot swap it), per-tenant allowlists apply, no redirects, no proxy, no cookies, no trace headers. A test posts through the real handler with a name that resolves to loopback and expects `webhook_ssrf_blocked`.
+* **Cross-tenant.** The route names an endpoint; the runner re-checks that the endpoint belongs to the message's tenant before sending and reads the route by tenant. Another tenant's receiver never gets a message even if a write path bug let the route through.
+* **Injection.** The JSON payload is written by a JSON writer (everything escaped, unpaired surrogates replaced, so a hostile message can neither break the document nor make it unbuildable). The `raw_mime` envelope and verdicts travel in `EggMail-*` headers as percent-encoded ASCII; a CR, LF or non-ASCII character in an address cannot add a header. Nothing from a message is placed in a URL, a header name or a log line (`actionLastError` holds codes only). Receivers must treat every field as attacker-controlled (documented in the API guide).
+* **Secrets and leaks.** The webhook secret is unprotected only to sign; errors recorded for the tenant carry no URL, address or response body (the outbox attempt log keeps a snippet for outbound events; inbound deliberately does not, so a receiver cannot be used to read internal services through the failure text). Attachments are listed by path, never inlined and never with a pre-signed URL: a leaked payload does not leak the attachment.
+* **Amplification and DoS.** One received message produces at most one webhook attempt stream (eight attempts over 27 h) per matching route (the first enabled route only); payloads are bounded (`Inbound:Webhook:MaxTextBytes`, 256 KiB of headers, 200 listed attachments, `MaxRawMessageBytes` for the raw format); the pool is bounded per replica and per tenant. **Known limit:** the claim hands out the oldest due work first and cannot skip a tenant, so a very large backlog of one tenant for a receiver that does not answer delays other tenants' actions on the same replica by roughly (backlog / per-tenant share) x timeout; watch `mta_inbound_actions{state="pending"}` and suspend or throttle the tenant (the per-domain rate limits and stored-bytes limits bound how fast a backlog can grow).
+* **Failure notices.** A failed action is visible to the tenant (state, `inbound.action.failed`), never to the sender of the received mail.
+
+## Inbound forwarding
+
+* **Laundering a spoof.** A forward whose From is in the route's own organizational domain would carry an aligned SRS envelope and an aligned signature of the tenant's domain; a spoof of `ceo@tenant.com` would pass DMARC at the final receiver. The forwarder refuses such a message unless it passed DMARC when it was received (`unauthenticated_local_sender`). Messages from other domains get the unaligned route-domain signature only, which proves "this tenant's server handled it" and nothing about the From domain.
+* **Signing.** The engine signs a forward with the key of `SendingDomain` (the route's domain) and never with the From domain; the original signatures are untouched (headers are added on top only); a regression test compares the bytes. No key: unsigned, never signed with anything else.
+* **Loops.** The target check at run time (route's domain, any inbound-enabled domain, the bounce domain), the signed hop marker (3 hops; forged markers count as zero; one marker only), the cap of 10 targets and the tenant's sending caps. The marker is dropped by a body-changing hop, which the `Received` limit of the receive path then bounds.
+* **SRS.** An SRS address is accepted only from the null sender with a valid hash and age, then dropped (no relay, no backscatter, no open relay by forging); the hash is 40 bits and comparisons are constant time over every key of the ring; the local part never exceeds 64 octets whatever the original address.
+* **Targets come from the route only**, never from the message (`Reply-To`, `Bcc`, `Resent-*` are ignored; a test pins it).
+
 ## Operational guidance
 
 - Run the container as the non-root user it is built with, read-only root file system, drop all capabilities, publish only the ports you enable (`docs/design.md` section 7).
