@@ -210,7 +210,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
         var webhooks = new WebhookDispatcher(storage.Webhooks, storage.Config, secrets, config.Webhooks, clock, log, endpointNotifier, transport: webhookTransport);
         var arcSealers = new ConfigArcSealerProvider(storage.Config, secrets, clock);
         var forwarder = new InboundForwarder(
-            storage, new Mta.Dsn.SrsCodec(verp), new Mta.Dsn.ForwardHopMarker(verp), new Mta.Auth.Arc.ArcValidator(dns, new Mta.Auth.Arc.ArcValidatorOptions { MaxInstances = 10 }), arcSealers,
+            storage, new ForwardSrs(verp), new ForwardHops(verp), new Mta.Auth.Arc.ArcValidator(dns, new Mta.Auth.Arc.ArcValidatorOptions { MaxInstances = 10 }), arcSealers,
             new InboundForwarderOptions { AuthenticationResultsId = config.Hostname, BounceDomain = config.Delivery.BounceDomain, QueueLifetime = config.Storage.Queue.MaxLifetime }, clock, log, onQueued: () => engine?.Wake());
         var inboundActions = new InboundActionRunner(
             storage, webhookTransport, new WebhookEndpointHealth(storage.Config, config.Webhooks, log, endpointNotifier), secrets, InboundActionOptionsFrom(config), clock, log,
@@ -247,7 +247,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
         {
             KeysProtectedAtRest = Mta.Host.Secrets.SecretsFactory.KeysProtectedAtRest(config.Secrets, storage.Config),
             Config = config, Storage = storage, Clock = clock, Log = log, Secrets = secrets, Certificates = certificates, Verp = verp,
-            Submission = submission, AuthThrottle = throttle, SmtpServer = smtp, Delivery = delivery, Webhooks = webhooks, InboundActions = inboundActions, SrsBounces = new SrsBounceHandler(new Mta.Dsn.SrsCodec(verp), clock, log), Dns = dns,
+            Submission = submission, AuthThrottle = throttle, SmtpServer = smtp, Delivery = delivery, Webhooks = webhooks, InboundActions = inboundActions, SrsBounces = new SrsBounceHandler(new ForwardSrs(verp), clock, log), Dns = dns,
             Pool = pool, Routes = routes, Limits = limits, Acme = acme, AcmeHttpListener = acmeHttpListener, TlsReports = reports, Health = routeHealth, DestinationThrottle = destinationThrottle, ReplicaCoordinator = replicaCoordinator,
             CounterPersistence = counterPersistence, TlsJournal = tlsJournal, TlsCollector = collector,
         };
