@@ -7,7 +7,7 @@ namespace Mta.Storage.Portability;
 public sealed class BundleManifest
 {
     /// <summary>Semantic version of the bundle format. A reader accepts the same major and any minor; it refuses a newer major.</summary>
-    public const string CurrentFormatVersion = "1.2.0";
+    public const string CurrentFormatVersion = "1.3.0";
 
     public string FormatVersion { get; set; } = CurrentFormatVersion;
     public Guid SwitchId { get; set; }
@@ -108,6 +108,9 @@ public sealed class BundleTable
     public string Name { get; set; } = "";
     public string Part { get; set; } = "";
     public long Rows { get; set; }
+
+    /// <summary>The rows a switch holds back from dispatch (received mail holds its pending actions only). Null in a bundle written before this member existed: every row of a table with a hold.</summary>
+    public long? HeldRows { get; set; }
 
     /// <summary>Hex of the 256-bit sum of the row hashes (secret columns excluded).</summary>
     public string Checksum { get; set; } = "";

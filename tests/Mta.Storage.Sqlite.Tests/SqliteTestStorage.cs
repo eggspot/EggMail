@@ -42,6 +42,7 @@ public static class SqliteTestStorage
             Postgres = o.Postgres,
             Content = o.Content,
             Queue = o.Queue,
+            Inbound = o.Inbound,
         };
     }
 }

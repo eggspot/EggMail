@@ -67,6 +67,18 @@ public class OutageTests : StorageTestBase
         await Assert.ThrowsAsync<StorageUnavailableException>(async () => await Storage.Config.GetTenantsAsync(ct));
         await Assert.ThrowsAsync<StorageUnavailableException>(async () => await Storage.Config.UpsertTenantAsync(new Tenant(Ids.New(), "T", "t", true, Clock.UtcNow, false), ct));
 
+        var inboundDraft = new InboundMessageDraft
+        {
+            Id = Ids.New(), TenantId = TenantA, DomainId = Ids.New(), Domain = "example.com", ReceivedAt = Clock.UtcNow, RemoteAddress = "203.0.113.9", EnvelopeFrom = "a@sender.test", EnvelopeTo = "x@example.com",
+            Auth = InboundAuthResults.NotChecked, RouteId = Ids.New(), ActionKind = InboundActionKind.Store, Raw = new byte[10],
+        };
+        await Assert.ThrowsAsync<StorageUnavailableException>(async () => await Storage.Inbound.AcceptAsync([inboundDraft], ct));
+        await Assert.ThrowsAsync<StorageUnavailableException>(async () => await Storage.Inbound.SearchAsync(new InboundMessageQuery(TenantId: TenantA), ct));
+        await Assert.ThrowsAsync<StorageUnavailableException>(async () => await Storage.Inbound.GetRawAsync(TenantA, inboundDraft.Id, ct));
+        await Assert.ThrowsAsync<StorageUnavailableException>(async () => await Storage.Inbound.ClaimActionsAsync("w", 5, Clock.UtcNow, TimeSpan.FromMinutes(1), ct));
+        await Assert.ThrowsAsync<StorageUnavailableException>(async () => await Storage.Inbound.GetUsageAsync(null, null, ct));
+        await Assert.ThrowsAsync<StorageUnavailableException>(async () => await Storage.Inbound.LoadEnabledDomainsAsync(ct));
+
         StorageHealth down = await Storage.Maintenance.GetHealthAsync(ct);
         Assert.False(down.Ready);
         Assert.Contains("postgres_unavailable", down.Warnings);

@@ -23,6 +23,8 @@ public interface IConfigDbSets : IDataProtectionKeyContext
     DbSet<AcmeRenewalEntity> AcmeRenewals { get; }
     DbSet<LeaseEntity> Leases { get; }
     DbSet<SwitchStateEntity> SwitchStates { get; }
+    DbSet<InboundDomainSettingsEntity> InboundSettings { get; }
+    DbSet<InboundRouteEntity> InboundRoutes { get; }
 }
 
 public interface IQueueDbSets
@@ -31,6 +33,8 @@ public interface IQueueDbSets
     DbSet<SpoolMessageEntity> Spool { get; }
     DbSet<WebhookOutboxEntity> WebhookOutbox { get; }
     DbSet<IdempotencyKeyEntity> IdempotencyKeys { get; }
+    DbSet<InboundMessageEntity> InboundMessages { get; }
+    DbSet<InboundMessageRawEntity> InboundRaw { get; }
 }
 
 public interface IStatsDbSets
@@ -49,6 +53,9 @@ public interface IHistoryDbSets
     DbSet<MessageContentEntity> MessageContents { get; }
     DbSet<RetainedRawEntity> RetainedRaw { get; }
 }
+
+/// <summary>A queue context that can be pooled (the inbound message reads), built from its options alone like <see cref="ConfigReadContext"/>.</summary>
+public sealed class QueueReadContext(DbContextOptions<QueueReadContext> options) : QueueDbContext(options);
 
 /// <summary>A config context that can be pooled: EF's pool constructs contexts from their options alone, so the hooks come from the options.</summary>
 public sealed class ConfigReadContext(DbContextOptions<ConfigReadContext> options) : ConfigDbContext(options);
@@ -77,6 +84,8 @@ public class ConfigDbContext : DbContext, IConfigDbSets
     public DbSet<AcmeRenewalEntity> AcmeRenewals => Set<AcmeRenewalEntity>();
     public DbSet<LeaseEntity> Leases => Set<LeaseEntity>();
     public DbSet<SwitchStateEntity> SwitchStates => Set<SwitchStateEntity>();
+    public DbSet<InboundDomainSettingsEntity> InboundSettings => Set<InboundDomainSettingsEntity>();
+    public DbSet<InboundRouteEntity> InboundRoutes => Set<InboundRouteEntity>();
     public DbSet<DataProtectionKey> DataProtectionKeys => Set<DataProtectionKey>();
 
     protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder) => _hooks.ConfigureConventions(configurationBuilder);
@@ -88,19 +97,28 @@ public class ConfigDbContext : DbContext, IConfigDbSets
     }
 }
 
-public class QueueDbContext(DbContextOptions<QueueDbContext> options, IStorageModelHooks hooks) : DbContext(options), IQueueDbSets
+public class QueueDbContext : DbContext, IQueueDbSets
 {
+    private readonly IStorageModelHooks _hooks;
+
+    public QueueDbContext(DbContextOptions<QueueDbContext> options, IStorageModelHooks hooks) : base(options) => _hooks = hooks;
+
+    /// <summary>For derived (pooled) contexts: the hooks travel in the options (<see cref="ModelHooksOptionsExtensions.UseModelHooks{TContext}"/>).</summary>
+    protected QueueDbContext(DbContextOptions options) : base(options) => _hooks = options.HooksOf();
+
     public DbSet<QueuedDeliveryEntity> Deliveries => Set<QueuedDeliveryEntity>();
     public DbSet<SpoolMessageEntity> Spool => Set<SpoolMessageEntity>();
     public DbSet<WebhookOutboxEntity> WebhookOutbox => Set<WebhookOutboxEntity>();
     public DbSet<IdempotencyKeyEntity> IdempotencyKeys => Set<IdempotencyKeyEntity>();
+    public DbSet<InboundMessageEntity> InboundMessages => Set<InboundMessageEntity>();
+    public DbSet<InboundMessageRawEntity> InboundRaw => Set<InboundMessageRawEntity>();
 
-    protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder) => hooks.ConfigureConventions(configurationBuilder);
+    protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder) => _hooks.ConfigureConventions(configurationBuilder);
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         StorageModel.ConfigureQueue(modelBuilder);
-        hooks.OnModelBuilt(modelBuilder);
+        _hooks.OnModelBuilt(modelBuilder);
     }
 }
 

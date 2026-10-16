@@ -159,6 +159,9 @@ public sealed class InboundMessageEntity
     public bool HasRaw { get; set; }
     public string? LeaseOwner { get; set; }
 
+    /// <summary>Grows with every claim and never goes down (a release and a retry leave it alone): the token a completion has to present.</summary>
+    public long ClaimSequence { get; set; }
+
     /// <summary>Unix epoch when not leased; an action is claimable when this is not after "now".</summary>
     public DateTimeOffset LeaseUntil { get; set; }
 

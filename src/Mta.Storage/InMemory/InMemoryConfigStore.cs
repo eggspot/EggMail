@@ -5,7 +5,7 @@ using Mta.Storage.Transfer;
 namespace Mta.Storage.InMemory;
 
 /// <summary>In-memory <see cref="IConfigStore"/>; same semantics as the EF implementation (normalization, uniqueness, leases).</summary>
-internal sealed partial class InMemoryConfigStore : IConfigStore, IInboundConfigStore
+internal sealed partial class InMemoryConfigStore : IConfigStore
 {
     private readonly object _gate = new();
     private readonly Dictionary<Guid, TenantEntity> _tenants = [];
@@ -583,7 +583,7 @@ internal sealed partial class InMemoryConfigStore : IConfigStore, IInboundConfig
             {
                 if (_inboundRoutes.Values.Any(r => r.ActionKind == InboundActionKind.Webhook && r.WebhookEndpointId == id))
                 {
-                    throw new StorageConflictException("The webhook endpoint is the target of inbound routes.");
+                    throw new StorageConflictException("The webhook endpoint is the target of inbound routes.", StorageConflictReasons.WebhookEndpointInUse);
                 }
 
                 _endpoints.Remove(id);
@@ -936,6 +936,8 @@ internal sealed partial class InMemoryConfigStore : IConfigStore, IInboundConfig
                 "acme_renewal" => Snapshot(_renewals.Values.OrderBy(x => x.CertificateName, StringComparer.Ordinal)),
                 "domain_record_check" => Snapshot(_domainChecks.Values.OrderBy(x => x.DomainId).ThenBy(x => x.RecordKey, StringComparer.Ordinal)),
                 "tls_rpt_bucket" => Snapshot(_tlsRpt.Values.OrderBy(x => x.Id)),
+                "inbound_domain_settings" => Snapshot(_inboundSettings.Values.OrderBy(x => x.DomainId)),
+                "inbound_route" => Snapshot(_inboundRoutes.Values.OrderBy(x => x.Id)),
                 "sending_counter" => Snapshot(_counters.Values.OrderBy(x => x.Scope).ThenBy(x => x.TenantId).ThenBy(x => x.Domain, StringComparer.Ordinal).ThenBy(x => x.WindowKind).ThenBy(x => x.WindowIndex)),
                 _ => throw new ArgumentOutOfRangeException(nameof(table), table, "not a config table"),
             };
@@ -971,6 +973,8 @@ internal sealed partial class InMemoryConfigStore : IConfigStore, IInboundConfig
                     case AcmeRenewalEntity x: _renewals[x.CertificateName] = x; break;
                     case DomainRecordCheckEntity x: _domainChecks[(x.DomainId, x.RecordKey)] = x; break;
                     case TlsRptBucketEntity x: _tlsRpt[x.Id] = x; break;
+                    case InboundDomainSettingsEntity x: _inboundSettings[x.DomainId] = x; break;
+                    case InboundRouteEntity x: _inboundRoutes[x.Id] = x; break;
                     case SendingCounterEntity x: _counters[(x.Scope, x.TenantId, x.Domain, x.WindowKind, x.WindowIndex)] = x; break;
                     default: throw new ArgumentOutOfRangeException(nameof(rows), table, "not a config row");
                 }
@@ -1010,6 +1014,8 @@ internal sealed partial class InMemoryConfigStore : IConfigStore, IInboundConfig
                 case "domain_record_check": _domainChecks.Clear(); break;
                 case "tls_rpt_bucket": _tlsRpt.Clear(); break;
                 case "sending_counter": _counters.Clear(); break;
+                case "inbound_domain_settings": _inboundSettings.Clear(); break;
+                case "inbound_route": _inboundRoutes.Clear(); break;
                 default: throw new ArgumentOutOfRangeException(nameof(table), table, "not a config table");
             }
         }

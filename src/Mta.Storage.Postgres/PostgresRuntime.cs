@@ -116,6 +116,8 @@ internal sealed class PostgresRuntime
 
     public EfConfigStore<PostgresDbContext> ConfigStore { get; set; } = null!;
 
+    public EfInboundMessageStore<PostgresDbContext> InboundMessages { get; set; } = null!;
+
     private static NpgsqlDataSource BuildReaderDataSource(string connectionString, PostgresOptions pg)
     {
         var builder = new NpgsqlConnectionStringBuilder(connectionString);
