@@ -19,6 +19,7 @@ internal sealed class SmtpSession
     private readonly SocketTransport _transport;
     private readonly SmtpSessionContext _ctx;
     private readonly SmtpSessionState _state;
+    private readonly long _listenerMaxMessageSize;   // the listener's own limit, else the server's; the handler may lower it for one transaction (SmtpSessionContext.TransactionMaxMessageSize)
     private readonly SmtpParseOptions _parseOptions;
     private readonly IMtaLog _log;
     private readonly CancellationTokenSource _readCts;
@@ -44,6 +45,7 @@ internal sealed class SmtpSession
         _listener = listener;
         _log = server.Log;
         _stopping = stopping;
+        _listenerMaxMessageSize = listener.MaxMessageSize ?? _options.MaxMessageSize;
         _transport = new SocketTransport(socket, startPlain: listener.Mode != ListenerMode.Implicit);
         _readCts = CancellationTokenSource.CreateLinkedTokenSource(stopping);
         _parseOptions = new SmtpParseOptions { MaxLineLength = _options.MaxLineLength, AllowSmtpUtf8 = _options.SmtpUtf8, AddressCache = new EmailAddressCache() };
@@ -62,9 +64,12 @@ internal sealed class SmtpSession
             AuthAvailable = listener.Role == ListenerRole.Submission,
             AllowInsecureAuth = listener.AllowInsecureAuth,
             RequireAuthForMail = listener.AuthRequired,
-            MaxRecipients = _options.MaxRecipients,
+            MaxRecipients = listener.MaxRecipients ?? _options.MaxRecipients,
         };
     }
+
+    /// <summary>The limit that applies to the message of the open transaction: the listener's, or the lower one the handler set while accepting recipients.</summary>
+    private long EffectiveMaxMessageSize => _ctx.TransactionMaxMessageSize is { } lower && lower < _listenerMaxMessageSize ? lower : _listenerMaxMessageSize;
 
     private static MessageBuffer CreateDisposedBuffer()
     {
@@ -291,6 +296,17 @@ internal sealed class SmtpSession
 
             if (cmd.Verb == SmtpVerb.Data)
             {
+                SmtpReply? dataRefusal = await _handler.OnDataStartAsync(_ctx, _mail!, _recipients, _stopping).ConfigureAwait(false);
+                if (dataRefusal is not null)
+                {
+                    SmtpMetrics.MessagesRejected.Add(1);
+                    ResetTransaction();
+                    await ReplyAsync(dataRefusal).ConfigureAwait(false);
+                    continue;
+                }
+
+                long maxMessageSize = EffectiveMaxMessageSize;
+
                 // The DATA transaction is written out inside this loop rather than as an asynchronous method of its own (and reads straight from the
                 // pipe): every asynchronous method that is waiting is a state machine on the heap, and this one would be waiting for the whole time
                 // the handler stores the message. The loop's own state machine exists once per session anyway.
@@ -362,7 +378,7 @@ internal sealed class SmtpSession
                             consumedTotal += used;
                             if (!(tooLarge || noMemory))
                             {
-                                if (scanner.BytesWritten > _options.MaxMessageSize)
+                                if (scanner.BytesWritten > maxMessageSize)
                                 {
                                     tooLarge = true;
                                 }
@@ -424,6 +440,7 @@ internal sealed class SmtpSession
                     if (tooLarge)
                     {
                         SmtpMetrics.MessagesRejected.Add(1);
+                        _handler.OnMessageRefused(_ctx, SmtpReplies.MessageTooLarge);
                         ResetTransaction();
                         Write(SmtpReplies.MessageTooLarge);
                         continue;
@@ -432,6 +449,7 @@ internal sealed class SmtpSession
                     if (noMemory)
                     {
                         SmtpMetrics.MessagesRejected.Add(1);
+                        _handler.OnMessageRefused(_ctx, SmtpReplies.InsufficientStorage);
                         ResetTransaction();
                         Write(SmtpReplies.InsufficientStorage);
                         continue;
@@ -588,6 +606,7 @@ internal sealed class SmtpSession
 
     private void ResetTransaction()
     {
+        _ctx.TransactionMaxMessageSize = null;
         _state.ResetTransaction();
         _mail = null;
         _recipients.Clear();
@@ -604,7 +623,7 @@ internal sealed class SmtpSession
             Chunking = _options.Chunking,
             EnhancedStatusCodes = _options.EnhancedStatusCodes,
             StartTls = _state.StartTlsAvailable && !_state.TlsActive,
-            Size = _options.MaxMessageSize,
+            Size = _listenerMaxMessageSize,
             AuthMechanisms = offerAuth ? ["PLAIN", "LOGIN"] : [],
         };
     }
@@ -686,7 +705,7 @@ internal sealed class SmtpSession
     [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask HandleMailAsync(SmtpCommand cmd)
     {
-        if (cmd.Mail.Size is long declared && declared > _options.MaxMessageSize)
+        if (cmd.Mail.Size is long declared && declared > _listenerMaxMessageSize)
         {
             if (await ErrorAsync(SmtpReplies.MessageTooLarge).ConfigureAwait(false)) { _close = true; }
             return;
@@ -892,6 +911,18 @@ internal sealed class SmtpSession
         bool failed = false;
         SmtpReply? failure = null;
         var chunk = cmd;
+
+        // The first chunk is the start of the message data: the handler may refuse the message now. The chunks are still read and discarded (RFC 3030: the sequence runs to BDAT LAST).
+        bool refusedByHandler = false;
+        if (await _handler.OnDataStartAsync(_ctx, _mail!, _recipients, _stopping).ConfigureAwait(false) is { } dataRefusal)
+        {
+            failed = true;
+            refusedByHandler = true;
+            failure = dataRefusal;
+            message.Dispose();
+        }
+
+        long maxMessageSize = EffectiveMaxMessageSize;
         long started = _server.Clock.Timestamp;
         // BDAT bodies have no terminator to scan for, but they are sent on with DATA: the same line-ending rule as for DATA applies (a bare LF is smuggling material).
         var lineEndings = new LineEndingValidator(_options.RejectNulInData);
@@ -903,7 +934,7 @@ internal sealed class SmtpSession
             {
                 long remaining = chunk.ChunkSize;
                 total += chunk.ChunkSize;
-                if (!failed && total > _options.MaxMessageSize)
+                if (!failed && total > maxMessageSize)
                 {
                     failed = true;
                     failure = SmtpReplies.MessageTooLarge;
@@ -991,6 +1022,11 @@ internal sealed class SmtpSession
                     SmtpMetrics.MessagesRejected.Add(1);
                     if (chunk.LastChunk)
                     {
+                        if (!refusedByHandler)
+                        {
+                            _handler.OnMessageRefused(_ctx, failure!);
+                        }
+
                         ResetTransaction();
                         Write(failure!);
                         return;
