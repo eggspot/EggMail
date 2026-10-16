@@ -225,6 +225,54 @@ public sealed class InboundForwardPipelineTests : IAsyncLifetime
         Assert.False(stored.HasRaw);
     }
 
+    /// <summary>The message as an earlier hop (relay.test) left it: sealed with an ARC set of its own key, published in the fake DNS.</summary>
+    private byte[] SealedByAnEarlierHop(byte[] message, RSA relayKey)
+    {
+        using var sealer = new Mta.Auth.Arc.ArcSealer(new Mta.Auth.Arc.ArcSealerOptions { Domain = "relay.test", Selector = "s1" }, relayKey);
+        Mta.Auth.Arc.ArcSealResult sealedHop = sealer.Seal(message, "relay.test; spf=pass smtp.mailfrom=sender.test; dkim=pass header.d=sender.test", new Mta.Auth.Arc.ArcChainResult(Mta.Auth.Arc.ArcChainStatus.None, "no chain"));
+        Assert.True(sealedHop.IsSealed);
+        return [.. sealedHop.HeaderBytes.ToArray(), .. message];
+    }
+
+    private string TopArcSeal(byte[] mail)
+    {
+        string text = Encoding.UTF8.GetString(mail);
+        int at = text.IndexOf("ARC-Seal:", StringComparison.Ordinal);
+        return text[at..text.IndexOf("\r\n", at, StringComparison.Ordinal)];
+    }
+
+    [Fact]
+    public async Task A_valid_arc_chain_is_continued_with_cv_pass_and_a_broken_one_is_sealed_cv_fail()
+    {
+        using RSA relayKey = DkimKeyTools.GenerateRsa2048();
+        _dns.AddTxt("s1._domainkey.relay.test", DkimKeyTools.FormatDnsTxtValue(relayKey));
+        var locator = new Locator(new Dictionary<string, RSA>(StringComparer.OrdinalIgnoreCase) { ["example.org"] = _routeKey, ["sender.test"] = _senderKey, ["relay.test"] = relayKey });
+
+        // Valid chain: ours is instance 2, cv=pass, and MimeKit validates the two sets.
+        byte[] chained = SealedByAnEarlierHop(SignedByTheSender("through a relay\r\n"), relayKey);
+        InboundMessageDraft good = await ReceiveAsync(chained);
+        await RunActionsUntilAsync(good.Id, InboundActionState.Done);
+        await WaitForMailAsync(1);
+        byte[] delivered;
+        lock (_internet.Received) { delivered = _internet.Received[0].Body; }
+        string seal = TopArcSeal(delivered);
+        Assert.Contains("i=2", seal, StringComparison.Ordinal);
+        Assert.Contains("cv=pass", seal, StringComparison.Ordinal);
+        Assert.Equal(Mta.Auth.Arc.ArcChainStatus.Pass, (await new Mta.Auth.Arc.ArcValidator(_dns).ValidateAsync(delivered)).Status);
+        Assert.Equal(ArcSignatureValidationResult.Pass, new ArcVerifier(locator).Verify(Wire, Load(delivered)).Chain);
+
+        // Broken chain (the earlier hop's signature no longer matches): the new seal says cv=fail and vouches for nothing.
+        byte[] broken = Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(SealedByAnEarlierHop(SignedByTheSender("through a relay\r\n"), relayKey)).Replace("through a relay", "through a RELAY", StringComparison.Ordinal));
+        InboundMessageDraft bad = await ReceiveAsync(broken);
+        await RunActionsUntilAsync(bad.Id, InboundActionState.Done);
+        await WaitForMailAsync(2);
+        byte[] deliveredBad;
+        lock (_internet.Received) { deliveredBad = _internet.Received[1].Body; }
+        string failSeal = TopArcSeal(deliveredBad);
+        Assert.Contains("i=2", failSeal, StringComparison.Ordinal);
+        Assert.Contains("cv=fail", failSeal, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task A_forwarded_message_is_not_forwarded_again_after_three_hops_and_a_forged_marker_does_not_count()
     {
