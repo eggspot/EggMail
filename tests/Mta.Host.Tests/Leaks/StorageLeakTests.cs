@@ -67,14 +67,9 @@ public sealed class StorageLeakTests(ITestOutputHelper output)
         }
     }
 
-    [Fact]
+    [PostgresFact]
     public async Task Leak_postgres_storage_message_flow_does_not_grow()
     {
-        if (PostgresTestServer.UnavailableReason is not null)
-        {
-            return;   // the same convention as the other PostgreSQL tests of this assembly set: no server, nothing to run
-        }
-
         await using TestDatabase db = await PostgresTestServer.Instance.CreateDatabaseAsync();
         var clock = new VirtualClock();
         var pg = new PostgresOptions { RuntimeConnectionString = db.ConnectionString, MaxPoolSize = 8, StatsFlushInterval = TimeSpan.Zero, RetentionDeletePause = TimeSpan.FromMilliseconds(1) };
@@ -86,6 +81,7 @@ public sealed class StorageLeakTests(ITestOutputHelper output)
         await monitor.OpenAsync();
         using var probe = new LeakProbe(output.WriteLine) { WarmupBatches = 1 };
         probe.TrackArrayPoolBalance(ignoreRentalsFrom: ["Microsoft.EntityFrameworkCore"]);   // EF Core rents an array per query (its expression funcletizer) and keeps it; the maintenance run queries through EF
+        probe.Allow("threads", 8);   // pool and thread-pool threads come and go with the load of a database round trip
         probe.Track("server connections of the database", () => ServerConnections(monitor, db.Name), absolute: 1);
 
         // A round costs a few milliseconds of server time and a virtual day (partition rotation and retention) more, so the default batch is smaller than on the other

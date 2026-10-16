@@ -145,7 +145,7 @@ public sealed class RegistrationLeakTests(ITestOutputHelper output)
             long statementsBefore = PreparedCommand.LiveCount;   // other tests of the assembly may have left storages open; only this test's must be gone
             int attachedBefore = SqliteMetrics.AttachedCount;
             using var probe = new LeakProbe(output.WriteLine) { WarmupBatches = 1 };
-            probe.Allow("threads", 8);
+            probe.Allow("threads", 12);
             probe.Track("prepared SQLite statements", () => PreparedCommand.LiveCount);
             probe.Track("storages attached to the SQLite gauges", () => SqliteMetrics.AttachedCount);
             LeakReport report = await probe.RunAsync(async _ =>

@@ -11,15 +11,20 @@ namespace Mta.TestSupport;
 /// <item>one or more <b>warm-up</b> batches run the flow so that JIT, pools, caches, lazily created singletons and the thread pool reach their steady state;</item>
 /// <item>then three measured batches B1, B2, B3 of N iterations each run, and before each sample the process is brought to a quiet point
 /// (<c>GC.Collect(2, Forced, blocking, compacting)</c>, <c>WaitForPendingFinalizers</c>, collect again, twice);</item>
-/// <item>every metric must satisfy <c>level(B3) - level(B2) &lt;= tolerance</c>. A leak of K per batch shows up as K in that difference however big the
-/// level is; a one-off growth (a cache that fills during B1) shows up in B1 - B0 only and is not reported.</item>
+/// <item>a metric is reported only when it grew by more than its tolerance in <b>both</b> measured intervals, <c>level(B2) - level(B1)</c> and
+/// <c>level(B3) - level(B2)</c>. A leak of K per batch shows up as K in both however big the level is; a one-off growth (a cache that fills during B1, a
+/// thread-pool thread or a descriptor that happens to be open at one sample) shows up in one interval only and is not reported.</item>
 /// </list>
-/// Built-in metrics: managed heap after a full collection (tolerance <c>max(2 MiB, 20 % of the level after warm-up)</c>), process thread count (4), open file
+/// Built-in metrics: managed heap after a full collection (tolerance <c>max(256 KiB, 2 % of the level after warm-up)</c>), process thread count (4), open file
 /// descriptors (0; <c>/proc/self/fd</c> on Linux, <c>/dev/fd</c> on macOS, not available on Windows and then skipped), active
 /// <see cref="Timer"/>s (2; <c>Timer.ActiveCount</c> is the runtime's own count, so an undisposed <c>CancellationTokenSource.CancelAfter</c> or
 /// <c>Timer</c> shows up here), thread-pool pending work items (8). Custom counters are added with <see cref="Track"/>; the outstanding
 /// <c>ArrayPool&lt;byte&gt;.Shared</c> rentals (rented minus returned, from the runtime's <c>System.Buffers.ArrayPoolEventSource</c>) with
 /// <see cref="TrackArrayPoolBalance"/>.
+/// <para>Sensitivity: a heap leak is seen when it exceeds the tolerance in each batch, so with a batch of N iterations the smallest leak per iteration that
+/// is seen is the tolerance divided by N (256 KiB / 50 = about 5 KB per iteration for a batch of 50, about 25 bytes for 10,000; on a heap of 45 MB the 2 % rule
+/// makes it about 900 KB per batch). The heap after a forced collection is stable to a few KB between batches, so the tolerance is not there to absorb noise
+/// but to ignore what a flow legitimately keeps (a cache filling up).</para>
 /// <para>Not covered by design: a leak smaller than the tolerance per batch (use a bigger N, <c>EGGMAIL_ACCEL_SCALE</c>), native memory outside
 /// counters that the caller adds, and OS-level leaks that only appear under real load (the soak test, docs/soak.md, samples the real process).</para>
 /// </summary>
@@ -32,7 +37,7 @@ public sealed class LeakProbe : IDisposable
     public LeakProbe(Action<string>? log = null)
     {
         _log = log ?? (_ => { });
-        _metrics.Add(new Metric("managed heap (bytes)", () => GC.GetTotalMemory(forceFullCollection: true), 2 * 1024 * 1024, 0.20));
+        _metrics.Add(new Metric("managed heap (bytes)", () => GC.GetTotalMemory(forceFullCollection: true), 256 * 1024, 0.02));
         _metrics.Add(new Metric("threads", () => Process.GetCurrentProcess().Threads.Count, 4, 0));
         _metrics.Add(new Metric("timers", () => Timer.ActiveCount, 2, 0));
         _metrics.Add(new Metric("thread-pool pending work items", () => ThreadPool.PendingWorkItemCount, 8, 0));
@@ -58,7 +63,7 @@ public sealed class LeakProbe : IDisposable
         return this;
     }
 
-    /// <summary>Adds a counter whose growth between B2 and B3 must stay within <paramref name="absolute"/> plus <paramref name="relative"/> times its level.</summary>
+    /// <summary>Adds a counter that is reported when it grows by more than <paramref name="absolute"/> or <paramref name="relative"/> times its level (whichever is larger) in both measured intervals.</summary>
     public LeakProbe Track(string name, Func<long> read, long absolute = 0, double relative = 0)
     {
         _metrics.Add(new Metric(name, read, absolute, relative));
@@ -70,7 +75,7 @@ public sealed class LeakProbe : IDisposable
     /// tests in the non-parallel collection. <paramref name="captureStacks"/> remembers the stack of every rental until it is returned (slow; for finding a leak), and
     /// <see cref="DescribeOutstandingRentals"/> then names the call sites that rented and never returned.
     /// </summary>
-    /// <param name="absolute">Growth allowed between the last two batches.</param>
+    /// <param name="absolute">Growth allowed between batches.</param>
     /// <param name="captureStacks">Remember the stack of every rental (slow; for finding a leak).</param>
     /// <param name="ignoreRentalsFrom">
     /// Rentals whose stack contains this text are not counted (implies <paramref name="captureStacks"/>). For code the project does not own: Entity Framework Core's
@@ -113,10 +118,11 @@ public sealed class LeakProbe : IDisposable
         for (int m = 0; m < _metrics.Count; m++)
         {
             Metric metric = _metrics[m];
+            long b1 = levels[m][1];
             long b2 = levels[m][2];
             long b3 = levels[m][3];
             long allowed = Math.Max(metric.Absolute, (long)(metric.Relative * Math.Max(levels[m][0], 0)));
-            rows.Add(new LeakRow(metric.Name, levels[m][0], levels[m][1], b2, b3, allowed));
+            rows.Add(new LeakRow(metric.Name, levels[m][0], b1, b2, b3, allowed));
         }
 
         var report = new LeakReport(batchSize, rows);
@@ -338,9 +344,14 @@ public sealed class LeakProbe : IDisposable
 
 public sealed record LeakRow(string Name, long Warm, long B1, long B2, long B3, long Allowed)
 {
+    /// <summary>Growth in the last interval (B3 - B2).</summary>
     public long Growth => B3 - B2;
 
-    public bool Leaks => Growth > Allowed;
+    /// <summary>Growth in the interval before (B2 - B1).</summary>
+    public long PreviousGrowth => B2 - B1;
+
+    /// <summary>Grew by more than the allowance in both intervals: a steady leak, not a one-off.</summary>
+    public bool Leaks => Growth > Allowed && PreviousGrowth > Allowed;
 }
 
 public sealed class LeakReport(int batchSize, IReadOnlyList<LeakRow> rows)
@@ -368,10 +379,10 @@ public sealed class LeakReport(int batchSize, IReadOnlyList<LeakRow> rows)
     public override string ToString()
     {
         var sb = new StringBuilder();
-        sb.AppendLine($"{"metric",-36} {"after warm-up",14} {"B1",14} {"B2",14} {"B3",14} {"B3-B2",10} {"allowed",10}");
+        sb.AppendLine($"{"metric",-36} {"after warm-up",14} {"B1",14} {"B2",14} {"B3",14} {"B2-B1",10} {"B3-B2",10} {"allowed",10}");
         foreach (LeakRow r in Rows)
         {
-            sb.AppendLine($"{r.Name,-36} {r.Warm,14} {r.B1,14} {r.B2,14} {r.B3,14} {r.Growth,10} {r.Allowed,10}{(r.Leaks ? "  <-- GROWS" : string.Empty)}");
+            sb.AppendLine($"{r.Name,-36} {r.Warm,14} {r.B1,14} {r.B2,14} {r.B3,14} {r.PreviousGrowth,10} {r.Growth,10} {r.Allowed,10}{(r.Leaks ? "  <-- GROWS" : string.Empty)}");
         }
 
         if (Notes is not null)

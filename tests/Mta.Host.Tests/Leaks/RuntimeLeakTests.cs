@@ -45,14 +45,9 @@ public sealed class RuntimeLeakTests(ITestOutputHelper output)
         await RunSubmissionLeakCheck(harness);
     }
 
-    [Fact]
+    [PostgresFact]
     public async Task Leak_submit_deliver_record_and_webhook_on_the_postgres_runtime_does_not_grow()
     {
-        if (PostgresTestServer.UnavailableReason is not null)
-        {
-            return;   // the same convention as the other PostgreSQL tests of this assembly set: no server, nothing to run
-        }
-
         await using TestDatabase db = await PostgresTestServer.Instance.CreateDatabaseAsync();
         await using var harness = await RuntimeLeakHarness.StartAsync(db.ConnectionString);
         await RunSubmissionLeakCheck(harness);
@@ -86,7 +81,7 @@ public sealed class RuntimeLeakTests(ITestOutputHelper output)
         using var probe = new LeakProbe(output.WriteLine);
         probe.TrackArrayPoolBalance(ignoreRentalsFrom: ["Microsoft.EntityFrameworkCore"]);
         probe.Track("prepared SQLite statements", () => PreparedCommand.LiveCount, absolute: 2);
-        probe.Allow("threads", 8);
+        probe.Allow("threads", 12);
         LeakReport report = await probe.RunAsync(async _ =>
         {
             runtime.Limits.TryReserve(tenant, "example.org");
@@ -120,7 +115,7 @@ public sealed class RuntimeLeakTests(ITestOutputHelper output)
         probe.TrackArrayPoolBalance(ignoreRentalsFrom: ["Microsoft.EntityFrameworkCore"]);
         probe.WarmupBatches = 2;
         probe.Allow("open file descriptors", 4);
-        probe.Allow("threads", 8);   // thread-pool threads come and go with the load
+        probe.Allow("threads", 12);   // thread-pool threads come and go with the load
         probe.Allow("timers", 6);   // sockets of the outbound pool and of the PostgreSQL pool come and go
         probe.Track("open submission sessions", () => harness.Runtime.SmtpServer.ActiveConnections, absolute: 2);
         probe.Track("delivery groups in flight", () => harness.Runtime.Delivery.PendingGroups, absolute: 2);

@@ -463,7 +463,7 @@ public sealed class ChaosPipelineOnPostgres : ChaosPipelineTests
 
     protected override async Task PrepareAsync()
     {
-        if (Mta.Storage.Postgres.Tests.PostgresTestServer.UnavailableReason is not null)
+        if (!PostgresPromise.Available())
         {
             Unavailable = true;
             return;

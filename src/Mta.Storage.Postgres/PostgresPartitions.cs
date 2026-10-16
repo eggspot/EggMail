@@ -195,14 +195,25 @@ internal sealed class PostgresPartitions(NpgsqlDataSource owner)
         }
 
         // A rotation that died after DETACH and before DROP left a standalone table with expired rows: it is no longer in the partition list and would stay forever.
+        // This drops every table named message_{index,recipient,event,content,raw_retained}_pYYYYMMDD that belongs to no parent and is older than the cutoff: the names are
+        // the schema's own, nothing else matches. The job runs under the retention job's advisory lock, so no other replica is rotating the same tables; a table that
+        // is dropped between the listing and the statement (by a manual cleanup) is skipped, not an error.
         foreach (DayPartition p in (await ListDetachedAsync(cancellationToken).ConfigureAwait(false)).Where(p => tables.Contains(p.Table) && p.Day < cutoffDay).OrderBy(p => p.Day))
         {
-            await using NpgsqlConnection connection = await owner.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-            await using var count = new NpgsqlCommand($"SELECT count(*) FROM {p.Name}", connection);
-            rows += Convert.ToInt64(await count.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture);
-            await using var drop = new NpgsqlCommand($"DROP TABLE IF EXISTS {p.Name}", connection);
-            await drop.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-            dropped++;
+            try
+            {
+                await using NpgsqlConnection connection = await owner.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+                await using var count = new NpgsqlCommand($"SELECT count(*) FROM {p.Name}", connection);
+                rows += Convert.ToInt64(await count.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture);
+                await using var drop = new NpgsqlCommand($"DROP TABLE IF EXISTS {p.Name}", connection);
+                await drop.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                dropped++;
+            }
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
+            {
+                // gone already
+            }
+
             _known.TryRemove(p.Day, out _);
         }
 

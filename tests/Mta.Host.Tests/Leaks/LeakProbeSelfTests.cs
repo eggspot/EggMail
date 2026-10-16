@@ -52,6 +52,43 @@ public sealed class LeakProbeSelfTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public async Task Leak_probe_sees_a_heap_leak_of_a_few_kilobytes_per_iteration_at_the_batch_sizes_the_tests_use()
+    {
+        // 2 KB kept per iteration in a batch of 400 is 800 KB per batch: above max(256 KiB, 2 %) of a test host's heap in both intervals.
+        using LeakProbe probe = NewProbe();
+        try
+        {
+            LeakReport report = await probe.RunAsync(_ => Hold.Add(new byte[2048]), Batch);
+            Assert.Contains(report.Leaks, r => r.Name.StartsWith("managed heap", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Hold.Clear();
+        }
+    }
+
+    [Fact]
+    public async Task Leak_probe_does_not_report_growth_that_happens_in_one_interval_only()
+    {
+        // A cache that fills once, a thread or a descriptor that is open at one sample: not a leak, so not reported.
+        using LeakProbe probe = NewProbe();
+        int calls = 0;
+        long counter = 0;
+        probe.Track("one-off counter", () => counter);
+        LeakReport report = await probe.RunAsync(_ =>
+        {
+            // Batches are 400 iterations; the counter jumps once, in the last batch only (batch 1 is the warm-up, B1 to B3 are batches 2 to 4).
+            if (++calls == 3 * Batch + 1)
+            {
+                counter += 1000;
+            }
+        }, Batch);
+        Assert.Equal(1000, report["one-off counter"].Growth);
+        Assert.False(report["one-off counter"].Leaks);
+        report.AssertNoGrowth();
+    }
+
+    [Fact]
     public async Task Leak_probe_names_undisposed_timers_and_cancel_after_sources()
     {
         using LeakProbe probe = NewProbe();

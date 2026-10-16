@@ -47,7 +47,7 @@ public sealed class PostgresLifecycleBackend : LifecycleBackend
 
     public override async Task PrepareAsync()
     {
-        if (Mta.Storage.Postgres.Tests.PostgresTestServer.UnavailableReason is not null)
+        if (!PostgresPromise.Available())
         {
             Unavailable = true;
             return;

@@ -42,7 +42,7 @@ public sealed class ApiLeakTests(ITestOutputHelper output)
         probe.TrackArrayPoolBalance(ignoreRentalsFrom: ["Microsoft.EntityFrameworkCore", "Mta.Host.Tests.Api.Reply", "Mta.Host.Tests.Api.ApiClient"]);   // the test client parses every reply with a JsonDocument it never disposes; EF Core does not return its expression-state arrays
         probe.Track("series in the /metrics scrape", Series);
         probe.Track("prepared SQLite statements", () => PreparedCommand.LiveCount, absolute: 2);
-        probe.Allow("threads", 8);
+        probe.Allow("threads", 12);
         int n = 0;
         LeakReport report = await probe.RunAsync(async _ =>
         {

@@ -45,7 +45,9 @@ public static class VerpKeyStore
                 }
                 else
                 {
-                    // Another replica is creating the keys: wait for them to appear. A creator that died holds the lease for at most its duration.
+                    // Another replica is creating the keys: wait for them to appear. A creator that died holds the lease for at most its duration (30 s on the given clock).
+                    // The wait itself is real time (100 ms, 60 s in all) whatever the clock: with a clock a test froze, a lease that is never released is never seen to expire,
+                    // and the loop ends with the exception below instead of waiting forever.
                     await Task.Delay(100, ct).ConfigureAwait(false);
                     stored = await TryReadAsync(config, ct).ConfigureAwait(false);
                     if (stored is null && attempt >= 600)

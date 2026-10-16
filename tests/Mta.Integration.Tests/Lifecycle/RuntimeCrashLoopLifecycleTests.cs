@@ -23,7 +23,8 @@ namespace Mta.Integration.Tests.Lifecycle;
 /// A kill is the abrupt one: the storage is closed under the running engine, whose in-flight deliveries are never reported, the runtime state service is not stopped, nothing is flushed
 /// gracefully. The cycles share one virtual clock that the test advances (the delivery retry schedule and the claim lease run in virtual time; after a kill the clock passes the claim lease,
 /// as it does while the server is down). The configuration (tenant, domain, SMTP credential) is written once, in the first cycle, so every later sign-in proves that acknowledged
-/// configuration survived the kills.
+/// configuration survived the kills. The kill is placed by a seeded count of acknowledged submissions; the remote's replies are delayed in real time (to open the window between "the remote has it" and
+/// "we know it") and the engine runs on real threads, so the interleaving is not reproducible from the seed: the test is a randomized property test whose invariants hold for every interleaving, not a replay.
 /// <para>
 /// Invariants at the end, after the queue drained (<see cref="ChaosInvariants"/>): every message the server answered 250 to reaches exactly one final state per recipient, nothing is
 /// missing at the remote, nothing was delivered twice unless it is flagged <c>possible_duplicate</c>, every hard bounce is explained to the sender and suppressed.
@@ -213,6 +214,7 @@ public abstract class RuntimeCrashLoopLifecycleTests(ITestOutputHelper output) :
             for (int cycle = 0; cycle <= cycles; cycle++)
             {
                 int port = instance.SubmissionPort;
+                int submittedBefore = Volatile.Read(ref submitted);
                 var senders = Enumerable.Range(0, 2).Select(s => Task.Run(async () =>
                 {
                     try
@@ -266,7 +268,14 @@ public abstract class RuntimeCrashLoopLifecycleTests(ITestOutputHelper output) :
                     break;
                 }
 
-                await Task.Delay(rng.Next(80, 450));   // a random moment of the submission and the first deliveries
+                // The kill comes after a seeded number of acknowledged submissions of this cycle (an operation count, not a time): a random moment of the submission and of the first
+                // deliveries. How far the engine has got by then is up to the scheduler, which is why the invariants below are the same for every interleaving. The wait is a poll.
+                int killAfter = submittedBefore + rng.Next(1, 5);
+                while (Volatile.Read(ref submitted) < killAfter && !senders.All(t => t.IsCompleted))
+                {
+                    await Task.Delay(5);
+                }
+
                 _clock.Advance(TimeSpan.FromMinutes(1));
                 await KillAsync(instance);
                 await Task.WhenAll(senders);
@@ -324,7 +333,7 @@ public sealed class RuntimeCrashLoopLifecycleOnPostgres(ITestOutputHelper output
 
     protected override async Task PrepareAsync()
     {
-        if (Mta.Storage.Postgres.Tests.PostgresTestServer.UnavailableReason is not null)
+        if (!PostgresPromise.Available())
         {
             Unavailable = true;
             return;
