@@ -25,6 +25,9 @@ public static class InboundRules
 
     public const int MaxForwardTargets = 10;
     public const int MaxLocalPartLength = 64;
+
+    /// <summary>The most messages one search page holds, on every backend and in the API.</summary>
+    public const int MaxPageSize = 200;
     public const int MaxWildcards = 3;
     public const int MaxRouteNameLength = 100;
     public const int MaxSubjectLength = 256;
@@ -267,7 +270,7 @@ public static class InboundRules
     /// with 1 to <see cref="MaxWildcards"/> stars and something besides stars), the action (a webhook names an endpoint, a forward has 1 to
     /// <see cref="MaxForwardTargets"/> distinct valid addresses, store and discard carry no target). That the webhook endpoint exists and is the tenant's is the caller's check.
     /// </summary>
-    public static IReadOnlyList<InboundValidationError> ValidateRoute(InboundRouteRecord route, string? domainName = null)
+    public static IReadOnlyList<InboundValidationError> ValidateRoute(InboundRouteRecord route, string? domainName = null, IReadOnlySet<string>? localInboundDomains = null)
     {
         var errors = new List<InboundValidationError>();
         if (route.Name.Length > MaxRouteNameLength || ContainsControl(route.Name))
@@ -290,7 +293,7 @@ public static class InboundRules
         }
         else
         {
-            ValidateAction(route, errors, domainName);
+            ValidateAction(route, errors, domainName, localInboundDomains);
         }
 
         return errors;
@@ -366,7 +369,7 @@ public static class InboundRules
         }
     }
 
-    private static void ValidateAction(InboundRouteRecord route, List<InboundValidationError> errors, string? domainName)
+    private static void ValidateAction(InboundRouteRecord route, List<InboundValidationError> errors, string? domainName, IReadOnlySet<string>? localInboundDomains)
     {
         switch (route.ActionKind)
         {
@@ -417,6 +420,10 @@ public static class InboundRules
                     {
                         errors.Add(new(field, "A route cannot forward to its own domain: the forward would come straight back."));
                     }
+                    else if (localInboundDomains is not null && localInboundDomains.Contains(ALabel(address.Domain)))
+                    {
+                        errors.Add(new(field, "This server receives mail for that domain: the forward would loop. Use an address at another mail provider."));
+                    }
                 }
 
                 break;
@@ -439,7 +446,26 @@ public static class InboundRules
     // Domains are compared in A-label form, so "bücher.example" and "xn--bcher-kva.example" are the same domain (a name that cannot be converted compares as itself).
     private static readonly System.Globalization.IdnMapping Idn = new() { UseStd3AsciiRules = false, AllowUnassigned = false };
 
-    private static string ALabel(string domain)
+    /// <summary>
+    /// The domains of a forward route's targets in A-label form, lower-case, without duplicates: what a caller looks up to find which of them this server receives for, before it passes
+    /// that set to <see cref="ValidateRoute"/>. (The loop check has one implementation: the validator; callers only supply the facts it cannot read.)
+    /// </summary>
+    public static IReadOnlyList<string> ForwardTargetDomains(InboundRouteRecord route)
+    {
+        var domains = new List<string>();
+        foreach (string target in route.ForwardTo)
+        {
+            if (EmailAddress.TryParse(target, allowUtf8: true, out EmailAddress address) && !address.IsNull && ALabel(address.Domain) is { } domain && !domains.Contains(domain))
+            {
+                domains.Add(domain);
+            }
+        }
+
+        return domains;
+    }
+
+    /// <summary>A domain name in A-label form, lower-case, without a trailing dot (the form domains are compared in everywhere).</summary>
+    public static string ALabel(string domain)
     {
         string trimmed = domain.TrimEnd('.');
         try
