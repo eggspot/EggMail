@@ -204,7 +204,7 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | `Dns:Servers` | system resolvers | Resolvers (IP with optional port) |
 | `Dns:RequestDnssec` | true | Ask for DNSSEC records (needed for DANE) |
 | `Dns:TrustAuthenticatedData` | false | Trust the AD bit; only behind a local validating resolver. With the default DANE never applies. `deploy/compose/compose.unbound.yaml` (Compose) and `deploy/kubernetes/components/unbound` (Kubernetes) add an Unbound sidecar and set `Dns:Servers`, `Dns:RequestDnssec` and this key together |
-| `Sending:GlobalPerHour` | 0 | Most messages the server sends per UTC hour (0 = unlimited). Counters are in memory: a restart starts the hour at zero |
+| `Sending:GlobalPerHour` | 0 | Most messages the server sends per UTC hour (0 = unlimited). Counters are written behind to the database: a restart resumes the hour (a crash loses the last 10 s of counting) |
 | `Sending:GlobalPerDay` | 0 | The same per UTC day |
 | `Sending:TenantPerHour` | 0 | Default cap per tenant and hour; a tenant setting `Sending:PerHour` overrides it |
 | `Sending:TenantPerDay` | 0 | Default cap per tenant and day; tenant setting `Sending:PerDay` |
