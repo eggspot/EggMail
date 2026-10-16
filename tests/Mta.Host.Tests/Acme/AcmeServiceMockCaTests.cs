@@ -621,6 +621,24 @@ public class AcmeServiceMockCaTests
     }
 
     // ---------------------------------------------------------------------------------------------------------------------------------
+    // What the banner can say about the messages above (a category, never the text)
+
+    [Theory]
+    [InlineData("Cloudflare: could not look up the zone (HTTP 403, 9109: Invalid access token).", "the DNS provider (Cloudflare) could not publish or remove the challenge record")]
+    [InlineData("Cloudflare: no active zone found for _acme-challenge.mx.example.com (does the API token have access?)", "the DNS provider (Cloudflare) could not publish or remove the challenge record")]
+    [InlineData("Authorization for mx.example.com is still Pending after 45 checks", "the CA could not validate the challenge")]
+    [InlineData("The CA issued a certificate that does not cover 'mx.example.com' (it covers other.example.com).", "the CA sent a certificate that does not match the order")]
+    [InlineData("The CA's certificate chain has no certificate for the key of this order (it sent another CA's certificate or one for another key).", "the CA sent a certificate that does not match the order")]
+    [InlineData("The CA sent no certificate (the answer is empty or not PEM).", "the CA sent a certificate that does not match the order")]
+    [InlineData("The CA's certificate chain is damaged or cut off: 2 certificates start but 0 are complete.", "the CA sent a certificate that does not match the order")]
+    [InlineData("The ACME server sent an answer this client cannot read (JsonException: x).", "the CA's answer could not be understood")]
+    [InlineData("The CA's directory does not offer an endpoint this client needs (ACME operation not supported).", "the CA's answer could not be understood")]
+    [InlineData("The order is still Processing after it was finalized after 45 checks", "the CA did not finish the order")]
+    [InlineData("The CA marked the order invalid after it was finalized: CAA record prohibits issuance", "the CA did not finish the order")]
+    [InlineData("ACME server error: slow down (rateLimited)", "the CA refused the request")]
+    public void The_new_failure_messages_have_a_category_for_the_banner(string error, string expected) => Assert.Equal(expected, AcmeFailureCategory.Describe(error));
+
+    // ---------------------------------------------------------------------------------------------------------------------------------
     // The cost of a call: nothing is slept
 
     [Fact]

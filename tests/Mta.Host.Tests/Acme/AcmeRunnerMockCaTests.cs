@@ -646,14 +646,14 @@ public class AcmeRunnerMockCaTests
     }
 
     [Fact]
-    public async Task The_certificate_the_CA_sends_expired_already_is_the_runners_answer_and_the_service_decides()
+    public async Task A_certificate_the_CA_sends_that_is_expired_already_is_refused_by_the_runners_clock()
     {
         using var rig = new AcmeRig();
         rig.Ca.CertificateMode = MockCertificateMode.AlreadyExpired;
 
-        var issued = await rig.IssueAsync();
+        var ex = await Assert.ThrowsAsync<AcmeException>(() => rig.IssueAsync());
 
-        Assert.True(issued.NotAfter < DateTimeOffset.UtcNow);
+        Assert.Contains("already expired", ex.Message);
     }
 
     private static List<System.Security.Cryptography.X509Certificates.X509Certificate2> Certificates(string pem)

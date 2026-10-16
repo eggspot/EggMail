@@ -51,7 +51,7 @@ internal sealed class AcmeServiceRig : IDisposable
         }
 
         return Task.CompletedTask;
-    });
+    }, Clock);
 
     public AcmeSection Options(bool useRenewalInfo = false, string[]? domains = null, AcmeChallengeMode challenge = AcmeChallengeMode.Dns01, string? eabKeyId = null, string? eabKey = null) => new()
     {

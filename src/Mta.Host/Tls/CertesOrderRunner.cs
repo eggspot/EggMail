@@ -36,15 +36,18 @@ public sealed class CertesOrderRunner : IAcmeOrderRunner
     private readonly HttpMessageHandler? _handler;
     private readonly IMtaLog _log;
     private readonly Func<TimeSpan, CancellationToken, Task> _pause;
+    private readonly IClock _clock;
 
     /// <param name="handler">
     /// Transport for all requests to the CA (never disposed here). The default is a plain <see cref="HttpClient"/> with the system trust store;
     /// tests pass a handler that trusts a private test CA, and egress-controlled deployments can pass a proxying one.
     /// </param>
     /// <param name="log">Where a refused <c>replaces</c> link is reported (Debug); none by default.</param>
+    /// <param name="clock">The time a received certificate is judged by (it must not be expired already); the system clock by default.</param>
     /// <param name="pause">How the runner waits between polls of the CA and for DNS propagation (<see cref="Task.Delay(TimeSpan, CancellationToken)"/>); tests pass one that records the wait and returns at once.</param>
-    public CertesOrderRunner(HttpMessageHandler? handler = null, IMtaLog? log = null, Func<TimeSpan, CancellationToken, Task>? pause = null)
+    public CertesOrderRunner(HttpMessageHandler? handler = null, IMtaLog? log = null, Func<TimeSpan, CancellationToken, Task>? pause = null, IClock? clock = null)
     {
+        _clock = clock ?? SystemClock.Instance;
         _handler = handler;
         _log = log ?? NullMtaLog.Instance;
         _pause = pause ?? Task.Delay;
@@ -138,8 +141,9 @@ public sealed class CertesOrderRunner : IAcmeOrderRunner
             case NotSupportedException:
                 return new AcmeException($"The CA's directory does not offer an endpoint this client needs ({exception.Message}).", exception);
             default:
-                // Certes reads the CA's JSON without checking it: a body that is not JSON, or lacks a member it needs, surfaces as one of these.
-                if (exception is JsonException or NullReferenceException or InvalidOperationException or FormatException or ArgumentException or KeyNotFoundException)
+                // Certes reads the CA's JSON without checking it: a body that is not JSON, or lacks a member it needs, surfaces as one of these two. Other exceptions are our own
+                // (a damaged stored key, a bad URL) and keep their own message.
+                if (exception is JsonException or NullReferenceException)
                 {
                     string what = exception is NullReferenceException ? "a member it needs is missing" : $"{exception.GetType().Name}: {exception.Message}";
                     return new AcmeException($"The ACME server sent an answer this client cannot read ({what}).", exception, transient: true);
@@ -524,6 +528,11 @@ public sealed class CertesOrderRunner : IAcmeOrderRunner
         if (missing is not null)
         {
             throw new AcmeException($"The CA issued a certificate that does not cover '{missing}' (it covers {string.Join(", ", covered)}).");
+        }
+
+        if (leaf.NotAfter.ToUniversalTime() <= _clock.UtcNow.UtcDateTime)
+        {
+            throw new AcmeException($"The CA issued a certificate that is already expired ({leaf.NotAfter.ToUniversalTime():u}); its clock or this server's is wrong.");
         }
 
         var ordered = new List<X509Certificate2> { leaf };

@@ -146,11 +146,11 @@ public sealed class AcmeRenewalService
     }
 
     /// <summary>
-    /// Is what the CA sent the answer to this order? The leaf (first certificate) must go with the private key we hold, cover every name ordered and not be
-    /// expired already: a CA bug, a mixed-up answer or a wrong clock at the CA must end as a recorded failure with the old certificate still served, never as a
+    /// Is what the CA sent the answer to this order? The leaf (first certificate) must go with the private key we hold, cover every name ordered (the runner also
+    /// refuses an expired one; it judges by its own clock): a CA bug or a mixed-up answer must end as a recorded failure with the old certificate still served, never as a
     /// stored certificate that fails every handshake (or is served for names it does not carry).
     /// </summary>
-    private static void VerifyIssued(AcmeIssuedCertificate issued, IReadOnlyList<string> domains, DateTimeOffset now)
+    private static void VerifyIssued(AcmeIssuedCertificate issued, IReadOnlyList<string> domains)
     {
         var chain = new System.Security.Cryptography.X509Certificates.X509Certificate2Collection();
         try
@@ -181,11 +181,6 @@ public sealed class AcmeRenewalService
         catch (Exception ex) when (ex is System.Security.Cryptography.CryptographicException or ArgumentException)
         {
             throw new AcmeException("The private key of the order does not belong to the certificate the CA sent.", ex);
-        }
-
-        if (leaf.NotAfter.ToUniversalTime() <= now.UtcDateTime)
-        {
-            throw new AcmeException($"The CA issued a certificate that is already expired ({leaf.NotAfter.ToUniversalTime():u}); its clock or this server's is wrong.");
         }
     }
 
@@ -445,7 +440,7 @@ public sealed class AcmeRenewalService
                 await SaveAccountAsync(new AcmeAccountCreated(issued.AccountKeyPem, issued.AccountUrl), ct).ConfigureAwait(false);
             }
 
-            VerifyIssued(issued, domains, _clock.UtcNow);
+            VerifyIssued(issued, domains);
 
             // The order can outlast the lease (a stalled process, a CA that took minutes): when it expired and another replica took over, that replica's result stands and
             // this one is dropped without touching the renewal row (the other replica's status is the truth). Renewing here also extends the lease over the write.
