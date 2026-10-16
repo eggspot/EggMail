@@ -191,13 +191,21 @@ public abstract partial class LifecycleConformance
             return;
         }
 
-        await RunStatsScenarioAsync(hourlyDays: 10, dailyDays: 40, days: Accelerated.Scaled(55), maintainEvery: 1, domainsA: 8, topN: 3);
+        // History:Mode=Full also maintains partitions or history files every run, so it runs a shorter window of the same rules.
+        if (IsFull)
+        {
+            await RunStatsScenarioAsync(hourlyDays: 4, dailyDays: 12, days: Accelerated.Scaled(20), maintainEvery: 1, domainsA: 8, topN: 3);
+        }
+        else
+        {
+            await RunStatsScenarioAsync(hourlyDays: 10, dailyDays: 40, days: Accelerated.Scaled(55), maintainEvery: 1, domainsA: 8, topN: 3);
+        }
     }
 
     [Fact]
     public async Task Lifecycle_zero_statistics_retention_keeps_hourly_and_daily_rows_forever()
     {
-        if (!Heavy || !IsFull)   // statistics do not depend on History:Mode: the StatsOnly variant runs only the bounded scenario
+        if (!Heavy || IsFull)   // statistics do not depend on History:Mode: the long scenarios run in the cheaper StatsOnly variant, the Full variant runs a compact one
         {
             return;
         }
@@ -208,7 +216,7 @@ public abstract partial class LifecycleConformance
     [Fact]
     public async Task Lifecycle_a_maintenance_gap_longer_than_the_hourly_retention_loses_no_daily_row()
     {
-        if (!Heavy || !IsFull)   // statistics do not depend on History:Mode: the StatsOnly variant runs only the bounded scenario
+        if (!Heavy || IsFull)   // statistics do not depend on History:Mode: the long scenarios run in the cheaper StatsOnly variant, the Full variant runs a compact one
         {
             return;
         }
@@ -220,7 +228,7 @@ public abstract partial class LifecycleConformance
     [Fact]
     public async Task Lifecycle_the_default_400_day_daily_and_30_day_hourly_retention_over_450_days()
     {
-        if (!Heavy || !IsFull)   // statistics do not depend on History:Mode: the StatsOnly variant runs only the bounded scenario
+        if (!Heavy || IsFull)   // statistics do not depend on History:Mode: the long scenarios run in the cheaper StatsOnly variant, the Full variant runs a compact one
         {
             return;
         }

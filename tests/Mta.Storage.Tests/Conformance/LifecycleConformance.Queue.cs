@@ -248,4 +248,77 @@ public abstract partial class LifecycleConformance
             Clock.Advance(Day);
         }
     }
+
+    [Fact]
+    public async Task Lifecycle_a_large_backlog_of_expired_rows_is_cleaned_in_batches_while_intake_and_claims_carry_on()
+    {
+        if (!Heavy)
+        {
+            return;
+        }
+
+        await OpenAsync(Opts(retention: new RetentionOptions { MetadataDays = 12, WebhookOutboxDays = 3, WebhookAttemptLogDays = 3, StatsHourlyDays = 5, StatsDailyDays = 0 }, content: new ContentOptions { RetentionDays = 6 }));
+        Guid endpoint = await AddEndpointAsync(TenantA, true, "*");
+        _ = endpoint;
+
+        // A backlog nobody cleaned for 60 days: 3 days of traffic, every message with a webhook event, all finished.
+        int perDay = Accelerated.Scaled(40);
+        for (int day = 0; day < 3; day++)
+        {
+            Clock.Set(Start.AddDays(day));
+            for (int i = 0; i < perDay; i++)
+            {
+                await AcceptAsync(Msg(to: [$"old{day}-{i}@example.org"], size: 200));
+                Storage.Stats.Add(new StatKey(Clock.UtcNow, TenantA, "s.example", $"dom{i % 12}.example"), StatCounter.Accepted, 1);
+            }
+
+            foreach (ClaimedDelivery d in await ClaimAsync(max: 1000))
+            {
+                await RecordAsync(d, DeliveryOutcome.Delivered, events: [Draft("message.delivered")]);
+            }
+
+            foreach (WebhookOutboxItem item in await DueAsync("dispatcher", Clock.UtcNow, max: 1000))
+            {
+                await Storage.Webhooks.CompleteAsync(item.Id, new WebhookAttemptRecord(item.Id, Clock.UtcNow, 200, TimeSpan.FromMilliseconds(2), null, null), WebhookOutboxState.Delivered, null, CancellationToken.None);
+            }
+        }
+
+        await FlushStatsAsync();
+
+        // Sixty days later the first maintenance run has everything to do, while the application keeps working.
+        Clock.Set(Start.AddDays(63));
+        var fresh = new List<Guid>();
+        Task<IReadOnlyList<MaintenanceReport>> maintenance = Task.Run(async () => await Storage.Maintenance.RunAsync(Clock.UtcNow, CancellationToken.None).AsTask());
+        for (int i = 0; i < 25; i++)
+        {
+            AcceptedMessage m = await AcceptAsync(Msg(to: [$"new{i}@example.org"], size: 200));
+            fresh.Add(m.MessageId);
+            foreach (ClaimedDelivery d in await ClaimAsync(max: 100))
+            {
+                await RecordAsync(d, DeliveryOutcome.Delivered);
+            }
+        }
+
+        Task finished = await Task.WhenAny(maintenance, Task.Delay(TimeSpan.FromMinutes(2)));   // a hang becomes a failure; the bound is not an assertion about speed
+        Assert.Same(maintenance, finished);
+        IReadOnlyList<MaintenanceReport> reports = await maintenance;
+        Assert.All(reports, r => Assert.True(RetentionJobs.Contains(r.Job) || HousekeepingJobs.Contains(r.Job)));
+        Assert.True(reports.Single(r => r.Job == "retention.webhook_outbox").RowsAffected >= 3 * perDay);
+        Assert.True(reports.Single(r => r.Job == "retention.webhook_attempts").RowsAffected >= 3 * perDay);
+
+        // The old rows are gone, the new ones are intact, the queue is empty.
+        await MaintainAsync();
+        await AssertCountAsync(LifecycleTable.WebhookOutbox, 0, "the finished backlog is gone");
+        await AssertCountAsync(LifecycleTable.WebhookAttempt, 0, "and its attempts");
+        if (IsFull)
+        {
+            await AssertCountAsync(LifecycleTable.MessageIndex, fresh.Count, "only the fresh messages remain in the history");
+            var seen = (await Storage.History.SearchAsync(new MessageQuery(Limit: 500), CancellationToken.None)).Items.Select(i => i.MessageId).Order();
+            Assert.Equal(fresh.Order(), seen);
+        }
+
+        QueueStats stats = await Storage.Deliveries.GetQueueStatsAsync(CancellationToken.None);
+        Assert.Equal((0, 0, 0), (stats.Queued, stats.Leased, stats.Deferred));
+        Assert.Empty(await ClaimAsync());
+    }
 }

@@ -132,6 +132,32 @@ internal sealed class PostgresPartitions(NpgsqlDataSource owner)
         return list;
     }
 
+    private static readonly Regex DayTableName = new(@"^(?<table>message_(?:index|recipient|event|content|raw_retained))_p(?<date>\d{8})$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// Lists tables that are named like a day partition of a history table but belong to no parent: what a rotation leaves behind when the process dies between
+    /// <c>DETACH PARTITION</c> (which finished) and <c>DROP TABLE</c>. They are not partitions any more, so <see cref="ListAsync"/> cannot see them.
+    /// </summary>
+    public async Task<IReadOnlyList<DayPartition>> ListDetachedAsync(CancellationToken cancellationToken)
+    {
+        await using NpgsqlConnection connection = await owner.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var cmd = new NpgsqlCommand(
+            "SELECT c.relname FROM pg_class c WHERE c.relkind = 'r' AND c.relnamespace = 'public'::regnamespace AND NOT c.relispartition AND c.relname ~ '^message_(index|recipient|event|content|raw_retained)_p[0-9]{8}$'", connection);
+        var list = new List<DayPartition>();
+        await using NpgsqlDataReader r = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await r.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            string name = r.GetString(0);
+            Match m = DayTableName.Match(name);
+            if (m.Success && DateTimeOffset.TryParseExact(m.Groups["date"].Value, "yyyyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out DateTimeOffset date))
+            {
+                list.Add(new DayPartition(m.Groups["table"].Value, name, StorageTime.DayNumber(date), false));
+            }
+        }
+
+        return list;
+    }
+
     /// <summary>
     /// Detaches (concurrently) and drops the partitions of <paramref name="tables"/> older than <paramref name="cutoffDay"/>
     /// (a partition holds exactly one day, so "day below the cutoff" is the whole partition). Returns the rows that were in
@@ -162,6 +188,18 @@ internal sealed class PostgresPartitions(NpgsqlDataSource owner)
                 await finalize.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             }
 
+            await using var drop = new NpgsqlCommand($"DROP TABLE IF EXISTS {p.Name}", connection);
+            await drop.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            dropped++;
+            _known.TryRemove(p.Day, out _);
+        }
+
+        // A rotation that died after DETACH and before DROP left a standalone table with expired rows: it is no longer in the partition list and would stay forever.
+        foreach (DayPartition p in (await ListDetachedAsync(cancellationToken).ConfigureAwait(false)).Where(p => tables.Contains(p.Table) && p.Day < cutoffDay).OrderBy(p => p.Day))
+        {
+            await using NpgsqlConnection connection = await owner.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            await using var count = new NpgsqlCommand($"SELECT count(*) FROM {p.Name}", connection);
+            rows += Convert.ToInt64(await count.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture);
             await using var drop = new NpgsqlCommand($"DROP TABLE IF EXISTS {p.Name}", connection);
             await drop.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             dropped++;
