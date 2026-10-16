@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.DependencyInjection;
 using Mta.Core;
 using Mta.Host.Api;
 using Mta.Storage;
@@ -855,6 +856,15 @@ public class ApiInboundTests : IAsyncLifetime
         object forward = new { match = new { kind = "catch_all" }, action = new { kind = "forward", forwardTo = new[] { "a@elsewhere.test" } } };
 
         (await inboundOnly.PostAsync(_base + "/routes", forward)).Problem(HttpStatusCode.Forbidden, "forbidden");
+
+        // The scope is checked before the target domains are looked up: a key without `send` cannot use the "this server receives for that domain" answer to probe which domains
+        // (of any tenant) are inbound-enabled.
+        DomainRecord others = (await _f.Storage.Config.GetDomainsAsync(ApiFixture.TenantBId, default)).Single();
+        await _f.Storage.Inbound.UpsertSettingsAsync(InboundDomainSettings.Disabled(others.Id, ApiFixture.TenantBId, _f.Clock.UtcNow) with { Enabled = true }, default);
+        object toLocal = new { match = new { kind = "catch_all" }, action = new { kind = "forward", forwardTo = new[] { "someone@" + others.Name } } };
+        (await inboundOnly.PostAsync(_base + "/routes", toLocal)).Problem(HttpStatusCode.Forbidden, "forbidden");
+        ApiClient sender = await _f.KeyClientAsync(ApiFixture.TenantAId, "inbound:read", "inbound:write", "send");
+        (await sender.PostAsync(_base + "/routes", toLocal)).Problem(HttpStatusCode.BadRequest, "validation_failed");
         Assert.Empty(await _f.Storage.Inbound.GetRoutesAsync(_domainA.Id, default));
         // The other actions do not send anything and need no more than inbound:write.
         Assert.Equal(HttpStatusCode.Created, (await inboundOnly.PostAsync(_base + "/routes", CatchAll())).Status);
@@ -938,4 +948,89 @@ public class ApiInboundTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.NoContent, (await _a.DeleteAsync(url + "?purgeInbound=true")).Status);
         Assert.Null(await _f.Storage.Config.GetDomainAsync(_domainA.Id, default));
     }
+
+    // Wraps IStorage so that the inbound store reports, when DeleteMatchingAsync runs, whether the domain still receives mail.
+    public class RecordingStorage : System.Reflection.DispatchProxy
+    {
+        public IStorage Inner = null!;
+        public readonly List<bool?> EnabledWhenErasing = [];
+
+        protected override object? Invoke(System.Reflection.MethodInfo? targetMethod, object?[]? args)
+        {
+            try
+            {
+                object? result = targetMethod!.Invoke(Inner, args);
+                return targetMethod.Name == "get_Inbound" ? Wrap((IInboundStore)result!) : result;
+            }
+            catch (System.Reflection.TargetInvocationException ex)
+            {
+                throw ex.InnerException!;
+            }
+        }
+
+        private IInboundStore Wrap(IInboundStore inbound)
+        {
+            IInboundStore proxy = System.Reflection.DispatchProxy.Create<IInboundStore, InboundRecorder>();
+            var recorder = (InboundRecorder)(object)proxy;
+            recorder.Inner = inbound;
+            recorder.Owner = this;
+            return proxy;
+        }
+    }
+
+    public class InboundRecorder : System.Reflection.DispatchProxy
+    {
+        public IInboundStore Inner = null!;
+        public RecordingStorage Owner = null!;
+
+        protected override object? Invoke(System.Reflection.MethodInfo? targetMethod, object?[]? args)
+        {
+            try
+            {
+                if (targetMethod!.Name == nameof(IInboundMessageStore.DeleteMatchingAsync))
+                {
+                    var query = (InboundMessageQuery)args![0]!;
+                    InboundDomainSettings? settings = Inner.GetSettingsAsync(query.DomainId!.Value, default).AsTask().GetAwaiter().GetResult();
+                    Owner.EnabledWhenErasing.Add(settings?.Enabled);
+                }
+
+                return targetMethod.Invoke(Inner, args);
+            }
+            catch (System.Reflection.TargetInvocationException ex)
+            {
+                throw ex.InnerException!;
+            }
+        }
+    }
+
+    [Fact]
+    public async Task A_purge_switches_receiving_off_before_it_deletes_the_mail()
+    {
+        RecordingStorage? recorder = null;
+        await _f.DisposeAsync();
+        _f = await ApiFixture.StartAsync(new ApiFixtureOptions
+        {
+            ConfigureServices = services =>
+            {
+                IStorage inner = (IStorage)services.Last(d => d.ServiceType == typeof(IStorage)).ImplementationInstance!;
+                var proxy = System.Reflection.DispatchProxy.Create<IStorage, RecordingStorage>();
+                recorder = (RecordingStorage)(object)proxy;
+                recorder.Inner = inner;
+                services.AddSingleton(proxy);
+            },
+        });
+        _a = await _f.KeyClientAsync(ApiFixture.TenantAId);
+        _domainA = (await _f.Storage.Config.GetDomainsAsync(ApiFixture.TenantAId, default)).Single();
+        _base = $"/api/v1/domains/{_domainA.Id:N}/inbound";
+        await EnableAsync();
+        await StoreAsync(ApiFixture.TenantAId, _domainA, InboundActionKind.Store);
+
+        Assert.Equal(HttpStatusCode.NoContent, (await _a.DeleteAsync($"/api/v1/domains/{_domainA.Id:N}?purgeInbound=true")).Status);
+
+        // At the moment the erasure ran, the domain no longer received mail: a message accepted meanwhile could not be left behind.
+        Assert.NotNull(recorder);
+        Assert.Equal([false], recorder!.EnabledWhenErasing);
+        Assert.Null(await _f.Storage.Config.GetDomainAsync(_domainA.Id, default));
+    }
 }
+

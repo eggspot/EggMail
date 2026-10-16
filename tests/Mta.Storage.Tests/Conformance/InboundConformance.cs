@@ -494,16 +494,18 @@ public abstract class InboundConformance : StorageTestBase
         InboundMessageDraft draft = await StoreAsync(Draft(domain, Ids.New(), InboundActionKind.Webhook));
 
         // Three runners claim it and die without completing or releasing: the leases run out, the attempts stay used up.
+        long claimedToken = 0;
         for (int attempt = 1; attempt <= 3; attempt++)
         {
             var claimed = Assert.Single(await ClaimActionsAsync(owner: "runner-" + attempt, lease: TimeSpan.FromMinutes(1), now: Clock.UtcNow.AddMinutes(attempt * 2)));
             Assert.Equal(attempt, claimed.Message.ActionAttempts);
+            claimedToken = claimed.ClaimToken;
         }
 
         Assert.Equal(3, (await Inbound.GetAsync(TenantA, draft.Id, default))!.ActionAttempts);
 
         // Completing does not count a second time; a manual retry starts the count again.
-        Assert.True(await Inbound.CompleteActionAsync(draft.Id, "runner-3", new InboundActionOutcome(InboundActionState.Failed, Clock.UtcNow, null, "attempts used up", ClaimedAttempt: 3), default));
+        Assert.True(await Inbound.CompleteActionAsync(draft.Id, "runner-3", new InboundActionOutcome(InboundActionState.Failed, Clock.UtcNow, null, "attempts used up", ClaimToken: claimedToken), default));
         Assert.Equal(3, (await Inbound.GetAsync(TenantA, draft.Id, default))!.ActionAttempts);
         Assert.Equal(InboundRetryResult.Queued, await Inbound.RetryActionAsync(TenantA, draft.Id, Clock.UtcNow, default));
         Assert.Equal(0, (await Inbound.GetAsync(TenantA, draft.Id, default))!.ActionAttempts);
@@ -519,10 +521,10 @@ public abstract class InboundConformance : StorageTestBase
         Assert.Equal((1, 2), (first.Message.ActionAttempts, second.Message.ActionAttempts));
 
         var done = new InboundActionOutcome(InboundActionState.Done, Clock.UtcNow, null, null);
-        Assert.False(await Inbound.CompleteActionAsync(draft.Id, Owner, done with { ClaimedAttempt = first.Message.ActionAttempts }, default));   // the stale attempt
+        Assert.False(await Inbound.CompleteActionAsync(draft.Id, Owner, done with { ClaimToken = first.ClaimToken }, default));   // the stale attempt
         Assert.Equal(InboundActionState.Pending, (await Inbound.GetAsync(TenantA, draft.Id, default))!.ActionState);
-        Assert.False(await Inbound.CompleteActionAsync(draft.Id, "someone-else", done with { ClaimedAttempt = 2 }, default));
-        Assert.True(await Inbound.CompleteActionAsync(draft.Id, Owner, done with { ClaimedAttempt = second.Message.ActionAttempts }, default));
+        Assert.False(await Inbound.CompleteActionAsync(draft.Id, "someone-else", done with { ClaimToken = second.ClaimToken }, default));
+        Assert.True(await Inbound.CompleteActionAsync(draft.Id, Owner, done with { ClaimToken = second.ClaimToken }, default));
         Assert.Equal(InboundActionState.Done, (await Inbound.GetAsync(TenantA, draft.Id, default))!.ActionState);
     }
 
@@ -534,7 +536,7 @@ public abstract class InboundConformance : StorageTestBase
         var claim = Assert.Single(await ClaimActionsAsync(lease: TimeSpan.FromSeconds(30)));
         Clock.Advance(TimeSpan.FromMinutes(10));   // the attempt took longer than its lease, but no other runner took the row
 
-        Assert.True(await Inbound.CompleteActionAsync(draft.Id, Owner, new InboundActionOutcome(InboundActionState.Done, Clock.UtcNow, null, null, ClaimedAttempt: claim.Message.ActionAttempts), default));
+        Assert.True(await Inbound.CompleteActionAsync(draft.Id, Owner, new InboundActionOutcome(InboundActionState.Done, Clock.UtcNow, null, null, ClaimToken: claim.ClaimToken), default));
     }
 
     [Fact]
@@ -980,17 +982,42 @@ public abstract class InboundConformance : StorageTestBase
     public async Task Bidirectional_controls_are_removed_and_addresses_are_cut_at_the_path_limit()
     {
         DomainRecord domain = await AddDomainAsync(TenantA, "example.com");
-        InboundMessageDraft draft = Draft(domain, Ids.New(), InboundActionKind.Store, subject: "invoice \u202Efdp.exe");
-        draft.Helo = "good\u202E.test\u2066";
+        InboundMessageDraft draft = Draft(domain, Ids.New(), InboundActionKind.Store, subject: "invoice \u202Efdp.exe\u2028second line\u2029third");
+        draft.Helo = "good\u202E.test\u2066\u2028";
         draft.EnvelopeFrom = new string('A', 400) + "@sender.test";
         draft.EnvelopeTo = "Support@Example.com";
         await StoreAsync(draft);
 
         InboundMessage stored = (await Inbound.GetAsync(TenantA, draft.Id, default))!;
         Assert.Equal("good.test", stored.Helo);
-        Assert.Equal("invoice fdp.exe", stored.Subject);
+        Assert.Equal("invoice fdp.exe second line third", stored.Subject);   // U+2028 and U+2029 break a line like a newline does: a space in a subject, nothing in a name
         Assert.Equal(320, stored.EnvelopeFrom.Length);
         Assert.Equal(new string('a', 320), stored.EnvelopeFrom);
         Assert.Equal("support@example.com", stored.EnvelopeTo);
+    }
+
+    [Fact]
+    public async Task A_stale_completion_is_refused_after_a_release_or_a_retry_took_the_attempt_count_back_down()
+    {
+        DomainRecord domain = await AddDomainAsync(TenantA, "example.com");
+        InboundMessageDraft draft = await StoreAsync(Draft(domain, Ids.New(), InboundActionKind.Webhook));
+
+        // Claimed (attempt 1), released (attempt 0), claimed again by the same owner (attempt 1 again): the counts match, the tokens do not.
+        var first = Assert.Single(await ClaimActionsAsync());
+        Assert.Equal(1, await Inbound.ReleaseOwnedActionLeasesAsync(Owner, default));
+        var second = Assert.Single(await ClaimActionsAsync());
+        Assert.Equal((1, 1), (first.Message.ActionAttempts, second.Message.ActionAttempts));
+        Assert.True(second.ClaimToken > first.ClaimToken);
+        var done = new InboundActionOutcome(InboundActionState.Done, Clock.UtcNow, null, null);
+        Assert.False(await Inbound.CompleteActionAsync(draft.Id, Owner, done with { ClaimToken = first.ClaimToken }, default));
+        Assert.True(await Inbound.CompleteActionAsync(draft.Id, Owner, done with { ClaimToken = second.ClaimToken }, default));
+
+        // A retry resets the count to 0 and the next claim of the same owner counts 1 again; the old token is still stale.
+        Assert.Equal(InboundRetryResult.Queued, await Inbound.RetryActionAsync(TenantA, draft.Id, Clock.UtcNow, default));
+        var third = Assert.Single(await ClaimActionsAsync());
+        Assert.Equal(1, third.Message.ActionAttempts);
+        Assert.True(third.ClaimToken > second.ClaimToken);
+        Assert.False(await Inbound.CompleteActionAsync(draft.Id, Owner, done with { ClaimToken = second.ClaimToken }, default));
+        Assert.True(await Inbound.CompleteActionAsync(draft.Id, Owner, done with { ClaimToken = third.ClaimToken }, default));
     }
 }
