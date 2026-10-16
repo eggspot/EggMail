@@ -18,7 +18,9 @@ public sealed record ContentCapability(int RetentionDays, bool StoreAttachments)
 
 public sealed record LimitsCapability(long MaxMessageBytes, int MaxRecipients);
 
-public sealed record CapabilitiesResponse(string Version, string Backend, HistoryCapability History, ContentCapability Content, LimitsCapability Limits, IReadOnlyList<CapabilityWarning> Warnings);
+public sealed record InboundCapability(bool Enabled);
+
+public sealed record CapabilitiesResponse(string Version, string Backend, HistoryCapability History, ContentCapability Content, LimitsCapability Limits, InboundCapability Inbound, IReadOnlyList<CapabilityWarning> Warnings);
 
 /// <summary>Human text for the warning codes (the persistent banner of the dashboard, decision P).</summary>
 public static class WarningTexts
@@ -202,6 +204,7 @@ public sealed class CapabilitiesService
             new HistoryCapability(ApiMap.HistoryMode(_storage.HistoryMode)),
             new ContentCapability(_storageOptions.Content.RetentionDays, _storageOptions.Content.StoreAttachments && _storageOptions.Content.AllowAttachmentStorage),
             new LimitsCapability(_options.MaxMessageBytes, _options.MaxRecipients),
+            new InboundCapability(_options.InboundEnabled),
             health.Warnings.Select(w => new CapabilityWarning(w.Code, w.Message)).ToList());
     }
 }

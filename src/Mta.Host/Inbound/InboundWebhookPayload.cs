@@ -48,7 +48,7 @@ public static class InboundWebhookPayload
         {
             content = InboundContentReader.Read(raw, limits.MaxTextBytes);
         }
-        catch (Exception ex) when (ex is MimeException or ArgumentException or InvalidOperationException or FormatException or IndexOutOfRangeException)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             parseFailed = true;
         }
