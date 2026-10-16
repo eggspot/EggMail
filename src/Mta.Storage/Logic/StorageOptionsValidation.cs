@@ -15,6 +15,12 @@ public static class StorageOptionsValidation
         NonNegative(r.WebhookAttemptLogDays, "Webhooks:AttemptLogDays");
         NonNegative(r.RecipientDomainTopNHourly, "Stats:RecipientDomainTopNHourly");
         NonNegative(r.RecipientDomainTopNDaily, "Stats:RecipientDomainTopNDaily");
+        NonNegative(options.Inbound.RetentionDays, "Inbound:RetentionDays");
+        NonNegative(options.Inbound.MaxRetentionDays, "Inbound:MaxRetentionDays");
+        if (options.Inbound.MaxRetentionDays > 0 && (options.Inbound.RetentionDays == 0 || options.Inbound.RetentionDays > options.Inbound.MaxRetentionDays))
+        {
+            throw new ArgumentException("Inbound:RetentionDays must be between 1 and Inbound:MaxRetentionDays when a ceiling is set.");
+        }
         if (r.MaxSeriesPerHour < 1)
         {
             throw new ArgumentException("Stats:MaxSeriesPerHour must be at least 1.");
@@ -65,6 +71,7 @@ public static class StorageOptionsValidation
         Add(options.Retention.StatsDailyDays, "Stats:DailyRetentionDays", list);
         Add(options.Retention.WebhookOutboxDays, "Webhooks:OutboxRetentionDays", list);
         Add(options.Retention.WebhookAttemptLogDays, "Webhooks:AttemptLogDays", list);
+        Add(options.Inbound.RetentionDays, "Inbound:RetentionDays", list);
         return list;
 
         static void Add(int value, string name, List<string> into)

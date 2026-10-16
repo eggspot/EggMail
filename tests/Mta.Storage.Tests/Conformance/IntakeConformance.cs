@@ -194,6 +194,26 @@ public abstract class IntakeConformance : StorageTestBase
     };
 
     [Fact]
+    public async Task A_key_with_its_own_lifetime_outlives_the_default_window()
+    {
+        AcceptedMessage first = Msg(idempotencyKey: "forward-1");
+        first.IdempotencyKeyLifetime = TimeSpan.FromDays(366);
+        await AcceptAsync(first);
+
+        Clock.Advance(TimeSpan.FromHours(30));   // past the 24-hour default
+        IntakeResult dup = await Storage.Intake.AcceptAsync(Msg(idempotencyKey: "forward-1"), CancellationToken.None);
+        Assert.Equal((IntakeStatus.DuplicateIdempotencyKey, first.MessageId), (dup.Status, dup.MessageId));
+
+        Clock.Advance(TimeSpan.FromDays(300));
+        Assert.Equal(IntakeStatus.DuplicateIdempotencyKey, (await Storage.Intake.AcceptAsync(Msg(idempotencyKey: "forward-1"), CancellationToken.None)).Status);
+        await Storage.Maintenance.RunAsync(Clock.UtcNow, CancellationToken.None);   // the cleanup keeps it too
+        Assert.Equal(IntakeStatus.DuplicateIdempotencyKey, (await Storage.Intake.AcceptAsync(Msg(idempotencyKey: "forward-1"), CancellationToken.None)).Status);
+
+        Clock.Advance(TimeSpan.FromDays(70));   // 371 days since the first: past the year
+        Assert.Equal(IntakeStatus.Accepted, (await Storage.Intake.AcceptAsync(Msg(idempotencyKey: "forward-1"), CancellationToken.None)).Status);
+    }
+
+    [Fact]
     public async Task Idempotency_keys_are_unique_per_tenant()
     {
         Assert.Equal(IntakeStatus.Accepted, (await Storage.Intake.AcceptAsync(Msg(tenant: TenantA, idempotencyKey: "same"), CancellationToken.None)).Status);

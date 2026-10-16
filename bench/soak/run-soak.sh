@@ -36,6 +36,7 @@ fi
 ulimit -n 10240 2>/dev/null || echo "warning: could not raise the open file limit (ulimit -n is $(ulimit -n))" >&2
 
 python3 bench/soak/evaluate.py --self-test >/dev/null || { echo "bench/soak/evaluate.py --self-test failed" >&2; exit 2; }
+python3 bench/soak/plan.py --self-test >/dev/null || { echo "bench/soak/plan.py --self-test failed" >&2; exit 2; }
 
 if [ "$skip_build" = false ] || [ ! -e artifacts/soak/publish/mta ] || [ ! -e artifacts/soak/tools/mta-tools.dll ]; then
   # Framework-dependent publish, the layout the Docker image and a systemd unit run: `mta serve` out of one directory.

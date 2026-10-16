@@ -5,7 +5,7 @@ using Mta.Storage.Transfer;
 namespace Mta.Storage.InMemory;
 
 /// <summary>In-memory <see cref="IConfigStore"/>; same semantics as the EF implementation (normalization, uniqueness, leases).</summary>
-internal sealed partial class InMemoryConfigStore : IConfigStore
+internal sealed partial class InMemoryConfigStore : IConfigStore, IInboundConfigStore
 {
     private readonly object _gate = new();
     private readonly Dictionary<Guid, TenantEntity> _tenants = [];
@@ -428,6 +428,13 @@ internal sealed partial class InMemoryConfigStore : IConfigStore
             {
                 _dkim.Remove(k.Id);
             }
+
+            foreach (var r in _inboundRoutes.Values.Where(r => r.DomainId == domainId).ToList())
+            {
+                _inboundRoutes.Remove(r.Id);
+            }
+
+            _inboundSettings.Remove(domainId);
         }
 
         return default;
@@ -574,6 +581,11 @@ internal sealed partial class InMemoryConfigStore : IConfigStore
         {
             if (_endpoints.TryGetValue(id, out var w) && w.TenantId == tenantId)
             {
+                if (_inboundRoutes.Values.Any(r => r.ActionKind == InboundActionKind.Webhook && r.WebhookEndpointId == id))
+                {
+                    throw new StorageConflictException("The webhook endpoint is the target of inbound routes.");
+                }
+
                 _endpoints.Remove(id);
             }
         }
