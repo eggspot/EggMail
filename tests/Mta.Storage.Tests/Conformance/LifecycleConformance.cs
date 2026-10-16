@@ -42,6 +42,7 @@ public abstract partial class LifecycleConformance(ITestOutputHelper output) : S
         "stats.rollup",
         "stats.retention",
         "idempotency.expired",
+        "inbound_retention",
     ];
 
     /// <summary>Housekeeping jobs that delete nothing a user can see (partition creation, lease cleanup, vacuum).</summary>
