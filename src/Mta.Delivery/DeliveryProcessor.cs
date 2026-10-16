@@ -232,7 +232,7 @@ public sealed class DeliveryProcessor
             }
 
             // What goes on the wire (and so what DKIM signs) is decided per server, after its EHLO: see OutboundTransaction.
-            transaction = new OutboundTransaction(raw, signer, first.HeadersUtf8, await ChooseEnvelopeFromAsync(first, now, ct).ConfigureAwait(false), RecipientsOf(pending));
+            transaction = new OutboundTransaction(raw, signer, first.HeadersUtf8, await ChooseEnvelopeFromAsync(first, now, ct).ConfigureAwait(false), RecipientsOf(pending), byteExact: first.Source == MessageSource.Forward);
             var attempt = await RunRoutesAsync(first, transaction, ct).ConfigureAwait(false);
             Interpret(pending, attempt, results);
 
@@ -284,7 +284,8 @@ public sealed class DeliveryProcessor
 
     private async ValueTask<EmailAddress> ChooseEnvelopeFromAsync(ClaimedDelivery d, DateTimeOffset now, CancellationToken ct)
     {
-        if (_s.Verp is null || string.IsNullOrWhiteSpace(_options.BounceDomain) || d.EnvelopeFrom.IsNull || d.Source == MessageSource.Bounce)
+        if (_s.Verp is null || string.IsNullOrWhiteSpace(_options.BounceDomain) || d.EnvelopeFrom.IsNull || d.Source == MessageSource.Bounce
+            || d.Source == MessageSource.Forward)   // a forward keeps its SRS0 envelope sender (or the null one) at the route's domain, the one whose SPF the final receiver checks (design section 11.7)
         {
             return d.EnvelopeFrom;
         }

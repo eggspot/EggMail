@@ -578,6 +578,8 @@ and set `Storage:Postgres:ReadOnlyConnectionString` to a connection string for i
 | `mta_webhooks_delivery_duration_seconds` | histogram | none | One HTTP call to a receiver |
 | `mta_webhooks_endpoints_disabled_total` | counter | none | Endpoints switched off after `410 Gone` or a continuous failure period |
 | `mta_inbound_actions_total` | counter | `kind` (`webhook`, `forward`, `store`, `discard`: the kind of the route when the attempt ran), `outcome` (`done`, `retry`, `failed`) | Attempts at inbound route actions: `retry` goes to the next rung of the ladder (a deferral counts), `failed` is final |
+| `mta_inbound_forward_loops_total` | counter | none | Forwards refused because the message had been forwarded by this server three times already (`loop_detected`) |
+| `mta_inbound_srs_bounces_dropped_total` | counter | none | Bounces to the SRS address of a forwarded message that were accepted and dropped (never relayed to the original sender) |
 | `mta_inbound_action_duration_seconds` | histogram | `kind` | Claim to recorded result of one attempt |
 | `mta_inbound_actions` | gauge | `state` (`pending`, `failed`) | Inbound route actions waiting and given up, sampled every 15 seconds. A growing `pending` is a receiver that does not answer, or `Inbound:Enabled` off; `failed` is what the tenants should retry |
 | `mta_storage_sqlite_commit_duration_seconds` | histogram | `file` (`queue.db`, `stats.db`, `config.db`, `history.db`) | COMMIT of one writer transaction (`sqlite_commit_latency` in [benchmarks.md](benchmarks.md)); with `Sqlite:SyncMode=Full` this is the fsync |

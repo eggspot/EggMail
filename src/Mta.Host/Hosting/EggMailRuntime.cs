@@ -44,6 +44,9 @@ public sealed class EggMailRuntime : IAsyncDisposable
 
     /// <summary>Carries out the webhook and forward actions of received mail (inbound routes, design section 11.7).</summary>
     public required InboundActionRunner InboundActions { get; init; }
+
+    /// <summary>Verifies the SRS recipients of forwarded mail and drops their bounces; the receive path of the <c>Inbound</c> listener role calls it (design sections 11.4 and 11.7).</summary>
+    public required SrsBounceHandler SrsBounces { get; init; }
     public required IDnsResolver Dns { get; init; }
     public required SmtpConnectionPool Pool { get; init; }
     public required RoutePlanner Routes { get; init; }
@@ -205,9 +208,13 @@ public sealed class EggMailRuntime : IAsyncDisposable
         var webhookTransport = new WebhookTransport(config.Webhooks, clock);
         var endpointNotifier = new EndpointDisabledNotifier(storage, clock, log);
         var webhooks = new WebhookDispatcher(storage.Webhooks, storage.Config, secrets, config.Webhooks, clock, log, endpointNotifier, transport: webhookTransport);
+        var arcSealers = new ConfigArcSealerProvider(storage.Config, secrets, clock);
+        var forwarder = new InboundForwarder(
+            storage, new Mta.Dsn.SrsCodec(verp), new Mta.Dsn.ForwardHopMarker(verp), new Mta.Auth.Arc.ArcValidator(dns, new Mta.Auth.Arc.ArcValidatorOptions { MaxInstances = 10 }), arcSealers,
+            new InboundForwarderOptions { AuthenticationResultsId = config.Hostname, BounceDomain = config.Delivery.BounceDomain, QueueLifetime = config.Storage.Queue.MaxLifetime }, clock, log, onQueued: () => engine?.Wake());
         var inboundActions = new InboundActionRunner(
             storage, webhookTransport, new WebhookEndpointHealth(storage.Config, config.Webhooks, log, endpointNotifier), secrets, InboundActionOptionsFrom(config), clock, log,
-            () => config.Inbound.Enabled, new StorageWebhookPublisher(storage));
+            () => config.Inbound.Enabled, new StorageWebhookPublisher(storage), forwarder);
 
         var tlsJournal = collector is null ? null : new TlsReportJournal(collector, storage.Config, clock, log);
         TlsReportSender? reports = tlsJournal is null
@@ -240,7 +247,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
         {
             KeysProtectedAtRest = Mta.Host.Secrets.SecretsFactory.KeysProtectedAtRest(config.Secrets, storage.Config),
             Config = config, Storage = storage, Clock = clock, Log = log, Secrets = secrets, Certificates = certificates, Verp = verp,
-            Submission = submission, AuthThrottle = throttle, SmtpServer = smtp, Delivery = delivery, Webhooks = webhooks, InboundActions = inboundActions, Dns = dns,
+            Submission = submission, AuthThrottle = throttle, SmtpServer = smtp, Delivery = delivery, Webhooks = webhooks, InboundActions = inboundActions, SrsBounces = new SrsBounceHandler(new Mta.Dsn.SrsCodec(verp), clock, log), Dns = dns,
             Pool = pool, Routes = routes, Limits = limits, Acme = acme, AcmeHttpListener = acmeHttpListener, TlsReports = reports, Health = routeHealth, DestinationThrottle = destinationThrottle, ReplicaCoordinator = replicaCoordinator,
             CounterPersistence = counterPersistence, TlsJournal = tlsJournal, TlsCollector = collector,
         };
@@ -258,6 +265,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
         runtime._owned.Add(pool);
         runtime._owned.Add(smtp);
         runtime._owned.Add(new DisposableAdapter(webhookTransport));
+        runtime._owned.Add(new DisposableAdapter(arcSealers));
         return runtime;
     }
 
