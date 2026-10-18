@@ -354,6 +354,15 @@ public abstract partial class EngineLifecycleTests
             }
         }
 
+        // The notice is a delivery of its own and is claimed at once. Let it finish before time moves on: a virtual clock that jumps past the lease of an attempt still in flight has that
+        // attempt claimed a second time, and the notice would reach the remote twice (the same message, the same Message-ID). A live process extends its leases and real time does not
+        // jump, so that cannot happen outside this harness; the dying worker's own lease is the only one that may remain.
+        await h.WaitUntilAsync(async () =>
+        {
+            QueueStats stats = await h.Storage.Deliveries.GetQueueStatsAsync(default);
+            return h.Runtime.Delivery.PendingGroups == 0 && stats.Queued == 0 && stats.Leased == 1 && h.Bounces.Count == 1;
+        }, "the notice was not delivered while the dying worker's lease still held");
+
         // The next process takes over when the lease has run out.
         h.Clock.Advance(TimeSpan.FromMinutes(16));
         h.Runtime.Delivery.Wake();
