@@ -263,6 +263,68 @@ public class ClientTests
         Assert.False(conn.IsReusable);
     }
 
+    /// <summary>A 421 closes the channel (RFC 5321 4.2.2): the reply is the reason for the deferral and must survive the connection loss that follows it.</summary>
+    [Theory]
+    [InlineData(false, "mail")]
+    [InlineData(false, "rcpt")]
+    [InlineData(false, "data")]
+    [InlineData(true, "mail")]
+    [InlineData(true, "rcpt")]
+    [InlineData(true, "data")]
+    public async Task A_421_during_the_envelope_is_reported_as_the_reason_and_the_connection_is_not_reused(bool pipelining, string where)
+    {
+        const string Closing = "421 4.7.28 Our system has detected an unusual rate of mail from your IP, closing\r\n";
+        await using var peer = new ScriptedServer(async c =>
+        {
+            await c.SendAsync("220 x ESMTP\r\n");
+            await c.ReadLineAsync();
+            await c.SendAsync("250-x\r\n250 PIPELINING\r\n");
+            await c.ReadLineAsync();   // MAIL
+            if (pipelining)
+            {
+                await c.ReadLineAsync();   // RCPT and DATA are already on the way: take them all so that closing does not reset the connection and destroy the reply
+                await c.ReadLineAsync();
+            }
+
+            if (where == "mail")
+            {
+                await c.SendAsync(Closing);
+                return;
+            }
+
+            await c.SendAsync("250 ok\r\n");
+            if (!pipelining)
+            {
+                await c.ReadLineAsync();   // RCPT
+            }
+
+            if (where == "rcpt")
+            {
+                await c.SendAsync(Closing);
+                return;
+            }
+
+            await c.SendAsync("250 ok\r\n");
+            if (!pipelining)
+            {
+                await c.ReadLineAsync();   // DATA
+            }
+
+            await c.SendAsync(Closing);
+        });
+        var options = new SmtpClientOptions { HeloName = "c.test", Pipelining = pipelining };
+        await using var conn = await SmtpClientConnection.ConnectAsync(peer.Target(SmtpTlsPolicy.Disabled), options);
+
+        var result = await conn.SendAsync(Env("r@dest.example"), Msg());
+
+        Assert.False(result.Delivered);
+        Assert.False(result.EndOfDataSent);
+        var reply = result.SenderRejection ?? result.DataRejection ?? result.Recipients.Select(r => r.Reply).First(r => !r.IsPositiveCompletion);
+        Assert.Equal(421, reply.Code);
+        Assert.Contains("unusual rate", reply.Lines[0]);
+        Assert.False(conn.IsReusable);
+    }
+
     [Fact]
     public async Task Connection_lost_before_end_of_data_is_not_a_possible_duplicate()
     {

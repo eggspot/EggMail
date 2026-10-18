@@ -22,7 +22,7 @@ public sealed class BundleReader
     /// <summary>Opens a bundle. Throws <see cref="BundleException"/> if the manifest is missing, malformed or from an incompatible format.</summary>
     public static async Task<BundleReader> OpenAsync(string rootDirectory, CancellationToken ct)
     {
-        string root = Path.GetFullPath(rootDirectory);
+        string root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootDirectory));   // "dir/" and "dir" are the same bundle
         string manifestPath = Path.Combine(root, "manifest.json");
         if (!File.Exists(manifestPath))
         {
@@ -62,7 +62,19 @@ public sealed class BundleReader
         return new BundleReader(root, manifest);
     }
 
-    public string PathOf(string relativePath) => Path.Combine(Root, relativePath);
+    /// <summary>The absolute path of a file of the bundle; a path that leaves the bundle directory is refused (the manifest is checked when the bundle is opened, this is the same rule for every other caller).</summary>
+    // Containment is decided on the path as written: a symbolic link inside the bundle directory is not resolved. The bundle is a directory the administrator
+    // wrote and chose; the manifest hashes (VerifyAsync) are what notice a changed file.
+    public string PathOf(string relativePath)
+    {
+        string full = Path.GetFullPath(Path.Combine(Root, relativePath));
+        if (!full.StartsWith(Root + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+        {
+            throw new BundleException($"Path '{relativePath}' escapes the bundle directory.");
+        }
+
+        return full;
+    }
 
     public IEnumerable<BundleFile> FilesUnder(string prefix) => Manifest.Files.Where(f => f.Path.StartsWith(prefix, StringComparison.Ordinal));
 

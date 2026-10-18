@@ -140,6 +140,9 @@ internal sealed class ApiFixtureOptions
     public Action<ApiOptions>? ConfigureApi { get; init; }
     public Action<IServiceCollection>? ConfigureServices { get; init; }
 
+    /// <summary>Middleware and static hosting the host puts in front of the API (for example the dashboard's headers), added before the API is mapped.</summary>
+    public Action<WebApplication>? ConfigureApp { get; init; }
+
     /// <summary>
     /// A second server over the storage (and clock) of another fixture: a process restart, or another replica. The tenants, domains and users of the first fixture are
     /// there already, so nothing is seeded, and the shared storage is left open when this fixture is disposed.
@@ -250,6 +253,7 @@ internal sealed class ApiFixture : IAsyncDisposable
 
             await next().ConfigureAwait(false);
         });
+        o.ConfigureApp?.Invoke(_app);
         _app.MapEggMailApi();
         await _app.StartAsync().ConfigureAwait(false);
         Http = _app.GetTestClient();

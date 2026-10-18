@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using Mta.Core;
 
 namespace Mta.Webhooks;
 
@@ -10,74 +11,8 @@ namespace Mta.Webhooks;
 /// </summary>
 public static class SsrfGuard
 {
-    /// <summary>True when connecting to <paramref name="address"/> is permitted without an allowlist entry.</summary>
-    public static bool IsPubliclyRoutable(IPAddress address)
-    {
-        if (address.IsIPv4MappedToIPv6)
-        {
-            address = address.MapToIPv4();
-        }
-
-        if (address.AddressFamily == AddressFamily.InterNetwork)
-        {
-            Span<byte> b = stackalloc byte[4];
-            address.TryWriteBytes(b, out _);
-            return !IsDeniedV4(b);
-        }
-
-        if (address.AddressFamily == AddressFamily.InterNetworkV6)
-        {
-            Span<byte> b = stackalloc byte[16];
-            address.TryWriteBytes(b, out _);
-            return !IsDeniedV6(b);
-        }
-
-        return false;
-    }
-
-    private static bool IsDeniedV4(ReadOnlySpan<byte> b)
-    {
-        byte a = b[0], c = b[1];
-        return a == 0                                            // 0.0.0.0/8 "this network"
-            || a == 10                                           // private
-            || a == 127                                          // loopback
-            || (a == 100 && c >= 64 && c <= 127)                 // 100.64/10 carrier-grade NAT
-            || (a == 169 && c == 254)                            // link-local incl. cloud metadata 169.254.169.254
-            || (a == 172 && c >= 16 && c <= 31)                  // private
-            || (a == 192 && c == 168)                            // private
-            || (a == 192 && c == 0 && b[2] == 0)                 // 192.0.0.0/24 IETF protocol assignments
-            || (a == 192 && c == 0 && b[2] == 2)                 // documentation
-            || (a == 198 && (c == 18 || c == 19))                // benchmarking
-            || (a == 198 && c == 51 && b[2] == 100)              // documentation
-            || (a == 203 && c == 0 && b[2] == 113)               // documentation
-            || a >= 224;                                         // multicast, reserved, broadcast
-    }
-
-    private static bool IsDeniedV6(ReadOnlySpan<byte> b)
-    {
-        bool allZeroPrefix = true;
-        for (int i = 0; i < 15; i++)
-        {
-            if (b[i] != 0) { allZeroPrefix = false; break; }
-        }
-
-        if (allZeroPrefix && (b[15] == 0 || b[15] == 1))
-        {
-            return true; // :: and ::1
-        }
-
-        if ((b[0] & 0xFE) == 0xFC) { return true; }              // fc00::/7 unique local
-        if (b[0] == 0xFE && (b[1] & 0xC0) == 0x80) { return true; } // fe80::/10 link-local
-        if (b[0] == 0xFF) { return true; }                       // ff00::/8 multicast
-        if (b[0] == 0x20 && b[1] == 0x01 && b[2] == 0x0D && b[3] == 0xB8) { return true; } // 2001:db8::/32 documentation
-        if (b[0] == 0x20 && b[1] == 0x02) { return IsDeniedV4(b.Slice(2, 4)); }           // 6to4 embeds an IPv4 address
-        if (b[0] == 0x00 && b[1] == 0x64 && b[2] == 0xFF && b[3] == 0x9B)                   // 64:ff9b::/96 NAT64 embeds IPv4
-        {
-            return IsDeniedV4(b.Slice(12, 4));
-        }
-
-        return false;
-    }
+    /// <summary>True when connecting to <paramref name="address"/> is permitted without an allowlist entry (the one classification of <see cref="NetworkAddresses"/>).</summary>
+    public static bool IsPubliclyRoutable(IPAddress address) => NetworkAddresses.IsPubliclyRoutable(address);
 
     /// <summary>
     /// Resolves <paramref name="host"/> and returns the addresses that are allowed (public, or inside an allowlisted network).
