@@ -30,7 +30,11 @@ public abstract class AcmeRenewalInfoPebbleTests : IAsyncLifetime
 
     private static async Task<bool> WithTimeout(Task<bool> task) => await task.WaitAsync(TimeSpan.FromMinutes(2));
 
-    /// <summary>Orders the first certificate for a fresh name. The service always picks the start of a suggested window (random number 0).</summary>
+    /// <summary>
+    /// Orders the first certificate for a fresh name (the one order of the recorded transport), one that Pebble can look up when it is named in <c>replaces</c>: a certificate
+    /// with a padded serial (<see cref="Pebble.HasPaddedSerial"/>, about 1 in 128) is replaced by another one first, through a transport that is not recorded. The service
+    /// always picks the start of a suggested window (random number 0).
+    /// </summary>
     private async Task<(AcmeRenewalService Service, string Host, CertificateRecord Cert)> IssueAsync()
     {
         string host = AcmeTestNames.Unique();
@@ -38,6 +42,18 @@ public abstract class AcmeRenewalInfoPebbleTests : IAsyncLifetime
         var service = _h.CreateService(dns, [host], random: () => 0);
         Assert.True(await WithTimeout(service.CheckOnceAsync(default)), Diagnostics);
         var cert = Assert.Single(await _h.Storage.Config.GetCertificatesAsync(default));
+        if (Pebble.HasPaddedSerial(cert.ChainPem))
+        {
+            using var unrecorded = new RecordingHandler(Pebble.CreateTransport());
+            var reissue = _h.CreateService(dns, [host], http: unrecorded, random: () => 0);
+            for (int attempt = 1; Pebble.HasPaddedSerial(cert.ChainPem); attempt++)
+            {
+                Assert.True(attempt <= 20, "twenty certificates in a row with a padded serial: Pebble's serials are not what this assumes");
+                Assert.True(await WithTimeout(reissue.RequestAsync([host], default)), Diagnostics);
+                cert = Assert.Single(await _h.Storage.Config.GetCertificatesAsync(default));
+            }
+        }
+
         await WaitUntilThePebbleCanReplaceAsync(host, cert);
         return (service, host, cert);
     }
