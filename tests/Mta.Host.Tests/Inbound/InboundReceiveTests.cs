@@ -279,7 +279,8 @@ public class InboundReceiveTests : IAsyncLifetime
         public ValueTask<bool> DeleteAsync(Guid tenantId, Guid messageId, CancellationToken cancellationToken) => inner.DeleteAsync(tenantId, messageId, cancellationToken);
         public ValueTask<long> DeleteMatchingAsync(InboundMessageQuery query, CancellationToken cancellationToken) => inner.DeleteMatchingAsync(query, cancellationToken);
         public ValueTask<InboundRetryResult> RetryActionAsync(Guid tenantId, Guid messageId, DateTimeOffset now, CancellationToken cancellationToken) => inner.RetryActionAsync(tenantId, messageId, now, cancellationToken);
-        public ValueTask<IReadOnlyList<ClaimedInboundAction>> ClaimActionsAsync(string owner, int max, DateTimeOffset now, TimeSpan lease, CancellationToken cancellationToken) => inner.ClaimActionsAsync(owner, max, now, lease, cancellationToken);
+        public ValueTask<IReadOnlyList<ClaimedInboundAction>> ClaimActionsAsync(string owner, int max, DateTimeOffset now, TimeSpan lease, CancellationToken cancellationToken, InboundClaimLimits? limits = null) => inner.ClaimActionsAsync(owner, max, now, lease, cancellationToken, limits);
+        public ValueTask<long> CountActionsAsync(InboundActionState state, CancellationToken cancellationToken) => inner.CountActionsAsync(state, cancellationToken);
         public ValueTask<bool> ExtendActionLeaseAsync(Guid messageId, string owner, DateTimeOffset until, CancellationToken cancellationToken) => inner.ExtendActionLeaseAsync(messageId, owner, until, cancellationToken);
         public ValueTask<bool> CompleteActionAsync(Guid messageId, string owner, InboundActionOutcome outcome, CancellationToken cancellationToken) => inner.CompleteActionAsync(messageId, owner, outcome, cancellationToken);
         public ValueTask<int> ReleaseOwnedActionLeasesAsync(string owner, CancellationToken cancellationToken) => inner.ReleaseOwnedActionLeasesAsync(owner, cancellationToken);

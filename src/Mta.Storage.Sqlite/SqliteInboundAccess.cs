@@ -94,15 +94,76 @@ internal sealed class SqliteInboundAccess(SqliteRuntime rt, IStorageModelHooks h
     }
 
     // One writer, one transaction: the single-process claim needs no row locks.
-    public IReadOnlyList<Guid> ClaimIds(QueueDbContext context, string owner, int max, DateTimeOffset now, DateTimeOffset until)
+    public IReadOnlyList<Guid> ClaimIds(QueueDbContext context, string owner, int max, DateTimeOffset now, DateTimeOffset until, InboundClaimLimits? limits)
     {
         DbConnection connection = context.Database.GetDbConnection();
         using DbCommand cmd = connection.CreateCommand();
         cmd.Transaction = context.Database.CurrentTransaction?.GetDbTransaction();
-        cmd.CommandText =
-            "UPDATE inbound_message SET lease_owner = @owner, lease_until = @until, action_attempts = action_attempts + 1, claim_sequence = claim_sequence + 1 WHERE id IN (" +
-            "SELECT id FROM inbound_message WHERE transfer_switch_id IS NULL AND action_state = 0 AND action_next_attempt_at <= @now AND lease_until <= @now ORDER BY action_next_attempt_at, id LIMIT @max) " +
-            "RETURNING id";
+        const string Eligible = "transfer_switch_id IS NULL AND action_state = 0 AND action_next_attempt_at <= @now AND lease_until <= @now";
+        if (limits is null)
+        {
+            cmd.CommandText =
+                "UPDATE inbound_message SET lease_owner = @owner, lease_until = @until, action_attempts = action_attempts + 1, claim_sequence = claim_sequence + 1 WHERE id IN (" +
+                "SELECT id FROM inbound_message WHERE " + Eligible + " ORDER BY action_next_attempt_at, id LIMIT @max) " +
+                "RETURNING id";
+        }
+        else
+        {
+            // At most MaxPerTenant rows of a tenant (its oldest due ones), tenants in ExcludeTenants left out, then the oldest due first among what is left. One writer: nothing else claims
+            // meanwhile. Each tenant with pending actions is one probe of the index on (tenant_id, action_next_attempt_at, id) that stops after the cap, so the backlog of a tenant is never read
+            // to find the rows of the others (a window over all due rows read and sorted every one of them on each poll, inside the single writer).
+            var excluded = new HashSet<string>(StringComparer.Ordinal);
+            foreach (Guid tenant in limits.ExcludeTenants ?? [])
+            {
+                excluded.Add(tenant.ToString("D").ToUpperInvariant());
+            }
+
+            var candidates = new List<(long Due, string Id)>();
+            foreach (string tenant in TenantsWithPendingActions(connection, cmd.Transaction))
+            {
+                if (excluded.Contains(tenant))
+                {
+                    continue;
+                }
+
+                long perTenant = Math.Min(limits.AllowanceOf(Guid.Parse(tenant)), max);
+                if (perTenant <= 0)
+                {
+                    continue;
+                }
+
+                using DbCommand pick = connection.CreateCommand();
+                pick.Transaction = cmd.Transaction;
+                pick.CommandText = "SELECT action_next_attempt_at, id FROM inbound_message WHERE tenant_id = @tenant AND " + Eligible + " ORDER BY action_next_attempt_at, id LIMIT @cap";
+                Add(pick, "@tenant", tenant);
+                Add(pick, "@now", StorageTime.ToUnixMs(now));
+                Add(pick, "@cap", perTenant);
+                using DbDataReader rows = pick.ExecuteReader();
+                while (rows.Read())
+                {
+                    candidates.Add((rows.GetInt64(0), rows.GetString(1)));
+                }
+            }
+
+            if (candidates.Count == 0)
+            {
+                return [];
+            }
+
+            candidates.Sort((a, b) => a.Due != b.Due ? a.Due.CompareTo(b.Due) : string.CompareOrdinal(a.Id, b.Id));
+            var names = new List<string>();
+            foreach ((long _, string id) in candidates.Take(max))
+            {
+                string name = "@c" + names.Count.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                names.Add(name);
+                Add(cmd, name, id);
+            }
+
+            cmd.CommandText =
+                "UPDATE inbound_message SET lease_owner = @owner, lease_until = @until, action_attempts = action_attempts + 1, claim_sequence = claim_sequence + 1 WHERE id IN (" +
+                string.Join(',', names) + ") RETURNING id";
+        }
+
         Add(cmd, "@owner", owner);
         Add(cmd, "@until", StorageTime.ToUnixMs(until));
         Add(cmd, "@now", StorageTime.ToUnixMs(now));
@@ -115,6 +176,36 @@ internal sealed class SqliteInboundAccess(SqliteRuntime rt, IStorageModelHooks h
         }
 
         return ids;
+    }
+
+    /// <summary>
+    /// The tenants that have pending rows, one index probe each (a skip scan over the partial index on <c>(tenant_id, ...) WHERE action_state = 0</c>): the next tenant is the smallest
+    /// id above the last one. The count of tenants with pending work is the cost, never the count of rows.
+    /// </summary>
+    private static List<string> TenantsWithPendingActions(DbConnection connection, DbTransaction? transaction)
+    {
+        var tenants = new List<string>();
+        string? last = null;
+        while (true)
+        {
+            using DbCommand next = connection.CreateCommand();
+            next.Transaction = transaction;
+            next.CommandText = last is null
+                ? "SELECT tenant_id FROM inbound_message WHERE action_state = 0 ORDER BY tenant_id LIMIT 1"
+                : "SELECT tenant_id FROM inbound_message WHERE action_state = 0 AND tenant_id > @last ORDER BY tenant_id LIMIT 1";
+            if (last is not null)
+            {
+                Add(next, "@last", last);
+            }
+
+            if (next.ExecuteScalar() is not string tenant)
+            {
+                return tenants;
+            }
+
+            tenants.Add(tenant);
+            last = tenant;
+        }
     }
 
     private static void Add(DbCommand cmd, string name, object value)

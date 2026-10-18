@@ -380,6 +380,146 @@ public abstract class InboundConformance : StorageTestBase
     }
 
     [Fact]
+    public async Task A_claim_can_limit_the_rows_of_one_tenant_and_leave_tenants_out_so_a_backlog_does_not_starve_the_others()
+    {
+        DomainRecord a = await AddDomainAsync(TenantA, "a.example");
+        DomainRecord b = await AddDomainAsync(TenantB, "b.example");
+        Guid routeA = Ids.New();
+        Guid routeB = Ids.New();
+        var backlog = new List<Guid>();
+        for (int i = 0; i < 6; i++)
+        {
+            Clock.Advance(TimeSpan.FromSeconds(1));
+            backlog.Add((await StoreAsync(Draft(a, routeA, size: 100 + i))).Id);   // tenant A's backlog is older than anything of tenant B
+        }
+
+        InboundMessageDraft b1 = await StoreAsync(Draft(b, routeB, size: 200));
+        Clock.Advance(TimeSpan.FromSeconds(1));
+        InboundMessageDraft b2 = await StoreAsync(Draft(b, routeB, size: 201));
+        Clock.Advance(TimeSpan.FromSeconds(1));
+
+        // Without limits the oldest rows win: the claim is all of A's backlog and nothing of B.
+        var unlimited = await ClaimActionsAsync(max: 4, owner: "w-unlimited");
+        Assert.All(unlimited, c => Assert.Equal(TenantA, c.Message.TenantId));
+        await Inbound.ReleaseOwnedActionLeasesAsync("w-unlimited", default);
+
+        // At most two rows per tenant: A's two oldest, then B's two.
+        var capped = await Inbound.ClaimActionsAsync("w-capped", 4, Clock.UtcNow, TimeSpan.FromMinutes(1), default, new InboundClaimLimits(2));
+        Assert.Equal(2, capped.Count(c => c.Message.TenantId == TenantA));
+        Assert.Equal([b1.Id, b2.Id], capped.Where(c => c.Message.TenantId == TenantB).Select(c => c.Message.Id).Order());
+        Assert.Equal(backlog.Take(2).Order(), capped.Where(c => c.Message.TenantId == TenantA).Select(c => c.Message.Id).Order());   // the tenant's own oldest first
+        Assert.All(capped, c => Assert.Equal(1, c.Message.ActionAttempts));
+
+        // A tenant that is left out gets nothing, and the rows of the others are claimed instead; the left-out tenant's rows are not touched (no attempt counted).
+        var excluded = await Inbound.ClaimActionsAsync("w-excluded", 10, Clock.UtcNow, TimeSpan.FromMinutes(1), default, new InboundClaimLimits(0, [TenantB]));
+        Assert.Equal(4, excluded.Count);
+        Assert.All(excluded, c => Assert.Equal(TenantA, c.Message.TenantId));
+        var untouched = await Inbound.GetAsync(TenantB, b1.Id, default);
+        Assert.Equal(1, untouched!.ActionAttempts);   // only the claim of w-capped counted
+        Assert.Empty(await Inbound.ClaimActionsAsync("w-nothing", 10, Clock.UtcNow, TimeSpan.FromMinutes(1), default, new InboundClaimLimits(2, [TenantA, TenantB])));
+    }
+
+    [Fact]
+    public async Task A_tenant_never_holds_more_than_the_cap_at_once_the_rows_the_caller_has_in_flight_come_off_its_share()
+    {
+        DomainRecord a = await AddDomainAsync(TenantA, "a.example");
+        DomainRecord b = await AddDomainAsync(TenantB, "b.example");
+        Guid routeA = Ids.New();
+        Guid routeB = Ids.New();
+        var backlog = new List<Guid>();
+        for (int i = 0; i < 5; i++)
+        {
+            Clock.Advance(TimeSpan.FromSeconds(1));
+            backlog.Add((await StoreAsync(Draft(a, routeA, size: 100 + i))).Id);
+        }
+
+        Clock.Advance(TimeSpan.FromSeconds(1));
+        InboundMessageDraft b1 = await StoreAsync(Draft(b, routeB, size: 200));
+        Clock.Advance(TimeSpan.FromSeconds(1));
+
+        // The cap is three; the caller already has two of A's rows in flight: A gets one more (its oldest unclaimed), B gets its row.
+        var limits = new InboundClaimLimits(3, null, new Dictionary<Guid, int> { [TenantA] = 2 });
+        var first = await Inbound.ClaimActionsAsync("w-1", 10, Clock.UtcNow, TimeSpan.FromMinutes(1), default, limits);
+        Assert.Equal([backlog[0]], first.Where(c => c.Message.TenantId == TenantA).Select(c => c.Message.Id));
+        Assert.Equal([b1.Id], first.Where(c => c.Message.TenantId == TenantB).Select(c => c.Message.Id));
+
+        // At the cap (or over it) a tenant gets nothing, the others still do.
+        await Inbound.ReleaseOwnedActionLeasesAsync("w-1", default);
+        var atCap = await Inbound.ClaimActionsAsync("w-2", 10, Clock.UtcNow, TimeSpan.FromMinutes(1), default, new InboundClaimLimits(3, null, new Dictionary<Guid, int> { [TenantA] = 3 }));
+        Assert.All(atCap, c => Assert.Equal(TenantB, c.Message.TenantId));
+        await Inbound.ReleaseOwnedActionLeasesAsync("w-2", default);
+        var over = await Inbound.ClaimActionsAsync("w-3", 10, Clock.UtcNow, TimeSpan.FromMinutes(1), default, new InboundClaimLimits(3, null, new Dictionary<Guid, int> { [TenantA] = 7, [TenantB] = 3 }));
+        Assert.Empty(over);
+    }
+
+    [Fact]
+    public async Task A_call_that_asks_for_fewer_rows_than_the_tenants_share_gets_the_rows_it_asked_for_on_every_backend()
+    {
+        // The contract is LEAST(MaxPerTenant - slotsInUse, max): cap 4, one in flight, max 2 gives two rows (not one, which is what taking max below the cap first would give).
+        DomainRecord a = await AddDomainAsync(TenantA, "a.example");
+        Guid route = Ids.New();
+        var backlog = new List<Guid>();
+        for (int i = 0; i < 6; i++)
+        {
+            Clock.Advance(TimeSpan.FromSeconds(1));
+            backlog.Add((await StoreAsync(Draft(a, route, size: 100 + i))).Id);
+        }
+
+        Clock.Advance(TimeSpan.FromSeconds(1));
+        var limits = new InboundClaimLimits(4, null, new Dictionary<Guid, int> { [TenantA] = 1 });
+        var claimed = await Inbound.ClaimActionsAsync("w-1", 2, Clock.UtcNow, TimeSpan.FromMinutes(1), default, limits);
+        Assert.Equal(backlog.Take(2), claimed.Select(c => c.Message.Id));
+
+        // With three in use the share is one row even though the call asks for five.
+        var tight = new InboundClaimLimits(4, null, new Dictionary<Guid, int> { [TenantA] = 3 });
+        var one = await Inbound.ClaimActionsAsync("w-2", 5, Clock.UtcNow, TimeSpan.FromMinutes(1), default, tight);
+        Assert.Equal([backlog[2]], one.Select(c => c.Message.Id));
+
+        // No slots reported: the cap alone, and never more than max.
+        var capped = await Inbound.ClaimActionsAsync("w-3", 2, Clock.UtcNow, TimeSpan.FromMinutes(1), default, new InboundClaimLimits(4));
+        Assert.Equal(backlog.Skip(3).Take(2), capped.Select(c => c.Message.Id));
+    }
+
+    [Fact]
+    public async Task Extending_a_lease_changes_nothing_for_anyone_but_the_owner_and_never_shortens_or_revives_another_claim()
+    {
+        DomainRecord domain = await AddDomainAsync(TenantA, "a.example");
+        InboundMessageDraft draft = await StoreAsync(Draft(domain, Ids.New()));
+        var claim = Assert.Single(await ClaimActionsAsync(lease: TimeSpan.FromMinutes(1)));
+
+        Assert.False(await Inbound.ExtendActionLeaseAsync(draft.Id, "someone-else", Clock.UtcNow.AddHours(5), default));   // not the owner: nothing moves
+        Assert.False(await Inbound.ExtendActionLeaseAsync(Ids.New(), Owner, Clock.UtcNow.AddHours(5), default));   // unknown row
+        var taken = Assert.Single(await ClaimActionsAsync(owner: "worker-2", now: Clock.UtcNow.AddMinutes(2)));   // the lease is still the original minute
+        Assert.Equal(2, taken.Message.ActionAttempts);
+
+        // The first owner no longer holds it, so it cannot extend what worker-2 holds either.
+        Assert.False(await Inbound.ExtendActionLeaseAsync(draft.Id, Owner, Clock.UtcNow.AddHours(5), default));
+        Assert.Empty(await ClaimActionsAsync(owner: "worker-3", now: Clock.UtcNow.AddSeconds(179)));   // worker-2's own lease (a minute from minute 2) still holds a second before it ends
+        Assert.True(claim.ClaimToken < taken.ClaimToken);
+    }
+
+    [Fact]
+    public async Task Actions_are_counted_by_state_without_reading_the_bodies()
+    {
+        DomainRecord domain = await AddDomainAsync(TenantA, "a.example");
+        Guid route = Ids.New();
+        for (int i = 0; i < 3; i++)
+        {
+            await StoreAsync(Draft(domain, route, size: 100 + i));
+        }
+
+        await StoreAsync(Draft(domain, route, kind: InboundActionKind.Store));
+        var claimed = await ClaimActionsAsync(max: 1);
+        Assert.True(await Inbound.CompleteActionAsync(claimed[0].Message.Id, Owner, new InboundActionOutcome(InboundActionState.Failed, Clock.UtcNow, null, "x", ClaimToken: claimed[0].ClaimToken), default));
+
+        Assert.Equal(2, await Inbound.CountActionsAsync(InboundActionState.Pending, default));
+        Assert.Equal(1, await Inbound.CountActionsAsync(InboundActionState.Failed, default));
+        using var stopped = new CancellationTokenSource();
+        await stopped.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await Inbound.CountActionsAsync(InboundActionState.Pending, stopped.Token));
+    }
+
+    [Fact]
     public async Task The_claim_honors_the_maximum_and_a_lease_that_ran_out_can_be_claimed_again()
     {
         DomainRecord domain = await AddDomainAsync(TenantA, "example.com");

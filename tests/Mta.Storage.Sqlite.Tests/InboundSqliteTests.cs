@@ -85,6 +85,36 @@ public class InboundSqliteTests : SqliteTestBase
     }
 
     [Fact]
+    public async Task A_version_8_queue_file_gets_the_per_tenant_claim_index_and_keeps_its_messages()
+    {
+        (DomainRecord domain, Guid route) = await DomainAsync();
+        InboundMessageDraft draft = Draft(domain, route, InboundActionKind.Store, Clock.UtcNow, 50);
+        await Storage.Inbound.AcceptAsync([draft], default);
+        await Storage.DisposeAsync();
+        const string indexCount = "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'IX_inbound_message_tenant_id_action_next_attempt_at_id'";
+        Assert.Equal(1, ScalarLong(PathOf("queue.db"), indexCount));   // a fresh file is created from the model
+
+        foreach (string file in new[] { "config.db", "history.db", "queue.db", "stats.db" })
+        {
+            using var c = new SqliteConnection($"Data Source={PathOf(file)};Pooling=False");
+            c.Open();
+            using SqliteCommand cmd = c.CreateCommand();
+            cmd.CommandText = (file == "queue.db" ? "DROP INDEX IX_inbound_message_tenant_id_action_next_attempt_at_id;" : "") + "PRAGMA user_version = 8";
+            cmd.ExecuteNonQuery();
+        }
+
+        await ReopenAsync();
+
+        foreach (string file in new[] { "config.db", "history.db", "queue.db", "stats.db" })
+        {
+            Assert.Equal(SqliteFile.SchemaVersion, ScalarLong(PathOf(file), "PRAGMA user_version"));
+        }
+
+        Assert.Equal(1, ScalarLong(PathOf("queue.db"), indexCount));
+        Assert.NotNull(await Storage.Inbound.GetAsync(TenantA, draft.Id, default));
+    }
+
+    [Fact]
     public async Task Retention_deletes_in_batches_until_nothing_old_is_left()
     {
         await ReopenAsync(b => b.RetentionDeleteBatchSize = 10);

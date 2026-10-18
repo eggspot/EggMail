@@ -22,7 +22,7 @@ public partial class MetricsDocumentationTests
     /// <summary>Every production meter. A new meter must be added here, and its instruments to the table.</summary>
     private static readonly string[] ProductionMeters =
     [
-        "Mta.Smtp.Server", "Mta.Smtp.Client", "Mta.Delivery", "Mta.Webhooks", "Mta.Storage.Sqlite", "Mta.Tls", "Mta.Backup", "Mta.Process", "Mta.Bounce", "Mta.Inbound",
+        "Mta.Smtp.Server", "Mta.Smtp.Client", "Mta.Delivery", "Mta.Webhooks", "Mta.Storage.Sqlite", "Mta.Tls", "Mta.Backup", "Mta.Process", "Mta.Bounce", "Mta.Inbound", "Mta.Inbound.Actions",
     ];
 
     /// <summary>The Npgsql instruments the guide lists (pinned against a live server in the PostgreSQL tests).</summary>
@@ -69,7 +69,7 @@ public partial class MetricsDocumentationTests
     /// <summary>The instruments of the production meters, found the way an exporter finds them.</summary>
     private static List<Instrument> ProductionInstruments(IEnumerable<string> meterNames)
     {
-        foreach (Type t in new[] { typeof(SmtpMetrics), typeof(SmtpClientMetrics), typeof(DeliveryMetrics), typeof(WebhookMetrics), typeof(SqliteMetrics), typeof(TlsMetrics), typeof(BackupMetrics), typeof(Mta.Host.Hosting.ProcessMetrics), typeof(Mta.Host.Ingest.BounceMetrics), typeof(Mta.Host.Ingest.InboundMetrics) })
+        foreach (Type t in new[] { typeof(SmtpMetrics), typeof(SmtpClientMetrics), typeof(DeliveryMetrics), typeof(WebhookMetrics), typeof(SqliteMetrics), typeof(TlsMetrics), typeof(BackupMetrics), typeof(Mta.Host.Hosting.ProcessMetrics), typeof(Mta.Host.Ingest.BounceMetrics), typeof(Mta.Host.Ingest.InboundMetrics), typeof(Mta.Host.Inbound.InboundActionMetrics) })
         {
             RuntimeHelpers.RunClassConstructor(t.TypeHandle);   // a meter's instruments exist once its static class has been touched
         }

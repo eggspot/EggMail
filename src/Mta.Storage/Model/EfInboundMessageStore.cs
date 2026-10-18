@@ -32,7 +32,7 @@ public interface IInboundDbAccess<TContext> where TContext : DbContext, IQueueDb
     /// Leases up to <paramref name="max"/> pending actions that are due at <paramref name="now"/> and not held by a backend switch, oldest due first, and returns their
     /// ids. Runs inside the write transaction of <paramref name="context"/>. PostgreSQL adds <c>FOR UPDATE SKIP LOCKED</c> so replicas take disjoint rows.
     /// </summary>
-    IReadOnlyList<Guid> ClaimIds(TContext context, string owner, int max, DateTimeOffset now, DateTimeOffset until);
+    IReadOnlyList<Guid> ClaimIds(TContext context, string owner, int max, DateTimeOffset now, DateTimeOffset until, InboundClaimLimits? limits);
 }
 
 /// <summary>
@@ -300,7 +300,13 @@ public sealed class EfInboundMessageStore<TContext>(IInboundDbAccess<TContext> d
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    public async ValueTask<IReadOnlyList<ClaimedInboundAction>> ClaimActionsAsync(string owner, int max, DateTimeOffset now, TimeSpan lease, CancellationToken cancellationToken)
+    public async ValueTask<long> CountActionsAsync(InboundActionState state, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();   // the count is a synchronous query: a caller that is stopping should not start it
+        return await Read(c => c.InboundMessages.AsNoTracking().LongCount(x => x.ActionState == state)).ConfigureAwait(false);
+    }
+
+    public async ValueTask<IReadOnlyList<ClaimedInboundAction>> ClaimActionsAsync(string owner, int max, DateTimeOffset now, TimeSpan lease, CancellationToken cancellationToken, InboundClaimLimits? limits = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(owner);
         if (max <= 0 || db.Fence.IsClosed)
@@ -312,7 +318,7 @@ public sealed class EfInboundMessageStore<TContext>(IInboundDbAccess<TContext> d
         DateTimeOffset until = StorageTime.Normalize(now + lease);
         return await Write(c =>
         {
-            IReadOnlyList<Guid> ids = db.ClaimIds(c, owner, max, at, until);
+            IReadOnlyList<Guid> ids = db.ClaimIds(c, owner, max, at, until, limits is null or { IsUnrestricted: true } ? null : limits);
             if (ids.Count == 0)
             {
                 return (IReadOnlyList<ClaimedInboundAction>)[];

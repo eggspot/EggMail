@@ -522,6 +522,17 @@ public sealed class InboundSection
     public InboundArcSection Arc { get; init; } = new();
     public InboundDnsblSection Dnsbl { get; init; } = new();
     public InboundSrsSection Srs { get; init; } = new();
+
+    // ---- Route actions (webhook, forward, store, discard), design section 11.7. ----
+
+    /// <summary>Prefix of the attachment and raw-message paths in webhook payloads (<c>https://mail.example.com</c>): receivers of several servers can tell where to fetch. Empty: the paths alone, relative to the receiver's own server.</summary>
+    public string? ApiBaseUrl { get; init; }
+
+    /// <summary>The worker pool that carries out webhook and forward actions.</summary>
+    public InboundActionSection Action { get; init; } = new();
+
+    /// <summary>Size limits of the webhook payload formats.</summary>
+    public InboundWebhookSection Webhook { get; init; } = new();
 }
 
 /// <summary>Bounds of the SPF, DKIM, DMARC and ARC verification of received mail.</summary>
@@ -567,6 +578,35 @@ public sealed class InboundSrsSection
 {
     /// <summary>Days an SRS address of a forwarded message stays valid.</summary>
     public int MaxAgeDays { get; init; } = 21;
+}
+
+/// <summary>The route action runner (<c>Inbound:Action:*</c>): a worker pool per replica that claims pending actions and carries them out.</summary>
+public sealed class InboundActionSection
+{
+    /// <summary>Actions carried out at the same time on this replica.</summary>
+    public int Concurrency { get; init; } = 4;
+
+    /// <summary>Actions of one tenant carried out at the same time on this replica (so one tenant with a slow receiver cannot take every worker). At most <see cref="Concurrency"/> is useful.</summary>
+    public int MaxConcurrencyPerTenant { get; init; } = 2;
+
+    /// <summary>How long the runner waits before asking again when nothing is due.</summary>
+    public TimeSpan PollInterval { get; init; } = TimeSpan.FromSeconds(1);
+
+    /// <summary>How long a claimed action belongs to the replica that claimed it before another may take it over.</summary>
+    public TimeSpan Lease { get; init; } = TimeSpan.FromMinutes(2);
+
+    /// <summary>Delays before attempt 2, 3, ... of an action. Empty: the webhook ladder (5 s, 5 m, 30 m, 2 h, 5 h, 10 h, 10 h: about 27 hours, eight attempts).</summary>
+    public List<TimeSpan> RetrySchedule { get; init; } = [];
+}
+
+/// <summary>Size limits of the inbound webhook formats (<c>Inbound:Webhook:*</c>).</summary>
+public sealed class InboundWebhookSection
+{
+    /// <summary>The text part and the HTML part of the JSON payload are each cut at this many bytes (<c>truncated: true</c>).</summary>
+    public int MaxTextBytes { get; init; } = 256 * 1024;
+
+    /// <summary>The largest message sent as <c>raw_mime</c>; a bigger one fails at once with <c>too_large_for_raw_webhook</c> (use the JSON format or the download endpoint).</summary>
+    public long MaxRawMessageBytes { get; init; } = 10L * 1024 * 1024;
 }
 
 /// <summary>

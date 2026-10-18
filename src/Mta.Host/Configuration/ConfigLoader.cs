@@ -392,6 +392,24 @@ public static class ConfigLoader
             errors.Add("Inbound:MaxMessagesPerMinute and MaxMessagesPerMinutePerRemote must be at least 1, MaxMessageSize at least 1024, and the stored-bytes limits not negative (0 is unlimited).");
         }
 
+        InboundActionSection action = c.Inbound.Action;
+        if (action.Concurrency is < 1 or > 256 || action.MaxConcurrencyPerTenant is < 1 or > 256 || action.PollInterval <= TimeSpan.Zero || action.Lease < TimeSpan.FromSeconds(10)
+            || action.RetrySchedule.Count > 32 || action.RetrySchedule.Any(d => d <= TimeSpan.Zero))
+        {
+            errors.Add("Inbound:Action: Concurrency and MaxConcurrencyPerTenant must be between 1 and 256, PollInterval positive, Lease at least 10 seconds, and RetrySchedule at most 32 positive delays.");
+        }
+
+        if (c.Inbound.Webhook.MaxTextBytes is < 1024 or > 8 * 1024 * 1024 || c.Inbound.Webhook.MaxRawMessageBytes is < 1024 or > 256L * 1024 * 1024)
+        {
+            errors.Add("Inbound:Webhook: MaxTextBytes must be between 1 KiB and 8 MiB and MaxRawMessageBytes between 1 KiB and 256 MiB.");
+        }
+
+        if (c.Inbound.ApiBaseUrl is { Length: > 0 } baseUrl
+            && (!Uri.TryCreate(baseUrl, UriKind.Absolute, out Uri? baseUri) || baseUri.Scheme is not ("https" or "http") || baseUri.Query.Length > 0 || baseUri.Fragment.Length > 0 || baseUri.UserInfo.Length > 0))
+        {
+            errors.Add("Inbound:ApiBaseUrl must be an absolute http(s) URL without user information, query or fragment (for example https://mail.example.com).");
+        }
+
         if (c.Storage.Content.RetentionDays is < 6 or > 30)
         {
             errors.Add($"Content:RetentionDays must be between 6 and 30 (no unlimited value), not {c.Storage.Content.RetentionDays}.");

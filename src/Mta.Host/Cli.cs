@@ -288,6 +288,7 @@ internal static class Cli
             builder.Services.AddHostedService<ReplicaCoordinationService>();
             builder.Services.AddHostedService<DeliveryService>();
             builder.Services.AddHostedService<WebhookService>();
+            builder.Services.AddHostedService<InboundActionService>();
             builder.Services.AddHostedService<CertificateService>();
             builder.Services.AddHostedService<MaintenanceService>();
             builder.Services.AddHostedService<TlsReportService>();
