@@ -157,10 +157,10 @@ public abstract class InboundApiEndToEndTests(LabBackend backend)
         Assert.Equal(("store", JsonValueKind.Null, true), (items["to the postmaster"].GetProperty("action").GetProperty("kind").GetString(), items["to the postmaster"].GetProperty("routeId").ValueKind, items["to the postmaster"].GetProperty("hasRaw").GetBoolean()));
 
         string discardedId = items["discarded"].GetProperty("id").GetString()!;
-        alice.Bearer = null;
         (await alice.GetAsync($"/api/v1/inbound/messages/{discardedId}/raw")).Problem(HttpStatusCode.Gone, "inbound_body_gone");
-        Assert.Equal(2, (await alice.GetAsync("/api/v1/inbound/usage"))["messages"].GetInt64() - 1);   // three rows...
-        Assert.Equal(2L, await CountBodiesAsync(lab));                                                   // ...two bodies
+        Reply usage = await alice.GetAsync("/api/v1/inbound/usage");
+        Assert.Equal(3L, usage["messages"].GetInt64());   // three rows...
+        Assert.Equal(2L, await CountBodiesAsync(lab));    // ...two bodies: the discarded one has none
         await lab.AssertNothingWasSentAsync();
     }
 
@@ -220,8 +220,8 @@ public abstract class InboundApiEndToEndTests(LabBackend backend)
             return;
         }
 
-        FakeMtaReply reply = new(await lab.SendAsync("bob@sender.test", "support@example.org", message));
-        Assert.True(reply.Code is 250 or 554 or 552, reply.Text);   // stored, or refused as malformed at the door: never an error of the server
+        var reply = await lab.SendAsync("bob@sender.test", "support@example.org", message);
+        Assert.True(reply.Code is 250 or 554 or 552, reply.ToString());   // stored, or refused as malformed at the door: never an error of the server
         InboundMessage[] stored = [.. await lab.MessagesAsync(InboundLab.Acme)];
         if (reply.Code != 250)
         {
@@ -252,13 +252,6 @@ public abstract class InboundApiEndToEndTests(LabBackend backend)
         }
 
         lab.AssertNoErrorsLogged();
-    }
-
-    private readonly record struct FakeMtaReply(Host.Tests.Inbound.FakeMta.Reply Inner)
-    {
-        public int Code => Inner.Code;
-
-        public string Text => Inner.ToString();
     }
 
     // ------------------------------------------------------------------ tenant isolation
