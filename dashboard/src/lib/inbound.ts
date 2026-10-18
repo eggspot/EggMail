@@ -79,7 +79,7 @@ export function explainActionCode(code: string | null | undefined): string | nul
     forward_unavailable: 'Forwarding is not available on this server right now.',
     forward_backlog_full: 'Too many forwarded messages of yours are already waiting to be delivered. This one is kept and tried again; it goes out when the queue has room.',
     forward_key_conflict: 'Another message already holds the reference this forward needs, so nothing was sent. Contact the operator.',
-    dmarc_unsettled: 'The sender check (DMARC) could not be completed when the message arrived, and it claims to be from your own domain, so it is held back. Use Retry later.',
+    dmarc_unsettled: 'The sender check (DMARC) could not be completed when the message arrived, and it claims to be from your own domain, so it is not forwarded. The result is the one recorded on arrival, so trying again does not change it.',
     srs_failed: 'The sender address of the message could not be rewritten for forwarding, so it was not forwarded.',
     all_targets_suppressed: 'Every forward address is on your suppression list, so nothing was sent.',
     route_is_now_store: 'The route was changed to "store" while this message waited, so nothing was delivered. The message is kept until the retention ends.',
