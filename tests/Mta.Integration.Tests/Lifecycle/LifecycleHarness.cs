@@ -420,6 +420,17 @@ internal sealed class LifecycleHarness : IAsyncDisposable
 
     public static SmtpReply NoSuchUser() => SmtpReply.Create(550, "5.1.1", "No such user");
 
+    /// <summary>Polls until <paramref name="condition"/> holds, with a deadline far above any plausible load (a hang guard, not an assertion on time).</summary>
+    public async Task WaitUntilAsync(Func<Task<bool>> condition, string failure, int timeoutSeconds = 90)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
+        while (!await condition())
+        {
+            Assert.True(DateTime.UtcNow < deadline, failure + " (virtual now " + Clock.UtcNow.ToString("u") + ")\n" + string.Join('\n', Log.Lines.TakeLast(15)));
+            await Task.Delay(5);
+        }
+    }
+
     /// <summary>
     /// Wakes the engine until the message has a final state. For the moment right after the virtual clock passed an abandoned lease: the queue statistics already show nothing
     /// leased and nothing due, so "wait until idle" can return before the engine has picked the delivery up. A poll with a deadline far above any plausible load.
