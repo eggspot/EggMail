@@ -453,6 +453,34 @@ public abstract class InboundConformance : StorageTestBase
     }
 
     [Fact]
+    public async Task A_call_that_asks_for_fewer_rows_than_the_tenants_share_gets_the_rows_it_asked_for_on_every_backend()
+    {
+        // The contract is LEAST(MaxPerTenant - slotsInUse, max): cap 4, one in flight, max 2 gives two rows (not one, which is what taking max below the cap first would give).
+        DomainRecord a = await AddDomainAsync(TenantA, "a.example");
+        Guid route = Ids.New();
+        var backlog = new List<Guid>();
+        for (int i = 0; i < 6; i++)
+        {
+            Clock.Advance(TimeSpan.FromSeconds(1));
+            backlog.Add((await StoreAsync(Draft(a, route, size: 100 + i))).Id);
+        }
+
+        Clock.Advance(TimeSpan.FromSeconds(1));
+        var limits = new InboundClaimLimits(4, null, new Dictionary<Guid, int> { [TenantA] = 1 });
+        var claimed = await Inbound.ClaimActionsAsync("w-1", 2, Clock.UtcNow, TimeSpan.FromMinutes(1), default, limits);
+        Assert.Equal(backlog.Take(2), claimed.Select(c => c.Message.Id));
+
+        // With three in use the share is one row even though the call asks for five.
+        var tight = new InboundClaimLimits(4, null, new Dictionary<Guid, int> { [TenantA] = 3 });
+        var one = await Inbound.ClaimActionsAsync("w-2", 5, Clock.UtcNow, TimeSpan.FromMinutes(1), default, tight);
+        Assert.Equal([backlog[2]], one.Select(c => c.Message.Id));
+
+        // No slots reported: the cap alone, and never more than max.
+        var capped = await Inbound.ClaimActionsAsync("w-3", 2, Clock.UtcNow, TimeSpan.FromMinutes(1), default, new InboundClaimLimits(4));
+        Assert.Equal(backlog.Skip(3).Take(2), capped.Select(c => c.Message.Id));
+    }
+
+    [Fact]
     public async Task Extending_a_lease_changes_nothing_for_anyone_but_the_owner_and_never_shortens_or_revives_another_claim()
     {
         DomainRecord domain = await AddDomainAsync(TenantA, "a.example");
