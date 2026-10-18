@@ -148,6 +148,26 @@ public sealed class InboundRateLimiter
         _remotes.Add(RemoteKey(domainId, client), now);
     }
 
+    private readonly object _gate = new();
+
+    /// <summary>
+    /// Looks at both limits and counts one message in a single step: of any number of connections that ask at the same moment, only as many pass as the limits leave room for. (<see cref="Allows"/> then
+    /// <see cref="Count"/> leaves a window between the look and the count, and a receive path that waits for DNS or storage in between lets every connection through that looked before the first counted.)
+    /// </summary>
+    public bool TryCount(Guid domainId, IPAddress client, int perMinuteForDomain, int perMinuteForRemote, DateTimeOffset now)
+    {
+        lock (_gate)
+        {
+            if (!Allows(domainId, client, perMinuteForDomain, perMinuteForRemote, now))
+            {
+                return false;
+            }
+
+            Count(domainId, client, now);
+            return true;
+        }
+    }
+
     private static string DomainKey(Guid domainId) => domainId.ToString("N");
 
     private static string RemoteKey(Guid domainId, IPAddress client) => domainId.ToString("N") + "|" + NetworkKey.Remote(client);

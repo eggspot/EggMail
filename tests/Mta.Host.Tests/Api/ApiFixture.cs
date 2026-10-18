@@ -149,6 +149,16 @@ internal sealed class ApiFixtureOptions
     /// </summary>
     public ApiFixture? SharedWith { get; init; }
 
+    /// <summary>
+    /// A storage the caller opened and owns (a real runtime's, on SQLite or PostgreSQL), with the clock it was opened with: the tenants, users and domains of this fixture are seeded into it
+    /// as into a fresh one, and it is left open when the fixture is disposed.
+    /// </summary>
+    public IStorage? ExistingStorage { get; init; }
+
+    public TestClock? ExistingClock { get; init; }
+
+    public StorageOptions? ExistingStorageOptions { get; init; }
+
     /// <summary>A coordination store the failed-login throttle shares between fixtures (two servers over one database); null: a process-local throttle.</summary>
     public Mta.Storage.IReplicaCoordination? ThrottleCoordination { get; init; }
 }
@@ -193,8 +203,14 @@ internal sealed class ApiFixture : IAsyncDisposable
 
     private async Task InitializeAsync(ApiFixtureOptions o)
     {
-        Clock = o.SharedWith?.Clock ?? new TestClock(Start);
-        if (o.SharedWith is { } shared)
+        Clock = o.ExistingClock ?? o.SharedWith?.Clock ?? new TestClock(Start);
+        if (o.ExistingStorage is { } existing)
+        {
+            Storage = existing;
+            StorageOptions = o.ExistingStorageOptions ?? new StorageOptions();
+            _ownsStorage = false;
+        }
+        else if (o.SharedWith is { } shared)
         {
             Storage = shared.Storage;
             StorageOptions = shared.StorageOptions;

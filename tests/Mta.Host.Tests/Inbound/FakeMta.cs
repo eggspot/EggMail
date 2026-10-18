@@ -28,6 +28,9 @@ internal sealed class FakeMta : IAsyncDisposable
         return mta;
     }
 
+    /// <summary>The stream as it is now (the TLS stream after an upgrade): for a test that drives the handshake itself.</summary>
+    public Stream UnderlyingStream => _stream;
+
     public sealed record Reply(int Code, string Text, IReadOnlyList<string> Lines)
     {
         public string Enhanced => Text.Split(' ', 2)[0];
@@ -77,16 +80,16 @@ internal sealed class FakeMta : IAsyncDisposable
         }
     }
 
-    public async Task SendRawAsync(string text)
+    public async Task SendRawAsync(string text, bool utf8 = false)
     {
-        byte[] bytes = Encoding.Latin1.GetBytes(text);
+        byte[] bytes = (utf8 ? Encoding.UTF8 : Encoding.Latin1).GetBytes(text);
         await _stream.WriteAsync(bytes);
         await _stream.FlushAsync();
     }
 
-    public async Task<Reply> CommandAsync(string command)
+    public async Task<Reply> CommandAsync(string command, bool utf8 = false)
     {
-        await SendRawAsync(command + "\r\n");
+        await SendRawAsync(command + "\r\n", utf8);
         return await ReadReplyAsync();
     }
 

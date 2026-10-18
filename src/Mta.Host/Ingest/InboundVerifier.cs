@@ -185,15 +185,17 @@ public sealed class InboundVerifier
             }
         }
 
-        bool arcOverride = !anyUnsettled && chosen?.Result == DmarcResult.Fail && evaluations.Count == 1 && ArcVouches(arc, headers, fromDomains[0]);
+        bool arcOverride = fromUsable && !anyUnsettled && chosen?.Result == DmarcResult.Fail && evaluations.Count == 1 && ArcVouches(arc, headers, fromDomains[0]);
 
         (InboundVerdict dkimVerdict, string? dkimDomain) = dkimTimedOut ? (InboundVerdict.TempError, null) : ReduceDkim(dkimResults);
-        InboundVerdict dmarcVerdict = chosen is null ? InboundVerdict.PermError : decisive != DmarcDisposition.None ? InboundVerdict.Fail : anyUnsettled ? InboundVerdict.TempError : ToVerdict(chosen.Result);
+        // A From field that has no identity we can vouch for (it is empty, a mailbox does not parse, or another parser would read it as another address: design section 11.5) never gets the verdict of
+        // a domain it names: the evaluations above still decide what the action does, but what is recorded and shown, and so what a consumer relies on, is that the identity is unclear.
+        InboundVerdict dmarcVerdict = chosen is null || !fromUsable ? InboundVerdict.PermError : decisive != DmarcDisposition.None ? InboundVerdict.Fail : anyUnsettled ? InboundVerdict.TempError : ToVerdict(chosen.Result);
         var auth = new InboundAuthResults(
             ToVerdict(effective.Result), effective.Domain,
             ToVerdict(heloResult.Result),
             dkimVerdict, dkimDomain,
-            dmarcVerdict, chosen?.AppliedPolicy?.ToString().ToLowerInvariant(),
+            dmarcVerdict, fromUsable ? chosen?.AppliedPolicy?.ToString().ToLowerInvariant() : null,
             arcTimedOut ? InboundVerdict.TempError : arc.Status switch { ArcChainStatus.Pass => InboundVerdict.Pass, ArcChainStatus.Fail => InboundVerdict.Fail, _ => InboundVerdict.None });
 
         RecordMetrics(auth);
@@ -207,7 +209,7 @@ public sealed class InboundVerifier
             NoUsableFrom = !fromUsable || fromDomains.Count == 0,
             ArcOverridesDmarc = arcOverride,
             TimedOut = timedOut,
-            AuthenticationResultsHeader = BuildHeader(client, helo, mailFrom, heloResult, mailResult, dkimResults, dkimTimedOut, decisive != DmarcDisposition.None ? evaluations.First(e => !e.Unsettled && e.Evaluation.Result == DmarcResult.Fail && e.Evaluation.Disposition == decisive).Evaluation : chosen, dmarcVerdict, arc, arcTimedOut),
+            AuthenticationResultsHeader = BuildHeader(client, helo, mailFrom, heloResult, mailResult, dkimResults, dkimTimedOut, !fromUsable ? null : decisive != DmarcDisposition.None ? evaluations.First(e => !e.Unsettled && e.Evaluation.Result == DmarcResult.Fail && e.Evaluation.Disposition == decisive).Evaluation : chosen, dmarcVerdict, arc, arcTimedOut),
         };
     }
 

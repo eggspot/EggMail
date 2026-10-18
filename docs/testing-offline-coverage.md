@@ -104,6 +104,51 @@ RFC 8617 (ARC) publishes an example message but no keys, so it cannot be verifie
 - Real DNS publication: record syntax at a real registrar, TXT string splitting by DNS providers, caching and propagation.
 - Ed25519 (RFC 8463): not implemented.
 
+## Inbound mail: `tests/Mta.Host.Tests/InboundE2E`
+
+Run: `dotnet test tests/Mta.Host.Tests -c Release --filter "FullyQualifiedName~InboundE2E"` (about 1 minute; the PostgreSQL half needs `EGGMAIL_TEST_POSTGRES` or local PostgreSQL binaries and is skipped without them). Added with decision 105, next to the in-memory suites of the receive path in `tests/Mta.Host.Tests/Inbound`.
+
+### What it is
+
+A **lab** (`InboundLab`) starts the real `EggMailRuntime` on SQLite files or a PostgreSQL database of its own: the port-25 listener of role `Inbound` on an ephemeral loopback port, the receive path, the real inbound store, the route action runner, optionally the delivery engine and the HTTP API over the very same storage. Only the outside world is replaced:
+
+| Replaced | By |
+|---|---|
+| The sender | `FakeMta` (a byte-level scripted client: forged terminators, pipelining, a command in the same segment as `STARTTLS`), the project's own SMTP client (`SmtpClientConnection`, a sender that behaves like an MTA), and MimeKit for signing |
+| The sender's address | a seam, `EggMailRuntime.CreateAsync(..., inboundClientAddress)`: the real address is always 127.0.0.1, so SPF for a public sender, the blocklist and the per-address limits need it |
+| DNS | `StaticDnsResolver` with scripted SPF, DKIM, DMARC, ARC and blocklist answers, SERVFAIL, and a resolver that holds a query until the test lets it go (a verification in progress, a wait between two steps of the receive path) |
+| Time | a clock the test moves (rate-limit windows, retention days, the retry ladder, the age of a session and of the cached configuration); only hang guards use real time |
+| A webhook receiver | a real HTTP server on a loopback port that records what it was sent; its signatures are checked by a verifier written from the Standard Webhooks specification, sharing no code with the signer |
+| A destination MTA, other EggMail servers | with the forward change: the fake remote MTAs of `Mta.RemoteMta.Tests` (hand written SMTP servers with Postfix, Gmail, Outlook and Exim personalities; MimeKit verifies DKIM and ARC on what arrives) and a second lab for two servers that forward to each other |
+
+### Proven
+
+* **The receive path through the real stack** (about 200 end-to-end test cases): recipient classification and replies, verdicts persisted and read back through the API unchanged, each DMARC action with each policy, a transaction for several tenants, MimeKit-signed mail and its tampering, trusted ARC sealers by configuration, every limit (recipients, rates, connections, session age, size, stored bytes, verification slots, blocklist), smuggling and STARTTLS injection, open-relay and backscatter regressions with the real outbound queue and webhook outbox as the oracle, the bounce path on the same port.
+* **Both backends give the same answers.** Every scenario above runs on SQLite and on PostgreSQL; the switch test moves mail from SQLite to PostgreSQL and back and compares every column and the hash of every body.
+* **Route actions**: webhook (JSON and raw, signature, ladder, final failure, SSRF guard, `410`, runners over one database), store and discard. **The forward action through the outbound queue and the delivery engine to a fake MTA (original signature, the route's own signature, ARC, SRS and the hop marker verified by MimeKit; a destination that refuses, defers or lacks 8BITMIME; two servers that forward to each other) is tested end to end by `InboundForwardE2ETests`, which is added with the forward change (PR 108) because it needs that action.**
+* **Retention, erasure and domain deletion** with mail that really arrived; **crash, restart, a database that drops its connections, a switch in the middle of traffic**.
+* **Tenant isolation** of every inbound endpoint, three kinds of caller.
+* **Hostile input** to the receive path (random sessions, hostile MIME, hostile text) never produced a server error, a relay or a stored message no route accepts.
+
+### Real defects these tests found and fixed
+
+* A `From` field that another parser reads differently (`ceo@victim.test <x@evil.test`, an encoded word holding an angle address, a second address after the first, an unclosed quote) was evaluated for the attacker's domain and recorded as `dmarc=pass`. Found by comparing 1,460 hostile values with Python's `email.policy`; such a field is now unusable and its verdict is `permerror`.
+* A per-minute rate limit was a look followed by a count with a wait for DNS and storage in between: connections that asked at the same moment all passed. The count is one step now.
+* The budget of uncached `bounce.<name>` lookups reset its window with two separate steps and could lose counts at the turn of a second; its table behaviour when full was not pinned. It is one object with one lock now.
+* The route test of the API answered `550 5.1.1` for `postmaster`, which the receive path accepts.
+
+### NOT proven
+
+* **Real Internet senders.** No test connects to a real MTA's output: sloppy greetings, odd MAIL parameters, retries and pipelining habits of Gmail, Outlook, Postfix, Exim, Exchange on premises, mailing-list software, scanners, and anything that sends from a NAT, an IPv6 /64 pool or a shared pool of addresses. The senders here are the project's own client and a scripted one.
+* **Real blocklists.** The blocklist is a scripted zone. What Spamhaus, Barracuda or SORBS answer, how they treat a resolver at a large provider (`127.255.255.x`), their quotas and their listing policies are not tested; a wrong list rejects legitimate mail.
+* **Real receivers' treatment of forwarded mail.** (With the forward change) MimeKit says the original signature, the route's signature and the ARC set are valid and the envelope is an SRS address whose domain publishes our SPF. Whether Gmail, Microsoft or Yahoo trust the ARC seal of an unknown sealer, how they score an SRS envelope, what a `p=reject` sender's policy does to the copy at each of them, and what a flood of forwards does to the reputation of the route's domain cannot be shown offline.
+* **Real DMARC behaviour.** The evaluator is the one tested against the RFC's examples; what receivers do with `pct`, subdomain policy, reporting and the public suffix list over time is not.
+* **Spam.** Nothing here measures how much unwanted mail gets through, because nothing in the server judges content. The per-domain DMARC action, the optional blocklist and the rate limits are the defences; their effect on a real mail stream is the operator's to watch ([operations.md](operations.md#inbound-mail)).
+* **Real TLS stacks.** STARTTLS is tested with the .NET client and a self-signed certificate; other stacks' versions, ciphers, session resumption and certificate checks are not.
+* **A real network in front of the server.** Source NAT, a PROXY protocol, a load balancer's connection reuse and a firewall's idle timeout. The warning about internal client addresses is tested; the arrangements themselves are not.
+* **Scale.** Tests use tens to a few thousand messages and PostgreSQL 16 locally, 17 in CI; contention between replicas on a loaded database, a million stored messages, a retention pass over a large table and the growth of `queue.db` are not measured.
+* **Power loss** (the same limits as the lifecycle tests: a crash here is a disposed runtime or a terminated database connection).
+
 ## What is still open
 
 Nothing in this document is an independent audit, a 7-day soak or a real-internet delivery test; those stay open in [progress.md](progress.md) until done.

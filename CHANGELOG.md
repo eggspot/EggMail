@@ -17,6 +17,7 @@ workflow refuses a stable tag without a non-empty section for that exact version
 
 ### Added
 
+- Inbound mail, end-to-end tests on SQLite and PostgreSQL (decision 105, [docs/testing-offline-coverage.md](docs/testing-offline-coverage.md)): a lab over the real runtime with real stores, scripted DNS, a clock the tests move and fake remote MTAs; the receive path, the route actions, retention, crash and restart, the backend switch and tenant isolation, with the open-relay, backscatter, smuggling, STARTTLS and limit regressions; threat table in [docs/security.md](docs/security.md), abuse handling in [docs/operations.md](docs/operations.md).
 - Inbound mail, receive path (decision 103): with `Inbound:Enabled` the port-25 listener (container port 2526) is an MX receiver for the domains tenants enabled. RCPT-time classification (signed bounce, SRS, inbound domain with a route, else refused: no open relay, no backscatter), size, recipient, transaction-budget, rate and quota limits, SPF/DKIM/DMARC/ARC verification with the per-domain DMARC action, `Authentication-Results` and `Received`, optional DNSBL, one stored copy per recipient, `mta_inbound_*` metrics, `inbound.enabled` in capabilities. New server hooks (`OnDataStartAsync`, per-transaction size limit, per-listener limits), `SrsCodec` and `ForwardHopMarker`. Route actions are a separate change.
 - Inbound mail, design and storage contracts (decision 95, [design.md section 11](docs/design.md#11-inbound-mail)): receiving for domains a tenant enables, SPF/DKIM/DMARC/ARC verification, per-domain routes (webhook, forward with SRS, store, discard), retention, the `inbound:read` and `inbound:write` API scopes. Storage on all backends (schema version 8, bundle format 1.3), the retention job `inbound_retention`, and the HTTP API (settings, routes, received messages, downloads, retry; scopes `inbound:read` and `inbound:write`, `Inbound:*` and `Api:MaxInboundRoutesPerDomain` keys) are in; the SMTP receive path, the route actions and the dashboard pages follow in later changes.
 - Outbound SMTP server and client written on the .NET base class library only (STARTTLS, implicit TLS, AUTH, pipelining, BDAT, request
@@ -73,6 +74,7 @@ workflow refuses a stable tag without a non-empty section for that exact version
 
 ### Fixed
 
+- Inbound mail: a `From` field that two parsers read as different addresses is unusable and its DMARC verdict is `permerror` (it was evaluated, and shown as `pass`, for the domain the strict parser chose); a per-minute rate limit is counted in one step with its check (simultaneous connections all passed it); the lookup budget of the bounce listener loses no count at the turn of a second; the route test of the API says `250` for `postmaster`.
 - The envelope sender (and so SPF) uses the sending domain's own `bounce.<domain>` host once its return-path CNAME is verified; before, the record was required and verified but never used, and the bounce listener now accepts bounces addressed to it.
 
 ### Fixed

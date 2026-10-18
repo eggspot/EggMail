@@ -375,46 +375,9 @@ public sealed class IngestHandler : ISmtpServerHandler, IBounceNamespace
 
     // Names of the form bounce.<anything> each cost a storage lookup the first time they are asked about. Only a caller with a valid signed token can cause one (a name without a token is answered from the
     // cache or is "not ours"), and each client gets a few uncached lookups a second, with a backstop for the process: over it the caller (who holds a real token) gets a temporary failure and tries again.
-    private const int MaxUncachedHostLookupsPerClientPerSecond = 10;
-    private const int MaxUncachedHostLookupsPerSecond = 200;
-    private const int MaxTrackedLookupClients = 4096;
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (long Second, int Count)> _lookupsByClient = new(StringComparer.Ordinal);
-    private long _lookupWindow;
-    private int _lookupsInWindow;
+    private readonly LookupBudget _lookups = new();
 
-    private bool TryTakeLookup(string clientKey)
-    {
-        long second = Environment.TickCount64 / 1000;
-        if (_lookupsByClient.Count >= MaxTrackedLookupClients)
-        {
-            foreach (var entry in _lookupsByClient)
-            {
-                if (entry.Value.Second < second)
-                {
-                    _lookupsByClient.TryRemove(entry.Key, out _);
-                }
-            }
-
-            if (_lookupsByClient.Count >= MaxTrackedLookupClients && !_lookupsByClient.ContainsKey(clientKey))
-            {
-                return false;
-            }
-        }
-
-        // The client's own budget first: a client past it is refused without touching the process-wide count, so one client cannot use up what the others need.
-        (long Second, int Count) updated = _lookupsByClient.AddOrUpdate(clientKey, (second, 1), (_, old) => old.Second == second ? (second, old.Count + 1) : (second, 1));
-        if (updated.Count > MaxUncachedHostLookupsPerClientPerSecond)
-        {
-            return false;
-        }
-
-        if (Interlocked.Exchange(ref _lookupWindow, second) != second)
-        {
-            Volatile.Write(ref _lookupsInWindow, 0);
-        }
-
-        return Interlocked.Increment(ref _lookupsInWindow) <= MaxUncachedHostLookupsPerSecond;
-    }
+    private bool TryTakeLookup(string clientKey) => _lookups.TryTake(clientKey);
 
     /// <summary><c>bounce.example.com</c> is the return-path host of the registered domain <c>example.com</c> when that domain's return-path CNAME has been verified.</summary>
     private async ValueTask<bool> IsVerifiedReturnPathHostAsync(string host, bool tokenValid, string clientKey, CancellationToken ct)
