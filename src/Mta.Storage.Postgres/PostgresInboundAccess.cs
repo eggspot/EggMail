@@ -91,8 +91,8 @@ internal sealed class PostgresInboundAccess(PostgresRuntime rt, IStorageModelHoo
             string exclusion = limits.ExcludeTenants is { Count: > 0 } ? " AND id <> ALL(@excluded)" : string.Empty;
             // What the caller already has in flight for a tenant comes off its cap (never below zero): a tenant holds at most MaxPerTenant at once.
             string limit = limits.MaxPerTenant > 0 && limits.SlotsInUse is { Count: > 0 }
-                ? "GREATEST(@cap - COALESCE((SELECT u.used FROM unnest(@use_tenant, @use_count) AS u(tenant, used) WHERE u.tenant = t.id), 0), 0)"
-                : "@cap";
+                ? "GREATEST(LEAST(@cap - COALESCE((SELECT u.used FROM unnest(@use_tenant, @use_count) AS u(tenant, used) WHERE u.tenant = t.id), 0), @max), 0)"
+                : "LEAST(@cap, @max)";
             cmd.CommandText =
                 "WITH RECURSIVE tenants(id) AS (" +
                 "(SELECT tenant_id FROM inbound_message WHERE action_state = 0 ORDER BY tenant_id LIMIT 1) " +
@@ -103,7 +103,7 @@ internal sealed class PostgresInboundAccess(PostgresRuntime rt, IStorageModelHoo
                 "SELECT i.id, i.action_next_attempt_at AS due FROM inbound_message i WHERE i.tenant_id = t.id AND i.transfer_switch_id IS NULL AND i.action_state = 0 " +
                 "AND i.action_next_attempt_at <= @now AND i.lease_until <= @now ORDER BY i.action_next_attempt_at, i.id LIMIT " + limit + " FOR UPDATE SKIP LOCKED) pick ORDER BY pick.due, pick.id LIMIT @max) c " +
                 "WHERE m.id = c.id AND m.action_state = 0 AND m.lease_until <= @now AND m.transfer_switch_id IS NULL RETURNING m.id";
-            cmd.Parameters.Add(new NpgsqlParameter("cap", NpgsqlDbType.Bigint) { Value = limits.MaxPerTenant > 0 ? Math.Min((long)limits.MaxPerTenant, max) : (long)max });
+            cmd.Parameters.Add(new NpgsqlParameter("cap", NpgsqlDbType.Bigint) { Value = limits.MaxPerTenant > 0 ? (long)limits.MaxPerTenant : (long)max });   // the cap itself; the call's max is applied after the slots in use come off (LEAST(cap - used, max))
             if (limits.MaxPerTenant > 0 && limits.SlotsInUse is { Count: > 0 } inUse)
             {
                 cmd.Parameters.Add(new NpgsqlParameter("use_tenant", NpgsqlDbType.Array | NpgsqlDbType.Uuid) { Value = inUse.Keys.ToArray() });

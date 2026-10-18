@@ -112,18 +112,26 @@ public sealed class SmtpServer : IAsyncDisposable
                 continue;
             }
 
-            var task = HandleClientAsync(client, listener.Options);
+            var task = HandleClientAsync(client, listener);
             _sessions[task] = 0;
             _ = task.ContinueWith(static (t, state) => ((ConcurrentDictionary<Task, byte>)state!).TryRemove(t, out _), _sessions, TaskScheduler.Default);
         }
     }
 
-    private async Task HandleClientAsync(Socket client, SmtpListenerOptions listener)
+    private async Task HandleClientAsync(Socket client, ListenerRuntime listener)
     {
         IPAddress remote = ((IPEndPoint)client.RemoteEndPoint!).Address;
         client.NoDelay = true;
-        if (!_limiter.TryAcquire(remote))
+        // The listener's own cap first (an anonymous listener cannot take the connections submission needs), then the server-wide caps.
+        bool inListener = listener.TryEnter();
+        bool accepted = inListener && _limiter.TryAcquire(remote);
+        if (!accepted)
         {
+            if (inListener)
+            {
+                listener.Leave();
+            }
+
             SmtpMetrics.RefusedConnections.Add(1);
             try
             {
@@ -145,6 +153,7 @@ public sealed class SmtpServer : IAsyncDisposable
         finally
         {
             _limiter.Release(remote);
+            listener.Leave();
         }
     }
 
@@ -212,10 +221,31 @@ public sealed class SmtpServer : IAsyncDisposable
         }
     }
 
-    private sealed class ListenerRuntime(SmtpListenerOptions options, Socket socket)
+    internal sealed class ListenerRuntime(SmtpListenerOptions options, Socket socket)
     {
+        private int _connections;
+
         public SmtpListenerOptions Options { get; } = options;
         public Socket Socket { get; } = socket;
         public Task AcceptTask { get; set; } = Task.CompletedTask;
+
+        /// <summary>The bytes this listener may have in flight (null: only the server-wide budget).</summary>
+        public InFlightBudget? Budget { get; } = options.MaxInFlightBytes is { } bytes ? new InFlightBudget(bytes) : null;
+
+        /// <summary>The share of that budget one client network may use (null: no per-client share).</summary>
+        public KeyedInFlightBudget? PerRemoteBudget { get; } = options.MaxInFlightBytesPerRemote is { } share ? new KeyedInFlightBudget(share) : null;
+
+        public bool TryEnter()
+        {
+            if (Interlocked.Increment(ref _connections) > (Options.MaxConnections ?? int.MaxValue))
+            {
+                Interlocked.Decrement(ref _connections);
+                return false;
+            }
+
+            return true;
+        }
+
+        public void Leave() => Interlocked.Decrement(ref _connections);
     }
 }

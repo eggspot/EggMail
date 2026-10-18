@@ -36,3 +36,19 @@ Hand-written and package-free (decision 4). `Mta.Smtp.Protocol` is pure (no I/O)
 - Local checks before touching the wire: SIZE limit, SMTPUTF8 and 8BITMIME support (the delivery processor decides beforehand what to send per server, so these are a safety net there: see [delivery.md](delivery.md#8-bit-and-internationalized-mail)). `SmtpClientConnection.LocalIpAddress` (and `SmtpClientException.LocalIpAddress` for failed setups) is the local address of the TCP connection, used for TLS-RPT.
 - STARTTLS stripping is surfaced (`TlsSession.StartTlsAdvertised == false`, `TlsException(NotAdvertised)` when TLS is required) and plaintext injected behind the server's `220` aborts the upgrade.
 - `SmtpConnectionPool` keeps idle connections per target (idle timeout, per-target and total caps, transaction cap).
+
+## Listener roles and the inbound hooks
+
+`ListenerRole.Submission` (AUTH, tenant mail), `Bounce` (signed bounce addresses only) and `Inbound` (the MX receiver for the domains tenants enabled, a superset of `Bounce`; [operations.md](../operations.md#inbound-mail), design section 11). Only `Submission` offers AUTH; every other role is "not a submitter" and the host's `IngestHandler` keeps it away from the submission path. Per-listener `MaxMessageSize` (advertised as `SIZE`) and `MaxRecipients` override the server-wide options.
+
+What the server gives a handler for inbound mail, beyond `OnRcptToAsync` and `OnMessageAsync`:
+
+- `OnDataStartAsync(session, mail, recipients)`: called when the client sends `DATA` (or the first `BDAT`), before `354` and before any byte is read. Returning a reply refuses the message and ends the transaction (a refused `BDAT` sequence is still read and discarded, as RFC 3030 requires). The receive path uses it to look at the free verification slots.
+- `SmtpSessionContext.TransactionMaxMessageSize`: a lower size limit for the open transaction that the handler sets while it accepts recipients (the lowest per-domain limit). The session enforces the lower of this and the listener's limit while it reads, so an oversize body is `552 5.3.4` without being buffered, and clears it when the transaction ends.
+- `OnMessageRefused(session, reply)`: a message the handler was told about (`OnDataStartAsync` went on) died in the dialog without reaching `OnMessageAsync`: the body grew past the size limit (`552`), the in-flight budget was exhausted (`452`), a read timed out or the server was stopping (`421`), the data had a bare LF or NUL (`500`), the client went away mid-message, or a `BDAT` sequence ended by `RSET`, `QUIT`, another command or the session age limit. A refusal the handler itself made at `OnDataStartAsync` is not reported back. Lets the handler count what it never saw.
+- `SmtpSessionContext.TryReserveMemory(bytes)`: reserves memory for the handler's own copies of a message from the same budget (the listener's share, the client network's share and the server's), given back when the transaction ends; false means refuse with `452` instead of allocating.
+
+Per-listener limits: `MaxConnections`, `MaxInFlightBytes`, `MaxInFlightBytesPerRemote` (an IPv4 address or IPv6 /64) and `MaxSessionDuration` (checked between commands, also while a `BDAT` sequence waits for its next chunk); the per-address connection cap counts an IPv6 client by its /64.
+
+Tests: `tests/Mta.Smtp.Server.Tests/InboundSupportTests.cs`.
+

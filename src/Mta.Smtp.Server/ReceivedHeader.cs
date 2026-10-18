@@ -126,7 +126,7 @@ internal sealed class ReceivedHeaderBuilder
         var sb = new StringBuilder(value.Length);
         foreach (char c in value)
         {
-            sb.Append(IsUnsafe(c) ? '_' : c);
+            sb.Append(IsUnsafe(c) || c > 0x7E ? '_' : c);   // a HELO name is client text: the trace field is ASCII (the `for` clause, the recipient's own address, keeps its UTF-8)
         }
 
         return sb.ToString();

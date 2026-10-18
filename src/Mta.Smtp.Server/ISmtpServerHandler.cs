@@ -15,6 +15,36 @@ public sealed class SmtpSessionContext
     public required ListenerRole Role { get; init; }
     public DateTimeOffset ConnectedAt { get; init; } = DateTimeOffset.UtcNow;
 
+    /// <summary>
+    /// A lower limit for the message of the open transaction, set by the handler while it accepts recipients (for example the smallest limit among the domains of the accepted recipients).
+    /// The session enforces the lower of this and the listener's limit while it reads the body, with the ordinary <c>552 5.3.4</c>, and clears it when the transaction ends.
+    /// </summary>
+    public long? TransactionMaxMessageSize { get; set; }
+
+    internal Func<long, bool>? MemoryReserver { get; set; }
+
+    internal long ExtraReserved { get; set; }
+
+    /// <summary>
+    /// Reserves <paramref name="bytes"/> of the server's in-flight memory budget (the one the message bytes themselves are counted in) for work the handler does on the message, for example copies it makes. The
+    /// reservation is given back when the transaction ends. False when the budget (or the listener's share of it) cannot cover it: the handler refuses the message with <c>452</c> instead of allocating.
+    /// </summary>
+    public bool TryReserveMemory(long bytes)
+    {
+        if (bytes <= 0)
+        {
+            return true;
+        }
+
+        if (MemoryReserver is { } reserve && !reserve(bytes))
+        {
+            return false;
+        }
+
+        ExtraReserved += bytes;
+        return true;
+    }
+
     public string? HeloName { get; internal set; }
     public bool UsedEhlo { get; internal set; }
     public bool TlsActive { get; internal set; }
@@ -107,10 +137,25 @@ public interface ISmtpServerHandler
     ValueTask<SmtpReply> OnRcptToAsync(SmtpSessionContext session, MailFromInfo mail, EmailAddress recipient, RcptParameters parameters, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Called when the client starts the message data (<c>DATA</c>, or the first <c>BDAT</c> chunk), after the last <c>RCPT</c> and before any data is read. Return null to go on or a reply
+    /// to refuse the message at once: the transaction ends, nothing is read into memory (a refused <c>BDAT</c> chunk is still read and discarded, as the protocol requires). The default goes on.
+    /// </summary>
+    ValueTask<SmtpReply?> OnDataStartAsync(SmtpSessionContext session, MailFromInfo mail, IReadOnlyList<EmailAddress> recipients, CancellationToken cancellationToken) =>
+        ValueTask.FromResult<SmtpReply?>(null);
+
+    /// <summary>
     /// Called with the complete message. Return <c>250</c> only after the message is durably accepted (decision 13/Lite semantics);
     /// return 4xx to make the client retry, 5xx to bounce.
     /// </summary>
     ValueTask<SmtpReply> OnMessageAsync(SmtpMessage message, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Called when the server itself refused the message data after it had been announced to the handler (<see cref="OnDataStartAsync"/> went on): the body grew past the size limit (<c>552</c>) or the global
+    /// in-flight budget was exhausted (<c>452</c>). The handler never sees such a message, so this is where it can count it. The default does nothing.
+    /// </summary>
+    void OnMessageRefused(SmtpSessionContext session, SmtpReply reply)
+    {
+    }
 
     void OnDisconnected(SmtpSessionContext session);
 }
