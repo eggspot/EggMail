@@ -4,6 +4,8 @@ How to run EggMail. Everything here is about behaviour that exists in the code; 
 
 ## Deploying
 
+Going live for the first time (server, outbound port 25, PTR, DNS, real-mailbox tests, ACME, audit, soak, release)? Follow the step-by-step [go-live checklist](go-live-checklist.md); this guide is the reference it points into.
+
 Tested deployment files are in `deploy/` (the release workflow tests them against the image it builds: the PostgreSQL compose file on every build, the SQLite compose file, the Unbound sidecar and the Kubernetes manifests on tags and manual runs, not on the daily nightly; [release.md](release.md)):
 
 | Deployment | Files | Notes |
