@@ -201,6 +201,7 @@ internal sealed class MemoryInbound(MemoryState s) : IInboundMessageStore
 
     public ValueTask<long> CountActionsAsync(InboundActionState state, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         lock (s.Gate)
         {
             return R((long)s.InboundMessages.Values.Count(x => x.ActionState == state));
@@ -234,7 +235,7 @@ internal sealed class MemoryInbound(MemoryState s) : IInboundMessageStore
                 {
                     int seen = perTenant.GetValueOrDefault(x.TenantId) + 1;
                     perTenant[x.TenantId] = seen;
-                    return seen <= capped.MaxPerTenant;
+                    return seen <= capped.AllowanceOf(x.TenantId);
                 });
             }
 
@@ -270,6 +271,7 @@ internal sealed class MemoryInbound(MemoryState s) : IInboundMessageStore
     public ValueTask<bool> CompleteActionAsync(Guid messageId, string owner, InboundActionOutcome outcome, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(outcome);
+        cancellationToken.ThrowIfCancellationRequested();   // the real stores write through the token: a completion recorded with the runner's stopped token must fail here too
         if (outcome.State == InboundActionState.Pending && outcome.NextAttemptAt is null)
         {
             throw new ArgumentException("A pending outcome needs NextAttemptAt.", nameof(outcome));

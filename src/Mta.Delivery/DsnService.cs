@@ -61,7 +61,7 @@ public sealed class DsnService
                     i.Attempt.At)).ToList(),
             });
 
-            await _storage.Intake.AcceptAsync(new AcceptedMessage
+            var accepted = await _storage.Intake.AcceptAsync(new AcceptedMessage
             {
                 MessageId = Ids.New(now),
                 TenantId = first.TenantId,
@@ -72,8 +72,28 @@ public sealed class DsnService
                 ReceivedAt = now,
                 ExpiresAt = now + _options.DsnLifetime,
                 HeadersUtf8 = MessageInspector.HasValidUtf8Headers(dsn),   // the sender's address is in the To field
+                IdempotencyKey = IdempotencyKeyFor(list),
             }, ct).ConfigureAwait(false);
-            DeliveryMetrics.Bounces.Add(1);
+            if (accepted.Status == IntakeStatus.Accepted)
+            {
+                DeliveryMetrics.Bounces.Add(1);
+            }
         }
+    }
+
+    /// <summary>
+    /// The notice is queued before the result of the attempt it reports is recorded (a notice must never be lost). A process that dies between the two writes leaves a delivery whose lease runs out and which is
+    /// then attempted, and fails or expires, again: the same recipients, so the same key, and the second notice is recognised as a duplicate instead of being sent to the sender a second time.
+    /// </summary>
+    internal static string IdempotencyKeyFor(IReadOnlyList<BounceItem> items)
+    {
+        var ids = items.Select(i => i.Delivery.DeliveryId).OrderBy(id => id).ToList();
+        byte[] bytes = new byte[ids.Count * 16];
+        for (int i = 0; i < ids.Count; i++)
+        {
+            ids[i].TryWriteBytes(bytes.AsSpan(i * 16, 16));
+        }
+
+        return "eggmail-dsn:" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes))[..32].ToLowerInvariant();
     }
 }

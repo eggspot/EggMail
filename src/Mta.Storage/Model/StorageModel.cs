@@ -45,9 +45,10 @@ public static class StorageModel
     /// <c>sending_counter</c>) and the Message-ID header and tags of <c>message_index</c>; version 5 the
     /// <c>headers_utf8</c> column on queued deliveries (internationalized headers); version 7 the index on <c>delivery_queue (message_id)</c> that cancelling
     /// a message uses. SQLite files go from 5 straight to 7 so that the number matches PostgreSQL's <c>V007</c>: PostgreSQL's <c>V006</c> (replica
-    /// coordination tables) is PostgreSQL-only and has no SQLite counterpart.
+    /// coordination tables) is PostgreSQL-only and has no SQLite counterpart. Version 8 added the inbound mail tables; version 9 the index on
+    /// <c>inbound_message (tenant_id, action_next_attempt_at, id)</c> for the pending rows, which the per-tenant claim of the route actions probes once per tenant.
     /// </summary>
-    public const int SchemaVersion = 8;
+    public const int SchemaVersion = 9;
 
     /// <summary>
     /// Entity annotation requesting a <c>WITHOUT ROWID</c> table on SQLite (small rows whose primary key is the
@@ -218,6 +219,8 @@ public static class StorageModel
             e.HasIndex(x => new { x.DomainId, x.ReceivedAt });
             e.HasIndex(x => new { x.DomainId, x.Id });
             e.HasIndex(x => x.ActionNextAttemptAt).HasFilter("action_state = 0");
+            // The fair claim takes the oldest due rows of each tenant with pending actions (a probe per tenant), so a large backlog of one tenant is never read to find the others' rows.
+            e.HasIndex(x => new { x.TenantId, x.ActionNextAttemptAt, x.Id }).HasFilter("action_state = 0");
             // The retention pass for the server default scans the settled messages by age; pending ones are never candidates.
             e.HasIndex(x => x.ReceivedAt).HasFilter("action_state <> 0");
         });

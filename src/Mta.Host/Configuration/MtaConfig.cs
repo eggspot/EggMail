@@ -133,7 +133,7 @@ public sealed class DeliverySection
 
 /// <summary>
 /// Caps on how much mail may be sent per UTC hour and per UTC day (0 or unset = unlimited). A tenant can be given its own caps with the
-/// tenant settings <c>Sending:PerHour</c> and <c>Sending:PerDay</c>. Counters are in memory: a restart starts the current hour and day at zero.
+/// tenant settings <c>Sending:PerHour</c> and <c>Sending:PerDay</c>. Counters are kept in memory and written behind to the config store every few seconds and at a graceful stop: a restart resumes the current hour and day, and a crash loses only what was counted since the last write.
 /// </summary>
 public sealed class SendingSection
 {

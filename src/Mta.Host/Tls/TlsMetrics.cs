@@ -31,6 +31,9 @@ public static class TlsMetrics
     /// <summary>True while <paramref name="provider"/> is observed by the gauges.</summary>
     public static bool IsAttached(DatabaseCertificateProvider provider) => Live.ContainsKey(provider);
 
+    /// <summary>Providers the gauges currently read (a leak check: disposing the meters must detach the provider).</summary>
+    internal static int AttachedCount => Live.Count;
+
     private static IEnumerable<Measurement<double>> ObserveExpiry()
     {
         foreach ((DatabaseCertificateProvider provider, IClock clock) in Live)

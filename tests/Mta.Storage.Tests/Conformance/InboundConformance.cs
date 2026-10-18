@@ -420,6 +420,39 @@ public abstract class InboundConformance : StorageTestBase
     }
 
     [Fact]
+    public async Task A_tenant_never_holds_more_than_the_cap_at_once_the_rows_the_caller_has_in_flight_come_off_its_share()
+    {
+        DomainRecord a = await AddDomainAsync(TenantA, "a.example");
+        DomainRecord b = await AddDomainAsync(TenantB, "b.example");
+        Guid routeA = Ids.New();
+        Guid routeB = Ids.New();
+        var backlog = new List<Guid>();
+        for (int i = 0; i < 5; i++)
+        {
+            Clock.Advance(TimeSpan.FromSeconds(1));
+            backlog.Add((await StoreAsync(Draft(a, routeA, size: 100 + i))).Id);
+        }
+
+        Clock.Advance(TimeSpan.FromSeconds(1));
+        InboundMessageDraft b1 = await StoreAsync(Draft(b, routeB, size: 200));
+        Clock.Advance(TimeSpan.FromSeconds(1));
+
+        // The cap is three; the caller already has two of A's rows in flight: A gets one more (its oldest unclaimed), B gets its row.
+        var limits = new InboundClaimLimits(3, null, new Dictionary<Guid, int> { [TenantA] = 2 });
+        var first = await Inbound.ClaimActionsAsync("w-1", 10, Clock.UtcNow, TimeSpan.FromMinutes(1), default, limits);
+        Assert.Equal([backlog[0]], first.Where(c => c.Message.TenantId == TenantA).Select(c => c.Message.Id));
+        Assert.Equal([b1.Id], first.Where(c => c.Message.TenantId == TenantB).Select(c => c.Message.Id));
+
+        // At the cap (or over it) a tenant gets nothing, the others still do.
+        await Inbound.ReleaseOwnedActionLeasesAsync("w-1", default);
+        var atCap = await Inbound.ClaimActionsAsync("w-2", 10, Clock.UtcNow, TimeSpan.FromMinutes(1), default, new InboundClaimLimits(3, null, new Dictionary<Guid, int> { [TenantA] = 3 }));
+        Assert.All(atCap, c => Assert.Equal(TenantB, c.Message.TenantId));
+        await Inbound.ReleaseOwnedActionLeasesAsync("w-2", default);
+        var over = await Inbound.ClaimActionsAsync("w-3", 10, Clock.UtcNow, TimeSpan.FromMinutes(1), default, new InboundClaimLimits(3, null, new Dictionary<Guid, int> { [TenantA] = 7, [TenantB] = 3 }));
+        Assert.Empty(over);
+    }
+
+    [Fact]
     public async Task Extending_a_lease_changes_nothing_for_anyone_but_the_owner_and_never_shortens_or_revives_another_claim()
     {
         DomainRecord domain = await AddDomainAsync(TenantA, "a.example");
@@ -453,6 +486,9 @@ public abstract class InboundConformance : StorageTestBase
 
         Assert.Equal(2, await Inbound.CountActionsAsync(InboundActionState.Pending, default));
         Assert.Equal(1, await Inbound.CountActionsAsync(InboundActionState.Failed, default));
+        using var stopped = new CancellationTokenSource();
+        await stopped.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await Inbound.CountActionsAsync(InboundActionState.Pending, stopped.Token));
     }
 
     [Fact]
