@@ -22,8 +22,12 @@ public static class StorageTime
     /// <summary>Days since 1970-01-01 (UTC) for an instant.</summary>
     public static int DayNumber(DateTimeOffset value) => (int)Math.Floor(value.ToUnixTimeMilliseconds() / 86_400_000d);
 
-    /// <summary>The history <c>day</c> key of a message: the UTC day embedded in its UUIDv7 id.</summary>
-    public static int DayNumber(Guid messageId) => DayNumber(Ids.GetTimestamp(messageId));
+    /// <summary>
+    /// The history <c>day</c> key of a message: the UTC day embedded in its UUIDv7 id. Computed from the raw time field, so an id that is not ours (the API passes ids
+    /// from URLs through) gets a day that matches no row, and the lookup answers "not found" instead of throwing: before, about one random GUID in ten made
+    /// <c>GET /messages/{id}</c> answer 500.
+    /// </summary>
+    public static int DayNumber(Guid messageId) => (int)(Ids.GetUnixMilliseconds(messageId) / 86_400_000L);
 
     public static DateTimeOffset DayStart(int dayNumber) => FromUnixMs(dayNumber * 86_400_000L);
 

@@ -466,12 +466,13 @@ public sealed partial class EfConfigStore<TContext>(IConfigDbAccess<TContext> db
         Interlocked.Increment(ref _webhookVersion);
     }
 
-    public async ValueTask DisableWebhookEndpointAsync(Guid id, string reason, DateTimeOffset at, CancellationToken ct)
+    public async ValueTask<bool> DisableWebhookEndpointAsync(Guid id, string reason, DateTimeOffset at, CancellationToken ct)
     {
         DateTimeOffset when = StorageTime.Normalize(at);
-        await Write(c => c.WebhookEndpoints.Where(w => w.Id == id)
-            .ExecuteUpdate(u => u.SetProperty(w => w.Enabled, false).SetProperty(w => w.DisabledReason, reason).SetProperty(w => w.DisabledAt, when)), ct).ConfigureAwait(false);
+        bool changed = await Write(c => c.WebhookEndpoints.Where(w => w.Id == id && w.Enabled)
+            .ExecuteUpdate(u => u.SetProperty(w => w.Enabled, false).SetProperty(w => w.DisabledReason, reason).SetProperty(w => w.DisabledAt, when)) > 0, ct).ConfigureAwait(false);
         Interlocked.Increment(ref _webhookVersion);
+        return changed;
     }
 
     // Settings, policies, routes

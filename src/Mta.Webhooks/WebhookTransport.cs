@@ -256,17 +256,10 @@ public sealed class WebhookEndpointHealth
     /// </summary>
     public async ValueTask DisableAsync(WebhookEndpointRecord endpoint, string reason, DateTimeOffset now, CancellationToken ct)
     {
-        WebhookEndpointRecord? current = await _config.GetWebhookEndpointAsync(endpoint.Id, ct).ConfigureAwait(false);
-        if (current is null || !current.Enabled)
+        // The storage decides, atomically: true only for the call that changed the endpoint from enabled to disabled (false: already disabled, or gone).
+        if (!await _config.DisableWebhookEndpointAsync(endpoint.Id, reason, now, ct).ConfigureAwait(false))
         {
-            return;   // gone, or already switched off by someone else
-        }
-
-        await _config.DisableWebhookEndpointAsync(endpoint.Id, reason, now, ct).ConfigureAwait(false);
-        WebhookEndpointRecord? after = await _config.GetWebhookEndpointAsync(endpoint.Id, ct).ConfigureAwait(false);
-        if (after is not null && after.DisabledReason != reason)
-        {
-            return;   // another attempt switched it off between the read and the write with its own reason: that one reports
+            return;
         }
 
         WebhookMetrics.EndpointsDisabled.Add(1);

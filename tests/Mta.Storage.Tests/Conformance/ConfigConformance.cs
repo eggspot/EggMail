@@ -576,11 +576,18 @@ public abstract class ConfigConformance : StorageTestBase
         Assert.Equal(Clock.UtcNow, edited.FailingSince);
 
         DateTimeOffset at = Clock.UtcNow.AddMinutes(1);
-        await C.DisableWebhookEndpointAsync(ep.Id, "410 Gone", at, Ct);
+        Assert.True(await C.DisableWebhookEndpointAsync(ep.Id, "410 Gone", at, Ct));
         var disabled = (await C.GetWebhookEndpointAsync(ep.Id, Ct))!;
         Assert.False(disabled.Enabled);
         Assert.Equal("410 Gone", disabled.DisabledReason);
         Assert.Equal(at, disabled.DisabledAt);
+
+        // Only the call that switches the endpoint off says so (attempts that fail side by side, or on several replicas, must notify the tenant once); the first reason stays.
+        Assert.False(await C.DisableWebhookEndpointAsync(ep.Id, "failing for 5 days", at.AddMinutes(5), Ct));
+        Assert.False(await C.DisableWebhookEndpointAsync(Guid.NewGuid(), "no such endpoint", at, Ct));
+        var again = (await C.GetWebhookEndpointAsync(ep.Id, Ct))!;
+        Assert.Equal("410 Gone", again.DisabledReason);
+        Assert.Equal(at, again.DisabledAt);
 
         Assert.Empty(await C.GetWebhookEndpointsAsync(TenantB, Ct));
         await C.DeleteWebhookEndpointAsync(TenantB, ep.Id, Ct);

@@ -21,11 +21,17 @@ internal sealed class PreparedCommand : IDisposable
 {
     private const int StackTextBytes = 256;
 
+    private static long s_live;
+
+    /// <summary>Statements prepared and not yet finalized, in the whole process. A gauge for the leak tests: it must come back to its level when storages are closed (changed once per prepare and finalize, never per execution).</summary>
+    internal static long LiveCount => Interlocked.Read(ref s_live);
+
     private readonly sqlite3 _db;
     private readonly sqlite3_stmt _stmt;
     private readonly int[] _slots;
     private readonly RawReader _reader;
     private bool _active;
+    private int _finalized;
 
     public PreparedCommand(sqlite3 db, Stmt statement)
     {
@@ -36,6 +42,7 @@ internal sealed class PreparedCommand : IDisposable
             SqliteException.ThrowExceptionForRC(rc, db);
         }
 
+        Interlocked.Increment(ref s_live);
         _slots = new int[statement.Parameters.Length];
         for (int i = 0; i < _slots.Length; i++)
         {
@@ -43,6 +50,7 @@ internal sealed class PreparedCommand : IDisposable
             if (slot == 0)
             {
                 raw.sqlite3_finalize(_stmt);
+                Interlocked.Decrement(ref s_live);
                 throw new InvalidOperationException($"The statement has no parameter {statement.Parameters[i]}: {statement.Sql}");
             }
 
@@ -236,7 +244,14 @@ internal sealed class PreparedCommand : IDisposable
         }
     }
 
-    public void Dispose() => raw.sqlite3_finalize(_stmt);
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _finalized, 1) == 0)
+        {
+            raw.sqlite3_finalize(_stmt);
+            Interlocked.Decrement(ref s_live);
+        }
+    }
 }
 
 /// <summary>

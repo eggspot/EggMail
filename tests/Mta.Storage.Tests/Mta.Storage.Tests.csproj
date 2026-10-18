@@ -9,6 +9,10 @@
     <PackageReference Include="xunit.runner.visualstudio" />
   </ItemGroup>
   <ItemGroup>
+    <!-- Knobs and the virtual clock of the accelerated lifecycle tests, shared by link. -->
+    <Compile Include="..\Support\Accelerated.cs" Link="Support\Accelerated.cs" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="..\..\src\Mta.Storage\Mta.Storage.csproj" />
   </ItemGroup>
 </Project>

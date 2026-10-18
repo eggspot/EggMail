@@ -203,7 +203,12 @@ internal sealed class SocketTransport : IAsyncDisposable
             if (_output is not null)
             {
                 await _output.Writer.CompleteAsync().ConfigureAwait(false);
-                await Task.WhenAny(_outputPump, Task.Delay(TimeSpan.FromSeconds(2))).ConfigureAwait(false);
+                // The pump gets two seconds to flush. The wait is cancelled as soon as the pump is done: a bare Task.Delay(2 s) keeps its timer (and the
+                // closure around this transport) alive for the whole two seconds after every session, which at 1,000 sessions a second is 2,000 timers.
+                using var grace = new CancellationTokenSource();
+                Task expired = Task.Delay(TimeSpan.FromSeconds(2), grace.Token);
+                await Task.WhenAny(_outputPump, expired).ConfigureAwait(false);
+                await grace.CancelAsync().ConfigureAwait(false);
             }
         }
         catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException)
