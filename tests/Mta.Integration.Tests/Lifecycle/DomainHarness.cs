@@ -87,7 +87,7 @@ internal sealed class DomainHarness
 
     public async Task<IReadOnlyList<Mta.Storage.DkimKeyRecord>> KeysAsync() => await Config.GetDkimKeysAsync(DomainId, default);
 
-    public async Task<IReadOnlyList<ExpectedDomainRecord>> PlanAsync() => Service.PlanRecords(await DomainAsync(), await KeysAsync(), Clock.UtcNow);
+    public async Task<IReadOnlyList<ExpectedDomainRecord>> PlanAsync() => Service.PlanRecords(await DomainAsync(), await KeysAsync(), Clock.UtcNow, inboundEnabled: false);
 
     /// <summary>The customer publishes the records of the plan: the DKIM keys that are listed and the return path CNAME (not the advice).</summary>
     public async Task PublishAsync(bool dkim = true, bool returnPath = true, string? onlySelector = null)
