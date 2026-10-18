@@ -173,7 +173,7 @@ public class AnonymousListenerLimitsTests
         var handler = new Handler();
         var (server, port) = Start(handler, Open(b =>
         {
-            if (listenerShare) { b.MaxInFlightBytes = 80_000; } else { b.MaxInFlightBytesPerRemote = 80_000; }
+            if (listenerShare) { b.MaxInFlightBytes = 55_000; } else { b.MaxInFlightBytesPerRemote = 55_000; }
         }));
         await using var _ = server;
         using RawClient holder = await OpenAsync(port);

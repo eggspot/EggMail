@@ -142,19 +142,20 @@ internal static class InboundScenario
             refresh = runtime.InboundConfiguration!.RunAsync(stop.Token);
             await AddRouteAsync(storage, org, Acme, 40, InboundMatchKind.Address, "late", InboundActionKind.Store);
             InboundConfigChangeSignal.Bump();
-            await using (var mta = await MiniSmtp.ConnectAsync(port))
+            // (A refusal is an error of the session, and a session ends after ten: every attempt is a connection of its own.)
+            var deadline = DateTime.UtcNow.AddSeconds(30);
+            int code;
+            do
             {
-                var deadline = DateTime.UtcNow.AddSeconds(30);
-                int code;
-                do
+                await using var attempt = await MiniSmtp.ConnectAsync(port);
+                code = (await attempt.SendAsync("bob@sender.test", ["late@example.org"], Message("bob@sender.test", "Late"))).Code;
+                if (code != 250)
                 {
-                    await mta.ResetAsync();
-                    code = (await mta.SendAsync("bob@sender.test", ["late@example.org"], Message("bob@sender.test", "Late"))).Code;
-                    await mta.ResetAsync();
+                    await Task.Delay(50);
                 }
-                while (code != 250 && DateTime.UtcNow < deadline);
-                Assert.Equal(250, code);
             }
+            while (code != 250 && DateTime.UtcNow < deadline);
+            Assert.Equal(250, code);
 
             // Usage is computed by the store: the bodies that exist.
             InboundUsage usage = await storage.Inbound.GetUsageAsync(Acme, null, default);
