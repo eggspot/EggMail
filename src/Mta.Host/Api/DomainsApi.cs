@@ -182,6 +182,7 @@ public sealed class DomainsApi(ApiAuthenticator auth, IStorage storage, ISecretP
             if (settings is { Enabled: true })
             {
                 await storage.Inbound.UpsertSettingsAsync(settings with { Enabled = false, UpdatedAt = clock.UtcNow }, context.RequestAborted).ConfigureAwait(false);
+                Mta.Host.Ingest.InboundConfigChangeSignal.Bump();   // stop receiving before the purge starts
             }
 
             await storage.Inbound.DeleteMatchingAsync(new InboundMessageQuery(caller.TenantId, DomainId: domain.Id), context.RequestAborted).ConfigureAwait(false);

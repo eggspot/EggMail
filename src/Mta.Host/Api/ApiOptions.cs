@@ -65,9 +65,6 @@ public sealed class ApiOptions
     /// <summary>The server defaults the inbound settings API reports as effective values.</summary>
     public InboundApiDefaults Inbound { get; set; } = new();
 
-    /// <summary>Whether this server accepts inbound mail (<c>Inbound:Enabled</c>); reported by <c>GET /capabilities</c> so the dashboard can show or hide its inbound pages.</summary>
-    public bool InboundEnabled { get; set; }
-
     /// <summary>Most rows one statistics query may return; larger ranges are refused with <c>validation_failed</c>.</summary>
     public int MaxStatsRows { get; set; } = 50_000;
 

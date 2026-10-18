@@ -19,7 +19,6 @@ public static class InboundActionMetrics
     public static readonly Counter<long> ForwardLoops = Meter.CreateCounter<long>("mta.inbound.forward.loops", "{message}", "Inbound forwards refused by the signed hop marker (loop_detected)");
 
     /// <summary>Bounces to an SRS address of a forwarded message that were accepted and dropped (design section 11.7).</summary>
-    public static readonly Counter<long> SrsBouncesDropped = Meter.CreateCounter<long>("mta.inbound.srs.bounces.dropped", "{message}", "Bounces to SRS addresses accepted and dropped");
 
     // The gauge reads the last sample the runner took (a count of pending and failed actions), so a scrape never queries the message table.
     private static InboundActionRunner? s_runner;

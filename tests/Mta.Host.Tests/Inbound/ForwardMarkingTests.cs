@@ -17,13 +17,13 @@ public class ForwardMarkingTests
     [Fact]
     public void A_short_address_is_the_long_form_and_verifies()
     {
-        var srs = new ForwardSrs(Ring(1));
+        var srs = new SrsCodec(Ring(1));
         string local = srs.CreateLocalPart("Sender.Test", "Alice", Now);
 
         Assert.StartsWith("SRS0=", local, StringComparison.Ordinal);
         Assert.EndsWith("=sender.test=alice", local, StringComparison.Ordinal);
-        Assert.True(srs.IsValid(local, Now));
-        Assert.True(srs.IsValid(local.ToUpperInvariant(), Now));   // relays fold case
+        Assert.True(srs.TryVerify(local, Now));
+        Assert.True(srs.TryVerify(local.ToUpperInvariant(), Now));   // relays fold case
     }
 
     [Theory]
@@ -33,94 +33,99 @@ public class ForwardMarkingTests
     [InlineData("x.test", "dots..inside")]
     [InlineData("x.test", "trailing.")]
     [InlineData("x.test", "a=b=c")]
+    [InlineData("bücher.example", "jürgen")]
+    [InlineData("x.test", "用户")]
+    [InlineData("x.test", "name+tag")]
+    [InlineData("x.test", "Mixed.Case")]
+    [InlineData("x.test", "llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll")]
     public void A_long_or_awkward_original_gives_the_short_form_of_at_most_64_octets_that_verifies(string domain, string local)
     {
-        var srs = new ForwardSrs(Ring(1));
+        var srs = new SrsCodec(Ring(1));
         string made = srs.CreateLocalPart(domain, local, Now);
 
         Assert.True(made.Length <= 64, made);
-        Assert.True(srs.IsValid(made, Now));
+        Assert.True(srs.TryVerify(made, Now));
         Assert.All(made, c => Assert.True(c is > ' ' and < '\u007f'));
     }
 
     [Fact]
     public void Whatever_the_original_the_address_is_at_most_64_octets()
     {
-        var srs = new ForwardSrs(Ring(1));
+        var srs = new SrsCodec(Ring(1));
         string huge = new string('a', 255) + ".example";
         Assert.True(srs.CreateLocalPart(huge, new string('l', 64), Now).Length <= 64);
         Assert.True(srs.CreateLocalPart("d.test", new string('l', 64), Now).Length <= 64);
-        Assert.True(srs.CreateLocalPart("d.test", "", Now).Length <= 64);
+        Assert.Throws<ArgumentException>(() => srs.CreateLocalPart("d.test", "", Now));   // an envelope sender always has a local part; the null reverse-path never gets here
     }
 
     [Fact]
     public void The_short_form_is_bound_to_the_original_so_it_is_not_a_token_for_anything_else()
     {
-        var srs = new ForwardSrs(Ring(1));
+        var srs = new SrsCodec(Ring(1));
         string one = srs.CreateLocalPart("x.test", "ünïcode", Now);
         string two = srs.CreateLocalPart("x.test", "ünïcodE-other", Now);
         Assert.NotEqual(one, two);
 
         // Changing a field of a valid address invalidates it.
         string[] parts = one.Split('=');
-        Assert.False(srs.IsValid(string.Join('=', parts[0], parts[1], parts[2], parts[3], new string('0', 32)), Now));
-        Assert.False(srs.IsValid(string.Join('=', parts[0], parts[1], parts[2], "y", parts[4]), Now));
+        Assert.False(srs.TryVerify(string.Join('=', parts[0], parts[1], parts[2], parts[3], new string('0', 32)), Now));
+        Assert.False(srs.TryVerify(string.Join('=', parts[0], parts[1], parts[2], "y", parts[4]), Now));
     }
 
     [Fact]
     public void An_address_expires_after_the_window_and_is_never_dated_in_the_future()
     {
-        var srs = new ForwardSrs(Ring(1));
+        var srs = new SrsCodec(Ring(1));
         string local = srs.CreateLocalPart("sender.test", "alice", Now);
 
-        Assert.True(srs.IsValid(local, Now.AddDays(20)));
-        Assert.False(srs.IsValid(local, Now.AddDays(21)));
-        Assert.False(srs.IsValid(local, Now.AddDays(-1)));
-        Assert.False(srs.IsValid(local, Now.AddDays(21 + 1024)));   // the day number wraps; a year-old address is not the same as a recent one only by accident of the modulus
+        Assert.True(srs.TryVerify(local, Now.AddDays(20)));
+        Assert.False(srs.TryVerify(local, Now.AddDays(21)));
+        Assert.False(srs.TryVerify(local, Now.AddDays(-1)));
+        Assert.False(srs.TryVerify(local, Now.AddDays(21 + 1024)));   // the day number wraps; a year-old address is not the same as a recent one only by accident of the modulus
     }
 
     [Fact]
     public void Forged_malformed_and_foreign_addresses_do_not_verify()
     {
-        var srs = new ForwardSrs(Ring(1));
-        var other = new ForwardSrs(Ring(1));   // another deployment: another key
+        var srs = new SrsCodec(Ring(1));
+        var other = new SrsCodec(Ring(1));   // another deployment: another key
         string local = srs.CreateLocalPart("sender.test", "alice", Now);
 
-        Assert.False(other.IsValid(local, Now));
-        Assert.False(srs.IsValid("SRS0=aaaaaaaa=aa=sender.test=alice", Now));
-        Assert.False(srs.IsValid("SRS1=" + local[5..], Now));   // this server issues no SRS1 address
+        Assert.False(other.TryVerify(local, Now));
+        Assert.False(srs.TryVerify("SRS0=aaaaaaaa=aa=sender.test=alice", Now));
+        Assert.False(srs.TryVerify("SRS1=" + local[5..], Now));   // this server issues no SRS1 address
         foreach (string bad in new[] { "", "SRS0=", "SRS0=a=b=c=d", "SRS0=1111111=aa=d=l", "SRS0=zzzzzzzz=!!=d=l", "SRS0=aaaaaaaa=aa==x", "plain", "b+token" })
         {
-            Assert.False(srs.IsValid(bad, Now), bad);
+            Assert.False(srs.TryVerify(bad, Now), bad);
         }
 
-        Assert.False(srs.IsValid(new string('x', 600), Now));
+        Assert.False(srs.TryVerify(new string('x', 600), Now));
     }
 
     [Fact]
     public void Rotating_the_ring_keeps_addresses_in_flight_valid()
     {
         var oldKey = VerpCodec.GenerateKey();
-        var before = new ForwardSrs(new VerpCodec(new Dictionary<int, byte[]> { [2] = oldKey }, 2));
+        var before = new SrsCodec(new VerpCodec(new Dictionary<int, byte[]> { [2] = oldKey }, 2));
         string inFlight = before.CreateLocalPart("sender.test", "alice", Now);
 
-        var rotated = new ForwardSrs(new VerpCodec(new Dictionary<int, byte[]> { [2] = oldKey, [3] = VerpCodec.GenerateKey() }, 3));
-        Assert.True(rotated.IsValid(inFlight, Now));
+        var rotated = new SrsCodec(new VerpCodec(new Dictionary<int, byte[]> { [2] = oldKey, [3] = VerpCodec.GenerateKey() }, 3));
+        Assert.True(rotated.TryVerify(inFlight, Now));
         Assert.NotEqual(before.CreateLocalPart("sender.test", "alice", Now), rotated.CreateLocalPart("sender.test", "alice", Now));   // new ones use the new key
 
-        var dropped = new ForwardSrs(new VerpCodec(new Dictionary<int, byte[]> { [3] = VerpCodec.GenerateKey() }, 3));
-        Assert.False(dropped.IsValid(inFlight, Now));
+        var dropped = new SrsCodec(new VerpCodec(new Dictionary<int, byte[]> { [3] = VerpCodec.GenerateKey() }, 3));
+        Assert.False(dropped.TryVerify(inFlight, Now));
     }
 
     [Fact]
     public void The_srs_key_is_not_the_bounce_key_and_a_bounce_token_is_not_an_srs_address()
     {
         VerpCodec ring = Ring(1);
-        Assert.NotEqual(ring.DeriveKey(1, ForwardSrs.Purpose), ring.DeriveKey(1, ForwardHops.Purpose));
-        Assert.False(new ForwardSrs(ring).IsValid(ring.CreateLocalPart(Guid.NewGuid(), Guid.NewGuid(), Now, "x.test"), Now));
-        Assert.True(ForwardSrs.HasSrsPrefix("srs0=abc"));
-        Assert.True(ForwardSrs.HasSrsPrefix("SRS1=abc"));
-        Assert.False(ForwardSrs.HasSrsPrefix("b+abc"));
+        Assert.NotEqual(ring.DeriveKey(1, SrsCodec.Purpose), ring.DeriveKey(1, ForwardHopMarker.Purpose));
+        Assert.False(new SrsCodec(ring).TryVerify(ring.CreateLocalPart(Guid.NewGuid(), Guid.NewGuid(), Now, "x.test"), Now));
+        Assert.True(SrsCodec.HasSrsPrefix("srs0=abc"));
+        Assert.True(SrsCodec.HasSrsPrefix("SRS1=abc"));
+        Assert.False(SrsCodec.HasSrsPrefix("b+abc"));
     }
 
     // Hop marker
@@ -131,7 +136,7 @@ public class ForwardMarkingTests
     [Fact]
     public void A_forward_writes_one_marker_that_proves_the_count_for_this_body()
     {
-        var marker = new ForwardHops(Ring(1));
+        var marker = new ForwardHopMarker(Ring(1));
         byte[] original = Message();
         Assert.Equal(0, marker.ReadValidHops(original));
 
@@ -144,7 +149,7 @@ public class ForwardMarkingTests
     [Fact]
     public void A_forward_replaces_the_old_marker_and_the_message_never_carries_two()
     {
-        var marker = new ForwardHops(Ring(1));
+        var marker = new ForwardHopMarker(Ring(1));
         byte[] once = marker.Apply(Message(), 1);
         byte[] twice = marker.Apply(once, 2);
 
@@ -155,7 +160,7 @@ public class ForwardMarkingTests
     [Fact]
     public void A_forged_marker_or_a_changed_body_counts_for_nothing()
     {
-        var marker = new ForwardHops(Ring(1));
+        var marker = new ForwardHopMarker(Ring(1));
         byte[] valid = marker.Apply(Message(), 2);
         string text = Encoding.UTF8.GetString(valid);
 
@@ -165,16 +170,16 @@ public class ForwardMarkingTests
         Assert.Equal(0, marker.ReadValidHops(Encoding.UTF8.GetBytes(text.Replace("; ", "; 0", StringComparison.Ordinal))));
         Assert.Equal(0, marker.ReadValidHops(Message("X-EggMail-Hops: 1\r\n")));
         Assert.Equal(0, marker.ReadValidHops(Message("X-EggMail-Hops: ; \r\n")));
-        Assert.Equal(0, marker.ReadValidHops(new ForwardHops(Ring(1)).Apply(Message(), 2)));   // another deployment's marker
+        Assert.Equal(0, marker.ReadValidHops(new ForwardHopMarker(Ring(1)).Apply(Message(), 2)));   // another deployment's marker
     }
 
     [Fact]
     public void Of_several_markers_the_highest_valid_one_counts_and_a_forged_high_one_is_ignored()
     {
-        var marker = new ForwardHops(Ring(1));
+        var marker = new ForwardHopMarker(Ring(1));
         byte[] body = Encoding.UTF8.GetBytes("body\r\n");
-        string one = marker.CreateValue(1, ForwardHops.BodyHash(body));
-        string two = marker.CreateValue(2, ForwardHops.BodyHash(body));
+        string one = marker.CreateValue(1, ForwardHopMarker.BodyHash(body));
+        string two = marker.CreateValue(2, ForwardHopMarker.BodyHash(body));
         byte[] message = Encoding.UTF8.GetBytes($"X-EggMail-Hops: {one}\r\nX-EggMail-Hops: 9; ffffffffffffffff\r\nX-EggMail-Hops: {two}\r\nFrom: a@b.test\r\n\r\nbody\r\n");
 
         Assert.Equal(2, marker.ReadValidHops(message));
@@ -186,8 +191,8 @@ public class ForwardMarkingTests
     [Fact]
     public void A_folded_marker_is_read_and_removed_whole()
     {
-        var marker = new ForwardHops(Ring(1));
-        string value = marker.CreateValue(1, ForwardHops.BodyHash(Encoding.UTF8.GetBytes("b\r\n")));
+        var marker = new ForwardHopMarker(Ring(1));
+        string value = marker.CreateValue(1, ForwardHopMarker.BodyHash(Encoding.UTF8.GetBytes("b\r\n")));
         string folded = value.Replace("; ", ";\r\n ", StringComparison.Ordinal);
         byte[] message = Encoding.UTF8.GetBytes($"X-EggMail-Hops: {folded}\r\nFrom: a@b.test\r\n\r\nb\r\n");
 
@@ -200,13 +205,13 @@ public class ForwardMarkingTests
     [Fact]
     public void Markers_in_the_body_or_in_odd_shapes_are_not_counted_and_a_hidden_second_marker_does_not_survive()
     {
-        var marker = new ForwardHops(Ring(1));
+        var marker = new ForwardHopMarker(Ring(1));
         byte[] body = Encoding.UTF8.GetBytes("b\r\n");
-        string valid = marker.CreateValue(2, ForwardHops.BodyHash(body));
+        string valid = marker.CreateValue(2, ForwardHopMarker.BodyHash(body));
 
         // In the body (after the empty line), in a MIME part, with a space before the colon, as a continuation of another field: none is a marker of the message.
         Assert.Equal(0, marker.ReadValidHops(Encoding.UTF8.GetBytes($"From: a@b.test\r\n\r\nX-EggMail-Hops: {valid}\r\n")));
-        Assert.Equal(0, marker.ReadValidHops(Encoding.UTF8.GetBytes($"From: a@b.test\r\nX-EggMail-Hops : {valid}\r\n\r\nb\r\n")));
+        Assert.Equal(2, marker.ReadValidHops(Encoding.UTF8.GetBytes($"From: a@b.test\r\nX-EggMail-Hops : {valid}\r\n\r\nb\r\n")));   // white space before the colon: still our field (a parser that ignores it must not be able to hide a marker)
         Assert.Equal(0, marker.ReadValidHops(Encoding.UTF8.GetBytes($"From: a@b.test\r\nX-Other: x\r\n X-EggMail-Hops: {valid}\r\n\r\nb\r\n")));
         // Any case of the name, and a tab fold inside the value, are the marker.
         Assert.Equal(2, marker.ReadValidHops(Encoding.UTF8.GetBytes($"From: a@b.test\r\nx-eggmail-HOPS:\t{valid.Replace("; ", ";\r\n\t", StringComparison.Ordinal)}\r\n\r\nb\r\n")));
@@ -216,12 +221,16 @@ public class ForwardMarkingTests
         byte[] next = marker.Apply(Encoding.UTF8.GetBytes(hidden), 3);
         Assert.Single(Regex.Matches(Encoding.UTF8.GetString(next), "(?im)x-eggmail-hops"));
         Assert.Equal(3, marker.ReadValidHops(next));
+
+        // The same for a marker written with white space before the colon: the copy carries exactly one.
+        byte[] spaced = marker.Apply(Encoding.UTF8.GetBytes($"X-EggMail-Hops : {valid}\r\nFrom: a@b.test\r\n\r\nb\r\n"), 3);
+        Assert.Single(Regex.Matches(Encoding.UTF8.GetString(spaced), "(?im)x-eggmail-hops"));
     }
 
     [Fact]
     public void A_message_without_a_body_or_headers_is_handled()
     {
-        var marker = new ForwardHops(Ring(1));
+        var marker = new ForwardHopMarker(Ring(1));
         Assert.Equal(0, marker.ReadValidHops([]));
         Assert.Equal(1, marker.ReadValidHops(marker.Apply(Encoding.UTF8.GetBytes("From: a@b.test\r\n\r\n"), 1)));
         Assert.Equal(1, marker.ReadValidHops(marker.Apply(Encoding.UTF8.GetBytes("\r\nbody"), 1)));
@@ -231,9 +240,9 @@ public class ForwardMarkingTests
     public void Rotating_the_ring_keeps_markers_valid()
     {
         var oldKey = VerpCodec.GenerateKey();
-        var before = new ForwardHops(new VerpCodec(new Dictionary<int, byte[]> { [2] = oldKey }, 2));
+        var before = new ForwardHopMarker(new VerpCodec(new Dictionary<int, byte[]> { [2] = oldKey }, 2));
         byte[] message = before.Apply(Message(), 2);
-        var rotated = new ForwardHops(new VerpCodec(new Dictionary<int, byte[]> { [2] = oldKey, [3] = VerpCodec.GenerateKey() }, 3));
+        var rotated = new ForwardHopMarker(new VerpCodec(new Dictionary<int, byte[]> { [2] = oldKey, [3] = VerpCodec.GenerateKey() }, 3));
         Assert.Equal(2, rotated.ReadValidHops(message));
     }
 }

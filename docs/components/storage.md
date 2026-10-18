@@ -138,7 +138,7 @@ These sit on the config store (`IRuntimeStateStore`, which `IConfigStore` extend
 
 ## Inbound mail contracts (decision 95)
 
-`IStorage.Inbound` (`IInboundStore` = `IInboundConfigStore` + `IInboundMessageStore`, `Mta.Storage/Contracts.Inbound.cs`) is the storage side of [design.md section 11](../design.md#11-inbound-mail). A default interface member that throws `NotSupportedException` until a provider implements it. What it holds:
+`IStorage.Inbound` (`IInboundStore` = `IInboundConfigStore` + `IInboundMessageStore`, `Mta.Storage/Contracts.Inbound.cs`) is the storage side of [design.md section 11](../design.md#11-inbound-mail). Implemented by the in-memory, SQLite and PostgreSQL providers (the default interface member throws `NotSupportedException` only for a provider written without it). What it holds:
 
 | Group | Methods | Part (SQLite file) |
 |---|---|---|

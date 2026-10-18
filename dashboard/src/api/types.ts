@@ -27,7 +27,7 @@ export interface Capabilities {
   history: { mode: HistoryMode };
   content: { retentionDays: number; storeAttachments: boolean };
   limits: { maxMessageBytes: number; maxRecipients: number };
-  /** Whether this server accepts inbound mail (`Inbound:Enabled`); the inbound pages are shown only when true. */
+  /** Whether the server receives mail (`Inbound:Enabled`): the inbound pages are shown only then. */
   inbound: { enabled: boolean };
   warnings: CapabilityWarning[];
 }

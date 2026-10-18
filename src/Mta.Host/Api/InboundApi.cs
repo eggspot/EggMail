@@ -330,6 +330,7 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
         try
         {
             await Inbound.UpsertSettingsAsync(updated, ct).ConfigureAwait(false);
+            Mta.Host.Ingest.InboundConfigChangeSignal.Bump();
         }
         catch (StorageConflictException)
         {
@@ -507,6 +508,7 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
         try
         {
             await Inbound.UpsertRouteAsync(route, ct).ConfigureAwait(false);
+            Mta.Host.Ingest.InboundConfigChangeSignal.Bump();
         }
         catch (StorageConflictException ex) when (ex.Reason == StorageConflictReasons.WebhookEndpointMissing)
         {
@@ -639,6 +641,7 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
             throw ApiException.NotFound("Route not found.");
         }
 
+        Mta.Host.Ingest.InboundConfigChangeSignal.Bump();
         return ApiResults.NoContent();
     }
 
