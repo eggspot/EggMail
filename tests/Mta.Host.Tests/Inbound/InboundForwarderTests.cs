@@ -28,7 +28,7 @@ public class InboundForwarderTests
         var h = await new InboundActionHarness().InitializeAsync(InboundActionKind.Forward);
         await h.Storage.Inbound.UpsertRouteAsync(h.Route with { ForwardTo = targets ?? ["target@example.org"], UpdatedAt = h.Clock.UtcNow }, default);
         var forwarder = new InboundForwarder(
-            h.Storage, new ForwardSrs(Ring), new ForwardHops(Ring), new ArcValidator(new StaticDnsResolver()), null,
+            h.Storage, new SrsCodec(Ring), new ForwardHopMarker(Ring), new ArcValidator(new StaticDnsResolver()), null,
             new InboundForwarderOptions { AuthenticationResultsId = "egg.test", BounceDomain = bounceDomain }, h.Clock, NullMtaLog.Instance);
         return new Rig { Harness = h, Forwarder = forwarder };
     }
@@ -63,7 +63,7 @@ public class InboundForwarderTests
         string text = Encoding.UTF8.GetString(queued);
         Assert.StartsWith("X-EggMail-Hops: 1; ", text, StringComparison.Ordinal);
         Assert.EndsWith(Encoding.UTF8.GetString(raw), text, StringComparison.Ordinal);
-        Assert.Equal(1, new ForwardHops(Ring).ReadValidHops(queued));
+        Assert.Equal(1, new ForwardHopMarker(Ring).ReadValidHops(queued));
 
         ClaimedDelivery delivery = Assert.Single(await rig.Harness.Storage.Deliveries.ClaimAsync("t", 10, rig.Harness.Clock.UtcNow, TimeSpan.FromMinutes(1), default));
         Assert.Equal(MessageSource.Forward, delivery.Source);
@@ -71,7 +71,7 @@ public class InboundForwarderTests
         Assert.Equal("target@example.org", delivery.Recipient.ToString());
         string senderLocal = delivery.EnvelopeFrom.LocalPart;
         Assert.EndsWith("@example.com", delivery.EnvelopeFrom.ToString());
-        Assert.True(new ForwardSrs(Ring).IsValid(senderLocal, rig.Harness.Clock.UtcNow));
+        Assert.True(new SrsCodec(Ring).TryVerify(senderLocal, rig.Harness.Clock.UtcNow));
         Assert.True(senderLocal.Length <= 64);
     }
 
@@ -117,7 +117,7 @@ public class InboundForwarderTests
 
         ClaimedDelivery delivery = Assert.Single(await rig.Harness.Storage.Deliveries.ClaimAsync("t", 10, rig.Harness.Clock.UtcNow, TimeSpan.FromMinutes(1), default));
         Assert.InRange(delivery.EnvelopeFrom.LocalPart.Length, 1, 64);
-        Assert.True(new ForwardSrs(Ring).IsValid(delivery.EnvelopeFrom.LocalPart, rig.Harness.Clock.UtcNow));
+        Assert.True(new SrsCodec(Ring).TryVerify(delivery.EnvelopeFrom.LocalPart, rig.Harness.Clock.UtcNow));
     }
 
     [Fact]
@@ -173,7 +173,7 @@ public class InboundForwarderTests
     public async Task A_message_forwarded_three_times_already_is_not_forwarded_and_the_loop_is_counted()
     {
         await using Rig rig = await StartAsync();
-        var marker = new ForwardHops(Ring);
+        var marker = new ForwardHopMarker(Ring);
         byte[] raw = marker.Apply(Foreign(), 3);
         InboundMessageDraft draft = await rig.Harness.ReceiveAsync(raw);
 
@@ -267,7 +267,7 @@ public class SrsBounceHandlerTests
     public void Only_a_fresh_valid_srs_address_from_the_null_sender_is_accepted_and_dropping_logs_no_address()
     {
         var ring = new VerpCodec(new Dictionary<int, byte[]> { [1] = VerpCodec.GenerateKey() }, 1);
-        var srs = new ForwardSrs(ring);
+        var srs = new SrsCodec(ring);
         var clock = new Mta.Host.Tests.Api.TestClock(new DateTimeOffset(2026, 10, 16, 8, 0, 0, TimeSpan.Zero));
         var log = new Log();
         var handler = new SrsBounceHandler(srs, clock, log);

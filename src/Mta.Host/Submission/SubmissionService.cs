@@ -643,5 +643,9 @@ public static class DomainChangeSignal
 
     public static long Version => Interlocked.Read(ref _version);
 
-    public static void Bump() => Interlocked.Increment(ref _version);
+    public static void Bump()
+    {
+        Interlocked.Increment(ref _version);
+        Mta.Host.Ingest.InboundConfigChangeSignal.Bump();   // the inbound receive path decides on the domain list too
+    }
 }

@@ -45,8 +45,6 @@ public sealed class EggMailRuntime : IAsyncDisposable
     /// <summary>Carries out the webhook and forward actions of received mail (inbound routes, design section 11.7).</summary>
     public required InboundActionRunner InboundActions { get; init; }
 
-    /// <summary>Verifies the SRS recipients of forwarded mail and drops their bounces; the receive path of the <c>Inbound</c> listener role calls it (design sections 11.4 and 11.7).</summary>
-    public required SrsBounceHandler SrsBounces { get; init; }
     public required IDnsResolver Dns { get; init; }
     public required SmtpConnectionPool Pool { get; init; }
     public required RoutePlanner Routes { get; init; }
@@ -55,6 +53,12 @@ public sealed class EggMailRuntime : IAsyncDisposable
     public bool KeysProtectedAtRest { get; init; }
 
     public AcmeRenewalService? Acme { get; init; }
+
+    /// <summary>The MX receiver of inbound mail (null unless <c>Inbound:Enabled</c>).</summary>
+    public InboundReceiver? Inbound { get; init; }
+
+    /// <summary>The receive path's copy of the enabled domains and routes (null unless <c>Inbound:Enabled</c>); the API asks it to reload after it changes something (<see cref="InboundConfigurationCache.RequestRefresh"/>).</summary>
+    public InboundConfigurationCache? InboundConfiguration { get; init; }
 
     /// <summary>The built-in HTTP-01 responder (null unless ACME is on and answers HTTP-01 challenges itself, <c>Acme:Challenge</c>); it runs on every replica.</summary>
     public AcmeHttpChallengeListener? AcmeHttpListener { get; init; }
@@ -132,7 +136,23 @@ public sealed class EggMailRuntime : IAsyncDisposable
         DeliveryEngine? engine = null;
         var handler = new IngestHandler(storage, submission, throttle, new IngestOptions { BounceDomain = config.Delivery.BounceDomain, MaxRecipientsPerMessage = config.Smtp.MaxRecipients }, bounces, onAccepted: () => engine?.Wake(), log);
 
-        var listeners = config.Smtp.Listeners.Where(l => l.Value.Enabled).Select(l => l.Value.ToOptions(l.Key)).ToList();
+        // Inbound mail: the port-25 listener becomes an MX receiver. Everything is built only when Inbound:Enabled; off, the server behaves exactly as before.
+        InboundReceiveOptions inboundOptions = InboundReceiveOptions.From(config);
+        InboundReceiver? inbound = null;
+        InboundConfigurationCache? inboundConfiguration = null;
+        if (inboundOptions.Enabled)
+        {
+            inboundConfiguration = new InboundConfigurationCache(storage.Inbound, clock, inboundOptions, log);
+            var srs = new SrsCodec(verp, inboundOptions.SrsMaxAgeDays);
+            inbound = new InboundReceiver(
+                handler, storage.Inbound, inboundConfiguration, new InboundVerifier(dns, inboundOptions, config.Hostname, clock),
+                new VerificationSlots(inboundOptions.VerificationMaxConcurrency, inboundOptions.VerificationMaxConcurrencyPerRemote), new InboundRateLimiter(),
+                new DnsblChecker(dns, inboundOptions.DnsblZones, inboundOptions.DnsblTimeout), srs, new ForwardHopMarker(verp), inboundOptions, config.Hostname, clock, log, onAccepted: () => engine?.Wake());
+            handler.UseInbound(inbound);
+            log.Write(MtaLogLevel.Information, "startup", "Inbound mail is on: the port-25 listener receives mail for the domains tenants enabled. SPF and the per-address limits need the real client address: publish the port without source NAT (see the Inbound mail section of the operations guide); the server warns once an hour if connections look internal.");
+        }
+
+        var listeners = config.Smtp.Listeners.Where(l => l.Value.Enabled).Select(l => InboundListener(l.Value.ToOptions(l.Key), inboundOptions)).ToList();
         var smtp = new SmtpServer(new SmtpServerOptions
         {
             Hostname = config.Hostname,
@@ -210,7 +230,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
         var webhooks = new WebhookDispatcher(storage.Webhooks, storage.Config, secrets, config.Webhooks, clock, log, endpointNotifier, transport: webhookTransport);
         var arcSealers = new ConfigArcSealerProvider(storage.Config, secrets, clock);
         var forwarder = new InboundForwarder(
-            storage, new ForwardSrs(verp), new ForwardHops(verp), new Mta.Auth.Arc.ArcValidator(dns, new Mta.Auth.Arc.ArcValidatorOptions { MaxInstances = 10 }), arcSealers,
+            storage, new SrsCodec(verp, inboundOptions.SrsMaxAgeDays), new ForwardHopMarker(verp), new Mta.Auth.Arc.ArcValidator(dns, new Mta.Auth.Arc.ArcValidatorOptions { MaxInstances = 10 }), arcSealers,
             new InboundForwarderOptions { AuthenticationResultsId = config.Hostname, BounceDomain = config.Delivery.BounceDomain, QueueLifetime = config.Storage.Queue.MaxLifetime }, clock, log, onQueued: () => engine?.Wake());
         var inboundActions = new InboundActionRunner(
             storage, webhookTransport, new WebhookEndpointHealth(storage.Config, config.Webhooks, log, endpointNotifier), secrets, InboundActionOptionsFrom(config), clock, log,
@@ -248,7 +268,8 @@ public sealed class EggMailRuntime : IAsyncDisposable
         {
             KeysProtectedAtRest = Mta.Host.Secrets.SecretsFactory.KeysProtectedAtRest(config.Secrets, storage.Config),
             Config = config, Storage = storage, Clock = clock, Log = log, Secrets = secrets, Certificates = certificates, Verp = verp,
-            Submission = submission, AuthThrottle = throttle, SmtpServer = smtp, Delivery = delivery, Webhooks = webhooks, InboundActions = inboundActions, SrsBounces = new SrsBounceHandler(new ForwardSrs(verp), clock, log), Dns = dns,
+            Submission = submission, AuthThrottle = throttle, SmtpServer = smtp, Delivery = delivery, Webhooks = webhooks, InboundActions = inboundActions, Dns = dns,
+            Inbound = inbound, InboundConfiguration = inboundConfiguration,
             Pool = pool, Routes = routes, Limits = limits, Acme = acme, AcmeHttpListener = acmeHttpListener, TlsReports = reports, Health = routeHealth, DestinationThrottle = destinationThrottle, ReplicaCoordinator = replicaCoordinator,
             CounterPersistence = counterPersistence, TlsJournal = tlsJournal, TlsCollector = collector,
         };
@@ -291,6 +312,28 @@ public sealed class EggMailRuntime : IAsyncDisposable
             inner.Dispose();
             return ValueTask.CompletedTask;
         }
+    }
+
+    /// <summary>
+    /// The listener as the server runs it. With inbound mail on, the port-25 listener (the one of role Bounce, or Inbound) is an MX receiver: role Inbound, the inbound size ceiling and recipient cap, and no
+    /// AUTH. With it off, a listener configured as Inbound is the bounce listener it replaces (nothing receives mail that was not switched on). Submission listeners are never touched.
+    /// </summary>
+    internal static SmtpListenerOptions InboundListener(SmtpListenerOptions listener, InboundReceiveOptions inbound)
+    {
+        if (listener.Role == ListenerRole.Submission)
+        {
+            return listener;
+        }
+
+        if (!inbound.Enabled)
+        {
+            return listener.Role == ListenerRole.Inbound
+                ? listener.With(ListenerRole.Bounce, listener.MaxMessageSize, listener.MaxRecipients, listener.MaxConnections, listener.MaxInFlightBytes, listener.MaxInFlightBytesPerRemote, listener.MaxSessionDuration, authRequired: false)
+                : listener;
+        }
+
+        // The anonymous listener has its own share of connections and message memory (and a share of that per client network), so a flood of senders cannot starve submission, and its sessions do not live for ever.
+        return listener.With(ListenerRole.Inbound, inbound.Ceilings.MaxMessageBytes, inbound.MaxRecipients + 1, inbound.MaxConnections, inbound.MaxInFlightBytes, inbound.EffectiveMaxInFlightBytesPerRemote, inbound.MaxSessionDuration, authRequired: false);
     }
 
     /// <summary>The built-in ladder unless <c>Delivery:RetryDelays</c> overrides it (used by operators with unusual needs and by the chaos tests).</summary>

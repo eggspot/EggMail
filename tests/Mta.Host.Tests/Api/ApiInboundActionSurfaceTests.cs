@@ -1,4 +1,5 @@
 using System.Net;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Mta.Host.Tests.Api;
 
@@ -13,7 +14,7 @@ public class ApiInboundActionSurfaceTests
         Reply defaultReply = await off.NewClient().GetAsync("/api/v1/capabilities");
         Assert.False(defaultReply["inbound"].GetProperty("enabled").GetBoolean());
 
-        await using ApiFixture on = await ApiFixture.StartAsync(new ApiFixtureOptions { ConfigureApi = o => o.InboundEnabled = true });
+        await using ApiFixture on = await ApiFixture.StartAsync(new ApiFixtureOptions { ConfigureServices = services => services.AddSingleton(new Mta.Host.Configuration.MtaConfig { Inbound = new Mta.Host.Configuration.InboundSection { Enabled = true } }) });
         Reply enabled = await on.NewClient().GetAsync("/api/v1/capabilities");
         Assert.True(enabled["inbound"].GetProperty("enabled").GetBoolean());
     }

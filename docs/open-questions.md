@@ -47,11 +47,36 @@ Note on the license: the Unlicense / CC0 public-domain dedication is the only mo
 
 ## Owner action items
 
+The owner-only steps below (and the other real-world checks: deploy with a public IP, DNS, Gmail/Outlook/Yahoo, ACME against a real CA, TLS-RPT, security audit, 7-day soak, first release, GitHub settings, restore drill) are written out as commands with expected output in [go-live-checklist.md](go-live-checklist.md).
+
+
 - **A cloud KMS for `Secrets:KeyProtection=Kms`.** Design section 9.1 lists `Certificate | Kms | None`. What is built: `Kms` with the `LocalKey` provider (AES-256-GCM, a 32-byte key from a file or the environment held outside the database) and the `IKeyWrapProvider` extension point. What is **not** built: AWS KMS, Azure Key Vault or Google Cloud KMS providers. Each needs a cloud SDK package (allowed outside the protocol assemblies) and, to be anything more than untested code, **an account to test against**, which only the owner can provide. Say which service(s) are wanted and provide a sandbox account; until then `Secrets:KmsProvider` with any other name stops the start with a message that points here. Decision: [decisions.md](decisions.md) 79.
 - **Funding:** enable and get approved for **GitHub Sponsors for the eggspot organization**; choose a payout route (bank account in a supported region, or a fiscal host); add other platforms to `.github/FUNDING.yml` if wanted; review the policy draft. Until Sponsors is enabled, the README badge and the `FUNDING.yml` button point at a profile that does not exist yet. Steps in [funding.md](funding.md).
 - **Security reporting:** enable *Private vulnerability reporting* for the repository (Settings, Code security); [SECURITY.md](../SECURITY.md) and `/.well-known/security.txt` point reporters at it. Decide who receives the reports.
 - ~~**Actions**~~ done: Actions is allowed for the repository and both workflows have run.
 - **Release:** the `ghcr.io/eggspot/eggmail` package is public (anonymous pull is checked on every release run). Still open: the first stable tag (`v0.1.0`) and the decisions listed in [release.md](release.md) (Docker Hub mirror, standalone binaries).
+
+## Plan gaps found by the audit (open)
+
+From the plan-coverage audit in [progress.md](progress.md#plan-coverage). Each is written as an issue: what is wrong, why it matters, size (S under 2 days, M under 2 weeks, L more), and whether it needs a decision. Fixed ones are in the table "What this audit fixed" there.
+
+| # | Gap | Why it matters | Size | Needs the owner? |
+|---|---|---|---|---|
+| G1 | **SPF, DKIM verification, DMARC, ARC, Authentication-Results and DMARC aggregate reports are libraries that nothing in the runtime calls yet.** The plan budgets 18 engineer-weeks for SPF (6), DMARC (8) and ARC (4). The owner has asked for **inbound mail support**, which is their natural caller: evaluate and record authentication results on received mail, add `Authentication-Results`, seal ARC, feed the DMARC aggregate collector. Also possible meanwhile: evaluate the customer's published SPF against `Delivery:PublicSendingIp` in domain verification; authenticate DSN senders on the bounce listener. `MessageValidator` also has no caller. | Estimate spent on code with no caller until the inbound work lands | L | No: **to be wired by the inbound work** |
+| G2 | Storage-pressure indicator has no production source (`IStoragePressureSource`); `/admin/status` never returns `pressure` and the dashboard shows nothing. SQLite has the writer metrics to build it; PostgreSQL has none | Plan delta "storage-pressure indicator", decision C | S-M | No |
+| G3 | Residual of decision 92: a bounce address is bound to a destination domain, not an address, so a recipient at `gmail.com` can still get another `gmail.com` address suppressed for that tenant. Confirm against the message history (the address is a recipient of the quoted `Message-ID`) when `History:Mode=Full` | Forged suppression across the same large provider | S-M | No |
+| G4 | VERP signing key: no rotation, stored as plain JSON in settings instead of through the secret protector | Forged bounce addresses if the config store leaks | S-M | No |
+| G5 | Options fixed at their defaults with no configuration key: DSN generation switches and content, `DefaultTls` (DANE and MTA-STS switches), many `SmtpServerOptions`, SQLite writer tuning (`WriterBatchWindow`, `WriterMaxBatch`, `WriterQueueCapacity`, `BusyTimeout`, `JournalSizeLimitBytes`). `Delivery:Throttle:MaxMessagesPerConnection` is read and not enforced | Operators cannot tune or disable what the docs describe | M | No |
+| G6 | Missing engine-level tests: circuit-breaker skip, warm-up hold, webhook 5-day auto-disable, SSRF block through a real connect; BDAT oversize and timeout, `Chunking=false`, `MaxInFlightBytes`, `TlsHandshakeTimeout`. (MTA-STS enforce, DANE, throttle ladder, greylisting and 421 handling are covered since PR 105: [testing-offline-coverage.md](testing-offline-coverage.md).) | Behaviour only unit-tested in isolation | M | No |
+| G7 | Postgres switch coverage: A to B to A round trip, `mta migrate-storage` on Postgres, Postgres to SQLite and quiesce through the dashboard | Plan gate for phase 5 says both directions | M | No |
+| G8 | Fuzz targets missing for `VerpCodec.TryDecode` (unauthenticated path), `DaneVerifier`, `EightBitDowngrader`, `MessageBuilder`; the client assembly is not instrumented in `fuzz.yml`; no recorded clean run | Phase 1 gate; hostile input on the bounce listener | S-M | No |
+| G9 | ASVS L2 checklist for API and dashboard with mapped tests, and stale "see the API PR" placeholders in `docs/security.md` | Phase 4 gate | M-L | No (the external audit covers it too) |
+| G10 | OS-crash and power-loss fault injection for SQLite `Off`/`Normal`/`Full` (only SIGKILL is tested) | Plan delta "corruption handling", risk 13 | M-L | No |
+| G11 | Webhook attempts API returns `eventType` null; the dashboard column never fills against a real server | Cosmetic but visible | S | No |
+| G12 | Ed25519 DKIM (cut item 1); List-Unsubscribe and one-click endpoint (not in the plan; Gmail and Yahoo require it from bulk senders); delayed DSN, NOTIFY/RET/ORCPT; operator hold/release/retry-now; RFC 6857 and REQUIRETLS | Features customers will ask for | M each | Yes: which are v1 |
+| G13 | Allocation budget: met for the SQLite ingest path since PR 98 (decision 89); not met for PostgreSQL (22 KB per message, no gate) or the delivery path ([benchmarks.md](benchmarks.md)) | Phase 2 gate | M-L | Whether the budget is binding for PostgreSQL |
+| G14 | Runtime: a DKIM key that cannot be read sends the message unsigned; the bounce and TLS-RPT mail is unsigned | DMARC failures on a key problem; reports may be refused by a strict receiver | S | Whether to defer instead of sending unsigned |
+| G15 | `docs/api.md` is not compared with the mapped routes by any test | Documentation drift | S | No |
 
 ## Questions still open in the sources
 

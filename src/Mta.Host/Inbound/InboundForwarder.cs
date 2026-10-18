@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using Mta.Auth.Arc;
 using Mta.Auth.Domains;
 using Mta.Core;
+using Mta.Dsn;
 using Mta.Mime;
 using Mta.Storage;
 using Mta.Storage.Logic;
@@ -109,8 +110,8 @@ public sealed record InboundForwarderOptions
 public sealed class InboundForwarder : IInboundForwarder
 {
     private readonly IStorage _storage;
-    private readonly IForwardSrs _srs;
-    private readonly IForwardHops _hops;
+    private readonly SrsCodec _srs;
+    private readonly ForwardHopMarker _hops;
     private readonly ArcValidator? _arcValidator;
     private readonly IForwardArcSealerProvider? _sealers;
     private readonly InboundForwarderOptions _options;
@@ -121,7 +122,7 @@ public sealed class InboundForwarder : IInboundForwarder
     private HashSet<string>? _localDomains;
 
     public InboundForwarder(
-        IStorage storage, IForwardSrs srs, IForwardHops hops, ArcValidator? arcValidator, IForwardArcSealerProvider? sealers, InboundForwarderOptions options, IClock clock, IMtaLog log, Action? onQueued = null)
+        IStorage storage, SrsCodec srs, ForwardHopMarker hops, ArcValidator? arcValidator, IForwardArcSealerProvider? sealers, InboundForwarderOptions options, IClock clock, IMtaLog log, Action? onQueued = null)
     {
         _storage = storage;
         _srs = srs;

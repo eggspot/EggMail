@@ -196,7 +196,7 @@ public sealed class InboundForwardPipelineTests : IAsyncLifetime
         // Envelope: SRS0 at the route's domain, not a bounce address, and it verifies with the ring (so a bounce to it is recognized and dropped).
         Assert.EndsWith("@example.org", mail.Sender);
         Assert.StartsWith("SRS0=", mail.Sender, StringComparison.Ordinal);
-        Assert.True(new Mta.Host.Inbound.ForwardSrs(_runtime.Verp).IsValid(mail.Sender[..mail.Sender.IndexOf('@')], DateTimeOffset.UtcNow));
+        Assert.True(new SrsCodec(_runtime.Verp).TryVerify(mail.Sender[..mail.Sender.IndexOf('@')], DateTimeOffset.UtcNow));
 
         // The body and every original header are there byte for byte: headers were only added on top.
         string delivered = Encoding.UTF8.GetString(mail.Body);
@@ -276,7 +276,7 @@ public sealed class InboundForwardPipelineTests : IAsyncLifetime
     [Fact]
     public async Task A_forwarded_message_is_not_forwarded_again_after_three_hops_and_a_forged_marker_does_not_count()
     {
-        var hops = new Mta.Host.Inbound.ForwardHops(_runtime.Verp);
+        var hops = new ForwardHopMarker(_runtime.Verp);
         byte[] plain = SignedByTheSender("loop body\r\n");
 
         // Three honest hops: the fourth is refused.

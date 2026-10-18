@@ -126,6 +126,7 @@ The container healthcheck is `["CMD", "/app/mta", "--healthcheck"]`: the chisele
 | Document | Contents |
 |---|---|
 | [SECURITY.md](SECURITY.md), [docs/security.md](docs/security.md) | How to report a vulnerability; the threat model, implemented controls and known gaps |
+| [docs/go-live-checklist.md](docs/go-live-checklist.md) | The owner's step-by-step list for going live: server, port 25, PTR, DNS records, test sends to Gmail/Outlook/Yahoo, ACME with a real CA, TLS-RPT, security audit, 7-day soak, first release, GitHub settings, rollback and restore drill |
 | [docs/operations.md](docs/operations.md) | Running it: configuration reference, DNS records, backups and restore, monitoring, upgrades |
 | [docs/design.md](docs/design.md) | Architecture, components, interfaces, storage backends and history level, switching, content retention, webhooks, TLS and ports, security, deployment |
 | [docs/decisions.md](docs/decisions.md) | The decisions record (owner and design decisions A–T and items 1–52) |

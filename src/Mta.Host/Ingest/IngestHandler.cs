@@ -1,3 +1,4 @@
+using System.Buffers;
 using Mta.Core;
 using Mta.Host.Security;
 using Mta.Host.Submission;
@@ -23,7 +24,7 @@ public sealed class IngestOptions
 /// <see cref="SubmissionService"/>; the bounce listener accepts only verified bounce addresses and hands the message to the
 /// <see cref="BounceProcessor"/>. The handler never relays: there is no path for an unauthenticated session to queue mail for delivery.
 /// </summary>
-public sealed class IngestHandler : ISmtpServerHandler
+public sealed class IngestHandler : ISmtpServerHandler, IBounceNamespace
 {
     private sealed class State
     {
@@ -51,6 +52,7 @@ public sealed class IngestHandler : ISmtpServerHandler
     private readonly BounceProcessor? _bounces;
     private readonly Action? _onAccepted;
     private readonly IMtaLog _log;
+    private InboundReceiver? _inbound;
 
     public IngestHandler(IStorage storage, SubmissionService submission, AuthThrottle throttle, IngestOptions? options = null, BounceProcessor? bounces = null, Action? onAccepted = null, IMtaLog? log = null)
     {
@@ -63,10 +65,30 @@ public sealed class IngestHandler : ISmtpServerHandler
         _log = log ?? NullMtaLog.Instance;
     }
 
-    public ValueTask<SmtpReply?> OnConnectedAsync(SmtpSessionContext session, CancellationToken cancellationToken) => ValueTask.FromResult<SmtpReply?>(null);
+    /// <summary>
+    /// Turns the listeners of role <see cref="ListenerRole.Inbound"/> into MX receivers (design section 11). Without it such a listener behaves exactly like the bounce listener: accepting inbound mail
+    /// is something that has to be wired, never a default. The receiver is built after the handler because it asks the handler which recipients are bounce addresses.
+    /// </summary>
+    public void UseInbound(InboundReceiver receiver) => _inbound = receiver;
+
+    /// <summary>Whether the session is one of the inbound MX receiver (and a receiver is wired).</summary>
+    private InboundReceiver? InboundOf(SmtpSessionContext session) => session.Role == ListenerRole.Inbound ? _inbound : null;
+
+    public ValueTask<SmtpReply?> OnConnectedAsync(SmtpSessionContext session, CancellationToken cancellationToken) =>
+        InboundOf(session) is { } inbound ? inbound.OnConnectedAsync(session) : ValueTask.FromResult<SmtpReply?>(null);
+
+    public void OnMessageRefused(SmtpSessionContext session, SmtpReply reply) => InboundOf(session)?.OnMessageRefused(session, reply);
+
+    public ValueTask<SmtpReply?> OnDataStartAsync(SmtpSessionContext session, MailFromInfo mail, IReadOnlyList<EmailAddress> recipients, CancellationToken cancellationToken) =>
+        InboundOf(session) is { } inbound ? inbound.OnDataStartAsync(session) : ValueTask.FromResult<SmtpReply?>(null);
 
     public async ValueTask<SmtpAuthResult> AuthenticateAsync(SmtpSessionContext session, string authorizationId, string userName, string password, CancellationToken ct)
     {
+        if (session.Role != ListenerRole.Submission)
+        {
+            return SmtpAuthResult.Failed;   // the server offers no AUTH on these listeners; a handler that is asked anyway never authenticates anybody on a port-25 listener
+        }
+
         string ip = session.RemoteEndPoint.Address.ToString();
         string userKey = "user:" + Mta.Storage.Model.ConfigMapping.NormalizeUserName(userName);   // the same key as the dashboard sign-in: one budget per account, whichever door
         var check = await _throttle.CheckAsync(ct, ip, userKey).ConfigureAwait(false);
@@ -116,9 +138,10 @@ public sealed class IngestHandler : ISmtpServerHandler
 
     public ValueTask<SmtpReply> OnMailFromAsync(SmtpSessionContext session, MailFromInfo mail, CancellationToken ct)
     {
-        if (session.Role == ListenerRole.Bounce)
+        // Every role other than Submission is "not a submitter": it can never reach the submission path (AUTH, relay, sender policy).
+        if (session.Role != ListenerRole.Submission)
         {
-            return ValueTask.FromResult(SmtpReplies.SenderOk);
+            return InboundOf(session) is { } inbound ? inbound.OnMailFromAsync(session, mail) : ValueTask.FromResult(SmtpReplies.SenderOk);
         }
 
         if (session.HandlerState is not State state)
@@ -132,9 +155,9 @@ public sealed class IngestHandler : ISmtpServerHandler
 
     public ValueTask<SmtpReply> OnRcptToAsync(SmtpSessionContext session, MailFromInfo mail, EmailAddress recipient, RcptParameters parameters, CancellationToken ct)
     {
-        if (session.Role == ListenerRole.Bounce)
+        if (session.Role != ListenerRole.Submission)
         {
-            return IsBounceRecipientReplyAsync(recipient, ct);
+            return InboundOf(session) is { } inbound ? inbound.OnRcptToAsync(session, mail, recipient, ct) : IsBounceRecipientReplyAsync(recipient, NetworkKey.Remote(session.RemoteEndPoint.Address), ct);
         }
 
         if (session.HandlerState is not State state)
@@ -150,11 +173,11 @@ public sealed class IngestHandler : ISmtpServerHandler
         return ValueTask.FromResult(SmtpReplies.RecipientOk);
     }
 
-    private async ValueTask<SmtpReply> IsBounceRecipientReplyAsync(EmailAddress recipient, CancellationToken ct)
+    private async ValueTask<SmtpReply> IsBounceRecipientReplyAsync(EmailAddress recipient, string clientKey, CancellationToken ct)
     {
         try
         {
-            return await IsBounceRecipientAsync(recipient, ct).ConfigureAwait(false)
+            return await IsBounceRecipientAsync(recipient, clientKey, ct).ConfigureAwait(false)
                 ? SmtpReplies.RecipientOk
                 : SmtpReply.Create(550, "5.1.1", "No such user here");
         }
@@ -175,9 +198,11 @@ public sealed class IngestHandler : ISmtpServerHandler
     {
         try
         {
-            if (message.Session.Role == ListenerRole.Bounce)
+            if (message.Session.Role != ListenerRole.Submission)
             {
-                return await HandleBounceAsync(message, ct).ConfigureAwait(false);
+                return InboundOf(message.Session) is { } inbound
+                    ? await inbound.OnMessageAsync(message, ct).ConfigureAwait(false)
+                    : await HandleBounceAsync(message, ct).ConfigureAwait(false);
             }
 
             if (message.Session.HandlerState is not State state)
@@ -273,16 +298,44 @@ public sealed class IngestHandler : ISmtpServerHandler
         }
     }
 
+    ValueTask<SmtpReply> IBounceNamespace.HandleMessageAsync(SmtpMessage message, CancellationToken cancellationToken) => HandleBounceAsync(message, cancellationToken);
+
+    /// <summary>
+    /// Whether a recipient is in the bounce namespace, which the inbound classification must leave alone: the shared bounce domain and the verified return-path hosts of registered domains. Inside it only a valid
+    /// signed token (or <c>postmaster</c>/<c>abuse</c> at the shared bounce domain) is accepted; anything else is <c>550 5.1.1</c> and is never an inbound recipient (decision 92, design section 11.4).
+    /// </summary>
+    async ValueTask<BounceRecipientClass> IBounceNamespace.ClassifyAsync(EmailAddress recipient, string clientKey, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(_options.BounceDomain))
+        {
+            return BounceRecipientClass.NotBounce;
+        }
+
+        bool shared = string.Equals(recipient.Domain, _options.BounceDomain, StringComparison.OrdinalIgnoreCase);
+        if (!shared)
+        {
+            // A caller without a valid token never causes a storage lookup: a host the cache knows as a verified return-path host is refused with the bounce answer, any other name is simply not ours.
+            bool tokenValid = _bounces?.IsValidBounceAddress(recipient.LocalPart) ?? false;
+            if (!await IsVerifiedReturnPathHostAsync(recipient.Domain, tokenValid, clientKey, cancellationToken).ConfigureAwait(false))
+            {
+                return BounceRecipientClass.NotBounce;
+            }
+        }
+
+        return await IsBounceRecipientAsync(recipient, clientKey, cancellationToken).ConfigureAwait(false) ? BounceRecipientClass.Accepted : BounceRecipientClass.Refused;
+    }
+
     private async ValueTask<SmtpReply> HandleBounceAsync(SmtpMessage message, CancellationToken ct)
     {
         // Always answer 250 for a verified bounce address, whatever the body holds: a rejection here would only make the remote server
         // generate more traffic, and nothing sensitive is revealed by accepting.
         if (_bounces is not null)
         {
-            byte[] body = message.ToArray();
+            // A report is read from its head: the status part comes first, and some servers return the whole original after it. Only that much is copied and parsed.
+            byte[] body = message.Body.Slice(0, Math.Min(message.Body.Length, MaxBounceHeadBytes)).ToArray();
             foreach (var rcpt in message.Recipients)
             {
-                if (_bounces.IsValidBounceAddress(rcpt.LocalPart) && await IsBounceRecipientAsync(rcpt, ct).ConfigureAwait(false))
+                if (_bounces.IsValidBounceAddress(rcpt.LocalPart) && await IsBounceRecipientAsync(rcpt, NetworkKey.Remote(message.Session.RemoteEndPoint.Address), ct).ConfigureAwait(false))
                 {
                     await _bounces.ProcessAsync(rcpt.LocalPart, body, ct).ConfigureAwait(false);
                 }
@@ -297,7 +350,7 @@ public sealed class IngestHandler : ISmtpServerHandler
     /// token at a sending domain's own return-path host. The token check is a local HMAC, so strangers' addresses cost no storage access; only an
     /// address that carries a valid token for a host other than the shared bounce domain is looked up.
     /// </summary>
-    private async ValueTask<bool> IsBounceRecipientAsync(EmailAddress recipient, CancellationToken ct)
+    private async ValueTask<bool> IsBounceRecipientAsync(EmailAddress recipient, string clientKey, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(_options.BounceDomain))
         {
@@ -314,11 +367,57 @@ public sealed class IngestHandler : ISmtpServerHandler
             return _bounces?.IsValidBounceAddress(recipient.LocalPart) ?? false;
         }
 
-        return (_bounces?.IsValidBounceAddress(recipient.LocalPart) ?? false) && await IsVerifiedReturnPathHostAsync(recipient.Domain, ct).ConfigureAwait(false);
+        return (_bounces?.IsValidBounceAddress(recipient.LocalPart) ?? false) && await IsVerifiedReturnPathHostAsync(recipient.Domain, tokenValid: true, clientKey, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>How much of a report is parsed (the status part of a DSN comes after its human-readable text, and a server may append the whole original).</summary>
+    private const int MaxBounceHeadBytes = 256 * 1024;
+
+    // Names of the form bounce.<anything> each cost a storage lookup the first time they are asked about. Only a caller with a valid signed token can cause one (a name without a token is answered from the
+    // cache or is "not ours"), and each client gets a few uncached lookups a second, with a backstop for the process: over it the caller (who holds a real token) gets a temporary failure and tries again.
+    private const int MaxUncachedHostLookupsPerClientPerSecond = 10;
+    private const int MaxUncachedHostLookupsPerSecond = 200;
+    private const int MaxTrackedLookupClients = 4096;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (long Second, int Count)> _lookupsByClient = new(StringComparer.Ordinal);
+    private long _lookupWindow;
+    private int _lookupsInWindow;
+
+    private bool TryTakeLookup(string clientKey)
+    {
+        long second = Environment.TickCount64 / 1000;
+        if (_lookupsByClient.Count >= MaxTrackedLookupClients)
+        {
+            foreach (var entry in _lookupsByClient)
+            {
+                if (entry.Value.Second < second)
+                {
+                    _lookupsByClient.TryRemove(entry.Key, out _);
+                }
+            }
+
+            if (_lookupsByClient.Count >= MaxTrackedLookupClients && !_lookupsByClient.ContainsKey(clientKey))
+            {
+                return false;
+            }
+        }
+
+        // The client's own budget first: a client past it is refused without touching the process-wide count, so one client cannot use up what the others need.
+        (long Second, int Count) updated = _lookupsByClient.AddOrUpdate(clientKey, (second, 1), (_, old) => old.Second == second ? (second, old.Count + 1) : (second, 1));
+        if (updated.Count > MaxUncachedHostLookupsPerClientPerSecond)
+        {
+            return false;
+        }
+
+        if (Interlocked.Exchange(ref _lookupWindow, second) != second)
+        {
+            Volatile.Write(ref _lookupsInWindow, 0);
+        }
+
+        return Interlocked.Increment(ref _lookupsInWindow) <= MaxUncachedHostLookupsPerSecond;
     }
 
     /// <summary><c>bounce.example.com</c> is the return-path host of the registered domain <c>example.com</c> when that domain's return-path CNAME has been verified.</summary>
-    private async ValueTask<bool> IsVerifiedReturnPathHostAsync(string host, CancellationToken ct)
+    private async ValueTask<bool> IsVerifiedReturnPathHostAsync(string host, bool tokenValid, string clientKey, CancellationToken ct)
     {
         string prefix = _options.ReturnPathLabel + ".";
         if (!host.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) || host.Length == prefix.Length)
@@ -332,15 +431,45 @@ public sealed class IngestHandler : ISmtpServerHandler
             return cached.Verified;
         }
 
+        if (!tokenValid)
+        {
+            return false;   // no token, no lookup
+        }
+
+        if (!TryTakeLookup(clientKey))
+        {
+            throw new StorageUnavailableException("Too many return-path host lookups at the moment.");
+        }
+
         DomainRecord? domain = await _storage.Config.FindDomainByNameAsync(host[prefix.Length..], ct).ConfigureAwait(false);
         bool verified = domain is { ReturnPathVerified: true, ReturnPathHost: { } returnPathHost } && string.Equals(returnPathHost, host, StringComparison.OrdinalIgnoreCase);
         if (_returnPathHosts.Count >= MaxCachedHosts)
         {
-            _returnPathHosts.Clear();   // only hosts that came with a valid token get this far, but never let a prober grow the table
+            EvictOldestHosts(now);
         }
 
         _returnPathHosts[host] = (verified, now + HostCacheTicks);
         return verified;
+    }
+
+    // Expired answers go first, then the ones that expire first (the oldest): never the whole table at once, which would send every host back to storage.
+    private void EvictOldestHosts(long now)
+    {
+        foreach (var entry in _returnPathHosts)
+        {
+            if (now >= entry.Value.ExpiresAt)
+            {
+                _returnPathHosts.TryRemove(entry.Key, out _);
+            }
+        }
+
+        if (_returnPathHosts.Count >= MaxCachedHosts)
+        {
+            foreach (string key in _returnPathHosts.OrderBy(e => e.Value.ExpiresAt).Take(MaxCachedHosts / 8).Select(e => e.Key).ToList())
+            {
+                _returnPathHosts.TryRemove(key, out _);
+            }
+        }
     }
 
     public void OnDisconnected(SmtpSessionContext session)
