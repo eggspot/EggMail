@@ -120,6 +120,7 @@ describe('inbound explanations', () => {
     expect(explainActionCode('endpoint_disabled')).toContain('Enable');
     expect(explainActionCode('route_is_now_store')).toContain('kept');
     expect(explainActionCode('unauthenticated_local_sender')).toContain('spoof');
+    for (const code of ['forward_backlog_full', 'forward_key_conflict', 'dmarc_unsettled', 'srs_failed']) expect(explainActionCode(code)).toBeTruthy();
     expect(explainActionCode('something_new')).toBeNull();
     expect(explainActionCode(null)).toBeNull();
   });
