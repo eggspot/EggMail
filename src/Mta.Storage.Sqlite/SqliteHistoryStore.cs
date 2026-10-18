@@ -258,9 +258,9 @@ internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore, IMes
     public ValueTask<Page<MessageSummary>> SearchAsync(MessageQuery query, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(query);
-        if (!rt.IsFull)
+        if (!rt.IsFull || !StorageText.IsStorable(query))
         {
-            return ValueTask.FromResult(new Page<MessageSummary>([], null));
+            return ValueTask.FromResult(new Page<MessageSummary>([], null));   // a filter that cannot be stored matches nothing (and is never cleaned into one that does)
         }
 
         int limit = Math.Clamp(query.Limit, 1, 500);

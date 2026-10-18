@@ -1,0 +1,21 @@
+# A list appends a footer: the body hash no longer matches (dkim=fail) but the envelope sender is still the author's and the list's address is authorized, so SPF carries DMARC.
+client-ip: 192.0.2.3
+helo: mail.example.com
+mail-from: alice@example.com
+authserv-id: mx.receiver.example
+[zone]
+example.com TXT v=spf1 ip4:192.0.2.3 -all
+_dmarc.example.com TXT v=DMARC1; p=reject
+[message]
+From: Alice <alice@example.com>
+To: Bob <bob@receiver.example>
+Subject: Fixture
+Date: Mon, 12 Oct 2026 12:00:00 +0000
+Message-ID: <fx1@example.com>
+
+Hello Bob.
+[sign domain=example.com selector=s1]
+[edit]
+replace: Hello Bob. => Hello Bob.\r\n--\r\nThe list footer
+[expect]
+mx.receiver.example; spf=pass smtp.mailfrom=alice@example.com; dkim=fail reason="body hash did not verify" header.d=example.com header.s=s1 header.b=vbyOuf58; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=example.com

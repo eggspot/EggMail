@@ -166,6 +166,12 @@ public sealed record TlsPolicyDecision
     /// <summary>Names a DANE-TA certificate may carry besides <see cref="ExpectedHostname"/>.</summary>
     public IReadOnlyList<string> DaneReferenceNames { get; init; } = [];
 
+    /// <summary>
+    /// A way the connection breaks the policy that the policy tolerates (MTA-STS <c>testing</c> mode lets mail go to an MX the policy does not list). The mail goes out, and the
+    /// session is reported as the failure the policy owner wants to hear about (RFC 8460) instead of as a success. <see langword="null"/> when nothing is tolerated.
+    /// </summary>
+    public TlsResultType? ToleratedFailure { get; init; }
+
     /// <summary>Pre-connection facts for TLS-RPT (fetch errors, DANE problems, MX policy mismatch in testing mode).</summary>
     public IReadOnlyList<TlsPolicyReason> Reasons { get; init; } = [];
 

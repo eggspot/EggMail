@@ -1,0 +1,18 @@
+# Neither SPF nor DKIM authenticate the From domain; the policy is p=none, so DMARC fails but the disposition stays none.
+client-ip: 198.51.100.9
+helo: mail.example.com
+mail-from: alice@example.com
+authserv-id: mx.receiver.example
+[zone]
+example.com TXT v=spf1 ip4:192.0.2.3 -all
+_dmarc.example.com TXT v=DMARC1; p=none
+[message]
+From: Alice <alice@example.com>
+To: Bob <bob@receiver.example>
+Subject: Fixture
+Date: Mon, 12 Oct 2026 12:00:00 +0000
+Message-ID: <fx1@example.com>
+
+Hello Bob.
+[expect]
+mx.receiver.example; spf=fail smtp.mailfrom=alice@example.com; dkim=none; dmarc=fail (p=NONE sp=NONE dis=NONE) header.from=example.com

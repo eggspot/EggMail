@@ -70,15 +70,35 @@ internal sealed class PostgresInboundAccess(PostgresRuntime rt, IStorageModelHoo
 
     public bool IsConstraintViolation(Exception exception) => PostgresErrors.IsConstraint(exception);
 
-    public IReadOnlyList<Guid> ClaimIds(PostgresDbContext context, string owner, int max, DateTimeOffset now, DateTimeOffset until)
+    public IReadOnlyList<Guid> ClaimIds(PostgresDbContext context, string owner, int max, DateTimeOffset now, DateTimeOffset until, InboundClaimLimits? limits)
     {
         DbConnection connection = context.Database.GetDbConnection();
         using DbCommand cmd = connection.CreateCommand();
         cmd.Transaction = context.Database.CurrentTransaction?.GetDbTransaction();
-        cmd.CommandText =
-            "UPDATE inbound_message SET lease_owner = @owner, lease_until = @until, action_attempts = action_attempts + 1, claim_sequence = claim_sequence + 1 WHERE id IN (" +
-            "SELECT id FROM inbound_message WHERE transfer_switch_id IS NULL AND action_state = 0 AND action_next_attempt_at <= @now AND lease_until <= @now ORDER BY action_next_attempt_at, id LIMIT @max FOR UPDATE SKIP LOCKED) " +
-            "RETURNING id";
+        if (limits is null)
+        {
+            cmd.CommandText =
+                "UPDATE inbound_message SET lease_owner = @owner, lease_until = @until, action_attempts = action_attempts + 1, claim_sequence = claim_sequence + 1 WHERE id IN (" +
+                "SELECT id FROM inbound_message WHERE transfer_switch_id IS NULL AND action_state = 0 AND action_next_attempt_at <= @now AND lease_until <= @now ORDER BY action_next_attempt_at, id LIMIT @max FOR UPDATE SKIP LOCKED) " +
+                "RETURNING id";
+        }
+        else
+        {
+            // A window function cannot be combined with FOR UPDATE, so the candidates are chosen without locks and the UPDATE decides: it waits for a row another replica is claiming and then re-checks
+            // that the row is still unleased (the same predicate), so a row is never claimed twice; the loser of a race simply gets fewer rows and asks again.
+            string exclusion = limits.ExcludeTenants is { Count: > 0 } ? " AND tenant_id <> ALL(@excluded)" : string.Empty;
+            cmd.CommandText =
+                "UPDATE inbound_message m SET lease_owner = @owner, lease_until = @until, action_attempts = m.action_attempts + 1, claim_sequence = m.claim_sequence + 1 FROM (" +
+                "SELECT id FROM (SELECT id, action_next_attempt_at AS due, ROW_NUMBER() OVER (PARTITION BY tenant_id ORDER BY action_next_attempt_at, id) AS rn FROM inbound_message " +
+                "WHERE transfer_switch_id IS NULL AND action_state = 0 AND action_next_attempt_at <= @now AND lease_until <= @now" + exclusion + ") t WHERE rn <= @cap ORDER BY due, id LIMIT @max) c " +
+                "WHERE m.id = c.id AND m.action_state = 0 AND m.lease_until <= @now AND m.transfer_switch_id IS NULL RETURNING m.id";
+            cmd.Parameters.Add(new NpgsqlParameter("cap", NpgsqlDbType.Bigint) { Value = limits.MaxPerTenant > 0 ? (long)limits.MaxPerTenant : long.MaxValue });
+            if (limits.ExcludeTenants is { Count: > 0 } excluded)
+            {
+                cmd.Parameters.Add(new NpgsqlParameter("excluded", NpgsqlDbType.Array | NpgsqlDbType.Uuid) { Value = excluded.ToArray() });
+            }
+        }
+
         cmd.Parameters.Add(new NpgsqlParameter("owner", NpgsqlDbType.Text) { Value = owner });
         cmd.Parameters.Add(new NpgsqlParameter("until", NpgsqlDbType.TimestampTz) { Value = StorageTime.Normalize(until) });
         cmd.Parameters.Add(new NpgsqlParameter("now", NpgsqlDbType.TimestampTz) { Value = StorageTime.Normalize(now) });

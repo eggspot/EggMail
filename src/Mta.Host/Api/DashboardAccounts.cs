@@ -21,7 +21,7 @@ public static class DashboardAccounts
     public static string? UserNameProblem(string? userName)
     {
         string name = userName?.Trim() ?? "";
-        return name.Length is 0 or > MaximumUserNameLength || name.Any(char.IsControl)
+        return name.Length is 0 or > MaximumUserNameLength || ApiText.HasUnsafeCharacter(name)
             ? $"A user name of 1 to {MaximumUserNameLength} characters without control characters is required."
             : null;
     }

@@ -61,7 +61,7 @@ internal sealed class FakeReceiver : HttpMessageHandler
             _requests.Enqueue(new Request(request.RequestUri!, headers, body, request.Content?.Headers.ContentType?.ToString() ?? ""));
             if (Gate is { } gate)
             {
-                await gate().ConfigureAwait(false);
+                await gate().WaitAsync(cancellationToken).ConfigureAwait(false);   // a real handler stops when the caller cancels
             }
 
             HttpStatusCode status;
@@ -81,9 +81,13 @@ internal sealed class FakeReceiver : HttpMessageHandler
 
 internal sealed class PlainProtector : ISecretProtector
 {
+    /// <summary>A key provider that is down: opening a secret throws, like a key ring that cannot be read.</summary>
+    public bool Down { get; set; }
+
     public byte[] Protect(ReadOnlySpan<byte> plaintext, string purpose) => plaintext.ToArray();
 
-    public byte[] Unprotect(ReadOnlySpan<byte> protectedData, string purpose) => protectedData.ToArray();
+    public byte[] Unprotect(ReadOnlySpan<byte> protectedData, string purpose) =>
+        Down ? throw new System.Security.Cryptography.CryptographicException("the key ring is not available") : protectedData.ToArray();
 }
 
 internal sealed class RecordingPublisher : IWebhookPublisher
@@ -121,6 +125,7 @@ internal sealed class InboundActionHarness : IAsyncDisposable
     public RecordingPublisher Publisher { get; } = new();
     public FakeForwarder Forwarder { get; } = new();
     public bool InboundEnabled { get; set; } = true;
+    public bool KeysDown { get => _protector.Down; set => _protector.Down = value; }
     public Guid TenantId { get; } = Ids.New();
     public DomainRecord Domain { get; private set; } = null!;
     public WebhookEndpointRecord Endpoint { get; private set; } = null!;
@@ -204,6 +209,35 @@ internal sealed class InboundActionHarness : IAsyncDisposable
             RouteId = routeId ?? Route.Id,
             ActionKind = kind ?? Route.ActionKind,
             Raw = raw ?? SimpleMessage(),
+        };
+        await Storage.Inbound.AcceptAsync([draft], default);
+        return draft;
+    }
+
+    /// <summary>Another tenant with an enabled inbound domain, a webhook endpoint and a catch-all webhook route.</summary>
+    public sealed record OtherTenant(Guid TenantId, DomainRecord Domain, InboundRouteRecord Route);
+
+    public async Task<OtherTenant> AddTenantAsync(string domainName, string url)
+    {
+        Guid tenantId = Ids.New();
+        await Storage.Config.UpsertTenantAsync(new Tenant(tenantId, "Other " + domainName, "o" + tenantId.ToString("N")[..8], true, Clock.UtcNow, false), default);
+        var domain = new DomainRecord(Ids.New(), tenantId, domainName, DomainStatus.Verified, null, false, Clock.UtcNow, null, null, 0, null, false, null);
+        await Storage.Config.UpsertDomainAsync(domain, default);
+        await Storage.Inbound.UpsertSettingsAsync(new InboundDomainSettings(domain.Id, tenantId, true, InboundDmarcAction.RecordOnly, null, null, null, null, null, Clock.UtcNow), default);
+        WebhookEndpointRecord endpoint = await AddEndpointAsync(tenantId, url);
+        var route = new InboundRouteRecord(Ids.New(), tenantId, domain.Id, "route", 10, true, InboundMatchKind.CatchAll, null, false, InboundActionKind.Webhook, endpoint.Id, InboundWebhookFormat.Json, [], Clock.UtcNow, Clock.UtcNow);
+        await Storage.Inbound.UpsertRouteAsync(route, default);
+        return new OtherTenant(tenantId, domain, route);
+    }
+
+    public async Task<InboundMessageDraft> ReceiveForAsync(OtherTenant tenant, byte[]? raw = null)
+    {
+        DateTimeOffset at = Clock.UtcNow;
+        var draft = new InboundMessageDraft
+        {
+            Id = Ids.New(at), TenantId = tenant.TenantId, DomainId = tenant.Domain.Id, Domain = tenant.Domain.Name, ReceivedAt = at, RemoteAddress = "203.0.113.9", Helo = "mail.sender.test", TlsUsed = true,
+            EnvelopeFrom = "alice@sender.test", EnvelopeTo = "support@" + tenant.Domain.Name, Subject = "Hello",
+            Auth = InboundAuthResults.NotChecked, RouteId = tenant.Route.Id, ActionKind = InboundActionKind.Webhook, Raw = raw ?? SimpleMessage(),
         };
         await Storage.Inbound.AcceptAsync([draft], default);
         return draft;

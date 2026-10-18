@@ -37,6 +37,13 @@ public sealed class DeliveryServices
 
     /// <summary>Collects TLS-RPT data about sessions to MTA-STS / DANE domains; null disables reporting.</summary>
     public Mta.Tls.TlsRpt.TlsRptCollector? TlsReports { get; init; }
+
+    /// <summary>
+    /// How the certificate of an MX host is validated when the policy asks for PKIX validation: private trust anchors instead of the system store, and the
+    /// clock used for validity. Null (the default, and what production uses) means the system store and the system time. Tests and labs with a private CA set it.
+    /// <para>Never expose this in configuration (<c>MtaConfig</c>, the stored settings or the API): trust anchors that an operator or a tenant can add here would let a forged certificate pass a validated policy.</para>
+    /// </summary>
+    public RemoteCertificateValidatorOptions? CertificateValidation { get; init; }
 }
 
 /// <summary>
@@ -444,6 +451,11 @@ public sealed class DeliveryProcessor
                 return Synthetic(RouteAttemptResult.PermanentReply, 550, "5.1.2", mx.Detail ?? "domain has no mail host");
             case MxResolutionStatus.TempFail:
                 return Synthetic(RouteAttemptResult.TemporaryReply, 451, "4.4.3", mx.Detail ?? "temporary DNS failure resolving the mail host");
+            case MxResolutionStatus.AddressesRefused:
+                // Our policy, not a fact about the domain: never a permanent failure (that would bounce the mail and suppress the recipient for good).
+                // The mail waits until it expires, and the bounce then says why. An operator who runs such a mail server sets the switch.
+                _s.Log.Write(MtaLogLevel.Warning, Source, $"delivery to {first.RecipientDomain} is held: its mail hosts resolve only to internal-network or reserved addresses, which are refused unless Delivery:AllowPrivateMxAddresses is true");
+                return Synthetic(RouteAttemptResult.TemporaryReply, 451, "4.4.4", $"the mail hosts of {first.RecipientDomain} resolve only to internal-network or reserved addresses, which this server does not deliver to unless Delivery:AllowPrivateMxAddresses is true");
         }
 
         var domainTls = await _s.Tls.ResolveDomainAsync(first.RecipientDomain, _s.TlsPolicies.For(first.RecipientDomain), ct).ConfigureAwait(false);
@@ -484,7 +496,8 @@ public sealed class DeliveryProcessor
                 }
 
                 hosts++;
-                var decision = await _s.Tls.ResolveForMxAsync(domainTls, exchanger.Host, mx.MxAuthenticated, _options.RemotePort, ct).ConfigureAwait(false);
+                int port = _options.RemotePortFor(exchanger.Host);
+                var decision = await _s.Tls.ResolveForMxAsync(domainTls, exchanger.Host, mx.MxAuthenticated, port, ct).ConfigureAwait(false);
                 if (decision.IsBlocked)
                 {
                     TlsReportRecorder.RecordBlocked(_s.TlsReports, decision, ReportableSendingIp(ProbeSourceAddress(exchanger.Addresses.FirstOrDefault())));
@@ -517,7 +530,7 @@ public sealed class DeliveryProcessor
                     {
                         Host = exchanger.Host,
                         Address = address,
-                        Port = _options.RemotePort,
+                        Port = port,
                         Tls = BuildTlsPolicy(decision, exchanger.Host, out var validator),
                     };
                     var result = await SendOnceAsync(target, current, ct).ConfigureAwait(false);
@@ -526,6 +539,25 @@ public sealed class DeliveryProcessor
                     result.Validator = validator;
                     result.ReceivingIp = address.ToString();
                     ReportTls(first.RecipientDomain, decision, result);
+                    if (result.Route == RouteAttemptResult.TlsPolicyFailure && result.TlsFailure == TlsFailure.HandshakeFailed && decision.AllowsPlaintextFallback)
+                    {
+                        // Opportunistic TLS (RFC 7435): a server whose STARTTLS upgrade breaks (an old TLS stack, a middlebox, a half-configured certificate) must not keep mail
+                        // from being delivered, since the message could have been sent in clear had the server not offered TLS at all. The failure has been reported; the
+                        // message is offered again on a new connection that does not try STARTTLS. Policies that require TLS (encrypt, verify, MTA-STS enforce, DANE) never get here.
+                        Trace($"{exchanger.Host} [{address}] broke the STARTTLS upgrade; retrying in plaintext (opportunistic TLS)");
+                        var clearTarget = new SmtpRemoteTarget { Host = exchanger.Host, Address = address, Port = port, Tls = SmtpTlsPolicy.Disabled };
+                        var clear = await SendOnceAsync(clearTarget, current, ct).ConfigureAwait(false);
+                        clear.MxHost = exchanger.Host;
+                        clear.Decision = decision;
+                        clear.ReceivingIp = address.ToString();
+                        if (clear.Tls is { } clearSession)
+                        {
+                            clear.Tls = clearSession with { StartTlsAdvertised = true, PlaintextFallback = true };
+                        }
+
+                        result = clear;
+                    }
+
                     if (result.Route is RouteAttemptResult.ConnectTimeout or RouteAttemptResult.ConnectRefused)
                     {
                         _s.Routes.ReportMxHost(exchanger.Host, result.Route);
@@ -706,7 +738,7 @@ public sealed class DeliveryProcessor
         };
     }
 
-    private static SmtpTlsPolicy BuildTlsPolicy(TlsPolicyDecision decision, string mxHost, out RemoteCertificateValidator? validator)
+    private SmtpTlsPolicy BuildTlsPolicy(TlsPolicyDecision decision, string mxHost, out RemoteCertificateValidator? validator)
     {
         validator = null;
         if (!decision.AttemptTls)
@@ -714,7 +746,7 @@ public sealed class DeliveryProcessor
             return SmtpTlsPolicy.Disabled;
         }
 
-        validator = new RemoteCertificateValidator(decision);
+        validator = new RemoteCertificateValidator(decision, _s.CertificateValidation);
         return new SmtpTlsPolicy
         {
             Mode = SmtpTlsMode.StartTls,
@@ -786,6 +818,8 @@ public sealed class DeliveryProcessor
             }
             catch (Exception ex) when (ex is IOException or SocketException or SmtpProtocolException or ObjectDisposedException)
             {
+                // A reply that is not SMTP where the verdict on the message should be is as good as no verdict: the server may have accepted the data.
+                bool endOfDataStarted = pooled.Connection.EndOfDataStarted;
                 pooled.Discard();
                 return new AttemptResult
                 {
@@ -793,6 +827,7 @@ public sealed class DeliveryProcessor
                     Reply = SmtpReply.Create(421, "4.4.2", "connection lost: " + ex.Message),
                     Error = ex.Message,
                     Tls = tlsSession,
+                    EndOfDataSent = endOfDataStarted,
                     Stage = ClientSmtpStage.Data,
                     Duration = Stopwatch.GetElapsedTime(started),
                     SendingIp = sendingIp,
@@ -1264,6 +1299,9 @@ public sealed class DeliveryProcessor
             return null;
         }
 
+        // The policy's own verdict decides: the platform alone knows only the system trust store, so a DANE-authenticated server (usually a self-signed
+        // certificate pinned in DNS) or one that chains to a configured private CA would show as unverified.
+        bool verified = a.Validator?.Outcome is { } outcome ? outcome.Verified && s.Used : s.Verified;
         return new TlsInfo(
             s.Used,
             s.Protocol,
@@ -1272,7 +1310,7 @@ public sealed class DeliveryProcessor
             s.PeerIssuer,
             s.PeerSha256,
             s.PolicyErrors == System.Net.Security.SslPolicyErrors.None ? null : s.PolicyErrors.ToString(),
-            s.Verified,
+            verified,
             a.Decision?.Kind.ToString(),
             null,
             s.StartTlsAdvertised,

@@ -1,0 +1,18 @@
+# A bounce (empty MAIL FROM): SPF is evaluated on the HELO name.
+client-ip: 192.0.2.3
+helo: mail.example.com
+mail-from: 
+authserv-id: mx.receiver.example
+[zone]
+mail.example.com TXT v=spf1 ip4:192.0.2.3 -all
+_dmarc.example.com TXT v=DMARC1; p=reject
+[message]
+From: Alice <alice@example.com>
+To: Bob <bob@receiver.example>
+Subject: Fixture
+Date: Mon, 12 Oct 2026 12:00:00 +0000
+Message-ID: <fx1@example.com>
+
+Hello Bob.
+[expect]
+mx.receiver.example; spf=pass smtp.helo=mail.example.com; dkim=none; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=example.com

@@ -45,6 +45,32 @@ internal static class ApiRouteExtensions
     public static RouteHandlerBuilder DeleteRoute(this IEndpointRouteBuilder builder, string pattern, Delegate handler) => builder.MapDelete(pattern, handler);
 }
 
+/// <summary>
+/// Text a caller may not put into a name, a tag or a filter: control characters (including NUL and the C1 range), the Unicode line and paragraph
+/// separators (they end a line in logs and in some parsers), the bidirectional overrides and isolates (they reorder what a person reads in the dashboard,
+/// in a log or in an e-mail), and unpaired surrogates (not text; PostgreSQL could not store it).
+/// </summary>
+internal static class ApiText
+{
+    public static bool HasUnsafeCharacter(string? text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return false;
+        }
+
+        foreach (char c in text)
+        {
+            if (char.IsControl(c) || c is '\u2028' or '\u2029' || (c >= '\u202A' && c <= '\u202E') || (c >= '\u2066' && c <= '\u2069'))
+            {
+                return true;
+            }
+        }
+
+        return !StorageText.IsStorable(text);
+    }
+}
+
 /// <summary>A list response: <c>{ items, next_cursor }</c>.</summary>
 public sealed record ListResponse<T>(IReadOnlyList<T> Items, [property: System.Text.Json.Serialization.JsonPropertyName("next_cursor")] string? NextCursor);
 
@@ -128,6 +154,13 @@ public sealed class QueryReader(HttpRequest request, ValidationErrors errors)
         if (value.Length > maxLength)
         {
             errors.Add(name, $"At most {maxLength} characters.");
+            return null;
+        }
+
+        if (ApiText.HasUnsafeCharacter(value))
+        {
+            // A NUL or an unpaired surrogate is no filter anybody means, and PostgreSQL could not even be asked about it.
+            errors.Add(name, "Must not contain control characters.");
             return null;
         }
 

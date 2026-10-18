@@ -24,7 +24,11 @@ public sealed class InboundStoreFacade(IInboundConfigStore config, IInboundMessa
 
     public ValueTask AcceptAsync(IReadOnlyList<InboundMessageDraft> drafts, CancellationToken cancellationToken) => messages.AcceptAsync(drafts, cancellationToken);
 
-    public ValueTask<Page<InboundMessage>> SearchAsync(InboundMessageQuery query, CancellationToken cancellationToken) => messages.SearchAsync(query, cancellationToken);
+    // A filter with text that cannot be stored (NUL, an unpaired surrogate) matches nothing, on every backend (StorageText): PostgreSQL could not even be asked.
+    public ValueTask<Page<InboundMessage>> SearchAsync(InboundMessageQuery query, CancellationToken cancellationToken) =>
+        Storable(query) ? messages.SearchAsync(query, cancellationToken) : ValueTask.FromResult(new Page<InboundMessage>([], null));
+
+    private static bool Storable(InboundMessageQuery q) => StorageText.IsStorable(q.Recipient) && StorageText.IsStorable(q.Sender) && StorageText.IsStorable(q.SubjectContains);
 
     public ValueTask<InboundMessage?> GetAsync(Guid tenantId, Guid messageId, CancellationToken cancellationToken) => messages.GetAsync(tenantId, messageId, cancellationToken);
 
@@ -32,11 +36,14 @@ public sealed class InboundStoreFacade(IInboundConfigStore config, IInboundMessa
 
     public ValueTask<bool> DeleteAsync(Guid tenantId, Guid messageId, CancellationToken cancellationToken) => messages.DeleteAsync(tenantId, messageId, cancellationToken);
 
-    public ValueTask<long> DeleteMatchingAsync(InboundMessageQuery query, CancellationToken cancellationToken) => messages.DeleteMatchingAsync(query, cancellationToken);
+    public ValueTask<long> DeleteMatchingAsync(InboundMessageQuery query, CancellationToken cancellationToken) =>
+        Storable(query) ? messages.DeleteMatchingAsync(query, cancellationToken) : ValueTask.FromResult(0L);
 
     public ValueTask<InboundRetryResult> RetryActionAsync(Guid tenantId, Guid messageId, DateTimeOffset now, CancellationToken cancellationToken) => messages.RetryActionAsync(tenantId, messageId, now, cancellationToken);
 
-    public ValueTask<IReadOnlyList<ClaimedInboundAction>> ClaimActionsAsync(string owner, int max, DateTimeOffset now, TimeSpan lease, CancellationToken cancellationToken) => messages.ClaimActionsAsync(owner, max, now, lease, cancellationToken);
+    public ValueTask<IReadOnlyList<ClaimedInboundAction>> ClaimActionsAsync(string owner, int max, DateTimeOffset now, TimeSpan lease, CancellationToken cancellationToken, InboundClaimLimits? limits = null) => messages.ClaimActionsAsync(owner, max, now, lease, cancellationToken, limits);
+
+    public ValueTask<long> CountActionsAsync(InboundActionState state, CancellationToken cancellationToken) => messages.CountActionsAsync(state, cancellationToken);
 
     public ValueTask<bool> ExtendActionLeaseAsync(Guid messageId, string owner, DateTimeOffset until, CancellationToken cancellationToken) => messages.ExtendActionLeaseAsync(messageId, owner, until, cancellationToken);
 
