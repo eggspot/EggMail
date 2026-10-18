@@ -251,8 +251,9 @@ internal sealed class InboundHeaderAnalysis
     private static bool TryRecoverDomain(string addrSpec, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out string? domain)
     {
         domain = null;
+        // Exactly one "@": a refused mailbox with several ("ceo@victim.test x@evil.test") reads as different addresses to different parsers, and the one after the last "@" is the one an attacker would pick.
         int at = addrSpec.LastIndexOf('@');
-        if (at < 0)
+        if (at < 0 || addrSpec.IndexOf('@', StringComparison.Ordinal) != at)
         {
             return false;
         }

@@ -145,24 +145,29 @@ public sealed class InboundVerifier
         var dkimForDmarc = dkimResults.Where(r => r.Domain is not null).Select(r => new DkimAuthResult(r.Domain!, r.IsPass, r.Selector)).ToList();
         if (fromDomains.Count > 0)
         {
-            var dmarc = new DmarcEvaluator(new QueryBudgetResolver(_dns, MaxDmarcQueries));   // its own budget: nothing the SPF record of the sender does can make the policy lookup fail
-            using var dmarcTime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            dmarcTime.CancelAfter(_options.VerificationTimeout < DmarcTimeLimit ? _options.VerificationTimeout : DmarcTimeLimit);
-            foreach (string fromDomain in fromDomains)
+            // Every From domain is looked up side by side, each with a budget and a deadline of its own: a domain whose policy lookup never answers (an attacker can make one of his own do that) cannot
+            // use up the time the others need, in whatever order the addresses are written.
+            TimeSpan limit = _options.VerificationTimeout < DmarcTimeLimit ? _options.VerificationTimeout : DmarcTimeLimit;
+            (DmarcEvaluation Evaluation, bool TimedOut)[] looked = await Task.WhenAll(fromDomains.Select(async fromDomain =>
             {
-                DmarcEvaluation evaluation;
+                var dmarc = new DmarcEvaluator(new QueryBudgetResolver(_dns, MaxDmarcQueries));
+                using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                deadline.CancelAfter(limit);
                 try
                 {
-                    evaluation = await dmarc.EvaluateAsync(new DmarcInput(fromDomain, spfForDmarc, dkimForDmarc), dmarcTime.Token).ConfigureAwait(false);
+                    return (await dmarc.EvaluateAsync(new DmarcInput(fromDomain, spfForDmarc, dkimForDmarc), deadline.Token).ConfigureAwait(false), false);
                 }
                 catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
                 {
-                    timedOut = true;
-                    evaluation = TempErrorEvaluation(fromDomain, "verification timed out");
+                    return (TempErrorEvaluation(fromDomain, "verification timed out"), true);
                 }
-
+            })).ConfigureAwait(false);
+            for (int i = 0; i < looked.Length; i++)
+            {
+                DmarcEvaluation evaluation = looked[i].Evaluation;
+                timedOut |= looked[i].TimedOut;
                 bool unsettled = evaluation.Result == DmarcResult.TempError
-                    || (evaluation.Result == DmarcResult.Fail && TemporaryFailureCouldMatter(fromDomain, effective, dkimResults, dkimTimedOut, headers));
+                    || (evaluation.Result == DmarcResult.Fail && TemporaryFailureCouldMatter(fromDomains[i], effective, dkimResults, dkimTimedOut, headers));
                 evaluations.Add((evaluation, unsettled));
             }
         }

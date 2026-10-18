@@ -522,11 +522,11 @@ public class InboundReviewTests
         Assert.Equal(123L, new InboundReceiveOptions { MaxInFlightBytesPerRemote = 123 }.EffectiveMaxInFlightBytesPerRemote);
 
         var errors = new List<string>();
-        Mta.Host.Configuration.ConfigLoader.Validate(Load(("Inbound:MaxInFlightBytesPerRemote", "10485760")), errors);   // 10 MiB for 25 MiB messages
+        Mta.Host.Configuration.ConfigLoader.Validate(Load(("Inbound:Enabled", "true"), ("Inbound:MaxInFlightBytesPerRemote", "10485760")), errors);   // 10 MiB for 25 MiB messages
         Assert.Contains(errors, e => e.Contains("MaxInFlightBytesPerRemote", StringComparison.Ordinal));
 
         errors.Clear();
-        Mta.Host.Configuration.ConfigLoader.Validate(Load(("Smtp:MaxInFlightBytes", "134217728")), errors);   // half of 128 MiB is less than 4.2 x 25 MiB
+        Mta.Host.Configuration.ConfigLoader.Validate(Load(("Inbound:Enabled", "true"), ("Smtp:MaxInFlightBytes", "134217728")), errors);   // half of 128 MiB is less than 4.2 x 25 MiB
         Assert.Contains(errors, e => e.Contains("Inbound:MaxInFlightBytes", StringComparison.Ordinal));
 
         errors.Clear();

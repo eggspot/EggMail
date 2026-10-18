@@ -370,8 +370,8 @@ public sealed class IngestHandler : ISmtpServerHandler, IBounceNamespace
         return (_bounces?.IsValidBounceAddress(recipient.LocalPart) ?? false) && await IsVerifiedReturnPathHostAsync(recipient.Domain, tokenValid: true, clientKey, ct).ConfigureAwait(false);
     }
 
-    /// <summary>How much of a report is parsed (the status part of a DSN comes first; a server may append the whole original).</summary>
-    private const int MaxBounceHeadBytes = 64 * 1024;
+    /// <summary>How much of a report is parsed (the status part of a DSN comes after its human-readable text, and a server may append the whole original).</summary>
+    private const int MaxBounceHeadBytes = 256 * 1024;
 
     // Names of the form bounce.<anything> each cost a storage lookup the first time they are asked about. Only a caller with a valid signed token can cause one (a name without a token is answered from the
     // cache or is "not ours"), and each client gets a few uncached lookups a second, with a backstop for the process: over it the caller (who holds a real token) gets a temporary failure and tries again.
@@ -385,16 +385,6 @@ public sealed class IngestHandler : ISmtpServerHandler, IBounceNamespace
     private bool TryTakeLookup(string clientKey)
     {
         long second = Environment.TickCount64 / 1000;
-        if (Interlocked.Exchange(ref _lookupWindow, second) != second)
-        {
-            Volatile.Write(ref _lookupsInWindow, 0);
-        }
-
-        if (Interlocked.Increment(ref _lookupsInWindow) > MaxUncachedHostLookupsPerSecond)
-        {
-            return false;
-        }
-
         if (_lookupsByClient.Count >= MaxTrackedLookupClients)
         {
             foreach (var entry in _lookupsByClient)
@@ -411,8 +401,19 @@ public sealed class IngestHandler : ISmtpServerHandler, IBounceNamespace
             }
         }
 
+        // The client's own budget first: a client past it is refused without touching the process-wide count, so one client cannot use up what the others need.
         (long Second, int Count) updated = _lookupsByClient.AddOrUpdate(clientKey, (second, 1), (_, old) => old.Second == second ? (second, old.Count + 1) : (second, 1));
-        return updated.Count <= MaxUncachedHostLookupsPerClientPerSecond;
+        if (updated.Count > MaxUncachedHostLookupsPerClientPerSecond)
+        {
+            return false;
+        }
+
+        if (Interlocked.Exchange(ref _lookupWindow, second) != second)
+        {
+            Volatile.Write(ref _lookupsInWindow, 0);
+        }
+
+        return Interlocked.Increment(ref _lookupsInWindow) <= MaxUncachedHostLookupsPerSecond;
     }
 
     /// <summary><c>bounce.example.com</c> is the return-path host of the registered domain <c>example.com</c> when that domain's return-path CNAME has been verified.</summary>

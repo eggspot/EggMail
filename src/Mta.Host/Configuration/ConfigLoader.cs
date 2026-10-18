@@ -529,6 +529,30 @@ public static class ConfigLoader
         ValidateInbound(c, errors);
     }
 
+    private static void ValidateInboundSizing(MtaConfig c, List<string> errors)
+    {
+        InboundSection i = c.Inbound;
+        if (c.Smtp.MaxInFlightBytes < 2)
+        {
+            errors.Add("Smtp:MaxInFlightBytes must be at least 2 when Inbound:Enabled (the port-25 listener may use half of it).");
+            return;
+        }
+
+        double largest = i.MaxMessageSize ?? c.Smtp.MaxMessageSize;
+        double need = Mta.Host.Ingest.InboundReceiveOptions.SizingFactor * largest;
+        long usable = Math.Min(i.MaxInFlightBytes, c.Smtp.MaxInFlightBytes / 2);
+        string factor = Mta.Host.Ingest.InboundReceiveOptions.SizingFactor.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        if (usable < need)
+        {
+            errors.Add(FormattableString.Invariant($"Inbound:MaxInFlightBytes (at most half of Smtp:MaxInFlightBytes is used: {usable}) must be at least {factor} times the largest inbound message ({(long)need} bytes for {(long)largest}): raise it and Smtp:MaxInFlightBytes, or lower Inbound:MaxMessageSize."));
+        }
+
+        if (i.MaxInFlightBytesPerRemote > 0 && i.MaxInFlightBytesPerRemote < need)
+        {
+            errors.Add(FormattableString.Invariant($"Inbound:MaxInFlightBytesPerRemote must be at least {factor} times the largest inbound message ({(long)need} bytes), or 0 to derive it."));
+        }
+    }
+
     /// <summary>The inbound limits (design section 11.13): checked even while <c>Inbound:Enabled</c> is off, so switching it on later does not start a server with a contradictory configuration.</summary>
     private static void ValidateInbound(MtaConfig c, List<string> errors)
     {
@@ -545,17 +569,10 @@ public static class ConfigLoader
 
         // The sizing rule: a message of the largest size takes about 4 times its size from the in-flight budget while it is handled (the buffer, the copy the checks read, one or two stamped copies). A share
         // smaller than that makes the largest messages impossible to accept, with a 452 that looks temporary and never ends.
-        double largest = i.MaxMessageSize ?? c.Smtp.MaxMessageSize;
-        double need = Mta.Host.Ingest.InboundReceiveOptions.SizingFactor * largest;
-        long usable = Math.Min(i.MaxInFlightBytes, Math.Max(1, c.Smtp.MaxInFlightBytes / 2));
-        if (usable < need)
+        // Only for a server that receives mail: with inbound off these values are not used, and a server that never receives must not fail to start for them.
+        if (i.Enabled)
         {
-            errors.Add($"Inbound:MaxInFlightBytes (at most half of Smtp:MaxInFlightBytes is used: {usable}) must be at least {Mta.Host.Ingest.InboundReceiveOptions.SizingFactor} times the largest inbound message ({(long)need} bytes for {(long)largest}): raise it and Smtp:MaxInFlightBytes, or lower Inbound:MaxMessageSize.");
-        }
-
-        if (i.MaxInFlightBytesPerRemote > 0 && i.MaxInFlightBytesPerRemote < need)
-        {
-            errors.Add($"Inbound:MaxInFlightBytesPerRemote must be at least {Mta.Host.Ingest.InboundReceiveOptions.SizingFactor} times the largest inbound message ({(long)need} bytes), or 0 to derive it.");
+            ValidateInboundSizing(c, errors);
         }
 
         if (i.MaxMessageSize is < 1024)

@@ -36,9 +36,29 @@ public sealed class InboundDomainView
 /// </summary>
 public static class InboundConfigChangeSignal
 {
-    internal static event Action? Changed;
+    // Not a CLR event: the code base has none (a subscriber that forgets to unsubscribe would stay alive for ever); a subscription here is an object that is disposed.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<long, Action> Subscribers = new();
+    private static long s_next;
 
-    public static void Bump() => Changed?.Invoke();
+    public static void Bump()
+    {
+        foreach (Action subscriber in Subscribers.Values)
+        {
+            subscriber();
+        }
+    }
+
+    internal static IDisposable Subscribe(Action onChange)
+    {
+        long id = Interlocked.Increment(ref s_next);
+        Subscribers[id] = onChange;
+        return new Subscription(id);
+    }
+
+    private sealed class Subscription(long id) : IDisposable
+    {
+        public void Dispose() => Subscribers.TryRemove(id, out _);
+    }
 }
 
 /// <summary>
@@ -125,16 +145,8 @@ public sealed class InboundConfigurationCache
     /// <summary>The refresh loop: reload every interval (up to a tenth longer, so replicas do not all ask at once), or when asked. A failure is logged and tried again at the next interval.</summary>
     public async Task RunAsync(CancellationToken stoppingToken)
     {
-        Action onChange = RequestRefresh;
-        InboundConfigChangeSignal.Changed += onChange;
-        try
-        {
-            await RunLoopAsync(stoppingToken).ConfigureAwait(false);
-        }
-        finally
-        {
-            InboundConfigChangeSignal.Changed -= onChange;
-        }
+        using IDisposable subscription = InboundConfigChangeSignal.Subscribe(RequestRefresh);
+        await RunLoopAsync(stoppingToken).ConfigureAwait(false);
     }
 
     private async Task RunLoopAsync(CancellationToken stoppingToken)
