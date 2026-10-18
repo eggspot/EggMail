@@ -11,9 +11,9 @@ namespace Mta.Host.Inbound;
 
 /// <summary>Size limits of the webhook payload formats (<c>Inbound:Webhook:*</c>).</summary>
 /// <param name="MaxTextBytes">The text and the HTML part are each cut at this many bytes.</param>
-/// <param name="MaxRawMessageBytes">The largest message sent as <c>raw_mime</c>.</param>
 /// <param name="ApiBaseUrl">Prefix of the paths in the payload; null or empty: the bare paths.</param>
-public sealed record InboundWebhookLimits(int MaxTextBytes, long MaxRawMessageBytes, string? ApiBaseUrl);
+/// <param name="MaxPayloadBytes">The most the whole JSON document may be. JSON escaping can multiply the text (a character outside ASCII is six bytes as <c>\uXXXX</c>), so the document, not only the text, is capped: the HTML goes first, then the text, and <c>message.truncated</c> says so.</param>
+public sealed record InboundWebhookLimits(int MaxTextBytes, string? ApiBaseUrl, int MaxPayloadBytes = 4 * 1024 * 1024);
 
 /// <summary>
 /// The bodies a route's <c>webhook</c> action posts (design section 11.7). Everything in a received message is attacker-controlled: the payload is built with a JSON writer (values are
@@ -53,6 +53,22 @@ public static class InboundWebhookPayload
             parseFailed = true;
         }
 
+        byte[] json = Write(message, content, parseFailed, webhookId, limits, includeHtml: true, includeText: true);
+        if (json.Length > limits.MaxPayloadBytes)
+        {
+            json = Write(message, content, parseFailed, webhookId, limits, includeHtml: false, includeText: true);
+        }
+
+        if (json.Length > limits.MaxPayloadBytes)
+        {
+            json = Write(message, content, parseFailed, webhookId, limits, includeHtml: false, includeText: false);
+        }
+
+        return json;
+    }
+
+    private static byte[] Write(InboundMessage message, InboundMessageContent? content, bool parseFailed, string webhookId, InboundWebhookLimits limits, bool includeHtml, bool includeText)
+    {
         using var stream = new MemoryStream(4096);
         using (var w = new Utf8JsonWriter(stream))
         {
@@ -81,7 +97,7 @@ public static class InboundWebhookPayload
             w.WriteEndObject();
 
             WriteAuth(w, message.Auth);
-            WriteMessage(w, content, parseFailed, message.Subject);
+            WriteMessage(w, content, parseFailed, message.Subject, includeHtml, includeText);
             WriteAttachments(w, message.Id, content, limits.ApiBaseUrl);
             w.WriteString("raw_url", RawPath(message.Id, limits.ApiBaseUrl));
             w.WriteEndObject();
@@ -115,7 +131,7 @@ public static class InboundWebhookPayload
         w.WriteEndObject();
     }
 
-    private static void WriteMessage(Utf8JsonWriter w, InboundMessageContent? content, bool parseFailed, string? recordedSubject)
+    private static void WriteMessage(Utf8JsonWriter w, InboundMessageContent? content, bool parseFailed, string? recordedSubject, bool includeHtml, bool includeText)
     {
         w.WriteStartObject("message");
         if (content is null)
@@ -148,10 +164,10 @@ public static class InboundWebhookPayload
         }
 
         w.WriteEndArray();
-        Str(w, "text", content.Text);
-        Str(w, "html", content.Html);
+        Str(w, "text", includeText ? content.Text : null);
+        Str(w, "html", includeHtml ? content.Html : null);
 
-        bool truncated = content.Truncated;
+        bool truncated = content.Truncated || (!includeText && content.Text is not null) || (!includeHtml && content.Html is not null);
         w.WriteStartArray("headers");
         int chars = 0;
         foreach (InboundHeaderField header in content.Headers)

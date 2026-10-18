@@ -26,7 +26,7 @@ public static class InboundActionMetrics
 
     private static IEnumerable<Measurement<long>> ObserveStates()
     {
-        if (Volatile.Read(ref s_runner)?.LatestUsage is { } usage)
+        if (Volatile.Read(ref s_runner)?.LatestCounts is { } usage)
         {
             yield return new Measurement<long>(usage.Pending, new KeyValuePair<string, object?>("state", "pending"));
             yield return new Measurement<long>(usage.Failed, new KeyValuePair<string, object?>("state", "failed"));

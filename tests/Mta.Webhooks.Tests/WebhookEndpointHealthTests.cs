@@ -82,6 +82,28 @@ public class WebhookEndpointHealthTests
         Assert.Null(stored.FailingSince);
     }
 
+    [Fact]
+    public async Task Only_the_attempt_that_really_switched_the_endpoint_off_counts_and_tells_the_tenant()
+    {
+        (InMemoryStorage storage, WebhookEndpointRecord endpoint) = await StartAsync();
+        var told = new List<string>();
+        var health = new WebhookEndpointHealth(storage.Config, new WebhookOptions(), null, new Notifier(told));
+
+        // Several attempts to the same dead endpoint all end in a 410 (or in the failure window) at about the same time.
+        await health.DisableAsync(endpoint, "The receiver answered 410 Gone", Now, default);
+        await health.DisableAsync(endpoint, "The receiver answered 410 Gone", Now, default);
+        await health.DisableAsync(endpoint, "Failing continuously since x", Now, default);
+
+        Assert.Single(told);
+        WebhookEndpointRecord stored = (await storage.Config.GetWebhookEndpointAsync(endpoint.Id, default))!;
+        Assert.False(stored.Enabled);
+        Assert.Equal("The receiver answered 410 Gone", stored.DisabledReason);   // the first reason stays
+
+        // An endpoint that was deleted meanwhile is nothing to switch off.
+        await health.DisableAsync(endpoint with { Id = Ids.New() }, "x", Now, default);
+        Assert.Single(told);
+    }
+
     private sealed class Notifier(List<string> told) : IWebhookNotifier
     {
         public ValueTask EndpointDisabledAsync(WebhookEndpointRecord endpoint, string reason, CancellationToken cancellationToken)

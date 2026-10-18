@@ -250,10 +250,26 @@ public sealed class WebhookEndpointHealth
         }
     }
 
+    /// <summary>
+    /// Switches the endpoint off and tells the tenant, once: only the call that really changed the endpoint from enabled to disabled counts, logs and notifies. Several attempts to the same dead
+    /// endpoint run at the same time and each of them ends in a <c>410</c> or in the failure window, so without this the tenant would get a notice, a log line and a count for each.
+    /// </summary>
     public async ValueTask DisableAsync(WebhookEndpointRecord endpoint, string reason, DateTimeOffset now, CancellationToken ct)
     {
-        WebhookMetrics.EndpointsDisabled.Add(1);
+        WebhookEndpointRecord? current = await _config.GetWebhookEndpointAsync(endpoint.Id, ct).ConfigureAwait(false);
+        if (current is null || !current.Enabled)
+        {
+            return;   // gone, or already switched off by someone else
+        }
+
         await _config.DisableWebhookEndpointAsync(endpoint.Id, reason, now, ct).ConfigureAwait(false);
+        WebhookEndpointRecord? after = await _config.GetWebhookEndpointAsync(endpoint.Id, ct).ConfigureAwait(false);
+        if (after is not null && after.DisabledReason != reason)
+        {
+            return;   // another attempt switched it off between the read and the write with its own reason: that one reports
+        }
+
+        WebhookMetrics.EndpointsDisabled.Add(1);
         _log.Write(MtaLogLevel.Warning, "webhooks", $"endpoint {endpoint.Id} of tenant {endpoint.TenantId} disabled: {reason}");
         if (_notifier is not null)
         {

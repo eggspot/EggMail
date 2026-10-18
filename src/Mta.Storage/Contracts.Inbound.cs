@@ -350,6 +350,14 @@ public sealed record ClaimedInboundAction(InboundMessage Message, byte[]? Raw, l
 /// <param name="Note">Only for <see cref="InboundActionState.Done"/>: a short code (letters, digits, <c>_</c>) for a completion the tenant should know about, kept as <see cref="InboundMessage.ActionNote"/>. Known codes: <c>all_targets_suppressed</c> (every forward target is on the tenant's suppression list: nothing was queued), <c>route_is_now_store</c> and <c>route_is_now_discard</c> (the route was changed to an action without delivery while the message waited; the body is kept until retention).</param>
 /// <param name="ClaimToken">The <see cref="ClaimedInboundAction.ClaimToken"/> the claim returned; the completion is refused when the row has been claimed again since, whatever happened to the attempt count in between (a release, a retry). Null: not checked.</param>
 /// <param name="FreeBody">Delete the stored body: the runner sets it for a completed forward, whose copy now lives in the outbound queue. A completed webhook keeps the body for the attachment references until retention.</param>
+/// <summary>
+/// Limits on one <see cref="IInboundMessageStore.ClaimActionsAsync"/> call that keep one tenant from taking every worker (design section 11.7): a tenant with a slow receiver and a large backlog is
+/// the first rows of the queue, and without a limit it would be the only thing a replica ever claims.
+/// </summary>
+/// <param name="MaxPerTenant">At most this many rows of one tenant in the call (0: no limit). Rows are still chosen oldest due first within the tenant.</param>
+/// <param name="ExcludeTenants">Tenants that get nothing in this call (the ones the caller already has enough of in flight).</param>
+public sealed record InboundClaimLimits(int MaxPerTenant, IReadOnlyCollection<Guid>? ExcludeTenants = null);
+
 public sealed record InboundActionOutcome(InboundActionState State, DateTimeOffset At, DateTimeOffset? NextAttemptAt, string? Error, Guid? ForwardMessageId = null, bool FreeBody = false, string? Note = null, long? ClaimToken = null);
 
 public enum InboundRetryResult : byte
@@ -459,7 +467,17 @@ public interface IInboundMessageStore
     /// the ladder instead of being claimed for ever; the runner fails an action whose attempt number is past the last rung. A graceful release gives the attempt back
     /// (<see cref="ReleaseOwnedActionLeasesAsync"/>).
     /// </summary>
-    ValueTask<IReadOnlyList<ClaimedInboundAction>> ClaimActionsAsync(string owner, int max, DateTimeOffset now, TimeSpan lease, CancellationToken cancellationToken);
+    /// <remarks>
+    /// <paramref name="limits"/> (optional) caps the rows of one tenant in the call and leaves some tenants out, so the other tenants' work is claimed instead: the same rows the unlimited
+    /// claim would skip are not touched, claimed or counted. Without limits the claim is exactly the oldest-due-first one.
+    /// </remarks>
+    ValueTask<IReadOnlyList<ClaimedInboundAction>> ClaimActionsAsync(string owner, int max, DateTimeOffset now, TimeSpan lease, CancellationToken cancellationToken, InboundClaimLimits? limits = null);
+
+    /// <summary>
+    /// How many messages have an action in <paramref name="state"/>, server-wide, for the gauges. <see cref="InboundActionState.Pending"/> is answered from the partial index of the claim and is cheap;
+    /// <see cref="InboundActionState.Failed"/> has no index of its own and reads the settled rows, so ask for it rarely.
+    /// </summary>
+    ValueTask<long> CountActionsAsync(InboundActionState state, CancellationToken cancellationToken);
 
     /// <summary>Extends the lease of a long attempt; false when <paramref name="owner"/> no longer holds it.</summary>
     ValueTask<bool> ExtendActionLeaseAsync(Guid messageId, string owner, DateTimeOffset until, CancellationToken cancellationToken);
