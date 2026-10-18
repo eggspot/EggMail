@@ -52,13 +52,13 @@ public sealed class LeakProbeSelfTests(ITestOutputHelper output)
     }
 
     [Fact]
-    public async Task Leak_probe_sees_a_heap_leak_of_a_few_kilobytes_per_iteration_at_the_batch_sizes_the_tests_use()
+    public async Task Leak_probe_sees_a_heap_leak_of_several_kilobytes_per_iteration_at_the_batch_sizes_the_tests_use()
     {
-        // 2 KB kept per iteration in a batch of 400 is 800 KB per batch: above max(256 KiB, 2 %) of a test host's heap in both intervals.
+        // 8 KB kept per iteration in a batch of 400 is 3.2 MB per batch: above max(256 KiB, 2 %) of the test host heap (50 to 100 MB, so 1 to 2 MB) in both intervals.
         using LeakProbe probe = NewProbe();
         try
         {
-            LeakReport report = await probe.RunAsync(_ => Hold.Add(new byte[2048]), Batch);
+            LeakReport report = await probe.RunAsync(_ => Hold.Add(new byte[8192]), Batch);
             Assert.Contains(report.Leaks, r => r.Name.StartsWith("managed heap", StringComparison.Ordinal));
         }
         finally

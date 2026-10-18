@@ -21,10 +21,10 @@ namespace Mta.TestSupport;
 /// <c>Timer</c> shows up here), thread-pool pending work items (8). Custom counters are added with <see cref="Track"/>; the outstanding
 /// <c>ArrayPool&lt;byte&gt;.Shared</c> rentals (rented minus returned, from the runtime's <c>System.Buffers.ArrayPoolEventSource</c>) with
 /// <see cref="TrackArrayPoolBalance"/>.
-/// <para>Sensitivity: a heap leak is seen when it exceeds the tolerance in each batch, so with a batch of N iterations the smallest leak per iteration that
-/// is seen is the tolerance divided by N (256 KiB / 50 = about 5 KB per iteration for a batch of 50, about 25 bytes for 10,000; on a heap of 45 MB the 2 % rule
-/// makes it about 900 KB per batch). The heap after a forced collection is stable to a few KB between batches, so the tolerance is not there to absorb noise
-/// but to ignore what a flow legitimately keeps (a cache filling up).</para>
+/// <para>Sensitivity: a heap leak is seen when it exceeds the tolerance in each interval, so with a batch of N iterations the smallest leak per iteration that is
+/// seen is the tolerance divided by N. The tolerance is the larger of 256 KiB and 2 % of the heap: the test host's heap is 45 to 100 MB, so in practice 1 to 2 MB per
+/// batch, which is 20 to 40 KB per iteration for a batch of 50, 2.5 to 5 KB for 400, and 100 to 200 bytes for 10,000 (<c>EGGMAIL_ACCEL_SCALE</c> raises N). The heap after a
+/// forced collection is stable to a few KB between batches, so the tolerance is not there to absorb noise but to ignore what a flow legitimately keeps (a cache filling up).</para>
 /// <para>Not covered by design: a leak smaller than the tolerance per batch (use a bigger N, <c>EGGMAIL_ACCEL_SCALE</c>), native memory outside
 /// counters that the caller adds, and OS-level leaks that only appear under real load (the soak test, docs/soak.md, samples the real process).</para>
 /// </summary>
