@@ -211,8 +211,9 @@ public sealed class InboundForwarder : IInboundForwarder
             case SenderCheck.Refused:
                 return Refused("unauthenticated_local_sender");
             case SenderCheck.Unsettled:
-                // DMARC could not be settled at receipt (a DNS error): the message is not shown to be foreign, and not shown to be a spoof either. It waits on the ladder, a retry of the action
-                // (API or dashboard) is the way to try again once the cause is gone.
+                // DMARC could not be settled at receipt (a DNS error): the message is not shown to be foreign, and not shown to be a spoof either. The verdict is the one stored at receipt and is not
+                // evaluated again here, so waiting does not change it: the action runs its ladder (about 27 hours) and ends failed with dmarc_unsettled. It is a retry, not a refusal, only so that the
+                // tenant sees that nothing was decided about the message; it is not forwarded.
                 return InboundActionResult.Retry("dmarc_unsettled");
         }
 

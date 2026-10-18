@@ -232,7 +232,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
             storage, new SrsCodec(verp, inboundOptions.SrsMaxAgeDays), new ForwardHopMarker(verp), new Mta.Auth.Arc.ArcValidator(dns, new Mta.Auth.Arc.ArcValidatorOptions { MaxInstances = 10 }), arcSealers,
             new InboundForwarderOptions
             {
-                AuthenticationResultsId = config.Inbound.AuthenticationResultsId ?? config.Hostname,   // the authserv-id the receive path wrote into the stored message
+                AuthenticationResultsId = string.IsNullOrWhiteSpace(config.Inbound.AuthenticationResultsId) ? config.Hostname : config.Inbound.AuthenticationResultsId.Trim(),   // the authserv-id the receive path wrote into the stored message (the same rule as InboundVerifier)
                 BounceDomain = config.Delivery.BounceDomain,
                 QueueLifetime = config.Storage.Queue.MaxLifetime,
                 MaxQueuedMessagesPerTenant = config.Inbound.Forward.MaxQueuedMessagesPerTenant,
