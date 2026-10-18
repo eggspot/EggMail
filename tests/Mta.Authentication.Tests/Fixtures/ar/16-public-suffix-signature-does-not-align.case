@@ -1,0 +1,19 @@
+# A signature by the public suffix co.uk cannot align with example.co.uk; the organizational domain is example.co.uk.
+client-ip: 198.51.100.9
+helo: mail.elsewhere.example
+mail-from: alice@elsewhere.example
+authserv-id: mx.receiver.example
+[zone]
+elsewhere.example TXT v=spf1 ip4:198.51.100.9 -all
+_dmarc.example.co.uk TXT v=DMARC1; p=reject
+[message]
+From: Alice <alice@example.co.uk>
+To: Bob <bob@receiver.example>
+Subject: Fixture
+Date: Mon, 12 Oct 2026 12:00:00 +0000
+Message-ID: <fx1@example.com>
+
+Hello Bob.
+[sign domain=co.uk selector=s1]
+[expect]
+mx.receiver.example; spf=pass smtp.mailfrom=alice@elsewhere.example; dkim=pass (2048-bit key) header.d=co.uk header.s=s1 header.b="u8Z/t2ht"; dmarc=fail (p=REJECT sp=REJECT dis=REJECT) header.from=example.co.uk
