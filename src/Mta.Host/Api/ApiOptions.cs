@@ -65,6 +65,7 @@ public sealed class ApiOptions
     /// <summary>The server defaults the inbound settings API reports as effective values.</summary>
     public InboundApiDefaults Inbound { get; set; } = new();
 
+
     /// <summary>Most rows one statistics query may return; larger ranges are refused with <c>validation_failed</c>.</summary>
     public int MaxStatsRows { get; set; } = 50_000;
 
