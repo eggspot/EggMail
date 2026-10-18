@@ -240,6 +240,13 @@ public sealed class SmtpClientConnection : IAsyncDisposable
             _broken = true;
             throw new SmtpConnectionException(stage, $"Timeout waiting for reply from {_target.Host} at {stage}", timedOut: true);
         }
+        catch (OperationCanceledException)
+        {
+            // The caller gave up (a quiesce or a shutdown) with a reply possibly on its way: the conversation is out of step and the connection must not be reused or asked to QUIT politely
+            // (that would wait for an answer that is queued behind the one we abandoned, 5 seconds, for every connection that is cut).
+            _broken = true;
+            throw;
+        }
         catch (Exception ex) when (ex is IOException or SocketException or ObjectDisposedException)
         {
             _broken = true;
@@ -262,6 +269,11 @@ public sealed class SmtpClientConnection : IAsyncDisposable
                 _broken = true;
                 throw new SmtpConnectionException(stage, $"{_target.Host} closed the connection while sending at {stage}");
             }
+        }
+        catch (OperationCanceledException)
+        {
+            _broken = true;   // a partly written command or message cannot be completed later
+            throw;
         }
         catch (Exception ex) when (ex is IOException or SocketException or ObjectDisposedException)
         {

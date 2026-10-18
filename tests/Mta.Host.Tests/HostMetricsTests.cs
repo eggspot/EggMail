@@ -114,12 +114,14 @@ public class BackupMetricsTests : IAsyncLifetime
     public void The_newest_backup_on_disk_is_the_last_success_from_the_moment_the_scheduler_exists()
     {
         string backups = Path.Combine(_dir, "backups");
-        Directory.CreateDirectory(Path.Combine(backups, "eggmail-backup-20900305T060607000Z"));
-        Directory.CreateDirectory(Path.Combine(backups, "eggmail-backup-20900301T000000000Z"));
+        // Dated before the test's clock: a backup stamped later than the clock is ignored (BackupLifecycleTests).
+        DateTimeOffset newest = _clock.Now.AddDays(-1).AddSeconds(7);
+        Directory.CreateDirectory(Path.Combine(backups, "eggmail-backup-" + newest.ToString("yyyyMMddTHHmmssfff'Z'", System.Globalization.CultureInfo.InvariantCulture)));
+        Directory.CreateDirectory(Path.Combine(backups, "eggmail-backup-" + newest.AddDays(-4).ToString("yyyyMMddTHHmmssfff'Z'", System.Globalization.CultureInfo.InvariantCulture)));
 
         using var scheduler = new BackupScheduler(_storage, _clock, backups, TimeSpan.FromHours(24), keep: 2);   // no run needed: a restart is visible at once
 
-        Assert.Equal(new DateTimeOffset(2090, 3, 5, 6, 6, 7, TimeSpan.Zero).ToUnixTimeSeconds(), LastSuccessGauge(scheduler));
+        Assert.Equal(newest.ToUnixTimeSeconds(), LastSuccessGauge(scheduler));
     }
 
     [Fact]
