@@ -1,0 +1,21 @@
+# A second From header is added after signing: the oversigned From list makes the signature fail, SPF is for another domain, DMARC fails.
+client-ip: 192.0.2.3
+helo: mail.example.com
+mail-from: bounce@esp.example.net
+authserv-id: mx.receiver.example
+[zone]
+esp.example.net TXT v=spf1 ip4:192.0.2.3 -all
+_dmarc.example.com TXT v=DMARC1; p=reject
+[message]
+From: Alice <alice@example.com>
+To: Bob <bob@receiver.example>
+Subject: Fixture
+Date: Mon, 12 Oct 2026 12:00:00 +0000
+Message-ID: <fx1@example.com>
+
+Hello Bob.
+[sign domain=example.com selector=s1]
+[edit]
+replace: From: Alice <alice@example.com> => From: Alice <alice@example.com>\r\nFrom: Mallory <mallory@example.com>
+[expect]
+mx.receiver.example; spf=pass smtp.mailfrom=bounce@esp.example.net; dkim=fail reason="signature did not verify" header.d=example.com header.s=s1 header.b=vbyOuf58; dmarc=fail (p=REJECT sp=REJECT dis=REJECT) header.from=example.com
