@@ -205,6 +205,7 @@ public abstract partial class EngineLifecycleTests
 
         h.Clock.Advance(TimeSpan.FromMinutes(2));
         h.Runtime.Delivery.Wake();
+        await h.WaitForFinalStateAsync(id);
         await h.RunUntilQuietAsync();
         var events = await h.EventsAsync(id);
         Assert.Equal(MessageEventType.Delivered, Assert.Single(LifecycleHarness.FinalStates(events)).Value);
@@ -356,6 +357,7 @@ public abstract partial class EngineLifecycleTests
         // The next process takes over when the lease has run out.
         h.Clock.Advance(TimeSpan.FromMinutes(16));
         h.Runtime.Delivery.Wake();
+        await h.WaitForFinalStateAsync(id);
         await h.RunUntilQuietAsync();
 
         Assert.Equal(1, faulty.FailedRecordings);

@@ -420,6 +420,21 @@ internal sealed class LifecycleHarness : IAsyncDisposable
 
     public static SmtpReply NoSuchUser() => SmtpReply.Create(550, "5.1.1", "No such user");
 
+    /// <summary>
+    /// Wakes the engine until the message has a final state. For the moment right after the virtual clock passed an abandoned lease: the queue statistics already show nothing
+    /// leased and nothing due, so "wait until idle" can return before the engine has picked the delivery up. A poll with a deadline far above any plausible load.
+    /// </summary>
+    public async Task WaitForFinalStateAsync(Guid messageId, int timeoutSeconds = 90)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
+        while (FinalStates(await EventsAsync(messageId)).Count == 0)
+        {
+            Assert.True(DateTime.UtcNow < deadline, "the message never reached a final state at " + Clock.UtcNow.ToString("u") + "\n" + string.Join('\n', Log.Lines.TakeLast(15)));
+            Runtime.Delivery.Wake();
+            await Task.Delay(10);
+        }
+    }
+
     /// <summary>The recipients that reached each final state in the message's events (a recipient with two finals is a bug).</summary>
     public static Dictionary<string, MessageEventType> FinalStates(IEnumerable<MessageEvent> events)
     {
