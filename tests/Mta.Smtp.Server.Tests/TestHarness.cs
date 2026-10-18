@@ -44,18 +44,32 @@ internal sealed class RecordingHandler : ISmtpServerHandler
     public string ValidPassword { get; set; } = "pass";
     public SmtpReply? ConnectRefusal { get; set; }
     public int Disconnects;
+    public int AuthAttempts;
+    public int MailFromCalls;
+    public int RcptToCalls;
 
     public record ReceivedMessage(EmailAddress Sender, string[] Recipients, byte[] Body, byte[] Received, string? User, bool Tls, MailParameters Parameters);
 
     public ValueTask<SmtpReply?> OnConnectedAsync(SmtpSessionContext session, CancellationToken ct) => ValueTask.FromResult(ConnectRefusal);
 
     public ValueTask<SmtpAuthResult> AuthenticateAsync(SmtpSessionContext session, string authorizationId, string userName, string password, CancellationToken ct) =>
-        ValueTask.FromResult(userName == ValidUser && password == ValidPassword && AuthSucceeds ? SmtpAuthResult.Succeeded(userName) : SmtpAuthResult.Failed);
+        ValueTask.FromResult(CountAuthAttempt() && userName == ValidUser && password == ValidPassword && AuthSucceeds ? SmtpAuthResult.Succeeded(userName) : SmtpAuthResult.Failed);
 
-    public ValueTask<SmtpReply> OnMailFromAsync(SmtpSessionContext session, MailFromInfo mail, CancellationToken ct) => ValueTask.FromResult(SmtpReplies.SenderOk);
+    private bool CountAuthAttempt()
+    {
+        Interlocked.Increment(ref AuthAttempts);
+        return true;
+    }
+
+    public ValueTask<SmtpReply> OnMailFromAsync(SmtpSessionContext session, MailFromInfo mail, CancellationToken ct)
+    {
+        Interlocked.Increment(ref MailFromCalls);
+        return ValueTask.FromResult(SmtpReplies.SenderOk);
+    }
 
     public ValueTask<SmtpReply> OnRcptToAsync(SmtpSessionContext session, MailFromInfo mail, EmailAddress recipient, RcptParameters p, CancellationToken ct)
     {
+        Interlocked.Increment(ref RcptToCalls);
         if (recipient.LocalPart == "reject")
         {
             RejectedRecipients.Add(recipient.ToString());
@@ -146,6 +160,22 @@ internal sealed class RawClient : IDisposable
     }
 
     public SslStream? Ssl => _stream as SslStream;
+
+    /// <summary>The connected socket, for tests that run their own TLS handshake.</summary>
+    public Socket Socket => _tcp.Client;
+
+    /// <summary>A reply that is already there (or arrives within a moment); null when none does. For loops that keep sending while watching for the server's answer.</summary>
+    public async Task<SmtpReply?> ReadReplyAsyncNoWait()
+    {
+        try
+        {
+            return await ReadReplyAsync(150);
+        }
+        catch (OperationCanceledException)
+        {
+            return null;
+        }
+    }
 
     public Task SendAsync(string text) => SendBytesAsync(Encoding.UTF8.GetBytes(text));
 

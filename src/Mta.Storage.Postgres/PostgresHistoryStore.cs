@@ -287,9 +287,9 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore, 
     public async ValueTask<Page<MessageSummary>> SearchAsync(MessageQuery query, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(query);
-        if (!rt.IsFull)
+        if (!rt.IsFull || !StorageText.IsStorable(query))
         {
-            return new Page<MessageSummary>([], null);
+            return new Page<MessageSummary>([], null);   // a filter that cannot be stored matches nothing (and is never cleaned into one that does)
         }
 
         int limit = Math.Clamp(query.Limit, 1, 500);
@@ -315,7 +315,7 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore, 
 
         if (recipient is not null)
         {
-            Arg("r.recipient = $$", p => p.Text(recipient));
+            Arg("r.recipient = $$", p => p.TextExact(recipient));
         }
 
         if (MetadataFloor(now) is { } floor)
@@ -331,23 +331,23 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore, 
         if (!string.IsNullOrWhiteSpace(query.Sender))
         {
             // SQLite compares with COLLATE NOCASE (ASCII case folding); lower() under the "C" collation folds ASCII only too.
-            Arg("lower(m.envelope_from) = lower($$)", p => p.Text(query.Sender.Trim()));
+            Arg("lower(m.envelope_from) = lower($$)", p => p.TextExact(query.Sender.Trim()));
         }
 
         if (!string.IsNullOrEmpty(query.SubjectContains))
         {
             string escaped = query.SubjectContains.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("%", "\\%", StringComparison.Ordinal).Replace("_", "\\_", StringComparison.Ordinal);
-            Arg("m.subject ILIKE $$ ESCAPE '\\'", p => p.Text("%" + escaped + "%"));
+            Arg("m.subject ILIKE $$ ESCAPE '\\'", p => p.TextExact("%" + escaped + "%"));
         }
 
         if (!string.IsNullOrWhiteSpace(query.Status))
         {
-            Arg("m.status = $$", p => p.Text(query.Status.Trim().ToLowerInvariant()));
+            Arg("m.status = $$", p => p.TextExact(query.Status.Trim().ToLowerInvariant()));
         }
 
         if (!string.IsNullOrEmpty(query.Tag))
         {
-            Arg("m.tags IS NOT NULL AND jsonb_exists(m.tags::jsonb, $$)", p => p.Text(query.Tag));
+            Arg("m.tags IS NOT NULL AND jsonb_exists(m.tags::jsonb, $$)", p => p.TextExact(query.Tag));
         }
 
         if (query.From is { } from)
