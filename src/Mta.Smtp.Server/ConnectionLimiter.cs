@@ -3,7 +3,7 @@ using System.Net;
 
 namespace Mta.Smtp.Server;
 
-/// <summary>Global and per-address connection caps shared by all listeners (limits are keyed globally, not per port).</summary>
+/// <summary>Global and per-address connection caps shared by all listeners (limits are keyed globally, not per port). The per-address cap counts an IPv6 client by its /64.</summary>
 public sealed class ConnectionLimiter
 {
     private readonly int _maxTotal;
@@ -64,5 +64,22 @@ public sealed class ConnectionLimiter
         }
     }
 
-    private static IPAddress Normalize(IPAddress a) => a.IsIPv4MappedToIPv6 ? a.MapToIPv4() : a;
+    /// <summary>The key of a client: its IPv4 address (an IPv4-mapped IPv6 address included), or the /64 of its IPv6 address (a host with a /64 has 2^64 addresses to open connections from).</summary>
+    private static IPAddress Normalize(IPAddress a)
+    {
+        if (a.IsIPv4MappedToIPv6)
+        {
+            return a.MapToIPv4();
+        }
+
+        if (a.AddressFamily != System.Net.Sockets.AddressFamily.InterNetworkV6)
+        {
+            return a;
+        }
+
+        Span<byte> bytes = stackalloc byte[16];
+        a.TryWriteBytes(bytes, out _);
+        bytes[8..].Clear();
+        return new IPAddress(bytes);
+    }
 }

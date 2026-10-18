@@ -29,6 +29,17 @@ internal sealed class InboundHeaderAnalysis
     /// <summary>More header fields, or a larger header block, than the parser records: fields we would have to inspect (and maybe remove) could be hidden behind the limit, so the message is refused.</summary>
     public bool Oversized { get; private set; }
 
+    /// <summary>
+    /// The message starts with white space: its first line would be a continuation of a header field that does not exist, and the field we put in front of it (our <c>Authentication-Results</c>) would swallow
+    /// that line as its own continuation, letting the sender write verdicts into our header. No real message starts like that; it is refused.
+    /// </summary>
+    public bool StartsWithWhiteSpace { get; private set; }
+
+    /// <summary>A From field has a mailbox that does not parse (or the message has no From, an empty one or only groups): there is no identity whose policy could be applied.</summary>
+    public bool FromUnusable => FromInvalid || FromDomains.Count == 0;
+
+    private bool FromInvalid { get; set; }
+
     public int ReceivedCount { get; private set; }
 
     /// <summary>The distinct domains of the From field(s), lower-case, in order.</summary>
@@ -51,6 +62,12 @@ internal sealed class InboundHeaderAnalysis
     {
         HeaderList headers = HeaderList.Parse(original, Limits);
         var analysis = new InboundHeaderAnalysis(original, headers);
+        if (original.Length > 0 && original.Span[0] is (byte)' ' or (byte)'\t')
+        {
+            analysis.StartsWithWhiteSpace = true;
+            return analysis;
+        }
+
         if ((headers.Anomalies & (MimeAnomaly.TooManyHeaders | MimeAnomaly.HeaderBlockTooLarge)) != 0)
         {
             analysis.Oversized = true;
@@ -62,22 +79,22 @@ internal sealed class InboundHeaderAnalysis
         for (int i = 0; i < headers.Count; i++)
         {
             MimeHeader header = headers[i];
-            if (header.IsMalformed)
-            {
-                continue;
-            }
 
-            string name = NameOf(header);
-            if (name.Equals(HeaderNames.AuthenticationResults, StringComparison.OrdinalIgnoreCase))
+            // The name as a lenient consumer of the stored message might read it: control characters and white space dropped (a field named "X-EggMail-Dmarc<VT>:" is still ours), and a line without a colon
+            // judged by what it looks like. Anything that reads as one of our names but is not exactly that name written properly is removed.
+            string looksLike = Normalize(header);
+            bool properName = !header.IsMalformed && header.NameBytes.Length > 0 && IsToken(NameOf(header));
+            string name = header.IsMalformed ? string.Empty : NameOf(header);
+            if (looksLike == "authentication-results" || looksLike.StartsWith("authentication-results", StringComparison.Ordinal) && header.IsMalformed)
             {
-                if (AuthenticationResultsPolicy.ShouldRemoveOnIngress(header.GetValue(), ownAuthservIds))
+                if (!properName || !name.Equals(HeaderNames.AuthenticationResults, StringComparison.OrdinalIgnoreCase) || AuthenticationResultsPolicy.ShouldRemoveOnIngress(header.GetValue(), ownAuthservIds))
                 {
                     analysis.Remove(header);
                 }
             }
-            else if (name.StartsWith("X-EggMail-", StringComparison.OrdinalIgnoreCase))
+            else if (looksLike.StartsWith("x-eggmail-", StringComparison.Ordinal))
             {
-                if (name.Equals(ForwardHopMarker.HeaderName, StringComparison.OrdinalIgnoreCase) && hops is not null)
+                if (properName && name.Equals(ForwardHopMarker.HeaderName, StringComparison.OrdinalIgnoreCase) && hops is not null)
                 {
                     bodyHash ??= ForwardHopMarker.BodyHash(headers.Body.Span);
                     bool valid = hops.TryVerify(header.GetValue(), bodyHash, out int count);
@@ -87,6 +104,10 @@ internal sealed class InboundHeaderAnalysis
                 {
                     analysis.Remove(header);
                 }
+            }
+            else if (header.IsMalformed)
+            {
+                continue;
             }
             else if (name.Equals(HeaderNames.Received, StringComparison.OrdinalIgnoreCase))
             {
@@ -137,6 +158,46 @@ internal sealed class InboundHeaderAnalysis
         return Encoding.Latin1.GetString(name);
     }
 
+    /// <summary>The text before the colon (the whole line when there is none) reduced to lower-case letters, digits and hyphens.</summary>
+    private static string Normalize(MimeHeader header)
+    {
+        ReadOnlySpan<byte> raw = header.Raw.Span;
+        int colon = raw.IndexOf((byte)':');
+        ReadOnlySpan<byte> name = colon >= 0 ? raw[..colon] : raw;
+        var sb = new StringBuilder(Math.Min(name.Length, 64));
+        foreach (byte b in name)
+        {
+            if (sb.Length >= 64)
+            {
+                break;
+            }
+
+            if (b is >= (byte)'a' and <= (byte)'z' or >= (byte)'0' and <= (byte)'9' or (byte)'-')
+            {
+                sb.Append((char)b);
+            }
+            else if (b is >= (byte)'A' and <= (byte)'Z')
+            {
+                sb.Append((char)(b | 0x20));
+            }
+        }
+
+        return sb.ToString();
+    }
+
+    private static bool IsToken(string name)
+    {
+        foreach (char c in name)
+        {
+            if (!(char.IsAsciiLetterOrDigit(c) || c == '-'))
+            {
+                return false;
+            }
+        }
+
+        return name.Length > 0;
+    }
+
     private void Remove(MimeHeader header) => _removed.Add((header.Offset, header.LengthWithLineEnding));
 
     private void AddFrom(MimeHeader header)
@@ -147,10 +208,16 @@ internal sealed class InboundHeaderAnalysis
         }
 
         AddressList list = AddressList.Parse(header, Limits);
+        if (list.Count == 0)
+        {
+            FromInvalid = true;   // an empty From field
+        }
+
         foreach (Mailbox mailbox in list.Mailboxes)
         {
             if (!mailbox.IsValid)
             {
+                FromInvalid = true;
                 continue;
             }
 
@@ -179,7 +246,8 @@ internal sealed class InboundHeaderAnalysis
                 break;
             }
 
-            sb.Append(char.IsControl(c) ? ' ' : c);
+            // Control characters and the bidirectional controls (override, embedding, isolate and mark characters) become spaces: a subject is shown in lists and must not reorder the text around it.
+            sb.Append(char.IsControl(c) || c is >= '\u202A' and <= '\u202E' or >= '\u2066' and <= '\u2069' or '\u200E' or '\u200F' or '\u061C' ? ' ' : c);
         }
 
         string subject = sb.ToString().Trim();
@@ -194,6 +262,17 @@ internal sealed class InboundHeaderAnalysis
     /// <summary>The stored copy: <paramref name="prefix"/> (the headers we add, CRLF terminated), then the received bytes without the removed fields.</summary>
     public byte[] Compose(ReadOnlySpan<byte> prefix)
     {
+        // The received bytes must start on a line of their own: a prefix that stopped mid-line would let the first received line continue our last field.
+        if (prefix.Length < 2 || prefix[^2] != (byte)'\r' || prefix[^1] != (byte)'\n')
+        {
+            throw new ArgumentException("The headers we add must end with CRLF.", nameof(prefix));
+        }
+
+        if (_original.Length > 0 && _original.Span[0] is (byte)' ' or (byte)'\t')
+        {
+            throw new InvalidOperationException("A message that starts with white space is refused before it is stored.");
+        }
+
         int removedBytes = 0;
         foreach ((int _, int length) in _removed)
         {

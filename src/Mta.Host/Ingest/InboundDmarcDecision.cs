@@ -14,6 +14,9 @@ public enum InboundDmarcRefusal : byte
 
     /// <summary><c>451 4.7.0</c>: every accepted recipient's domain asked for rejection and the verdict could not be settled (a temporary error or the time ran out), so the message is neither accepted unverified nor rejected.</summary>
     TryLater,
+
+    /// <summary><c>554 5.6.0</c>: the message has no usable From (none, empty, group-only, or a mailbox that does not parse), so no policy can be applied, and every accepted recipient's domain asked for rejection.</summary>
+    NoUsableFrom,
 }
 
 /// <summary>The outcome of <see cref="InboundDmarcDecision.Decide"/>.</summary>
@@ -33,6 +36,23 @@ public static class InboundDmarcDecision
         ArgumentNullException.ThrowIfNull(verification);
         bool allReject = actionsPerRecipient.Count > 0 && actionsPerRecipient.All(a => a == InboundDmarcAction.Reject);
         DmarcEvaluation? dmarc = verification.Dmarc;
+
+        // No usable From: there is no identity to apply a policy to, which a spoofer could use to be rid of every policy. It counts as a failure under a reject policy.
+        if (verification.NoUsableFrom)
+        {
+            if (allReject)
+            {
+                return new InboundDmarcOutcome(InboundDmarcRefusal.NoUsableFrom, new bool[actionsPerRecipient.Count]);
+            }
+
+            var unusable = new bool[actionsPerRecipient.Count];
+            for (int i = 0; i < unusable.Length; i++)
+            {
+                unusable[i] = actionsPerRecipient[i] is InboundDmarcAction.Flag or InboundDmarcAction.Reject;
+            }
+
+            return new InboundDmarcOutcome(InboundDmarcRefusal.None, unusable);
+        }
 
         // A trusted sealer's chain turns a failure into a pass for this decision; the recorded verdicts keep the original.
         bool failed = dmarc?.Result == DmarcResult.Fail && !verification.ArcOverridesDmarc && !verification.Unsettled;

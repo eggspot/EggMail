@@ -526,12 +526,23 @@ public static class ConfigLoader
         ValidateTlsAndAcme(c, errors);
         ValidateApi(c.Api, errors);
         ValidateDomains(c, errors);
-        ValidateInbound(c.Inbound, errors);
+        ValidateInbound(c, errors);
     }
 
     /// <summary>The inbound limits (design section 11.13): checked even while <c>Inbound:Enabled</c> is off, so switching it on later does not start a server with a contradictory configuration.</summary>
-    private static void ValidateInbound(InboundSection i, List<string> errors)
+    private static void ValidateInbound(MtaConfig c, List<string> errors)
     {
+        InboundSection i = c.Inbound;
+        if ((i.MaxMessageSize ?? c.Smtp.MaxMessageSize) > i.MaxTransactionBytes)
+        {
+            errors.Add("Inbound:MaxTransactionBytes must be at least the largest inbound message (Inbound:MaxMessageSize, else Smtp:MaxMessageSize): otherwise a single message could never be accepted.");
+        }
+
+        if (i.MaxConnections < 1 || i.MaxInFlightBytes < 1 || i.MaxInFlightBytesPerRemote < 1 || i.MaxSessionDuration < TimeSpan.FromSeconds(1))
+        {
+            errors.Add("Inbound:MaxConnections, Inbound:MaxInFlightBytes and Inbound:MaxInFlightBytesPerRemote must be at least 1 and Inbound:MaxSessionDuration at least one second.");
+        }
+
         if (i.MaxMessageSize is < 1024)
         {
             errors.Add("Inbound:MaxMessageSize must be at least 1024.");

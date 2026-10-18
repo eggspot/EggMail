@@ -18,6 +18,9 @@ public sealed class InboundReceiveOptions
     /// <summary>A message with more <c>Received</c> headers than this is refused at the end of DATA with <c>554 5.4.6</c>.</summary>
     public const int MaxReceivedHeaders = 25;
 
+    /// <summary>A message to a bounce or SRS address is at most this big (a DSN is headers and a piece of the original; the port is anonymous).</summary>
+    public const long BounceMessageLimit = 1L << 20;
+
     /// <summary><c>Inbound:Enabled</c>: the master switch. Off, the port-25 listener is the bounce listener it always was.</summary>
     public bool Enabled { get; init; }
 
@@ -57,6 +60,21 @@ public sealed class InboundReceiveOptions
     /// <summary><c>Inbound:Dnsbl:Timeout</c>.</summary>
     public TimeSpan DnsblTimeout { get; init; } = TimeSpan.FromSeconds(2);
 
+    /// <summary><c>Inbound:CheckSpfForInternalClients</c>: check SPF for clients with a private, loopback or link-local address (lab setups and networks that really send from them). Off, SPF is not checked for them: behind source NAT the address is the NAT's.</summary>
+    public bool CheckSpfForInternalClients { get; init; }
+
+    /// <summary><c>Inbound:MaxConnections</c>: connections the port-25 listener may hold, below <c>Smtp:MaxConnections</c> so anonymous senders cannot take the connections submission needs.</summary>
+    public int MaxConnections { get; init; } = 1500;
+
+    /// <summary><c>Inbound:MaxInFlightBytes</c>: bytes of messages the port-25 listener may be receiving at once, below <c>Smtp:MaxInFlightBytes</c> for the same reason.</summary>
+    public long MaxInFlightBytes { get; init; } = 256L << 20;
+
+    /// <summary><c>Inbound:MaxInFlightBytesPerRemote</c>: the share of that budget one client network (IPv4 address, IPv6 /64) may use.</summary>
+    public long MaxInFlightBytesPerRemote { get; init; } = 64L << 20;
+
+    /// <summary><c>Inbound:MaxSessionDuration</c>: the longest an anonymous session lives between commands (a message being received is finished).</summary>
+    public TimeSpan MaxSessionDuration { get; init; } = TimeSpan.FromMinutes(10);
+
     /// <summary><c>Inbound:Srs:MaxAgeDays</c>: how old an SRS address may be (21).</summary>
     public int SrsMaxAgeDays { get; init; } = 21;
 
@@ -80,6 +98,11 @@ public sealed class InboundReceiveOptions
             DnsblReject = i.Dnsbl.Action == InboundDnsblAction.Reject,
             DnsblTimeout = i.Dnsbl.Timeout,
             SrsMaxAgeDays = i.Srs.MaxAgeDays,
+            CheckSpfForInternalClients = i.CheckSpfForInternalClients,
+            MaxConnections = i.MaxConnections,
+            MaxInFlightBytes = i.MaxInFlightBytes,
+            MaxInFlightBytesPerRemote = i.MaxInFlightBytesPerRemote,
+            MaxSessionDuration = i.MaxSessionDuration,
         };
     }
 

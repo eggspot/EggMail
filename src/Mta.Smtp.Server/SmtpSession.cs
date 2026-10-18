@@ -37,8 +37,13 @@ internal sealed class SmtpSession
     private readonly List<EmailAddress> _recipients = [];
     private readonly ReceivedHeaderBuilder _received = new();
 
-    public SmtpSession(SmtpServer server, Socket socket, SmtpListenerOptions listener, CancellationToken stopping)
+    private readonly SessionBudget _budget;
+    private readonly long _startedAt;
+
+    public SmtpSession(SmtpServer server, Socket socket, SmtpServer.ListenerRuntime runtime, CancellationToken stopping)
     {
+        SmtpListenerOptions listener = runtime.Options;
+        _startedAt = server.Clock.Timestamp;
         _server = server;
         _options = server.Options;
         _handler = server.Handler;
@@ -51,12 +56,14 @@ internal sealed class SmtpSession
         _parseOptions = new SmtpParseOptions { MaxLineLength = _options.MaxLineLength, AllowSmtpUtf8 = _options.SmtpUtf8, AddressCache = new EmailAddressCache() };
         var remote = (IPEndPoint)socket.RemoteEndPoint!;
         var local = (IPEndPoint)socket.LocalEndPoint!;
+        _budget = new SessionBudget(server.Budget, runtime.Budget, runtime.PerRemoteBudget, KeyedInFlightBudget.KeyOf(remote.Address));
         _ctx = new SmtpSessionContext
         {
             RemoteEndPoint = remote,
             LocalEndPoint = local,
             ListenerName = listener.Name,
             Role = listener.Role,
+            MemoryReserver = _budget.TryReserve,
         };
         _state = new SmtpSessionState
         {
@@ -133,6 +140,7 @@ internal sealed class SmtpSession
                 _log.Write(MtaLogLevel.Error, "smtp.server", "handler OnDisconnected failed", ex);
             }
 
+            ReleaseExtraMemory();
             await _transport.DisposeAsync().ConfigureAwait(false);
             _readCts.Dispose();
             SmtpMetrics.ActiveSessions.Add(-1);
@@ -198,6 +206,12 @@ internal sealed class SmtpSession
         bool first = true;
         while (!_close)
         {
+            if (SessionTooOld)
+            {
+                await ReplyAsync(SmtpReply.Create(421, "4.4.2", "Session time limit reached, closing connection")).ConfigureAwait(false);
+                return;
+            }
+
             ReadResult read;
             try
             {
@@ -353,16 +367,18 @@ internal sealed class SmtpSession
                         }
                         catch (TimeoutException)
                         {
-                            _server.Budget.Release(reserved);
+                            _budget.Release(reserved);
                             reserved = 0;
+                            _handler.OnMessageRefused(_ctx, SmtpReplies.Timeout);
                             await ReplyAsync(SmtpReplies.Timeout).ConfigureAwait(false);
                             _close = true;
                             return;
                         }
                         catch (OperationCanceledException)
                         {
-                            _server.Budget.Release(reserved);
+                            _budget.Release(reserved);
                             reserved = 0;
+                            _handler.OnMessageRefused(_ctx, SmtpReplies.ShuttingDown);
                             await ReplyAsync(SmtpReplies.ShuttingDown).ConfigureAwait(false);
                             _close = true;
                             return;
@@ -385,7 +401,7 @@ internal sealed class SmtpSession
                                 else if (message.Capacity > reserved)
                                 {
                                     long need = message.Capacity - reserved;
-                                    if (_server.Budget.TryReserve(need))
+                                    if (_budget.TryReserve(need))
                                     {
                                         reserved += need;
                                     }
@@ -398,7 +414,7 @@ internal sealed class SmtpSession
                                 if (tooLarge || noMemory)
                                 {
                                     message.Dispose();
-                                    _server.Budget.Release(reserved);
+                                    _budget.Release(reserved);
                                     reserved = 0;
                                 }
                             }
@@ -415,6 +431,7 @@ internal sealed class SmtpSession
                         {
                             if (dataRead.IsCompleted)
                             {
+                                _handler.OnMessageRefused(_ctx, SmtpReplies.Timeout);   // the client went away in the middle of the message
                                 _close = true;
                                 return;
                             }
@@ -425,10 +442,11 @@ internal sealed class SmtpSession
                         if (dataStatus != DataScanStatus.Complete)
                         {
                             // BareLf, BareCr or Nul.
-                            _server.Budget.Release(reserved);
+                            _budget.Release(reserved);
                             reserved = 0;
                             SmtpMetrics.ProtocolErrors.Add(1);
                             _log.Write(MtaLogLevel.Warning, "smtp.server", $"session {_ctx.SessionId} from {_ctx.RemoteEndPoint}: {dataStatus} in message data (possible smuggling attempt)");
+                            _handler.OnMessageRefused(_ctx, SmtpReplies.BareLineEnding);
                             await ReplyAsync(SmtpReplies.BareLineEnding).ConfigureAwait(false);
                             _close = true;
                             return;
@@ -483,7 +501,7 @@ internal sealed class SmtpSession
                 finally
                 {
                     message.Dispose();
-                    _server.Budget.Release(reserved);
+                    _budget.Release(reserved);
                 }
 
                 continue;
@@ -604,8 +622,21 @@ internal sealed class SmtpSession
 
     // ---------------------------------------------------------------- verbs
 
+    private void ReleaseExtraMemory()
+    {
+        if (_ctx.ExtraReserved > 0)
+        {
+            _budget.Release(_ctx.ExtraReserved);
+            _ctx.ExtraReserved = 0;
+        }
+    }
+
+    /// <summary>Whether the listener's session age limit has passed (checked between commands).</summary>
+    private bool SessionTooOld => _listener.MaxSessionDuration is { } limit && _server.Clock.GetElapsedTime(_startedAt) > limit;
+
     private void ResetTransaction()
     {
+        ReleaseExtraMemory();
         _ctx.TransactionMaxMessageSize = null;
         _state.ResetTransaction();
         _mail = null;
@@ -939,7 +970,7 @@ internal sealed class SmtpSession
                     failed = true;
                     failure = SmtpReplies.MessageTooLarge;
                     message.Dispose();
-                    _server.Budget.Release(reserved);
+                    _budget.Release(reserved);
                     reserved = 0;
                 }
 
@@ -954,12 +985,14 @@ internal sealed class SmtpSession
                     }
                     catch (TimeoutException)
                     {
+                        if (!failed) { _handler.OnMessageRefused(_ctx, SmtpReplies.Timeout); }
                         await ReplyAsync(SmtpReplies.Timeout).ConfigureAwait(false);
                         _close = true;
                         return;
                     }
                     catch (OperationCanceledException)
                     {
+                        if (!failed) { _handler.OnMessageRefused(_ctx, SmtpReplies.ShuttingDown); }
                         await ReplyAsync(SmtpReplies.ShuttingDown).ConfigureAwait(false);
                         _close = true;
                         return;
@@ -968,6 +1001,7 @@ internal sealed class SmtpSession
                     var buffer = read.Buffer;
                     if (buffer.IsEmpty && read.IsCompleted)
                     {
+                        if (!failed) { _handler.OnMessageRefused(_ctx, SmtpReplies.Timeout); }
                         _close = true;
                         return;
                     }
@@ -987,7 +1021,7 @@ internal sealed class SmtpSession
                         if (message.Capacity > reserved)
                         {
                             long need = message.Capacity - reserved;
-                            if (_server.Budget.TryReserve(need))
+                            if (_budget.TryReserve(need))
                             {
                                 reserved += need;
                             }
@@ -996,7 +1030,7 @@ internal sealed class SmtpSession
                                 failed = true;
                                 failure = SmtpReplies.InsufficientStorage;
                                 message.Dispose();
-                                _server.Budget.Release(reserved);
+                                _budget.Release(reserved);
                                 reserved = 0;
                             }
                         }
@@ -1079,7 +1113,7 @@ internal sealed class SmtpSession
         }
         finally
         {
-            _server.Budget.Release(reserved);
+            _budget.Release(reserved);
         }
     }
 
@@ -1087,6 +1121,7 @@ internal sealed class SmtpSession
     {
         SmtpMetrics.ProtocolErrors.Add(1);
         _log.Write(MtaLogLevel.Warning, "smtp.server", $"session {_ctx.SessionId} from {_ctx.RemoteEndPoint}: {status} in BDAT data (possible smuggling attempt)");
+        _handler.OnMessageRefused(_ctx, SmtpReplies.BareLineEnding);
         await ReplyAsync(SmtpReplies.BareLineEnding).ConfigureAwait(false);
         _close = true;
     }
@@ -1098,19 +1133,29 @@ internal sealed class SmtpSession
         while (true)
         {
             ReadResult read;
+            if (SessionTooOld)
+            {
+                SmtpReply closing = SmtpReply.Create(421, "4.4.2", "Session time limit reached, closing connection");
+                _handler.OnMessageRefused(_ctx, closing);   // a message was being sent in chunks
+                await ReplyAsync(closing).ConfigureAwait(false);
+                _close = true;
+                return null;
+            }
+
             try
             {
                 read = await ReadAsync(_options.CommandTimeout).ConfigureAwait(false);
             }
             catch (TimeoutException)
             {
+                _handler.OnMessageRefused(_ctx, SmtpReplies.Timeout);
                 await ReplyAsync(SmtpReplies.Timeout).ConfigureAwait(false);
                 _close = true;
                 return null;
             }
 
             var buffer = read.Buffer;
-            if (buffer.IsEmpty && read.IsCompleted) { _close = true; return null; }
+            if (buffer.IsEmpty && read.IsCompleted) { _handler.OnMessageRefused(_ctx, SmtpReplies.Timeout); _close = true; return null; }
             var status = TryReadCommand(buffer, out var cmd, out var err, out int consumed);
             if (status == LineStatus.Incomplete)
             {
@@ -1121,6 +1166,7 @@ internal sealed class SmtpSession
 
             if (status != LineStatus.Ok)
             {
+                _handler.OnMessageRefused(_ctx, SmtpReplies.BareLineEnding);
                 await ReplyAsync(status == LineStatus.TooLong ? SmtpReplies.LineTooLong : SmtpReplies.BareLineEnding).ConfigureAwait(false);
                 _close = true;
                 return null;
@@ -1134,6 +1180,7 @@ internal sealed class SmtpSession
 
             if (err == SmtpParseError.None && cmd.Verb is SmtpVerb.Rset)
             {
+                _handler.OnMessageRefused(_ctx, SmtpReplies.ResetOk);   // the message was abandoned
                 ResetTransaction();
                 Write(SmtpReplies.ResetOk);
                 return null;
@@ -1147,6 +1194,7 @@ internal sealed class SmtpSession
 
             if (err == SmtpParseError.None && cmd.Verb is SmtpVerb.Quit)
             {
+                _handler.OnMessageRefused(_ctx, SmtpReplies.Bye);
                 Write(SmtpReplies.Bye);
                 await FlushAsync().ConfigureAwait(false);
                 _close = true;
@@ -1154,6 +1202,7 @@ internal sealed class SmtpSession
             }
 
             // Anything else aborts the chunked transfer (RFC 3030 §4.1).
+            _handler.OnMessageRefused(_ctx, SmtpReplies.BadSequence);
             ResetTransaction();
             await ErrorAsync(SmtpReplies.BadSequence).ConfigureAwait(false);
             return null;

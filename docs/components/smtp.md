@@ -45,7 +45,10 @@ What the server gives a handler for inbound mail, beyond `OnRcptToAsync` and `On
 
 - `OnDataStartAsync(session, mail, recipients)`: called when the client sends `DATA` (or the first `BDAT`), before `354` and before any byte is read. Returning a reply refuses the message and ends the transaction (a refused `BDAT` sequence is still read and discarded, as RFC 3030 requires). The receive path uses it to look at the free verification slots.
 - `SmtpSessionContext.TransactionMaxMessageSize`: a lower size limit for the open transaction that the handler sets while it accepts recipients (the lowest per-domain limit). The session enforces the lower of this and the listener's limit while it reads, so an oversize body is `552 5.3.4` without being buffered, and clears it when the transaction ends.
-- `OnMessageRefused(session, reply)`: the server refused the body itself (`552` size, `452` in-flight budget); lets the handler count what it never saw.
+- `OnMessageRefused(session, reply)`: a message the handler was told about (`OnDataStartAsync` went on) died in the dialog without reaching `OnMessageAsync`: the body grew past the size limit (`552`), the in-flight budget was exhausted (`452`), a read timed out or the server was stopping (`421`), the data had a bare LF or NUL (`500`), the client went away mid-message, or a `BDAT` sequence ended by `RSET`, `QUIT`, another command or the session age limit. A refusal the handler itself made at `OnDataStartAsync` is not reported back. Lets the handler count what it never saw.
+- `SmtpSessionContext.TryReserveMemory(bytes)`: reserves memory for the handler's own copies of a message from the same budget (the listener's share, the client network's share and the server's), given back when the transaction ends; false means refuse with `452` instead of allocating.
+
+Per-listener limits: `MaxConnections`, `MaxInFlightBytes`, `MaxInFlightBytesPerRemote` (an IPv4 address or IPv6 /64) and `MaxSessionDuration` (checked between commands, also while a `BDAT` sequence waits for its next chunk); the per-address connection cap counts an IPv6 client by its /64.
 
 Tests: `tests/Mta.Smtp.Server.Tests/InboundSupportTests.cs`.
 

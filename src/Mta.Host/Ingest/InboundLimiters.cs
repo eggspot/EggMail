@@ -12,6 +12,7 @@ public sealed class BoundedWindowCounter
 {
     private readonly object _gate = new();
     private readonly Dictionary<string, (long Window, int Count)> _entries;
+    private Queue<string> _order = new();   // keys in the order they first appeared: what "oldest" means when every window is current
     private readonly int _maxEntries;
     private readonly string _kind;
 
@@ -68,6 +69,12 @@ public sealed class BoundedWindowCounter
             }
 
             _entries[key] = (window, 1);
+            _order.Enqueue(key);
+            if (_order.Count > 2 * _maxEntries)
+            {
+                _order = new Queue<string>(_entries.Keys);   // keys swept out as expired leave stale places in the queue; start it again from what is in the table
+            }
+
             return 1;
         }
     }
@@ -95,24 +102,18 @@ public sealed class BoundedWindowCounter
             return;
         }
 
-        // Everything is current: drop a sixteenth of the table (the entries nearest to the end of their window are all alike, so any is "the oldest"; a batch keeps this scan rare).
+        // Everything is current: drop the oldest sixteenth of the table, oldest first by when the key first appeared (a batch keeps this scan rare).
         int drop = Math.Max(1, _maxEntries / 16);
-        var victims = new List<string>(drop);
-        foreach (string key in _entries.Keys)
+        int dropped = 0;
+        while (dropped < drop && _order.Count > 0)
         {
-            victims.Add(key);
-            if (victims.Count == drop)
+            if (_entries.Remove(_order.Dequeue()))
             {
-                break;
+                dropped++;
             }
         }
 
-        foreach (string key in victims)
-        {
-            _entries.Remove(key);
-        }
-
-        InboundMetrics.LimiterEvictions.Add(victims.Count, new KeyValuePair<string, object?>("limiter", _kind));
+        InboundMetrics.LimiterEvictions.Add(dropped, new KeyValuePair<string, object?>("limiter", _kind));
     }
 
     private static long Window(DateTimeOffset now) => now.ToUnixTimeSeconds() / 60;

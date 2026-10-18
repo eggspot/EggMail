@@ -5,6 +5,7 @@ using Mta.Core;
 using Mta.Dkim;
 using Mta.Dns;
 using Mta.Dsn;
+using Mta.Host.Hosting;
 using Mta.Host.Ingest;
 using Mta.Host.Security;
 using Mta.Host.Submission;
@@ -90,14 +91,15 @@ internal sealed class InboundFixture : IAsyncDisposable
     /// <param name="wrapStore">Replaces the inbound store the receive path writes to (a store that fails).</param>
     /// <param name="loadConfiguration">Whether the receive path's configuration is loaded before the first connection (a cold start otherwise).</param>
     public static async Task<InboundFixture> CreateAsync(InboundReceiveOptions? options = null, ListenerMode mode = ListenerMode.Plain, Action<InboundFixture>? beforeStart = null,
-        bool bounceDomain = true, Func<StaticDnsResolver, IDnsResolver>? wrapDns = null, Func<IInboundStore, IInboundStore>? wrapStore = null, bool loadConfiguration = true)
+        bool bounceDomain = true, Func<StaticDnsResolver, IDnsResolver>? wrapDns = null, Func<IInboundStore, IInboundStore>? wrapStore = null, bool loadConfiguration = true,
+        long? listenerMaxInFlightBytes = null)
     {
         var f = new InboundFixture();
-        await f.InitializeAsync(options ?? new InboundReceiveOptions { Enabled = true }, mode, beforeStart, bounceDomain, wrapDns, wrapStore, loadConfiguration);
+        await f.InitializeAsync(options ?? new InboundReceiveOptions { Enabled = true }, mode, beforeStart, bounceDomain, wrapDns, wrapStore, loadConfiguration, listenerMaxInFlightBytes);
         return f;
     }
 
-    private async Task InitializeAsync(InboundReceiveOptions options, ListenerMode mode, Action<InboundFixture>? beforeStart, bool bounceDomain, Func<StaticDnsResolver, IDnsResolver>? wrapDns, Func<IInboundStore, IInboundStore>? wrapStore, bool loadConfiguration)
+    private async Task InitializeAsync(InboundReceiveOptions options, ListenerMode mode, Action<InboundFixture>? beforeStart, bool bounceDomain, Func<StaticDnsResolver, IDnsResolver>? wrapDns, Func<IInboundStore, IInboundStore>? wrapStore, bool loadConfiguration, long? listenerMaxInFlightBytes)
     {
         Options = options;
         Storage = new InMemoryStorage(new StorageOptions());
@@ -149,17 +151,20 @@ internal sealed class InboundFixture : IAsyncDisposable
         {
             Hostname = "mx.egg.test",
             Certificates = mode == ListenerMode.Plain ? null : new SelfSignedCertificates(),
-            Listeners =
-            [
-                new SmtpListenerOptions
-                {
-                    Name = "inbound", BindAddress = IPAddress.Loopback, Port = 0, Mode = mode, Role = ListenerRole.Inbound, AuthRequired = false,
-                    MaxMessageSize = options.Ceilings.MaxMessageBytes, MaxRecipients = options.MaxRecipients + 1,
-                },
-            ],
+            Listeners = [ConfiguredListener(mode, options, listenerMaxInFlightBytes)],
         }, Handler, log: _log);
         Server.Start();
         Port = Server.LocalEndPoints["inbound"].Port;
+    }
+
+    // The listener exactly as the host configures the port-25 listener for these options (role, limits, shares), with the test's address and mode.
+    private static SmtpListenerOptions ConfiguredListener(ListenerMode mode, InboundReceiveOptions options, long? maxInFlightBytes)
+    {
+        SmtpListenerOptions configured = EggMailRuntime.InboundListener(
+            new SmtpListenerOptions { Name = "inbound", BindAddress = IPAddress.Loopback, Port = 0, Mode = mode, Role = ListenerRole.Bounce, AuthRequired = false }, options);
+        return maxInFlightBytes is { } budget
+            ? configured.With(configured.Role, configured.MaxMessageSize, configured.MaxRecipients, configured.MaxConnections, budget, configured.MaxInFlightBytesPerRemote, configured.MaxSessionDuration, authRequired: false)
+            : configured;
     }
 
     public async Task<Guid> AddDomainAsync(Guid tenant, string name, DomainStatus status)

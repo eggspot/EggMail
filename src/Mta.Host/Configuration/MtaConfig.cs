@@ -503,6 +503,21 @@ public sealed class InboundSection
     /// <summary>The authserv-id of the <c>Authentication-Results</c> header added to received mail. Null: <c>Hostname</c>.</summary>
     public string? AuthenticationResultsId { get; init; }
 
+    /// <summary>Check SPF for clients with a private, loopback or link-local address. Off (the default), SPF is not checked for them (behind source NAT the address is the NAT's); turn it on for a lab or a network that really sends from such addresses.</summary>
+    public bool CheckSpfForInternalClients { get; init; }
+
+    /// <summary>Connections the port-25 listener may hold at once; <c>Smtp:MaxConnections</c> minus this is what stays available to submission when anonymous senders open as many as they can.</summary>
+    public int MaxConnections { get; init; } = 1500;
+
+    /// <summary>Bytes of messages the port-25 listener may be receiving at once; <c>Smtp:MaxInFlightBytes</c> minus this stays available to submission.</summary>
+    public long MaxInFlightBytes { get; init; } = 256L * 1024 * 1024;
+
+    /// <summary>The share of <c>Inbound:MaxInFlightBytes</c> one client network (an IPv4 address or an IPv6 /64) may use.</summary>
+    public long MaxInFlightBytesPerRemote { get; init; } = 64L * 1024 * 1024;
+
+    /// <summary>The longest an anonymous session lives, checked between commands: a client that keeps a connection open with NOOP or empty BDAT chunks is closed after it (a message being received is finished).</summary>
+    public TimeSpan MaxSessionDuration { get; init; } = TimeSpan.FromMinutes(10);
+
     public InboundVerificationSection Verification { get; init; } = new();
     public InboundArcSection Arc { get; init; } = new();
     public InboundDnsblSection Dnsbl { get; init; } = new();

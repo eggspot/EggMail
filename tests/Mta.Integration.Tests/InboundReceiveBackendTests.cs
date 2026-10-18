@@ -64,7 +64,7 @@ internal static class InboundScenario
         {
             Hostname = "mx.egg.test",
             Storage = storageOptions,
-            Inbound = new InboundSection { Enabled = true },
+            Inbound = new InboundSection { Enabled = true, CheckSpfForInternalClients = true },   // the test sender is 127.0.0.1
             Smtp = new SmtpSection
             {
                 Listeners = new Dictionary<string, ListenerSection>

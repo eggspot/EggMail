@@ -54,12 +54,14 @@ public sealed class InboundReceiver
     private static readonly SmtpReply AuthTryLater = SmtpReply.Constant(451, "4.7.0", "Temporary authentication failure, try again later");
     private static readonly SmtpReply TooManyHops = SmtpReply.Constant(554, "5.4.6", "Too many hops");
     private static readonly SmtpReply HeadersTooLarge = SmtpReply.Constant(554, "5.6.0", "Header section too large");
+    private static readonly SmtpReply MalformedStart = SmtpReply.Constant(554, "5.6.0", "Malformed message: it starts with white space");
+    private static readonly SmtpReply NoUsableFromAddress = SmtpReply.Constant(554, "5.6.0", "No usable From address");
     private static readonly SmtpReply TooManyFromAddresses = SmtpReply.Constant(554, "5.6.0", "Too many From addresses");
     private static readonly SmtpReply Unavailable = SmtpReply.Constant(451, "4.3.0", "Temporary problem accepting the message, try again later");
     private static readonly SmtpReply StorageFull = SmtpReply.Constant(452, "4.3.1", "Insufficient system storage, try again later");
     private static readonly SmtpReply Accepted = SmtpReply.Constant(250, "2.0.0", "Accepted");
 
-    private static long s_lastInternalAddressWarning = long.MinValue;
+    private long _lastInternalAddressWarning = long.MinValue;   // per receiver: one warning an hour for the listener, however many senders
     private static readonly long WarningIntervalTicks = (long)(TimeSpan.FromHours(1).TotalSeconds * System.Diagnostics.Stopwatch.Frequency);
 
     private enum Kind : byte
@@ -80,12 +82,14 @@ public sealed class InboundReceiver
         public long? DeclaredSize;
         public long MinLimit = long.MaxValue;
         public bool DnsblChecked;
+        public HashSet<Guid> CountedDomains { get; } = [];
         public string? DnsblZone;
 
         public void Reset()
         {
             Kind = Kind.None;
             Recipients.Clear();
+            CountedDomains.Clear();
             DeclaredSize = null;
             MinLimit = long.MaxValue;
         }
@@ -140,8 +144,8 @@ public sealed class InboundReceiver
         {
             // Behind source NAT (a Docker bridge or userland proxy, a Service with externalTrafficPolicy Cluster) every sender looks like this address.
             long now = System.Diagnostics.Stopwatch.GetTimestamp();
-            long last = Volatile.Read(ref s_lastInternalAddressWarning);
-            if ((last == long.MinValue || now - last > WarningIntervalTicks) && Interlocked.CompareExchange(ref s_lastInternalAddressWarning, now, last) == last)
+            long last = Volatile.Read(ref _lastInternalAddressWarning);
+            if ((last == long.MinValue || now - last > WarningIntervalTicks) && Interlocked.CompareExchange(ref _lastInternalAddressWarning, now, last) == last)
             {
                 _log.Write(MtaLogLevel.Warning, "inbound", "client addresses look internal (an inbound connection came from a private, loopback or link-local address); SPF and per-address limits are not meaningful behind NAT, see the Inbound mail section of the operations guide");
             }
@@ -191,6 +195,7 @@ public sealed class InboundReceiver
                 }
 
                 state.Kind = Kind.Bounce;
+                LimitBounceClassMessage(session);
                 InboundMetrics.Recipient("bounce");
                 return SmtpReplies.RecipientOk;
 
@@ -216,9 +221,9 @@ public sealed class InboundReceiver
         string local = recipient.LocalPart;
 
         // 2. An SRS address: only from the null sender, only with a valid hash and age; the bounce is dropped.
-        if (local.StartsWith("SRS0=", StringComparison.OrdinalIgnoreCase) || local.StartsWith("SRS1=", StringComparison.OrdinalIgnoreCase))
+        if (SrsCodec.HasSrsPrefix(local))
         {
-            if (!mail.Sender.IsNull || _srs is null || _srs.Verify(local, _clock.UtcNow) != SrsCheck.Valid)
+            if (!mail.Sender.IsNull || _srs is null || !_srs.TryVerify(local, _clock.UtcNow))
             {
                 InboundMetrics.Recipient("unknown_mailbox");
                 return UnknownMailbox;
@@ -230,6 +235,7 @@ public sealed class InboundReceiver
             }
 
             state.Kind = Kind.Srs;
+            LimitBounceClassMessage(session);
             InboundMetrics.Recipient("srs_bounce");
             return SmtpReplies.RecipientOk;
         }
@@ -262,7 +268,8 @@ public sealed class InboundReceiver
 
         DateTimeOffset now = _clock.UtcNow;
         InboundEffectiveLimits limits = view.Limits;
-        if (!_limiter.Allows(view.DomainId, state.Client, limits.MaxMessagesPerMinute, limits.MaxMessagesPerMinutePerRemote, now))
+        // A message is counted once per domain, however many of its recipients are in that domain (the limit is on messages per minute).
+        if (!state.CountedDomains.Contains(view.DomainId) && !_limiter.Allows(view.DomainId, state.Client, limits.MaxMessagesPerMinute, limits.MaxMessagesPerMinutePerRemote, now))
         {
             InboundMetrics.Recipient("rate_limited");
             return TooManyMessages;
@@ -287,7 +294,7 @@ public sealed class InboundReceiver
         {
             // Once per connection, at the first recipient that classifies as inbound; a connection that carries only bounce or SRS recipients is never looked up.
             state.DnsblChecked = true;
-            if (_dnsbl.Enabled)
+            if (_dnsbl.Enabled && !NetworkKey.IsInternal(state.Client))   // an internal address says nothing to a list and need not be disclosed to it
             {
                 state.DnsblZone = await _dnsbl.FindListingAsync(state.Client, ct).ConfigureAwait(false);
             }
@@ -305,14 +312,22 @@ public sealed class InboundReceiver
             return MailboxFull;
         }
 
-        _limiter.Count(view.DomainId, state.Client, now);
+        if (state.CountedDomains.Add(view.DomainId))
+        {
+            _limiter.Count(view.DomainId, state.Client, now);
+        }
+
         state.Kind = Kind.Inbound;
-        state.Recipients.Add(new AcceptedRecipient(view, route, recipient.LocalPart.ToLowerInvariant() + "@" + recipient.Domain.ToLowerInvariant()));
+        state.Recipients.Add(new AcceptedRecipient(view, route, recipient.LocalPart.ToLowerInvariant() + "@" + InboundRules.ALabel(view.DomainName)));
         state.MinLimit = limit;
         session.TransactionMaxMessageSize = limit;
         InboundMetrics.Recipient(postmaster ? "postmaster" : "accepted");
         return SmtpReplies.RecipientOk;
     }
+
+    // A bounce or an SRS bounce is a few kilobytes of headers and a piece of the original; the anonymous port does not take more than that for one.
+    private static void LimitBounceClassMessage(SmtpSessionContext session) =>
+        session.TransactionMaxMessageSize = session.TransactionMaxMessageSize is { } existing ? Math.Min(existing, InboundReceiveOptions.BounceMessageLimit) : InboundReceiveOptions.BounceMessageLimit;
 
     private static SmtpReply Mixed()
     {
@@ -432,8 +447,21 @@ public sealed class InboundReceiver
             return TooManyRecipientsForSize;
         }
 
+        // The copies this handler makes are memory too: reserve them from the same budget the message bytes were counted in before making them, so a flood of large messages cannot multiply its footprint.
+        if (!message.Body.IsSingleSegment && !message.Session.TryReserveMemory(size))
+        {
+            InboundMetrics.Message("rejected_other");
+            return StorageFull;
+        }
+
         ReadOnlyMemory<byte> original = message.Body.IsSingleSegment ? message.Body.First : message.ToArray();
         InboundHeaderAnalysis headers = InboundHeaderAnalysis.Analyze(original, _ownAuthservIds, _hops);
+        if (headers.StartsWithWhiteSpace)
+        {
+            InboundMetrics.Message("rejected_other");
+            return MalformedStart;
+        }
+
         if (headers.Oversized)
         {
             InboundMetrics.Message("rejected_other");
@@ -465,7 +493,7 @@ public sealed class InboundReceiver
 
         try
         {
-            verification = await _verifier.VerifyAsync(client, message.Session.HeloName, mailFrom, original, headers.Headers, headers.FromDomains, ct).ConfigureAwait(false);
+            verification = await _verifier.VerifyAsync(client, message.Session.HeloName, mailFrom, original, headers.Headers, headers.FromDomains, !headers.FromUnusable, ct).ConfigureAwait(false);
         }
         finally
         {
@@ -480,10 +508,23 @@ public sealed class InboundReceiver
                 InboundMetrics.Message("rejected_dmarc");
                 return SmtpReply.Create(550, "5.7.1", "Rejected by the DMARC policy of " + SafeText(verification.Dmarc?.FromDomain ?? "the sender"));
 
+            case InboundDmarcRefusal.NoUsableFrom:
+                InboundMetrics.Refused("dmarc");
+                InboundMetrics.Message("rejected_dmarc");
+                return NoUsableFromAddress;
+
             case InboundDmarcRefusal.TryLater:
                 InboundMetrics.Refused("verification_temperror");
                 InboundMetrics.Message("rejected_verification");
                 return AuthTryLater;
+        }
+
+        // One stamped copy per distinct state (flagged or not), each as large as the message plus the headers we add.
+        int variants = decision.Flagged.Distinct().Count();
+        if (!message.Session.TryReserveMemory(variants * (size + 64 * 1024)))
+        {
+            InboundMetrics.Message("rejected_other");
+            return StorageFull;
         }
 
         IReadOnlyList<InboundMessageDraft> drafts = BuildDrafts(message, state, headers, verification, decision);

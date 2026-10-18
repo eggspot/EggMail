@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text.RegularExpressions;
 using Mta.Auth.Arc;
 using Mta.Auth.AuthenticationResults;
 using Mta.Auth.Dmarc;
@@ -23,12 +24,16 @@ public sealed class InboundVerification
     public DmarcEvaluation? Dmarc { get; init; }
 
     /// <summary>
-    /// The DMARC verdict could not be settled: the policy lookup failed temporarily, the time ran out, or a failure depends on a mechanism that failed temporarily (a
-    /// DKIM key that could not be fetched may have been the aligned pass). Under the action <c>reject</c> such a message is not accepted unverified, and not rejected either: the sender retries.
+    /// The DMARC verdict could not be settled for at least one From domain: the policy lookup failed temporarily, the time ran out, or a failure depends on a mechanism that failed temporarily <em>for the
+    /// From domain's own identifiers</em> (a DKIM key of an aligned signature that could not be fetched may have been the pass; the SPF record of an unrelated domain could not have been). Under the action
+    /// <c>reject</c> such a message is neither accepted unverified nor rejected: the sender retries.
     /// </summary>
     public bool Unsettled { get; init; }
 
-    /// <summary>The last seal of a valid ARC chain belongs to a trusted sealer and vouches for the From domain: a DMARC failure is treated as a pass for the decision (the recorded verdicts stay).</summary>
+    /// <summary>The message has no usable From (none, an empty or group-only one, or a mailbox that does not parse): there is no domain whose policy could be applied, which is treated as a DMARC failure under a reject policy.</summary>
+    public bool NoUsableFrom { get; init; }
+
+    /// <summary>The last seal of a valid ARC chain belongs to a trusted sealer and vouches for the From domain: a DMARC failure is treated as a pass for the action decision (the original verdicts stay recorded).</summary>
     public bool ArcOverridesDmarc { get; init; }
 
     public bool TimedOut { get; init; }
@@ -38,18 +43,24 @@ public sealed class InboundVerification
 }
 
 /// <summary>
-/// Verifies an inbound message with the libraries of <c>Mta.Auth</c> and <c>Mta.Dkim</c> through the DNS client (design section 11.5): SPF for the MAIL FROM identity (HELO when the reverse-path is null)
-/// and for the HELO name, DKIM, DMARC for every From domain, and the ARC chain. One total timeout bounds it all; whatever did not finish is a <c>temperror</c>, never a pass.
+/// Verifies an inbound message with the libraries of <c>Mta.Auth</c> and <c>Mta.Dkim</c> through the DNS client (design section 11.5): SPF for the MAIL FROM identity (HELO when the reverse-path is null) and for
+/// the HELO name, DKIM, DMARC for every From domain, and the ARC chain. One total timeout bounds SPF, DKIM and ARC; whatever did not finish is a <c>temperror</c> for that mechanism only (DMARC still runs with
+/// what finished). One query budget bounds all the DNS work of a message, so a hostile record set cannot turn the receiver into a DNS load generator.
 /// </summary>
 public sealed class InboundVerifier
 {
+    /// <summary>The most DNS queries all the checks of one message may make together (SPF alone may use up to 10 terms, each expanding to several lookups). Over it the answer is a temporary failure.</summary>
+    public const int MaxQueriesPerMessage = 80;
+
+    /// <summary>DMARC needs one or two lookups; it gets its own short time so a stage that used up the total still leaves it room.</summary>
+    private static readonly TimeSpan DmarcTimeLimit = TimeSpan.FromSeconds(5);
+
+    private static readonly Regex DomainTag = new(@"(?:^|;)\s*d\s*=\s*([^;\s]+)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(100));
+
     private readonly IDnsResolver _dns;
     private readonly InboundReceiveOptions _options;
     private readonly IClock _clock;
-    private readonly SpfEvaluator _spf;
-    private readonly DkimVerifier _dkim;
-    private readonly DmarcEvaluator _dmarc;
-    private readonly ArcValidator _arc;
+    private readonly string _hostname;
     private readonly string _authservId;
 
     public InboundVerifier(IDnsResolver dns, InboundReceiveOptions options, string hostname, IClock clock)
@@ -57,11 +68,8 @@ public sealed class InboundVerifier
         _dns = dns;
         _options = options;
         _clock = clock;
+        _hostname = hostname;
         _authservId = string.IsNullOrWhiteSpace(options.AuthenticationResultsId) ? hostname : options.AuthenticationResultsId.Trim();
-        _spf = new SpfEvaluator(dns, new SpfOptions { ReceivingHostName = hostname, EvaluateExplanations = false, Clock = clock });
-        _dkim = new DkimVerifier(dns, new DkimVerifierOptions { Clock = clock });
-        _dmarc = new DmarcEvaluator(dns);
-        _arc = new ArcValidator(dns, new ArcValidatorOptions { MaxInstances = InboundReceiveOptions.MaxArcInstances });
     }
 
     /// <summary>The authserv-id of the header this verifier writes (also what the receive path removes from incoming mail).</summary>
@@ -73,78 +81,153 @@ public sealed class InboundVerifier
     /// <param name="message">The message exactly as received (CRLF lines), without the headers we add.</param>
     /// <param name="headers">The parsed header block of <paramref name="message"/>.</param>
     /// <param name="fromDomains">The distinct domains of the From header(s), lower-case; empty when there is none.</param>
+    /// <param name="fromUsable">Whether the From header(s) gave a usable identity: every mailbox parsed, at least one. False sets <see cref="InboundVerification.NoUsableFrom"/>.</param>
     /// <param name="cancellationToken">Stops everything (shutdown): the caller's reply is not needed any more. The verification timeout is a result, not a cancellation.</param>
-    public async ValueTask<InboundVerification> VerifyAsync(IPAddress client, string? helo, string mailFrom, ReadOnlyMemory<byte> message, HeaderList headers, IReadOnlyList<string> fromDomains, CancellationToken cancellationToken)
+    public async ValueTask<InboundVerification> VerifyAsync(IPAddress client, string? helo, string mailFrom, ReadOnlyMemory<byte> message, HeaderList headers, IReadOnlyList<string> fromDomains, bool fromUsable, CancellationToken cancellationToken)
     {
         long started = _clock.Timestamp;
         client = NetworkKey.Normalize(client);
         helo = string.IsNullOrWhiteSpace(helo) ? string.Empty : helo.Trim();
+        IDnsResolver dns = new QueryBudgetResolver(_dns, MaxQueriesPerMessage);
+        var spfHelo = new SpfEvaluator(dns, new SpfOptions { ReceivingHostName = _hostname, EvaluateExplanations = false, Clock = _clock, MaxDnsLookups = 4, MaxVoidLookups = 1, MaxMxPtrNames = 3 });
+        var spfMail = new SpfEvaluator(dns, new SpfOptions { ReceivingHostName = _hostname, EvaluateExplanations = false, Clock = _clock });
+        var dkim = new DkimVerifier(dns, new DkimVerifierOptions { Clock = _clock });
+        var arcValidator = new ArcValidator(dns, new ArcValidatorOptions { MaxInstances = InboundReceiveOptions.MaxArcInstances });
+
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(_options.VerificationTimeout);
-        bool timedOut = false;
 
-        Task<SpfSessionResult?> spfTask = RunAsync(() => _spf.CheckSessionAsync(client, helo, mailFrom, timeout.Token).AsTask(), cancellationToken);
-        Task<IReadOnlyList<DkimVerificationResult>?> dkimTask = RunAsync(() => _dkim.VerifyAsync(message, timeout.Token).AsTask(), cancellationToken);
-        Task<ArcChainResult?> arcTask = RunAsync(() => _arc.ValidateAsync(message, timeout.Token).AsTask(), cancellationToken);
-        await Task.WhenAll(spfTask, dkimTask, arcTask).ConfigureAwait(false);
+        // Behind source NAT the address is the NAT's, not the sender's: an SPF verdict for it would be wrong either way. No check is better than a wrong one (unless the operator says the clients are real).
+        bool checkSpf = _options.CheckSpfForInternalClients || !NetworkKey.IsInternal(client);
+        Task<SpfCheckResult?> helloTask = checkSpf ? RunAsync(() => spfHelo.CheckHostAsync(SpfCheckRequest.ForHelo(client, helo), timeout.Token).AsTask(), cancellationToken) : Task.FromResult<SpfCheckResult?>(NotChecked(helo));
+        Task<SpfCheckResult?> mailTask = string.IsNullOrEmpty(mailFrom) ? Task.FromResult<SpfCheckResult?>(null)
+            : checkSpf ? RunAsync(() => spfMail.CheckHostAsync(SpfCheckRequest.ForMailFrom(client, helo, mailFrom), timeout.Token).AsTask(), cancellationToken) : Task.FromResult<SpfCheckResult?>(NotChecked(DomainOf(mailFrom) ?? string.Empty));
+        Task<IReadOnlyList<DkimVerificationResult>?> dkimTask = RunAsync(() => dkim.VerifyAsync(message, timeout.Token).AsTask(), cancellationToken);
+        Task<ArcChainResult?> arcTask = RunAsync(() => arcValidator.ValidateAsync(message, timeout.Token).AsTask(), cancellationToken);
+        await Task.WhenAll(helloTask, mailTask, dkimTask, arcTask).ConfigureAwait(false);
 
-        SpfSessionResult spf = spfTask.Result ?? TimedOutSpf(helo, mailFrom);
-        IReadOnlyList<DkimVerificationResult> dkim = dkimTask.Result ?? [new DkimVerificationResult(DkimStatus.TempError, "verification timed out", DkimFailure.KeyDnsError)];
-        ArcChainResult arc = arcTask.Result ?? new ArcChainResult(ArcChainStatus.Fail, "verification timed out", ArcFailure.KeyDnsError);
-        timedOut = spfTask.Result is null || dkimTask.Result is null || arcTask.Result is null;
+        // What did not finish is a temporary error of that mechanism, and only of it.
+        bool mailRequested = !string.IsNullOrEmpty(mailFrom);
+        SpfCheckResult heloResult = helloTask.Result ?? TimedOutSpf(helo);
+        SpfCheckResult? mailResult = mailRequested ? mailTask.Result ?? TimedOutSpf(DomainOf(mailFrom) ?? string.Empty) : null;
+        SpfCheckResult effective = mailResult ?? heloResult;
+        bool dkimTimedOut = dkimTask.Result is null;
+        IReadOnlyList<DkimVerificationResult> dkimResults = dkimTask.Result ?? [];
+        bool arcTimedOut = arcTask.Result is null;
+        ArcChainResult arc = arcTask.Result ?? new ArcChainResult(ArcChainStatus.None, "verification timed out");
+        bool timedOut = helloTask.Result is null || (mailRequested && mailTask.Result is null) || dkimTimedOut || arcTimedOut;
         if (arc.Failure == ArcFailure.TooManyInstances)
         {
             arc = new ArcChainResult(ArcChainStatus.Fail, "too_long", ArcFailure.TooManyInstances);
         }
 
-        // DMARC for every From domain; the strictest evaluation decides (a second From header must not be a way around a policy).
-        var evaluations = new List<DmarcEvaluation>(fromDomains.Count);
-        var spfForDmarc = new SpfAuthResult(spf.Effective.Result, spf.Effective.Domain);
-        var dkimForDmarc = dkim.Where(r => r.Domain is not null).Select(r => new DkimAuthResult(r.Domain!, r.IsPass, r.Selector)).ToList();
-        foreach (string fromDomain in fromDomains)
+        // DMARC for every From domain, with what finished; the strictest evaluation decides what is shown, and any unsettled one makes the verdict unsettled.
+        var evaluations = new List<(DmarcEvaluation Evaluation, bool Unsettled)>(fromDomains.Count);
+        var spfForDmarc = new SpfAuthResult(effective.Result, effective.Domain);
+        var dkimForDmarc = dkimResults.Where(r => r.Domain is not null).Select(r => new DkimAuthResult(r.Domain!, r.IsPass, r.Selector)).ToList();
+        if (fromDomains.Count > 0)
         {
-            if (timedOut)
+            var dmarc = new DmarcEvaluator(dns);
+            using var dmarcTime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            dmarcTime.CancelAfter(_options.VerificationTimeout < DmarcTimeLimit ? _options.VerificationTimeout : DmarcTimeLimit);
+            foreach (string fromDomain in fromDomains)
             {
-                evaluations.Add(TempErrorEvaluation(fromDomain, "verification timed out"));
-                continue;
-            }
+                DmarcEvaluation evaluation;
+                try
+                {
+                    evaluation = await dmarc.EvaluateAsync(new DmarcInput(fromDomain, spfForDmarc, dkimForDmarc), dmarcTime.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    timedOut = true;
+                    evaluation = TempErrorEvaluation(fromDomain, "verification timed out");
+                }
 
-            try
-            {
-                evaluations.Add(await _dmarc.EvaluateAsync(new DmarcInput(fromDomain, spfForDmarc, dkimForDmarc), timeout.Token).ConfigureAwait(false));
-            }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-            {
-                timedOut = true;
-                evaluations.Add(TempErrorEvaluation(fromDomain, "verification timed out"));
+                bool unsettled = evaluation.Result == DmarcResult.TempError
+                    || (evaluation.Result == DmarcResult.Fail && TemporaryFailureCouldMatter(fromDomain, effective, dkimResults, dkimTimedOut, headers));
+                evaluations.Add((evaluation, unsettled));
             }
         }
 
-        DmarcEvaluation? dmarc = evaluations.Count == 0 ? null : evaluations.MaxBy(Rank);
-        bool temporaryFailureBehindFail = spf.Effective.Result == SpfResult.TempError || dkim.Any(r => r.Status == DkimStatus.TempError);
-        bool unsettled = timedOut || dmarc?.Result == DmarcResult.TempError || (dmarc?.Result == DmarcResult.Fail && temporaryFailureBehindFail);
-        bool arcOverride = !unsettled && dmarc?.Result == DmarcResult.Fail && evaluations.Count == 1 && ArcVouches(arc, headers, fromDomains[0]);
+        DmarcEvaluation? chosen = evaluations.Count == 0 ? null : evaluations.Select(e => e.Evaluation).MaxBy(Rank);
+        bool anyUnsettled = evaluations.Any(e => e.Unsettled);
+        bool arcOverride = !anyUnsettled && chosen?.Result == DmarcResult.Fail && evaluations.Count == 1 && ArcVouches(arc, headers, fromDomains[0]);
 
-        (InboundVerdict dkimVerdict, string? dkimDomain) = ReduceDkim(dkim);
-        InboundVerdict dmarcVerdict = dmarc is null ? InboundVerdict.PermError : unsettled ? InboundVerdict.TempError : ToVerdict(dmarc.Result);
+        (InboundVerdict dkimVerdict, string? dkimDomain) = dkimTimedOut ? (InboundVerdict.TempError, null) : ReduceDkim(dkimResults);
+        InboundVerdict dmarcVerdict = chosen is null ? InboundVerdict.PermError : anyUnsettled ? InboundVerdict.TempError : ToVerdict(chosen.Result);
         var auth = new InboundAuthResults(
-            ToVerdict(spf.Effective.Result), spf.Effective.Domain,
-            ToVerdict(spf.Helo.Result),
+            ToVerdict(effective.Result), effective.Domain,
+            ToVerdict(heloResult.Result),
             dkimVerdict, dkimDomain,
-            dmarcVerdict, dmarc?.AppliedPolicy?.ToString().ToLowerInvariant(),
-            arc.Status switch { ArcChainStatus.Pass => InboundVerdict.Pass, ArcChainStatus.Fail => InboundVerdict.Fail, _ => InboundVerdict.None });
+            dmarcVerdict, chosen?.AppliedPolicy?.ToString().ToLowerInvariant(),
+            arcTimedOut ? InboundVerdict.TempError : arc.Status switch { ArcChainStatus.Pass => InboundVerdict.Pass, ArcChainStatus.Fail => InboundVerdict.Fail, _ => InboundVerdict.None });
 
-        RecordMetrics(auth, spf);
+        RecordMetrics(auth);
         InboundMetrics.VerificationSeconds.Record(_clock.GetElapsedTime(started).TotalSeconds);
         return new InboundVerification
         {
             Auth = auth,
-            Dmarc = dmarc,
-            Unsettled = unsettled,
+            Dmarc = chosen,
+            Unsettled = anyUnsettled,
+            NoUsableFrom = !fromUsable || fromDomains.Count == 0,
             ArcOverridesDmarc = arcOverride,
             TimedOut = timedOut,
-            AuthenticationResultsHeader = BuildHeader(client, helo, mailFrom, spf, dkim, dmarc, dmarcVerdict, arc),
+            AuthenticationResultsHeader = BuildHeader(client, helo, mailFrom, heloResult, mailResult, dkimResults, dkimTimedOut, chosen, dmarcVerdict, arc, arcTimedOut),
         };
+    }
+
+    /// <summary>
+    /// Whether a mechanism that failed temporarily could have been the aligned pass that makes a DMARC failure a pass: the SPF identity must be aligned with the From domain, a DKIM result that failed temporarily must
+    /// come from a signature whose <c>d=</c> is, and a DKIM stage that did not finish matters only if the message carries a signature whose <c>d=</c> is. A temporary failure of an unrelated domain's record
+    /// cannot change the verdict, so it must not be a way to keep a failure from being counted.
+    /// </summary>
+    private static bool TemporaryFailureCouldMatter(string fromDomain, SpfCheckResult spf, IReadOnlyList<DkimVerificationResult> dkim, bool dkimTimedOut, HeaderList headers)
+    {
+        if (spf.Result == SpfResult.TempError && Aligned(spf.Domain, fromDomain))
+        {
+            return true;
+        }
+
+        foreach (DkimVerificationResult r in dkim)
+        {
+            if (r.Status == DkimStatus.TempError && (r.Domain is null || Aligned(r.Domain, fromDomain)))
+            {
+                return true;
+            }
+        }
+
+        return dkimTimedOut && SignatureDomains(headers).Any(d => Aligned(d, fromDomain));
+    }
+
+    private static bool Aligned(string? a, string b) =>
+        !string.IsNullOrEmpty(a) && PublicSuffixList.Default.HaveSameOrganizationalDomain(a.Trim().TrimEnd('.').ToLowerInvariant(), b);
+
+    /// <summary>The <c>d=</c> of every DKIM-Signature header of the message (what a stage that timed out would have had to check).</summary>
+    private static IEnumerable<string> SignatureDomains(HeaderList headers)
+    {
+        int count = 0;
+        foreach (MimeHeader header in headers)
+        {
+            if (header.IsMalformed || !header.NameEquals(HeaderNames.DkimSignature) || ++count > 20)
+            {
+                continue;
+            }
+
+            Match m;
+            try
+            {
+                m = DomainTag.Match(header.GetValue(16 * 1024));
+            }
+            catch (RegexMatchTimeoutException)
+            {
+                continue;
+            }
+
+            if (m.Success)
+            {
+                yield return m.Groups[1].Value;
+            }
+        }
     }
 
     // A stage that ran out of time (the shared timeout, not the caller's cancellation) gives null; a cancellation by the caller propagates.
@@ -160,17 +243,15 @@ public sealed class InboundVerifier
         }
     }
 
-    private static SpfSessionResult TimedOutSpf(string helo, string mailFrom)
+    private static string? DomainOf(string mailbox)
     {
-        var helored = new SpfCheckResult(SpfResult.TempError, helo.ToLowerInvariant(), Reason: "verification timed out");
-        if (string.IsNullOrEmpty(mailFrom))
-        {
-            return new SpfSessionResult(helored, null);
-        }
-
-        int at = mailFrom.LastIndexOf('@');
-        return new SpfSessionResult(helored, new SpfCheckResult(SpfResult.TempError, (at >= 0 ? mailFrom[(at + 1)..] : mailFrom).ToLowerInvariant(), Reason: "verification timed out"));
+        int at = mailbox.LastIndexOf('@');
+        return at >= 0 ? mailbox[(at + 1)..].ToLowerInvariant() : null;
     }
+
+    private static SpfCheckResult NotChecked(string domain) => new(SpfResult.None, domain.ToLowerInvariant(), Reason: "client address is internal; SPF not checked");
+
+    private static SpfCheckResult TimedOutSpf(string domain) => new(SpfResult.TempError, domain.ToLowerInvariant(), Reason: "verification timed out");
 
     private static DmarcEvaluation TempErrorEvaluation(string fromDomain, string reason) =>
         new(DmarcResult.TempError, DmarcDisposition.None, null, fromDomain, null, fromDomain, false, false, false, null, null, null, reason);
@@ -257,19 +338,18 @@ public sealed class InboundVerifier
                 continue;
             }
 
-            PublicSuffixList psl = PublicSuffixList.Default;
-            bool Aligned(string? domain) => !string.IsNullOrEmpty(domain) && psl.HaveSameOrganizationalDomain(domain.Trim().TrimEnd('.').ToLowerInvariant(), fromDomain);
-            if (results.ForMethod("dmarc").Any(r => r.Result == "pass"))
+            // The sealer must vouch for this From domain: a dmarc=pass for another header.from says nothing about it.
+            if (results.ForMethod("dmarc").Any(r => r.Result == "pass" && Aligned(r.GetProperty("header", "from"), fromDomain)))
             {
                 return true;
             }
 
-            if (results.ForMethod("spf").Any(r => r.Result == "pass" && Aligned(DomainOf(r.GetProperty("smtp", "mailfrom")))))
+            if (results.ForMethod("spf").Any(r => r.Result == "pass" && Aligned(DomainOf(r.GetProperty("smtp", "mailfrom") ?? string.Empty) ?? r.GetProperty("smtp", "mailfrom"), fromDomain)))
             {
                 return true;
             }
 
-            if (results.ForMethod("dkim").Any(r => r.Result == "pass" && Aligned(r.GetProperty("header", "d"))))
+            if (results.ForMethod("dkim").Any(r => r.Result == "pass" && Aligned(r.GetProperty("header", "d"), fromDomain)))
             {
                 return true;
             }
@@ -278,33 +358,29 @@ public sealed class InboundVerifier
         return false;
     }
 
-    private static string? DomainOf(string? mailbox)
-    {
-        if (mailbox is null)
-        {
-            return null;
-        }
-
-        int at = mailbox.LastIndexOf('@');
-        return at >= 0 ? mailbox[(at + 1)..] : mailbox;
-    }
-
-    private string BuildHeader(IPAddress client, string helo, string mailFrom, SpfSessionResult spf, IReadOnlyList<DkimVerificationResult> dkim, DmarcEvaluation? dmarc, InboundVerdict dmarcVerdict, ArcChainResult arc)
+    private string BuildHeader(IPAddress client, string helo, string mailFrom, SpfCheckResult heloResult, SpfCheckResult? mailResult, IReadOnlyList<DkimVerificationResult> dkim, bool dkimTimedOut, DmarcEvaluation? dmarc, InboundVerdict dmarcVerdict, ArcChainResult arc, bool arcTimedOut)
     {
         var builder = new AuthenticationResultsBuilder(_authservId);
-        if (spf.MailFrom is { } mailFromResult)
+        if (mailResult is not null)
         {
-            builder.AddSpf(mailFromResult, SpfIdentityKind.MailFrom, mailFrom);
+            builder.AddSpf(mailResult, SpfIdentityKind.MailFrom, mailFrom);
         }
 
         if (!string.IsNullOrEmpty(helo))
         {
-            builder.AddSpf(spf.Helo, SpfIdentityKind.Helo, helo);
+            builder.AddSpf(heloResult, SpfIdentityKind.Helo, helo);
         }
 
-        foreach (string fragment in DkimAuthenticationResults.FormatAll(dkim))
+        if (dkimTimedOut)
         {
-            builder.TryAddFragment(fragment);
+            builder.TryAddFragment("dkim=temperror reason=\"verification timed out\"");
+        }
+        else
+        {
+            foreach (string fragment in DkimAuthenticationResults.FormatAll(dkim))
+            {
+                builder.TryAddFragment(fragment);
+            }
         }
 
         if (dmarc is not null && dmarcVerdict != InboundVerdict.TempError)
@@ -317,11 +393,11 @@ public sealed class InboundVerifier
             builder.Add("dmarc", InboundNames.Of(dmarcVerdict), properties, reason: dmarc is null ? "no usable From header" : "could not be settled");
         }
 
-        builder.TryAddFragment(ArcAuthenticationResults.Format(arc, client));
+        builder.TryAddFragment(arcTimedOut ? "arc=temperror reason=\"verification timed out\"" : ArcAuthenticationResults.Format(arc, client));
         return builder.BuildHeader();
     }
 
-    private static void RecordMetrics(InboundAuthResults auth, SpfSessionResult spf)
+    private static void RecordMetrics(InboundAuthResults auth)
     {
         static void Count(string mechanism, InboundVerdict verdict) =>
             InboundMetrics.Auth.Add(1, new KeyValuePair<string, object?>("mechanism", mechanism), new KeyValuePair<string, object?>("result", InboundNames.Of(verdict)));
@@ -330,5 +406,16 @@ public sealed class InboundVerifier
         Count("dkim", auth.Dkim);
         Count("dmarc", auth.Dmarc);
         Count("arc", auth.Arc);
+    }
+
+    /// <summary>Counts the queries of one message and answers SERVFAIL (a temporary error to every checker) once the budget is used up.</summary>
+    private sealed class QueryBudgetResolver(IDnsResolver inner, int limit) : IDnsResolver
+    {
+        private int _used;
+
+        public ValueTask<DnsResponse> QueryAsync(string name, DnsRecordType type, CancellationToken cancellationToken = default) =>
+            Interlocked.Increment(ref _used) > limit
+                ? ValueTask.FromResult(new DnsResponse { Rcode = DnsRcode.ServerFailure })
+                : inner.QueryAsync(name, type, cancellationToken);
     }
 }

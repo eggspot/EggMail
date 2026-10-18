@@ -311,7 +311,7 @@ public sealed class IngestHandler : ISmtpServerHandler, IBounceNamespace
         }
 
         bool shared = string.Equals(recipient.Domain, _options.BounceDomain, StringComparison.OrdinalIgnoreCase);
-        if (!shared && !await IsVerifiedReturnPathHostAsync(recipient.Domain, cancellationToken).ConfigureAwait(false))
+        if (!shared && !await IsVerifiedReturnPathHostAsync(recipient.Domain, tokenValid: _bounces?.IsValidBounceAddress(recipient.LocalPart) ?? false, cancellationToken).ConfigureAwait(false))
         {
             return BounceRecipientClass.NotBounce;
         }
@@ -360,11 +360,29 @@ public sealed class IngestHandler : ISmtpServerHandler, IBounceNamespace
             return _bounces?.IsValidBounceAddress(recipient.LocalPart) ?? false;
         }
 
-        return (_bounces?.IsValidBounceAddress(recipient.LocalPart) ?? false) && await IsVerifiedReturnPathHostAsync(recipient.Domain, ct).ConfigureAwait(false);
+        return (_bounces?.IsValidBounceAddress(recipient.LocalPart) ?? false) && await IsVerifiedReturnPathHostAsync(recipient.Domain, tokenValid: true, ct).ConfigureAwait(false);
     }
 
     /// <summary><c>bounce.example.com</c> is the return-path host of the registered domain <c>example.com</c> when that domain's return-path CNAME has been verified.</summary>
-    private async ValueTask<bool> IsVerifiedReturnPathHostAsync(string host, CancellationToken ct)
+    // Names of the form bounce.<anything> each cost a storage lookup the first time they are asked about, and anybody can ask about as many as they like. The lookups that are not answered from the cache
+    // are therefore limited to a number a second for the process: over it, a recipient with a valid token gets a temporary failure (the sender retries; the token is real) and one without is simply not in
+    // the bounce namespace (the answer is a refusal either way).
+    private const int MaxUncachedHostLookupsPerSecond = 50;
+    private long _lookupWindow;
+    private int _lookupsInWindow;
+
+    private bool TryTakeLookup()
+    {
+        long second = Environment.TickCount64 / 1000;
+        if (Interlocked.Exchange(ref _lookupWindow, second) != second)
+        {
+            Volatile.Write(ref _lookupsInWindow, 0);
+        }
+
+        return Interlocked.Increment(ref _lookupsInWindow) <= MaxUncachedHostLookupsPerSecond;
+    }
+
+    private async ValueTask<bool> IsVerifiedReturnPathHostAsync(string host, bool tokenValid, CancellationToken ct)
     {
         string prefix = _options.ReturnPathLabel + ".";
         if (!host.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) || host.Length == prefix.Length)
@@ -376,6 +394,11 @@ public sealed class IngestHandler : ISmtpServerHandler, IBounceNamespace
         if (_returnPathHosts.TryGetValue(host, out var cached) && now < cached.ExpiresAt)
         {
             return cached.Verified;
+        }
+
+        if (!TryTakeLookup())
+        {
+            return tokenValid ? throw new StorageUnavailableException("Too many return-path host lookups at the moment.") : false;
         }
 
         DomainRecord? domain = await _storage.Config.FindDomainByNameAsync(host[prefix.Length..], ct).ConfigureAwait(false);

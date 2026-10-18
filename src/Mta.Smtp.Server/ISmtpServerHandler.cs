@@ -21,6 +21,30 @@ public sealed class SmtpSessionContext
     /// </summary>
     public long? TransactionMaxMessageSize { get; set; }
 
+    internal Func<long, bool>? MemoryReserver { get; set; }
+
+    internal long ExtraReserved { get; set; }
+
+    /// <summary>
+    /// Reserves <paramref name="bytes"/> of the server's in-flight memory budget (the one the message bytes themselves are counted in) for work the handler does on the message, for example copies it makes. The
+    /// reservation is given back when the transaction ends. False when the budget (or the listener's share of it) cannot cover it: the handler refuses the message with <c>452</c> instead of allocating.
+    /// </summary>
+    public bool TryReserveMemory(long bytes)
+    {
+        if (bytes <= 0)
+        {
+            return true;
+        }
+
+        if (MemoryReserver is { } reserve && !reserve(bytes))
+        {
+            return false;
+        }
+
+        ExtraReserved += bytes;
+        return true;
+    }
+
     public string? HeloName { get; internal set; }
     public bool UsedEhlo { get; internal set; }
     public bool TlsActive { get; internal set; }
