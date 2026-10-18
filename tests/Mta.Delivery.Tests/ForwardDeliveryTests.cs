@@ -8,7 +8,7 @@ using Mta.Storage;
 namespace Mta.Delivery.Tests;
 
 /// <summary>
-/// The delivery-engine rules for source Forward (decision 95, design section 11.7) through the whole outbound pipeline: the envelope is kept, the body is never converted, the signature is the route
+/// The delivery-engine rules for source Forward (decision 98, design section 11.7) through the whole outbound pipeline: the envelope is kept, the body is never converted, the signature is the route
 /// domain's and only that, and a failure produces no bounce message of any kind.
 /// </summary>
 [Collection("delivery-pipeline")]
@@ -122,10 +122,14 @@ public class ForwardDeliveryTests
         string text = Encoding.ASCII.GetString(body);
         // One signature was added, on top, with the route's domain; the original header is where it was, untouched, and nothing names the From domain as the signer.
         Assert.StartsWith("DKIM-Signature:", text, StringComparison.Ordinal);
-        Assert.Contains("d=example.org", text[..text.IndexOf("\r\n", StringComparison.Ordinal)], StringComparison.Ordinal);
         Assert.EndsWith(Encoding.ASCII.GetString(raw), text, StringComparison.Ordinal);
-        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(text, "(?im)^DKIM-Signature:").Count);
-        Assert.DoesNotContain("d=other.test; s=egg1", text, StringComparison.Ordinal);
+        // Our signature is folded over several lines: compare whole header fields, unfolded, never the first line only.
+        var signatures = System.Text.RegularExpressions.Regex.Matches(text, @"(?im)^DKIM-Signature:(?:[^\r\n]|\r\n[ \t])*")
+            .Select(m => System.Text.RegularExpressions.Regex.Replace(m.Value, @"\r\n([ \t])", "$1")).ToList();
+        Assert.Equal(2, signatures.Count);
+        Assert.Contains("d=example.org", signatures[0], StringComparison.Ordinal);   // ours, on top
+        Assert.DoesNotContain("other.test", signatures[0], StringComparison.Ordinal);
+        Assert.Equal(original.TrimEnd('\r', '\n'), signatures[1]);   // the original, where it was, untouched
         DkimVerificationResult added = (await new DkimVerifier(f.Dns).VerifyAsync(body)).First(r => r.Domain == RouteDomain);
         Assert.Equal(DkimStatus.Pass, added.Status);
     }

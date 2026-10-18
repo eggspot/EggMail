@@ -18,7 +18,8 @@ public static class InboundActionMetrics
     /// <summary>Forwards refused because the message already went through this server the maximum number of times (<c>loop_detected</c>).</summary>
     public static readonly Counter<long> ForwardLoops = Meter.CreateCounter<long>("mta.inbound.forward.loops", "{message}", "Inbound forwards refused by the signed hop marker (loop_detected)");
 
-    /// <summary>Bounces to an SRS address of a forwarded message that were accepted and dropped (design section 11.7).</summary>
+    /// <summary>Forwards that were not queued, by <c>reason</c>: <c>unauthenticated_local_sender</c>, <c>forward_target_is_local</c>, <c>forward_backlog_full</c>, <c>invalid_forward_target</c>, <c>srs_failed</c>, <c>forward_key_conflict</c>.</summary>
+    public static readonly Counter<long> ForwardRefused = Meter.CreateCounter<long>("mta.inbound.forward.refused", "{message}", "Inbound forwards not queued, by reason");
 
     // The gauge reads the last sample the runner took (a count of pending and failed actions), so a scrape never queries the message table.
     private static InboundActionRunner? s_runner;

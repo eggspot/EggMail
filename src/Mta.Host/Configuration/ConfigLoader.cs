@@ -399,6 +399,12 @@ public static class ConfigLoader
             errors.Add("Inbound:Action: Concurrency and MaxConcurrencyPerTenant must be between 1 and 256, PollInterval positive, Lease at least 10 seconds, and RetrySchedule at most 32 positive delays.");
         }
 
+        InboundForwardSection forward = c.Inbound.Forward;
+        if (forward.MaxQueuedMessagesPerTenant < 0 || forward.MaxQueuedBytesPerTenant < 0 || forward.MaxQueuedMessagesPerDomain < 0)
+        {
+            errors.Add("Inbound:Forward: MaxQueuedMessagesPerTenant, MaxQueuedBytesPerTenant and MaxQueuedMessagesPerDomain must not be negative (0 is no cap).");
+        }
+
         if (c.Inbound.Webhook.MaxTextBytes is < 1024 or > 8 * 1024 * 1024 || c.Inbound.Webhook.MaxRawMessageBytes is < 1024 or > 256L * 1024 * 1024)
         {
             errors.Add("Inbound:Webhook: MaxTextBytes must be between 1 KiB and 8 MiB and MaxRawMessageBytes between 1 KiB and 256 MiB.");

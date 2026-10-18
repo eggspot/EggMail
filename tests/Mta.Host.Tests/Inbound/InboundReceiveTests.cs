@@ -281,6 +281,7 @@ public class InboundReceiveTests : IAsyncLifetime
         public ValueTask<InboundRetryResult> RetryActionAsync(Guid tenantId, Guid messageId, DateTimeOffset now, CancellationToken cancellationToken) => inner.RetryActionAsync(tenantId, messageId, now, cancellationToken);
         public ValueTask<IReadOnlyList<ClaimedInboundAction>> ClaimActionsAsync(string owner, int max, DateTimeOffset now, TimeSpan lease, CancellationToken cancellationToken, InboundClaimLimits? limits = null) => inner.ClaimActionsAsync(owner, max, now, lease, cancellationToken, limits);
         public ValueTask<long> CountActionsAsync(InboundActionState state, CancellationToken cancellationToken) => inner.CountActionsAsync(state, cancellationToken);
+        public ValueTask<ForwardBacklog> GetForwardBacklogAsync(Guid tenantId, string sendingDomain, CancellationToken cancellationToken) => inner.GetForwardBacklogAsync(tenantId, sendingDomain, cancellationToken);
         public ValueTask<bool> ExtendActionLeaseAsync(Guid messageId, string owner, DateTimeOffset until, CancellationToken cancellationToken) => inner.ExtendActionLeaseAsync(messageId, owner, until, cancellationToken);
         public ValueTask<bool> CompleteActionAsync(Guid messageId, string owner, InboundActionOutcome outcome, CancellationToken cancellationToken) => inner.CompleteActionAsync(messageId, owner, outcome, cancellationToken);
         public ValueTask<int> ReleaseOwnedActionLeasesAsync(string owner, CancellationToken cancellationToken) => inner.ReleaseOwnedActionLeasesAsync(owner, cancellationToken);

@@ -300,6 +300,21 @@ public sealed class EfInboundMessageStore<TContext>(IInboundDbAccess<TContext> d
         }, cancellationToken).ConfigureAwait(false);
     }
 
+    public async ValueTask<ForwardBacklog> GetForwardBacklogAsync(Guid tenantId, string sendingDomain, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        string domain = sendingDomain.ToLowerInvariant();
+        return await Read(c =>
+        {
+            // The partial index on (tenant_id, sending_domain) WHERE source = Forward holds exactly these rows.
+            var rows = c.Deliveries.AsNoTracking().Where(d => d.TenantId == tenantId && d.Source == MessageSource.Forward);
+            long messages = rows.Select(d => d.MessageId).Distinct().LongCount();
+            long bytes = c.Spool.AsNoTracking().Where(m => rows.Select(d => d.MessageId).Contains(m.MessageId)).Sum(m => (long?)m.Size) ?? 0;
+            long inDomain = rows.Where(d => d.SendingDomain == domain).Select(d => d.MessageId).Distinct().LongCount();
+            return new ForwardBacklog(messages, bytes, inDomain);
+        }).ConfigureAwait(false);
+    }
+
     public async ValueTask<long> CountActionsAsync(InboundActionState state, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();   // the count is a synchronous query: a caller that is stopping should not start it

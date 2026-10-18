@@ -5,7 +5,7 @@ using Mta.Storage.InMemory;
 namespace Mta.Delivery.Tests;
 
 /// <summary>
-/// A forward of received mail (decision 95, design section 11.7) never gets a bounce message of any kind: its sender is someone else's, and the
+/// A forward of received mail (decision 98, design section 11.7) never gets a bounce message of any kind: its sender is someone else's, and the
 /// tenant learns of a failure from the outbound message and its webhook. This pins <see cref="DsnService.Applies"/> for source Forward whatever the options say.
 /// </summary>
 public class ForwardDsnTests

@@ -44,7 +44,6 @@ public sealed class EggMailRuntime : IAsyncDisposable
 
     /// <summary>Carries out the webhook and forward actions of received mail (inbound routes, design section 11.7).</summary>
     public required InboundActionRunner InboundActions { get; init; }
-
     public required IDnsResolver Dns { get; init; }
     public required SmtpConnectionPool Pool { get; init; }
     public required RoutePlanner Routes { get; init; }
@@ -231,7 +230,15 @@ public sealed class EggMailRuntime : IAsyncDisposable
         var arcSealers = new ConfigArcSealerProvider(storage.Config, secrets, clock);
         var forwarder = new InboundForwarder(
             storage, new SrsCodec(verp, inboundOptions.SrsMaxAgeDays), new ForwardHopMarker(verp), new Mta.Auth.Arc.ArcValidator(dns, new Mta.Auth.Arc.ArcValidatorOptions { MaxInstances = 10 }), arcSealers,
-            new InboundForwarderOptions { AuthenticationResultsId = config.Hostname, BounceDomain = config.Delivery.BounceDomain, QueueLifetime = config.Storage.Queue.MaxLifetime }, clock, log, onQueued: () => engine?.Wake());
+            new InboundForwarderOptions
+            {
+                AuthenticationResultsId = config.Inbound.AuthenticationResultsId ?? config.Hostname,   // the authserv-id the receive path wrote into the stored message
+                BounceDomain = config.Delivery.BounceDomain,
+                QueueLifetime = config.Storage.Queue.MaxLifetime,
+                MaxQueuedMessagesPerTenant = config.Inbound.Forward.MaxQueuedMessagesPerTenant,
+                MaxQueuedBytesPerTenant = config.Inbound.Forward.MaxQueuedBytesPerTenant,
+                MaxQueuedMessagesPerDomain = config.Inbound.Forward.MaxQueuedMessagesPerDomain,
+            }, clock, log, onQueued: () => engine?.Wake());
         var inboundActions = new InboundActionRunner(
             storage, webhookTransport, new WebhookEndpointHealth(storage.Config, config.Webhooks, log, endpointNotifier), secrets, InboundActionOptionsFrom(config), clock, log,
             () => config.Inbound.Enabled, new StorageWebhookPublisher(storage), forwarder);
