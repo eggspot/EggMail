@@ -97,7 +97,7 @@ public class UnitTests
         Assert.Contains("ALTER DEFAULT PRIVILEGES", script, StringComparison.Ordinal);
         Assert.Single(script.Split("DO $eggmail_migrate$", StringSplitOptions.None).Skip(1));
         Assert.DoesNotContain("GRANT", PostgresMigrator.GenerateScript(null), StringComparison.Ordinal);
-        Assert.Equal(9, PostgresMigrator.CurrentVersion);
+        Assert.Equal(10, PostgresMigrator.CurrentVersion);
     }
 
     [Fact]

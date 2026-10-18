@@ -367,6 +367,18 @@ public class ApiSendingTests : IAsyncLifetime
         Assert.Single(await _f.Storage.Deliveries.ClaimAsync("t", 10, _f.Clock.UtcNow, TimeSpan.FromMinutes(1), default));
     }
 
+    [Theory]
+    [InlineData("inbound:0198f0d2b4e87c3a9d1e2f3a4b5c6d7e")]
+    [InlineData("INBOUND:anything")]
+    [InlineData("eggmail-dsn:0123456789abcdef")]
+    public async Task A_key_that_belongs_to_the_server_cannot_be_registered_through_the_api(string key)
+    {
+        // "inbound:<id>" is the key of the forward of a received message: registering it first would make the forward complete without queueing anything.
+        Reply r = await _a.PostAsync("/api/v1/messages", Basic(), ("Idempotency-Key", key));
+        r.Problem(HttpStatusCode.BadRequest, "validation_failed");
+        Assert.Empty(await _f.Storage.Deliveries.ClaimAsync("t", 10, _f.Clock.UtcNow, TimeSpan.FromMinutes(1), default));
+    }
+
     [Fact]
     public async Task The_same_key_with_another_body_is_409_idempotency_conflict()
     {

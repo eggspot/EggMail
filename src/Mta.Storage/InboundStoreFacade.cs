@@ -45,6 +45,8 @@ public sealed class InboundStoreFacade(IInboundConfigStore config, IInboundMessa
 
     public ValueTask<long> CountActionsAsync(InboundActionState state, CancellationToken cancellationToken) => messages.CountActionsAsync(state, cancellationToken);
 
+    public ValueTask<ForwardBacklog> GetForwardBacklogAsync(Guid tenantId, string sendingDomain, CancellationToken cancellationToken) => messages.GetForwardBacklogAsync(tenantId, sendingDomain, cancellationToken);
+
     public ValueTask<bool> ExtendActionLeaseAsync(Guid messageId, string owner, DateTimeOffset until, CancellationToken cancellationToken) => messages.ExtendActionLeaseAsync(messageId, owner, until, cancellationToken);
 
     public ValueTask<bool> CompleteActionAsync(Guid messageId, string owner, InboundActionOutcome outcome, CancellationToken cancellationToken) => messages.CompleteActionAsync(messageId, owner, outcome, cancellationToken);

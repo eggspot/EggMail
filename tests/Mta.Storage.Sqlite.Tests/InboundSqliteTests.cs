@@ -85,7 +85,7 @@ public class InboundSqliteTests : SqliteTestBase
     }
 
     [Fact]
-    public async Task A_version_8_queue_file_gets_the_per_tenant_claim_index_and_keeps_its_messages()
+    public async Task A_version_8_queue_file_gets_the_claim_and_forward_backlog_indexes_and_keeps_its_messages()
     {
         (DomainRecord domain, Guid route) = await DomainAsync();
         InboundMessageDraft draft = Draft(domain, route, InboundActionKind.Store, Clock.UtcNow, 50);
@@ -93,13 +93,15 @@ public class InboundSqliteTests : SqliteTestBase
         await Storage.DisposeAsync();
         const string indexCount = "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'IX_inbound_message_tenant_id_action_next_attempt_at_id'";
         Assert.Equal(1, ScalarLong(PathOf("queue.db"), indexCount));   // a fresh file is created from the model
+        const string forwardIndexCount = "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'IX_delivery_queue_tenant_id_sending_domain'";
+        Assert.Equal(1, ScalarLong(PathOf("queue.db"), forwardIndexCount));
 
         foreach (string file in new[] { "config.db", "history.db", "queue.db", "stats.db" })
         {
             using var c = new SqliteConnection($"Data Source={PathOf(file)};Pooling=False");
             c.Open();
             using SqliteCommand cmd = c.CreateCommand();
-            cmd.CommandText = (file == "queue.db" ? "DROP INDEX IX_inbound_message_tenant_id_action_next_attempt_at_id;" : "") + "PRAGMA user_version = 8";
+            cmd.CommandText = (file == "queue.db" ? "DROP INDEX IX_inbound_message_tenant_id_action_next_attempt_at_id; DROP INDEX IX_delivery_queue_tenant_id_sending_domain;" : "") + "PRAGMA user_version = 8";
             cmd.ExecuteNonQuery();
         }
 
@@ -111,6 +113,7 @@ public class InboundSqliteTests : SqliteTestBase
         }
 
         Assert.Equal(1, ScalarLong(PathOf("queue.db"), indexCount));
+        Assert.Equal(1, ScalarLong(PathOf("queue.db"), forwardIndexCount));
         Assert.NotNull(await Storage.Inbound.GetAsync(TenantA, draft.Id, default));
     }
 

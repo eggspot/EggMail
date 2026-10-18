@@ -296,6 +296,46 @@ public sealed class InboundForwardPipelineTests : IAsyncLifetime
         Assert.Contains("X-EggMail-Hops: 1; ", text, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("victim.test", false)]    // a domain of another tenant that holds a DKIM key here
+    [InlineData("sibling.test", true)]    // another domain of the same tenant that holds a DKIM key here
+    public async Task A_spoofed_from_of_a_domain_that_also_holds_a_dkim_key_here_is_never_signed_with_that_domain(string fromDomain, bool sameTenant)
+    {
+        // The review's probes P1 and P1b: the copy is signed (DKIM, and the ARC set) by the route's domain only, whoever the From says it is and whichever keys the server holds.
+        Guid tenant = sameTenant ? TenantId : Guid.Parse("a0000000-0000-7000-8000-000000000002");
+        var now = DateTimeOffset.UtcNow;
+        if (!sameTenant)
+        {
+            await _runtime.Storage.Config.UpsertTenantAsync(new Tenant(tenant, "Globex", "globex", true, now, false), default);
+        }
+
+        Guid otherDomain = Ids.New();
+        using RSA otherKey = DkimKeyTools.GenerateRsa2048();
+        await _runtime.Storage.Config.UpsertDomainAsync(new DomainRecord(otherDomain, tenant, fromDomain, DomainStatus.Verified, null, false, now, now, now, 0, null, false, null), default);
+        await _runtime.Storage.Config.AddDkimKeyAsync(new Mta.Storage.DkimKeyRecord(
+            Ids.New(), otherDomain, "k1", _runtime.Secrets.Protect(otherKey.ExportPkcs8PrivateKey(), SecretPurposes.DkimKey), DkimKeyTools.ExportPublicKeyBase64(otherKey), now, true, null), default);
+        _dns.AddTxt("k1._domainkey." + fromDomain, DkimKeyTools.FormatDnsTxtValue(otherKey));
+        byte[] spoof = Encoding.UTF8.GetBytes($"Received: from mail.sender.test by egg.test\r\nFrom: CEO <ceo@{fromDomain}>\r\nTo: support@example.org\r\nSubject: pay now\r\nDate: Fri, 16 Oct 2026 07:00:00 +0000\r\nMessage-ID: <p@x.test>\r\n\r\nplease\r\n");
+        InboundMessageDraft draft = await ReceiveAsync(spoof, from: $"ceo@{fromDomain}");
+
+        await RunActionsUntilAsync(draft.Id, InboundActionState.Done);
+        await WaitForMailAsync(1);
+
+        FakeInternet.Mail mail = _internet.Received.Single();
+        string text = Encoding.UTF8.GetString(mail.Body);
+        var ours = System.Text.RegularExpressions.Regex.Matches(text, @"(?im)^(DKIM-Signature|ARC-Seal|ARC-Message-Signature):[^\r\n]*(\r\n[ \t][^\r\n]*)*");
+        Assert.Equal(3, ours.Count);   // our DKIM signature and the two signed ARC headers
+        foreach (System.Text.RegularExpressions.Match header in ours)
+        {
+            string flat = System.Text.RegularExpressions.Regex.Replace(header.Value, @"\s+", "");
+            Assert.Contains("d=example.org", flat, StringComparison.Ordinal);
+            Assert.DoesNotContain(fromDomain, flat, StringComparison.Ordinal);
+        }
+
+        Assert.StartsWith("SRS0=", mail.Sender, StringComparison.Ordinal);
+        Assert.EndsWith("@example.org", mail.Sender, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task A_suppressed_target_is_not_mailed_and_when_all_are_the_action_says_so()
     {
