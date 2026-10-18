@@ -276,6 +276,11 @@ internal static class Cli
         }
 
         // The listeners always start (they answer 421 while the instance does not accept mail, so senders retry cleanly).
+        if (runtime.InboundConfiguration is not null)
+        {
+            builder.Services.AddHostedService<InboundConfigurationService>();   // before the listeners: they must know the inbound domains when the first sender connects
+        }
+
         builder.Services.AddHostedService<SmtpListenerService>();
         if (gate.Mode == StartupMode.Normal || gate.Mode == StartupMode.Draining)
         {

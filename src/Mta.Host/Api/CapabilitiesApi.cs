@@ -18,7 +18,10 @@ public sealed record ContentCapability(int RetentionDays, bool StoreAttachments)
 
 public sealed record LimitsCapability(long MaxMessageBytes, int MaxRecipients);
 
-public sealed record CapabilitiesResponse(string Version, string Backend, HistoryCapability History, ContentCapability Content, LimitsCapability Limits, IReadOnlyList<CapabilityWarning> Warnings);
+/// <summary>Whether this server receives mail (<c>Inbound:Enabled</c>): the dashboard shows or hides its inbound pages by this.</summary>
+public sealed record InboundCapability(bool Enabled);
+
+public sealed record CapabilitiesResponse(string Version, string Backend, HistoryCapability History, ContentCapability Content, LimitsCapability Limits, InboundCapability Inbound, IReadOnlyList<CapabilityWarning> Warnings);
 
 /// <summary>Human text for the warning codes (the persistent banner of the dashboard, decision P).</summary>
 public static class WarningTexts
@@ -133,12 +136,14 @@ public sealed class CapabilitiesService
     private readonly ApiOptions _options;
     private readonly HealthService _health;
     private readonly IClock _clock;
+    private readonly bool _inboundEnabled;
     private readonly string _version;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private (long At, HealthReport Report)? _cached;
 
-    public CapabilitiesService(IStorage storage, StorageOptions storageOptions, ApiOptions options, HealthService health, IClock clock)
+    public CapabilitiesService(IStorage storage, StorageOptions storageOptions, ApiOptions options, HealthService health, IClock clock, Mta.Host.Configuration.MtaConfig? config = null)
     {
+        _inboundEnabled = config?.Inbound.Enabled ?? false;
         _storage = storage;
         _storageOptions = storageOptions;
         _options = options;
@@ -202,6 +207,7 @@ public sealed class CapabilitiesService
             new HistoryCapability(ApiMap.HistoryMode(_storage.HistoryMode)),
             new ContentCapability(_storageOptions.Content.RetentionDays, _storageOptions.Content.StoreAttachments && _storageOptions.Content.AllowAttachmentStorage),
             new LimitsCapability(_options.MaxMessageBytes, _options.MaxRecipients),
+            new InboundCapability(_inboundEnabled),
             health.Warnings.Select(w => new CapabilityWarning(w.Code, w.Message)).ToList());
     }
 }

@@ -66,6 +66,16 @@ public sealed class VerpCodec
 
     public static byte[] GenerateKey() => RandomNumberGenerator.GetBytes(32);
 
+    /// <summary>The ids of every key in the ring (the active key and the retired ones whose tokens may still be in flight): what a verifier of a derived secret (<see cref="DeriveKey"/>) tries in turn.</summary>
+    public IReadOnlyCollection<int> KeyIds => _keys.Keys.ToArray();
+
+    /// <summary>
+    /// A key for another purpose, derived from the ring key <paramref name="keyId"/> with HKDF-SHA-256 and <paramref name="purpose"/> as the context (for example <c>EggMail.Srs.v1</c>): the
+    /// bounce key is the only secret the deployment holds, so SRS addresses and the forward hop marker do not add a new one to deploy or back up, and rotating the ring rotates them too.
+    /// </summary>
+    public byte[] DeriveKey(int keyId, string purpose) =>
+        System.Security.Cryptography.HKDF.DeriveKey(HashAlgorithmName.SHA256, _keys[keyId], 32, salt: [], info: System.Text.Encoding.UTF8.GetBytes(purpose));
+
     /// <summary>
     /// The hour (counted from the codec's epoch) a token made at <paramref name="now"/> carries. Everything else in an address is fixed for a tenant, sending domain, return-path host and destination domain, so
     /// the address is the same for every message of the same hour: a caller may keep it per (tenant, domain, host, destination, hour stamp) instead of signing again for every message.

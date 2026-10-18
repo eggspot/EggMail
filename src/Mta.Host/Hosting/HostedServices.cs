@@ -21,6 +21,32 @@ internal sealed class SmtpListenerService(EggMailRuntime runtime) : IHostedServi
 }
 
 /// <summary>
+/// Keeps the receive path's copy of the inbound domains and routes fresh (every 30 seconds, and when the API asks). It loads once in <see cref="StartAsync"/>, before the SMTP listeners open, so the
+/// first sender does not meet a receiver that does not know its domains yet (a load that fails leaves the listener answering <c>451</c> until a refresh works). Nothing to do without inbound mail.
+/// </summary>
+internal sealed class InboundConfigurationService(EggMailRuntime runtime) : BackgroundService
+{
+    public override async Task StartAsync(CancellationToken cancellationToken)
+    {
+        if (runtime.InboundConfiguration is { } cache)
+        {
+            try
+            {
+                await cache.RefreshAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                runtime.Log.Write(MtaLogLevel.Warning, "inbound", "could not load the inbound domains at start; inbound mail is deferred with 451 until a refresh succeeds", ex);
+            }
+        }
+
+        await base.StartAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    protected override Task ExecuteAsync(CancellationToken stoppingToken) => runtime.InboundConfiguration is { } cache ? cache.RunAsync(stoppingToken) : Task.CompletedTask;
+}
+
+/// <summary>
 /// Coordinates with the other replicas on the same database (live set, shares of the per-destination limits, slowdowns and open circuits learned from remote servers)
 /// every few seconds and leaves the replica set when the host stops, so the others take over this replica's share at once. Nothing to do without replica coordination.
 /// It joins the set in <see cref="StartAsync"/>, before the services registered after it (the delivery engine) start, so this replica sends at its share from the first message.

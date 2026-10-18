@@ -24,6 +24,12 @@ public enum ListenerRole : byte
 
     /// <summary>Unauthenticated bounce / DSN receiver (port 25). Policy is the handler's job.</summary>
     Bounce,
+
+    /// <summary>
+    /// Unauthenticated MX receiver (port 25) for the domains tenants enabled for inbound mail (design section 11): a superset of <see cref="Bounce"/>, it still takes the signed bounce
+    /// addresses. Like <see cref="Bounce"/> it offers no AUTH and can never submit mail; every role other than <see cref="Submission"/> is "not a submitter".
+    /// </summary>
+    Inbound,
 }
 
 public sealed class SmtpListenerOptions
@@ -38,6 +44,37 @@ public sealed class SmtpListenerOptions
 
     /// <summary>Permit AUTH on a <see cref="ListenerMode.Plain"/> listener (only sensible on loopback).</summary>
     public bool AllowInsecureAuth { get; init; }
+
+    /// <summary>Largest message this listener takes, advertised as <c>SIZE</c>. Null: <see cref="SmtpServerOptions.MaxMessageSize"/>. The inbound listener uses the operator's ceiling for inbound mail here.</summary>
+    public long? MaxMessageSize { get; init; }
+
+    /// <summary>Recipients per transaction on this listener. Null: <see cref="SmtpServerOptions.MaxRecipients"/>.</summary>
+    public int? MaxRecipients { get; init; }
+
+    /// <summary>
+    /// Connections this listener may hold at once, besides the server-wide <see cref="SmtpServerOptions.MaxConnections"/> that counts all listeners. An anonymous listener (port 25) gets a cap below the server's, so
+    /// the difference stays available to the others (submission). Null: only the server-wide cap.
+    /// </summary>
+    public int? MaxConnections { get; init; }
+
+    /// <summary>Bytes of messages this listener may be receiving at once, besides the server-wide <see cref="SmtpServerOptions.MaxInFlightBytes"/>: the share of the budget an anonymous listener can take. Null: only the server-wide budget.</summary>
+    public long? MaxInFlightBytes { get; init; }
+
+    /// <summary>Bytes one client network (an IPv4 address or an IPv6 /64) may have in flight on this listener. Null: no per-client share.</summary>
+    public long? MaxInFlightBytesPerRemote { get; init; }
+
+    /// <summary>
+    /// The longest a session lives, checked between commands (a message being received is finished): a client that keeps a connection open with NOOP or empty BDAT chunks is closed with <c>421 4.4.2</c> after it.
+    /// Null: no limit.
+    /// </summary>
+    public TimeSpan? MaxSessionDuration { get; init; }
+
+    /// <summary>A copy with another role (and limits); every other setting is kept.</summary>
+    public SmtpListenerOptions With(ListenerRole role, long? maxMessageSize, int? maxRecipients, int? maxConnections, long? maxInFlightBytes, long? maxInFlightBytesPerRemote, TimeSpan? maxSessionDuration, bool authRequired) => new()
+    {
+        Name = Name, BindAddress = BindAddress, Port = Port, Mode = Mode, Role = role, AuthRequired = authRequired, Enabled = Enabled, AllowInsecureAuth = AllowInsecureAuth,
+        MaxMessageSize = maxMessageSize, MaxRecipients = maxRecipients, MaxConnections = maxConnections, MaxInFlightBytes = maxInFlightBytes, MaxInFlightBytesPerRemote = maxInFlightBytesPerRemote, MaxSessionDuration = maxSessionDuration,
+    };
 }
 
 /// <summary>Supplies the server certificate for a TLS handshake. Implementations hot-reload.</summary>
