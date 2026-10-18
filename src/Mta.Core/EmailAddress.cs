@@ -129,7 +129,18 @@ public readonly record struct EmailAddress
     private static bool IsAtext(char c, bool allowUtf8) =>
         char.IsAsciiLetterOrDigit(c)
         || "!#$%&'*+-/=?^_`{|}~".Contains(c)
-        || (allowUtf8 && c > 0x7F && !char.IsControl(c));
+        || (allowUtf8 && c > 0x7F && IsPermittedNonAscii(c));
+
+    /// <summary>
+    /// RFC 6531 allows any non-ASCII character in an internationalized local part. Characters that no real address contains and that only serve to
+    /// forge text are refused: C1 controls, the Unicode line and paragraph separators (they end a line in logs and in some parsers) and the bidirectional
+    /// overrides and isolates (they reorder what a person reads). Zero-width joiners stay: some scripts need them.
+    /// </summary>
+    private static bool IsPermittedNonAscii(char c) =>
+        !char.IsControl(c)
+        && c is not ('\u2028' or '\u2029')
+        && !(c >= '\u202A' && c <= '\u202E')
+        && !(c >= '\u2066' && c <= '\u2069');
 
     internal static bool IsValidLocalPart(ReadOnlySpan<char> local, bool allowUtf8, out bool international)
     {
@@ -137,6 +148,20 @@ public readonly record struct EmailAddress
         if (local.Length == 0)
         {
             return false;
+        }
+
+        // An unpaired surrogate is not text (UTF-8 cannot encode it, and it would be replaced differently by every consumer): never part of an address.
+        for (int i = 0; i < local.Length; i++)
+        {
+            if (char.IsSurrogate(local[i]))
+            {
+                if (!char.IsHighSurrogate(local[i]) || i + 1 >= local.Length || !char.IsLowSurrogate(local[i + 1]))
+                {
+                    return false;
+                }
+
+                i++;
+            }
         }
 
         // Octet length limit (64) applies to the UTF-8 encoding for SMTPUTF8 addresses.
@@ -168,7 +193,7 @@ public readonly record struct EmailAddress
 
                 if (c > 0x7F)
                 {
-                    if (!allowUtf8) { return false; }
+                    if (!allowUtf8 || !IsPermittedNonAscii(c)) { return false; }
                     international = true;
                 }
             }

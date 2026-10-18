@@ -166,7 +166,13 @@ internal static class NpgsqlParameterExtensions
     public static NpgsqlParameterCollection Uuid(this NpgsqlParameterCollection p, Guid? value) =>
         Add(p, NpgsqlDbType.Uuid, value is { } v ? v : DBNull.Value);
 
+    // PostgreSQL text cannot hold NUL, and UTF-8 cannot encode an unpaired surrogate: text from a client or a remote server is written with U+FFFD in their place
+    // (StorageText), so a hostile character is never an exception in the middle of recording a delivery result.
     public static NpgsqlParameterCollection Text(this NpgsqlParameterCollection p, string? value) =>
+        Add(p, NpgsqlDbType.Text, (object?)StorageText.Clean(value) ?? DBNull.Value);
+
+    /// <summary>Text for a WHERE clause: exactly as given (never cleaned, so it cannot come to equal stored text it differs from; callers refuse unstorable filters first).</summary>
+    public static NpgsqlParameterCollection TextExact(this NpgsqlParameterCollection p, string? value) =>
         Add(p, NpgsqlDbType.Text, (object?)value ?? DBNull.Value);
 
     public static NpgsqlParameterCollection Int(this NpgsqlParameterCollection p, int value) =>
@@ -201,7 +207,21 @@ internal static class NpgsqlParameterExtensions
         Add(p, NpgsqlDbType.Array | NpgsqlDbType.Uuid, value);
 
     public static NpgsqlParameterCollection TextArray(this NpgsqlParameterCollection p, string?[] value) =>
-        Add(p, NpgsqlDbType.Array | NpgsqlDbType.Text, value);
+        Add(p, NpgsqlDbType.Array | NpgsqlDbType.Text, CleanedIfNeeded(value));
+
+    /// <summary>The same array when every element can be stored (the usual case allocates nothing), otherwise a copy with the elements cleaned.</summary>
+    internal static string?[] CleanedIfNeeded(string?[] values)
+    {
+        foreach (string? v in values)
+        {
+            if (!StorageText.IsStorable(v))
+            {
+                return values.Select(StorageText.Clean).ToArray();
+            }
+        }
+
+        return values;
+    }
 
     public static NpgsqlParameterCollection IntArray(this NpgsqlParameterCollection p, int[] value) =>
         Add(p, NpgsqlDbType.Array | NpgsqlDbType.Integer, value);
