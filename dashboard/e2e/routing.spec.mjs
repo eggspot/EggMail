@@ -57,6 +57,7 @@ test.describe('relay routes', () => {
     await dialog.getByRole('button', { name: 'Save' }).click();
     await expect(page.getByText(`Relay route ${name} saved.`)).toBeVisible();
     await expect(row(page, name)).toContainText('7');
+    await expect(page.getByRole('dialog')).toBeHidden();   // the first dialog is gone before the second one is opened, so the next steps cannot talk to the closing one
     expect((await admin.ok('GET', `/api/v1/admin/relay-routes/${stored.id}`)).hasPassword).toBe(true);
 
     // Moving the route (another port) with a stored login needs the password typed again: the form says so, and the server insists too.
