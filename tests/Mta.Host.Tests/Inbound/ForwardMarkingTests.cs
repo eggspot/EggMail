@@ -33,6 +33,11 @@ public class ForwardMarkingTests
     [InlineData("x.test", "dots..inside")]
     [InlineData("x.test", "trailing.")]
     [InlineData("x.test", "a=b=c")]
+    [InlineData("bücher.example", "jürgen")]
+    [InlineData("x.test", "用户")]
+    [InlineData("x.test", "name+tag")]
+    [InlineData("x.test", "Mixed.Case")]
+    [InlineData("x.test", "llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll")]
     public void A_long_or_awkward_original_gives_the_short_form_of_at_most_64_octets_that_verifies(string domain, string local)
     {
         var srs = new SrsCodec(Ring(1));
@@ -50,7 +55,7 @@ public class ForwardMarkingTests
         string huge = new string('a', 255) + ".example";
         Assert.True(srs.CreateLocalPart(huge, new string('l', 64), Now).Length <= 64);
         Assert.True(srs.CreateLocalPart("d.test", new string('l', 64), Now).Length <= 64);
-        Assert.True(srs.CreateLocalPart("d.test", "", Now).Length <= 64);
+        Assert.Throws<ArgumentException>(() => srs.CreateLocalPart("d.test", "", Now));   // an envelope sender always has a local part; the null reverse-path never gets here
     }
 
     [Fact]
@@ -206,7 +211,7 @@ public class ForwardMarkingTests
 
         // In the body (after the empty line), in a MIME part, with a space before the colon, as a continuation of another field: none is a marker of the message.
         Assert.Equal(0, marker.ReadValidHops(Encoding.UTF8.GetBytes($"From: a@b.test\r\n\r\nX-EggMail-Hops: {valid}\r\n")));
-        Assert.Equal(0, marker.ReadValidHops(Encoding.UTF8.GetBytes($"From: a@b.test\r\nX-EggMail-Hops : {valid}\r\n\r\nb\r\n")));
+        Assert.Equal(2, marker.ReadValidHops(Encoding.UTF8.GetBytes($"From: a@b.test\r\nX-EggMail-Hops : {valid}\r\n\r\nb\r\n")));   // white space before the colon: still our field (a parser that ignores it must not be able to hide a marker)
         Assert.Equal(0, marker.ReadValidHops(Encoding.UTF8.GetBytes($"From: a@b.test\r\nX-Other: x\r\n X-EggMail-Hops: {valid}\r\n\r\nb\r\n")));
         // Any case of the name, and a tab fold inside the value, are the marker.
         Assert.Equal(2, marker.ReadValidHops(Encoding.UTF8.GetBytes($"From: a@b.test\r\nx-eggmail-HOPS:\t{valid.Replace("; ", ";\r\n\t", StringComparison.Ordinal)}\r\n\r\nb\r\n")));
@@ -216,6 +221,10 @@ public class ForwardMarkingTests
         byte[] next = marker.Apply(Encoding.UTF8.GetBytes(hidden), 3);
         Assert.Single(Regex.Matches(Encoding.UTF8.GetString(next), "(?im)x-eggmail-hops"));
         Assert.Equal(3, marker.ReadValidHops(next));
+
+        // The same for a marker written with white space before the colon: the copy carries exactly one.
+        byte[] spaced = marker.Apply(Encoding.UTF8.GetBytes($"X-EggMail-Hops : {valid}\r\nFrom: a@b.test\r\n\r\nb\r\n"), 3);
+        Assert.Single(Regex.Matches(Encoding.UTF8.GetString(spaced), "(?im)x-eggmail-hops"));
     }
 
     [Fact]
