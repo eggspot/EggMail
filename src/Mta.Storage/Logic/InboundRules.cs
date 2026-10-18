@@ -43,8 +43,11 @@ public static class InboundRules
     /// <summary>A forwarded message that has been forwarded this many times by this server is not forwarded again (the signed hop marker, design section 11.7).</summary>
     public const int MaxForwardHops = 3;
 
-    /// <summary>How long the idempotency key of a forward is remembered: longer than the retry ladder and any manual retry (decision 95).</summary>
-    public static readonly TimeSpan ForwardKeyLifetime = TimeSpan.FromDays(366);
+    /// <summary>
+    /// How long the idempotency key of a forward is remembered: far longer than the retry ladder (about 27 hours) and any manual retry of a failed action in practice, and short enough that the keys
+    /// do not pile up in the hot queue database (one row per forwarded message).
+    /// </summary>
+    public static readonly TimeSpan ForwardKeyLifetime = TimeSpan.FromDays(30);
 
     /// <summary>The idempotency key of the forward of one inbound message (independent of how often the action is retried).</summary>
     public static string ForwardKey(Guid inboundMessageId) => "inbound:" + inboundMessageId.ToString("N");

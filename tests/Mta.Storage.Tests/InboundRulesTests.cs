@@ -319,7 +319,7 @@ public class InboundRulesTests
         Guid id = Guid.Parse("01900000-0000-7000-8000-0000000000aa");
         Assert.Equal("inbound:0190000000007000800000000000" + "00aa", InboundRules.ForwardKey(id));
         Assert.Equal(InboundRules.ForwardKey(id), InboundRules.ForwardKey(id));
-        Assert.True(InboundRules.ForwardKeyLifetime > TimeSpan.FromDays(30));
+        Assert.Equal(TimeSpan.FromDays(30), InboundRules.ForwardKeyLifetime);   // far longer than the ladder (about 27 hours), short enough not to pile keys up in the hot queue database
         Assert.Equal(3, InboundRules.MaxForwardHops);
     }
 

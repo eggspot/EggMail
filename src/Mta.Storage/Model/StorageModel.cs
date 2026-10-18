@@ -46,9 +46,10 @@ public static class StorageModel
     /// <c>headers_utf8</c> column on queued deliveries (internationalized headers); version 7 the index on <c>delivery_queue (message_id)</c> that cancelling
     /// a message uses. SQLite files go from 5 straight to 7 so that the number matches PostgreSQL's <c>V007</c>: PostgreSQL's <c>V006</c> (replica
     /// coordination tables) is PostgreSQL-only and has no SQLite counterpart. Version 8 added the inbound mail tables; version 9 the index on
-    /// <c>inbound_message (tenant_id, action_next_attempt_at, id)</c> for the pending rows, which the per-tenant claim of the route actions probes once per tenant.
+    /// <c>inbound_message (tenant_id, action_next_attempt_at, id)</c> for the pending rows, which the per-tenant claim of the route actions probes once per tenant; version 10 the partial index on
+    /// <c>delivery_queue (tenant_id, sending_domain)</c> for the rows of source Forward, which the forward action counts before it queues another copy.
     /// </summary>
-    public const int SchemaVersion = 9;
+    public const int SchemaVersion = 10;
 
     /// <summary>
     /// Entity annotation requesting a <c>WITHOUT ROWID</c> table on SQLite (small rows whose primary key is the
@@ -194,6 +195,8 @@ public static class StorageModel
             e.HasIndex(x => new { x.DueAt, x.Id });
             e.HasIndex(x => new { x.ExpiresAt, x.Id });
             e.HasIndex(x => x.MessageId);
+            // The forward action counts the forwards a tenant still has waiting (a handful of thousand at most) before it queues another one: only these rows are in the index.
+            e.HasIndex(x => new { x.TenantId, x.SendingDomain }).HasFilter("source = 4");
         });
         mb.Entity<SpoolMessageEntity>(e =>
         {

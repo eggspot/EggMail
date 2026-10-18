@@ -533,6 +533,26 @@ public sealed class InboundSection
 
     /// <summary>Size limits of the webhook payload formats.</summary>
     public InboundWebhookSection Webhook { get; init; } = new();
+
+    /// <summary>Caps on the forwarded copies waiting in the outbound queue.</summary>
+    public InboundForwardSection Forward { get; init; } = new();
+}
+
+/// <summary>
+/// What the forward action may leave waiting in the outbound queue (<c>Inbound:Forward:*</c>). The copy of a forwarded message lives in the shared queue (up to <c>Queue:MaxLifetime</c>) after the
+/// inbound copy was freed, so without these caps the per-domain and per-tenant inbound quotas could be passed by anyone who can send mail to the domain whenever delivery stalls. Over a cap the
+/// forward waits on its retry ladder as <c>forward_backlog_full</c> and the message stays in the inbound store. <c>0</c> is no cap.
+/// </summary>
+public sealed class InboundForwardSection
+{
+    /// <summary>Forwarded messages of one tenant waiting in the outbound queue (a message with several recipients counts once).</summary>
+    public int MaxQueuedMessagesPerTenant { get; init; } = 5000;
+
+    /// <summary>Bytes of the forwarded messages of one tenant waiting in the outbound queue.</summary>
+    public long MaxQueuedBytesPerTenant { get; init; } = 1024L * 1024 * 1024;
+
+    /// <summary>Forwarded messages sent from one domain (the domain of the route) waiting in the outbound queue, so one noisy domain cannot use the whole share of its tenant.</summary>
+    public int MaxQueuedMessagesPerDomain { get; init; } = 1000;
 }
 
 /// <summary>Bounds of the SPF, DKIM, DMARC and ARC verification of received mail.</summary>
