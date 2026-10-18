@@ -81,11 +81,12 @@ public class SecretsHandlingTests : IAsyncLifetime
         Reply key = await alice.PostAsync("/api/v1/api-keys", new { name = "ci", scopes = new[] { "read", "send", "webhooks" } });
         string token = key.Str("key");
         secrets.Add(("api key", token));
-        secrets.Add(("api key secret part", token[(token.LastIndexOf('_') + 1)..]));
+        string keySecret = SecretPartOf(token);
+        secrets.Add(("api key secret part", keySecret));
         ApiClient viaKey = _f.NewClient().WithBearer(token);
         Assert.Equal(HttpStatusCode.OK, (await viaKey.GetAsync("/api/v1/messages")).Status);
         await _f.NewClient().WithBearer(token[..^3] + "AAA").GetAsync("/api/v1/messages");   // a near miss
-        await _f.NewClient().WithBearer("egm_AAAAAAAA_" + token[(token.LastIndexOf('_') + 1)..]).GetAsync("/api/v1/messages");   // right secret, wrong id
+        await _f.NewClient().WithBearer("egm_AAAAAAAA_" + keySecret).GetAsync("/api/v1/messages");   // right secret, wrong id
         await alice.DeleteAsync("/api/v1/api-keys/" + key.Str("id"));
         await viaKey.GetAsync("/api/v1/messages");
 
@@ -113,13 +114,13 @@ public class SecretsHandlingTests : IAsyncLifetime
         using X509Certificate2 cert = req.CreateSelfSigned(_f.Clock.UtcNow.AddDays(-1), _f.Clock.UtcNow.AddDays(90));
         string keyPem = rsa.ExportPkcs8PrivateKeyPem();
         Assert.Equal(HttpStatusCode.Created, (await root.PostAsync("/api/v1/admin/certificates", new { certificatePem = cert.ExportCertificatePem(), privateKeyPem = keyPem })).Status);
-        secrets.Add(("certificate private key", Convert.ToBase64String(rsa.ExportPkcs8PrivateKey())[..64]));
+        secrets.Add(("certificate private key", Convert.ToBase64String(rsa.ExportPkcs8PrivateKey())[100..164]));
         Reply domain = await alice.PostAsync("/api/v1/domains", new { name = "secrets.example" });
         await alice.PostAsync($"/api/v1/domains/{domain.Str("id")}/dkim/rotate");
         foreach (DkimKeyRecord dkim in await _f.Storage.Config.GetDkimKeysAsync(Guid.Parse(domain.Str("id")), default))
         {
             byte[] pkcs8 = _real.Unprotect(dkim.PrivateKeyProtected, SecretPurposes.DkimKey);
-            secrets.Add(("dkim private key", Convert.ToBase64String(pkcs8)[..64]));
+            secrets.Add(("dkim private key", Convert.ToBase64String(pkcs8)[100..164]));
         }
 
         // Every GET route, as the owner of the secrets, must not show them again.
@@ -167,6 +168,38 @@ public class SecretsHandlingTests : IAsyncLifetime
 
             Assert.False(bytes.AsSpan().IndexOf("-----BEGIN PRIVATE KEY-----"u8) >= 0, $"{Path.GetFileName(file)} holds a PEM private key");
         }
+    }
+
+    /// <summary>
+    /// The secret part of an API key: the last 43 characters (<c>egm_</c>, an 8 character id, <c>_</c>, then 43). Never found by looking for the last underscore:
+    /// base64url uses <c>_</c> too, about every other secret has one, and the "secret part" then shrinks to a few characters that any response can contain by chance
+    /// (this was the flaky failure "a GET response contains the api key secret part", which a needle of a few characters made likely).
+    /// </summary>
+    internal static string SecretPartOf(string token)
+    {
+        Assert.Equal(4 + 8 + 1 + 43, token.Length);
+        return token[^43..];
+    }
+
+    [Fact]
+    public void The_secret_part_of_a_key_is_always_the_full_43_characters_even_when_the_secret_holds_underscores()
+    {
+        int withUnderscore = 0;
+        for (int i = 0; i < 5_000; i++)
+        {
+            string token = Mta.Host.Security.ApiKeys.Generate().Token;
+            string secret = SecretPartOf(token);
+            Assert.Equal(43, secret.Length);
+            Assert.EndsWith(secret, token, StringComparison.Ordinal);
+            if (secret.Contains('_', StringComparison.Ordinal))
+            {
+                withUnderscore++;
+                // The way the test used to cut it leaves a shorter needle: that is the flake.
+                Assert.True(token[(token.LastIndexOf('_') + 1)..].Length < 43);
+            }
+        }
+
+        Assert.InRange(withUnderscore, 1, 5_000);   // the case that broke the test is common (about half of all keys), so it is exercised here every run
     }
 
     [Fact]
