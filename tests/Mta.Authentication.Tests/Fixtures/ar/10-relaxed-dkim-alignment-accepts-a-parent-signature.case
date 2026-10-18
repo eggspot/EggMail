@@ -1,0 +1,19 @@
+# Same message with relaxed alignment (the default): the parent domain's signature aligns, DMARC passes.
+client-ip: 198.51.100.9
+helo: mail.example.com
+mail-from: alice@elsewhere.example
+authserv-id: mx.receiver.example
+[zone]
+elsewhere.example TXT v=spf1 ip4:198.51.100.9 -all
+_dmarc.example.com TXT v=DMARC1; p=reject
+[message]
+From: Alice <alice@news.example.com>
+To: Bob <bob@receiver.example>
+Subject: Fixture
+Date: Mon, 12 Oct 2026 12:00:00 +0000
+Message-ID: <fx1@example.com>
+
+Hello Bob.
+[sign domain=example.com selector=s1]
+[expect]
+mx.receiver.example; spf=pass smtp.mailfrom=alice@elsewhere.example; dkim=pass (2048-bit key) header.d=example.com header.s=s1 header.b=Bs8HNz2w; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=news.example.com

@@ -1,0 +1,19 @@
+# adkim=s: a signature by example.com does not align with news.example.com, and SPF is for another domain: DMARC fails.
+client-ip: 198.51.100.9
+helo: mail.example.com
+mail-from: alice@elsewhere.example
+authserv-id: mx.receiver.example
+[zone]
+elsewhere.example TXT v=spf1 ip4:198.51.100.9 -all
+_dmarc.example.com TXT v=DMARC1; p=reject; adkim=s
+[message]
+From: Alice <alice@news.example.com>
+To: Bob <bob@receiver.example>
+Subject: Fixture
+Date: Mon, 12 Oct 2026 12:00:00 +0000
+Message-ID: <fx1@example.com>
+
+Hello Bob.
+[sign domain=example.com selector=s1]
+[expect]
+mx.receiver.example; spf=pass smtp.mailfrom=alice@elsewhere.example; dkim=pass (2048-bit key) header.d=example.com header.s=s1 header.b=Bs8HNz2w; dmarc=fail (p=REJECT sp=REJECT dis=REJECT) header.from=news.example.com

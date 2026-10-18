@@ -92,6 +92,10 @@ Design [section 11.7](../design.md#117-route-actions-executed-by-a-worker-after-
 * **Fairness.** At most `Inbound:Action:MaxConcurrencyPerTenant` attempts of one tenant run at once. The storage claim cannot skip a tenant, so a very large backlog of one tenant for a receiver that does not answer still delays other tenants' work on that replica (follow-up: a claim that excludes saturated tenants).
 * **Metrics.** `mta_inbound_actions_total{kind,outcome}`, `mta_inbound_action_duration_seconds{kind}`, `mta_inbound_actions{state}` (sampled every 15 s with `GetUsageAsync`).
 
+## Behaviour pinned by the fake-remote-MTA suite
+
+See decision 100 and [../testing-offline-coverage.md](../testing-offline-coverage.md). In short: a `421` anywhere in the envelope is the verdict and closes the connection; under opportunistic TLS a broken STARTTLS upgrade is reported and the message is retried in plaintext on a new connection; a temporary answer from the preferred MX (greylisting, 4xx) is the answer and the next MX is not tried, only connection, banner and TLS-policy failures move on; a peer that closes a reused connection with `421` after N messages costs the next message a deferral (known limitation: it is not retried at once on a fresh connection).
+
 ## Known gaps
 
 - **Behaviour change.** A message with UTF-8 header fields used to be sent as is to every server; it now bounces with `5.6.9` (nothing is sent) when the server lacks SMTPUTF8, as RFC 6531 requires. Header downgrading (RFC 6857, experimental) is not implemented, so such mail cannot reach those servers. The `8BITMIME` conversion does not touch 8-bit header fields of nested parts or embedded messages either (it refuses, see mime.md).
