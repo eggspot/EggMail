@@ -21,5 +21,7 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Mta.Host\Mta.Host.csproj" />
+    <!-- The fake remote MTAs of the delivery tests (hand written SMTP servers with Gmail, Outlook, Postfix and Exim personalities): the inbound end-to-end tests forward to them. -->
+    <ProjectReference Include="..\Mta.RemoteMta.Tests\Mta.RemoteMta.Tests.csproj" />
   </ItemGroup>
 </Project>

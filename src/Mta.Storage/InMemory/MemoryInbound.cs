@@ -199,6 +199,20 @@ internal sealed class MemoryInbound(MemoryState s) : IInboundMessageStore
         }
     }
 
+    public ValueTask<ForwardBacklog> GetForwardBacklogAsync(Guid tenantId, string sendingDomain, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        string domain = sendingDomain.ToLowerInvariant();
+        lock (s.Gate)
+        {
+            var forwards = s.Deliveries.Values.Where(d => d.TenantId == tenantId && d.Source == MessageSource.Forward).ToList();
+            var ids = forwards.Select(d => d.MessageId).ToHashSet();
+            long bytes = ids.Sum(id => s.Spool.TryGetValue(id, out SpoolMessageEntity? m) ? m.Size : 0);
+            long inDomain = forwards.Where(d => d.SendingDomain == domain).Select(d => d.MessageId).Distinct().LongCount();
+            return R(new ForwardBacklog(ids.Count, bytes, inDomain));
+        }
+    }
+
     public ValueTask<long> CountActionsAsync(InboundActionState state, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();

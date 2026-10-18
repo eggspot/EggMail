@@ -481,6 +481,26 @@ public abstract class InboundConformance : StorageTestBase
     }
 
     [Fact]
+    public async Task The_forward_backlog_counts_the_waiting_forwards_of_one_tenant_by_messages_bytes_and_sending_domain()
+    {
+        Assert.Equal(new ForwardBacklog(0, 0, 0), await Inbound.GetForwardBacklogAsync(TenantA, "a.example", default));
+
+        await Storage.Intake.AcceptAsync(Msg(tenant: TenantA, to: ["x@dest.example", "y@dest.example"], size: 1000, source: MessageSource.Forward, sendingDomain: "a.example"), default);   // two recipients: one message
+        await Storage.Intake.AcceptAsync(Msg(tenant: TenantA, size: 3000, source: MessageSource.Forward, sendingDomain: "a.example"), default);
+        await Storage.Intake.AcceptAsync(Msg(tenant: TenantA, size: 500, source: MessageSource.Forward, sendingDomain: "b.example"), default);
+        await Storage.Intake.AcceptAsync(Msg(tenant: TenantA, size: 7000, source: MessageSource.Api, sendingDomain: "a.example"), default);        // not a forward
+        await Storage.Intake.AcceptAsync(Msg(tenant: TenantB, size: 9000, source: MessageSource.Forward, sendingDomain: "a.example"), default);    // another tenant
+
+        Assert.Equal(new ForwardBacklog(3, 4500, 2), await Inbound.GetForwardBacklogAsync(TenantA, "a.example", default));
+        Assert.Equal(new ForwardBacklog(3, 4500, 1), await Inbound.GetForwardBacklogAsync(TenantA, "B.Example", default));   // the domain is compared in lower case
+        Assert.Equal(new ForwardBacklog(1, 9000, 1), await Inbound.GetForwardBacklogAsync(TenantB, "a.example", default));
+        Assert.Equal(new ForwardBacklog(0, 0, 0), await Inbound.GetForwardBacklogAsync(Ids.New(), "a.example", default));
+        using var stopped = new CancellationTokenSource();
+        await stopped.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await Inbound.GetForwardBacklogAsync(TenantA, "a.example", stopped.Token));
+    }
+
+    [Fact]
     public async Task Extending_a_lease_changes_nothing_for_anyone_but_the_owner_and_never_shortens_or_revives_another_claim()
     {
         DomainRecord domain = await AddDomainAsync(TenantA, "a.example");

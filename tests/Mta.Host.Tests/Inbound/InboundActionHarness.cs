@@ -161,7 +161,7 @@ internal sealed class InboundActionHarness : IAsyncDisposable
         return this;
     }
 
-    public InboundActionRunner CreateRunner(bool withForwarder = false, InboundActionOptions? options = null)
+    public InboundActionRunner CreateRunner(bool withForwarder = false, InboundActionOptions? options = null, IInboundForwarder? forwarder = null)
     {
         if (options is not null)
         {
@@ -169,7 +169,7 @@ internal sealed class InboundActionHarness : IAsyncDisposable
         }
 
         var health = new WebhookEndpointHealth(Storage.Config, new WebhookOptions(), null, Notifier);
-        return new InboundActionRunner(Storage, Transport, health, _protector, _options, Clock, NullMtaLog.Instance, () => InboundEnabled, Publisher, withForwarder ? Forwarder : null);
+        return new InboundActionRunner(Storage, Transport, health, _protector, _options, Clock, NullMtaLog.Instance, () => InboundEnabled, Publisher, forwarder ?? (withForwarder ? Forwarder : null));
     }
 
     public async Task<WebhookEndpointRecord> AddEndpointAsync(Guid tenantId, string url, bool enabled = true)

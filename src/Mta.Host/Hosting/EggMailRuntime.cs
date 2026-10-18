@@ -227,9 +227,21 @@ public sealed class EggMailRuntime : IAsyncDisposable
         var webhookTransport = new WebhookTransport(config.Webhooks, clock);
         var endpointNotifier = new EndpointDisabledNotifier(storage, clock, log);
         var webhooks = new WebhookDispatcher(storage.Webhooks, storage.Config, secrets, config.Webhooks, clock, log, endpointNotifier, transport: webhookTransport);
+        var arcSealers = new ConfigArcSealerProvider(storage.Config, secrets, clock);
+        var forwarder = new InboundForwarder(
+            storage, new SrsCodec(verp, inboundOptions.SrsMaxAgeDays), new ForwardHopMarker(verp), new Mta.Auth.Arc.ArcValidator(dns, new Mta.Auth.Arc.ArcValidatorOptions { MaxInstances = 10 }), arcSealers,
+            new InboundForwarderOptions
+            {
+                AuthenticationResultsId = config.Inbound.AuthenticationResultsId ?? config.Hostname,   // the authserv-id the receive path wrote into the stored message
+                BounceDomain = config.Delivery.BounceDomain,
+                QueueLifetime = config.Storage.Queue.MaxLifetime,
+                MaxQueuedMessagesPerTenant = config.Inbound.Forward.MaxQueuedMessagesPerTenant,
+                MaxQueuedBytesPerTenant = config.Inbound.Forward.MaxQueuedBytesPerTenant,
+                MaxQueuedMessagesPerDomain = config.Inbound.Forward.MaxQueuedMessagesPerDomain,
+            }, clock, log, onQueued: () => engine?.Wake());
         var inboundActions = new InboundActionRunner(
             storage, webhookTransport, new WebhookEndpointHealth(storage.Config, config.Webhooks, log, endpointNotifier), secrets, InboundActionOptionsFrom(config), clock, log,
-            () => config.Inbound.Enabled, new StorageWebhookPublisher(storage));
+            () => config.Inbound.Enabled, new StorageWebhookPublisher(storage), forwarder);
 
         var tlsJournal = collector is null ? null : new TlsReportJournal(collector, storage.Config, clock, log);
         TlsReportSender? reports = tlsJournal is null
@@ -282,6 +294,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
         runtime._owned.Add(pool);
         runtime._owned.Add(smtp);
         runtime._owned.Add(new DisposableAdapter(webhookTransport));
+        runtime._owned.Add(new DisposableAdapter(arcSealers));
         return runtime;
     }
 

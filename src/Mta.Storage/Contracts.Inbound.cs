@@ -367,6 +367,12 @@ public sealed record InboundClaimLimits(int MaxPerTenant, IReadOnlyCollection<Gu
     public bool IsUnrestricted => MaxPerTenant <= 0 && ExcludeTenants is null or { Count: 0 };
 }
 
+/// <summary>The forwards of one tenant that are still waiting in the outbound queue (<see cref="IInboundMessageStore.GetForwardBacklogAsync"/>).</summary>
+/// <param name="TenantMessages">Messages of source Forward with a recipient not yet final.</param>
+/// <param name="TenantBytes">Bytes of those messages as stored.</param>
+/// <param name="DomainMessages">How many of the messages are sent from the asked sending domain.</param>
+public sealed record ForwardBacklog(long TenantMessages, long TenantBytes, long DomainMessages);
+
 public sealed record InboundActionOutcome(InboundActionState State, DateTimeOffset At, DateTimeOffset? NextAttemptAt, string? Error, Guid? ForwardMessageId = null, bool FreeBody = false, string? Note = null, long? ClaimToken = null);
 
 public enum InboundRetryResult : byte
@@ -481,6 +487,13 @@ public interface IInboundMessageStore
     /// claim would skip are not touched, claimed or counted. Without limits the claim is exactly the oldest-due-first one.
     /// </remarks>
     ValueTask<IReadOnlyList<ClaimedInboundAction>> ClaimActionsAsync(string owner, int max, DateTimeOffset now, TimeSpan lease, CancellationToken cancellationToken, InboundClaimLimits? limits = null);
+
+    /// <summary>
+    /// What the forwards of <paramref name="tenantId"/> that are still waiting in the outbound queue take (design section 11.7): messages (a message with several recipients counts once), the bytes of their
+    /// stored copies, and how many of the messages are sent from <paramref name="sendingDomain"/> (the domain of the route). Answered from the partial index on the queue rows of source
+    /// <see cref="MessageSource.Forward"/>, so the cost grows with the forwards of the tenant (bounded by the caps this is used for), never with the queue.
+    /// </summary>
+    ValueTask<ForwardBacklog> GetForwardBacklogAsync(Guid tenantId, string sendingDomain, CancellationToken cancellationToken);
 
     /// <summary>
     /// How many messages have an action in <paramref name="state"/>, server-wide, for the gauges. <see cref="InboundActionState.Pending"/> is answered from the partial index of the claim and is cheap;
