@@ -114,11 +114,15 @@ export interface SettingsForm {
 
 const MIB = 1024 * 1024;
 
+/**
+ * The size in MiB as shown in the form: six decimals, so the number of bytes comes back exactly for any size that is a whole number of bytes up to a gigabyte
+ * (25000000 bytes shows as 23.841858, 1024 bytes as 0.000977) and a value the tenant did not touch can be recognized by its text.
+ */
 function mibText(bytes: number | null): string {
   if (bytes === null) return '';
   if (bytes === 0) return '0';
   const mib = bytes / MIB;
-  return Number.isInteger(mib) ? String(mib) : mib.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+  return Number.isInteger(mib) ? String(mib) : mib.toFixed(6).replace(/0+$/, '').replace(/\.$/, '');
 }
 
 export function settingsToForm(s: InboundSettings): SettingsForm {
@@ -144,7 +148,7 @@ function parseWhole(text: string): number | null | undefined {
 function parseMiB(text: string): number | null | undefined {
   const t = text.trim();
   if (t === '') return null;
-  if (!/^\d+(\.\d{1,3})?$/.test(t)) return undefined;
+  if (!/^\d+(\.\d{1,6})?$/.test(t)) return undefined;
   return Math.round(Number(t) * MIB);
 }
 
@@ -166,21 +170,41 @@ export function validateSettings(f: SettingsForm): SettingsErrors {
   return errors;
 }
 
-/** The members that differ from what is stored, as a PATCH body. Only these are sent, so a ceiling the operator lowered later never blocks a change of something else. */
+/**
+ * The members that differ from what is stored, as a PATCH body. Only these are sent, so a ceiling the operator lowered later never blocks a change of something else.
+ * A number is sent only when its text in the form differs from the text of the stored value: the form shows sizes in MiB, which cannot be an exact copy of every byte count, and a value
+ * the tenant did not touch must never be written back as a rounded one.
+ */
 export function settingsPatch(original: InboundSettings, f: SettingsForm): InboundSettingsPatch {
+  const unchanged = settingsToForm(original);
   const patch: InboundSettingsPatch = {};
   if (f.enabled !== original.enabled) patch.enabled = f.enabled;
   if (f.dmarcAction !== original.dmarcAction) patch.dmarcAction = f.dmarcAction;
-  const size = parseMiB(f.maxMessageMiB);
-  if (size !== undefined && size !== original.maxMessageBytes) patch.maxMessageBytes = size;
-  const perMinute = parseWhole(f.maxMessagesPerMinute);
-  if (perMinute !== undefined && perMinute !== original.maxMessagesPerMinute) patch.maxMessagesPerMinute = perMinute;
-  const perRemote = parseWhole(f.maxMessagesPerMinutePerRemote);
-  if (perRemote !== undefined && perRemote !== original.maxMessagesPerMinutePerRemote) patch.maxMessagesPerMinutePerRemote = perRemote;
-  const stored = parseMiB(f.maxStoredMiB);
-  if (stored !== undefined && stored !== original.maxStoredBytes) patch.maxStoredBytes = stored;
-  const days = parseWhole(f.retentionDays);
-  if (days !== undefined && days !== original.retentionDays) patch.retentionDays = days;
+  if (f.maxMessageMiB.trim() !== unchanged.maxMessageMiB) {
+    const size = parseMiB(f.maxMessageMiB);
+    if (size !== undefined) patch.maxMessageBytes = size;
+  }
+
+  if (f.maxMessagesPerMinute.trim() !== unchanged.maxMessagesPerMinute) {
+    const perMinute = parseWhole(f.maxMessagesPerMinute);
+    if (perMinute !== undefined) patch.maxMessagesPerMinute = perMinute;
+  }
+
+  if (f.maxMessagesPerMinutePerRemote.trim() !== unchanged.maxMessagesPerMinutePerRemote) {
+    const perRemote = parseWhole(f.maxMessagesPerMinutePerRemote);
+    if (perRemote !== undefined) patch.maxMessagesPerMinutePerRemote = perRemote;
+  }
+
+  if (f.maxStoredMiB.trim() !== unchanged.maxStoredMiB) {
+    const stored = parseMiB(f.maxStoredMiB);
+    if (stored !== undefined) patch.maxStoredBytes = stored;
+  }
+
+  if (f.retentionDays.trim() !== unchanged.retentionDays) {
+    const days = parseWhole(f.retentionDays);
+    if (days !== undefined) patch.retentionDays = days;
+  }
+
   return patch;
 }
 
@@ -250,14 +274,17 @@ export function splitAddresses(text: string): string[] {
 }
 
 const ATOM = /^[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]+$/;
-const EMAIL = /^[^\s@,;<>()"]{1,64}@[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$/;
+// The server accepts internationalized addresses (UTF-8 local part, IDN domain): letters and digits of any script are fine here, the server decides the rest.
+const EMAIL = /^[^\s@,;<>()"]{1,64}@(?:[\p{L}\p{N}](?:[\p{L}\p{N}-]*[\p{L}\p{N}])?\.)+[\p{L}\p{N}][\p{L}\p{N}-]*[\p{L}\p{N}]$/u;
+// Control characters (the server refuses them in a name), the same test as InboundRules.ContainsControl.
+const CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
 
 export type RouteErrors = Partial<Record<'name' | 'order' | 'localPart' | 'webhookEndpointId' | 'forwardTo', string>>;
 
 export function validateRoute(f: RouteForm): RouteErrors {
   const errors: RouteErrors = {};
-  if (f.name.length > 100) errors.name = 'At most 100 characters.';
-  if (!/^-?\d{1,9}$/.test(f.order.trim())) errors.order = 'Enter a whole number; the lowest number is checked first.';
+  if (f.name.length > 100 || CONTROL.test(f.name)) errors.name = 'At most 100 characters, no control characters.';
+  if (!/^\d{1,7}$/.test(f.order.trim()) || Number(f.order.trim()) > 1_000_000) errors.order = 'Enter a whole number from 0 to 1000000; the lowest number is checked first.';
   const local = f.localPart.trim();
   if (f.matchKind === 'address') {
     if (!local) errors.localPart = 'Enter the part before the @ (for example support).';

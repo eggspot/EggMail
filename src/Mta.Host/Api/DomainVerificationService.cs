@@ -226,7 +226,7 @@ public sealed class DomainVerificationService : BackgroundService
         keys.Where(k => k.Active || k.RetiredAt is null || now < k.RetiredAt.Value + retirementGrace).OrderBy(k => k.CreatedAt).ThenBy(k => k.Id).ToList();
 
     /// <summary>The records the customer has to publish for <paramref name="domain"/> (required ones decide verification; the rest is advice).</summary>
-    public IReadOnlyList<ExpectedDomainRecord> PlanRecords(DomainRecord domain, IReadOnlyList<StoredDkimKey> keys, DateTimeOffset now, bool inboundEnabled = false) =>
+    public IReadOnlyList<ExpectedDomainRecord> PlanRecords(DomainRecord domain, IReadOnlyList<StoredDkimKey> keys, DateTimeOffset now, bool inboundEnabled) =>
         PlanRecords(domain, keys, now, _recordOptions, _options.DkimRetirementGrace, inboundEnabled);
 
     /// <summary>The records of <paramref name="domain"/> including the inbound MX while inbound mail is enabled for it (read from the domain's inbound settings).</summary>
@@ -236,7 +236,7 @@ public sealed class DomainVerificationService : BackgroundService
         return PlanRecords(domain, keys, now, inbound is { Enabled: true });
     }
 
-    public static IReadOnlyList<ExpectedDomainRecord> PlanRecords(DomainRecord domain, IReadOnlyList<StoredDkimKey> keys, DateTimeOffset now, DomainRecordOptions recordOptions, TimeSpan retirementGrace, bool inboundEnabled = false)
+    public static IReadOnlyList<ExpectedDomainRecord> PlanRecords(DomainRecord domain, IReadOnlyList<StoredDkimKey> keys, DateTimeOffset now, DomainRecordOptions recordOptions, TimeSpan retirementGrace, bool inboundEnabled)
     {
         var published = PublishedKeys(keys, now, retirementGrace);
         var plan = DomainRecordPlanner.Plan(domain.Name, published.Select(k => new DomainDkimKey(k.Selector, k.PublicKeyBase64)), recordOptions, inboundEnabled);

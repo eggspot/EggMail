@@ -98,7 +98,7 @@ export function seedInboundMessage(stack, { tenantId, domainId, domain, to, from
 }
 
 /** A message with a text part, an HTML part that tries everything, and one attachment. */
-export function sampleMessage({ from = 'Alice <alice@sender.test>', to = 'support@example.test', subject = 'Quarterly report', text = 'Hello,\r\nthe report is attached.\r\n', html = '<p>Hello, <b>the report</b> is attached.</p>' } = {}) {
+export function sampleMessage({ from = 'Alice <alice@sender.test>', to = 'support@example.test', subject = 'Quarterly report', text = 'Hello,\r\nthe report is attached.\r\n', html = '<p>Hello, <b>the report</b> is attached.</p>', attachmentFilename = 'filename="report.pdf"' } = {}) {
   return [
     `From: ${from}`,
     `To: ${to}`,
@@ -122,7 +122,7 @@ export function sampleMessage({ from = 'Alice <alice@sender.test>', to = 'suppor
     '--b2--',
     '--b1',
     'Content-Type: application/pdf; name="report.pdf"',
-    'Content-Disposition: attachment; filename="report.pdf"',
+    `Content-Disposition: attachment; ${attachmentFilename}`,
     'Content-Transfer-Encoding: base64',
     '',
     Buffer.from('%PDF-1.4 e2e attachment').toString('base64'),

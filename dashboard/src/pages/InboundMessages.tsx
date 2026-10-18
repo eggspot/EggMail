@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import { api } from '../api/endpoints';
 import type { Domain, InboundMessageQuery, InboundMessageSummary, InboundVerdictWord } from '../api/types';
 import { Button, Card, Chip, ConfirmDialog, EmptyState, ErrorNotice, Field, LoadMore, Loading, Notice, PageHeader, TextField } from '../components/ui';
@@ -36,6 +36,22 @@ function toQuery(f: SearchForm): InboundMessageQuery {
     from: toIsoOrUndefined(f.from),
     to: toIsoOrUndefined(f.to),
   };
+}
+
+/** The filters of a query in words, for the confirmation of a bulk delete. */
+function describeFilters(q: InboundMessageQuery): string {
+  const parts: string[] = [];
+  if (q.domainId) parts.push('one domain');
+  if (q.recipient) parts.push(`recipient ${q.recipient}`);
+  if (q.sender) parts.push(`sender ${q.sender}`);
+  if (q.subject) parts.push(`subject contains "${q.subject}"`);
+  if (q.action) parts.push(`action ${q.action}`);
+  if (q.state) parts.push(`state ${q.state}`);
+  if (q.dmarc) parts.push(`DMARC ${q.dmarc}`);
+  if (q.dmarcFlagged) parts.push('flagged for DMARC');
+  if (q.from) parts.push(`from ${q.from}`);
+  if (q.to) parts.push(`until ${q.to}`);
+  return parts.join(', ') || 'none';
 }
 
 function hasFilter(q: InboundMessageQuery): boolean {
@@ -96,6 +112,9 @@ function Search() {
   const [tick, setTick] = useState(0);
   const [erasing, setErasing] = useState(false);
   const [erased, setErased] = useState<number | null>(null);
+  // The query the list on screen belongs to: a "Load more" that answers after the search changed must not add its rows to the new list.
+  const current = useRef<InboundMessageQuery>(applied);
+  current.current = applied;
 
   useEffect(() => {
     let live = true;
@@ -120,12 +139,14 @@ function Search() {
     if (!next) return;
     setMoreBusy(true);
     setMoreError(undefined);
+    const asked = applied;
     try {
-      const page = await api.inboundMessages({ ...applied, limit: PAGE_SIZE, cursor: next });
+      const page = await api.inboundMessages({ ...asked, limit: PAGE_SIZE, cursor: next });
+      if (current.current !== asked) return;
       setItems((cur) => [...cur, ...page.items]);
       setNext(page.next_cursor ?? null);
     } catch (e) {
-      setMoreError(e);
+      if (current.current === asked) setMoreError(e);
     } finally {
       setMoreBusy(false);
     }
@@ -313,7 +334,10 @@ function Search() {
           onConfirm={() => void erase.run()}
         >
           <p>
-            This deletes <strong>all</strong> received messages that match the filters you applied, including their stored copies, and cannot be undone. Use it for an erasure request
+            Filters applied: <strong data-testid="erase-filters">{describeFilters(applied)}</strong>
+          </p>
+          <p>
+            This deletes <strong>all</strong> received messages that match them, including their stored copies, and cannot be undone. Use it for an erasure request
             (a sender, a recipient) or to clear a domain's test mail. Messages whose action is still waiting are deleted too.
           </p>
         </ConfirmDialog>

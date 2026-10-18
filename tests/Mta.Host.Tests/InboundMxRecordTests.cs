@@ -45,7 +45,10 @@ public class InboundMxRecordTests
         async Task<DomainRecordCheck> Check(StaticDnsResolver dns) => Assert.Single((await new DomainChecker(dns).CheckAsync([record], default)).Records);
 
         Assert.Equal(DomainRecordStatus.Ok, (await Check(new StaticDnsResolver().AddMx(Domain, 10, Server))).Status);
-        Assert.Equal(DomainRecordStatus.Ok, (await Check(new StaticDnsResolver().AddMx(Domain, 5, "backup.mail.test").AddMx(Domain, 20, Server))).Status);
+        Assert.Equal(DomainRecordStatus.Ok, (await Check(new StaticDnsResolver().AddMx(Domain, 10, "other.mail.test").AddMx(Domain, 10, Server))).Status);   // equal preference: senders pick among them, this server gets its share
+        // Another host with a lower number gets the mail first: inbound mail would be split between two providers, so this is not OK.
+        DomainRecordCheck behind = await Check(new StaticDnsResolver().AddMx(Domain, 5, "backup.mail.test").AddMx(Domain, 20, Server));
+        Assert.Equal(DomainRecordStatus.Mismatch, behind.Status);
         Assert.Equal(DomainRecordStatus.Missing, (await Check(new StaticDnsResolver().AddTxt(Domain, "x"))).Status);
         DomainRecordCheck wrong = await Check(new StaticDnsResolver().AddMx(Domain, 10, "mx.elsewhere.test"));
         Assert.Equal(DomainRecordStatus.Mismatch, wrong.Status);
@@ -53,13 +56,15 @@ public class InboundMxRecordTests
     }
 
     [Fact]
-    public void The_mx_is_a_line_of_the_zone_file_and_belongs_in_the_domains_zone()
+    public void The_mx_is_a_comment_of_the_zone_file_like_spf_and_dmarc_so_importing_it_cannot_split_the_domains_mail()
     {
         IReadOnlyList<ExpectedDomainRecord> plan = Plan(true);
         ExpectedDomainRecord mx = plan.Single(r => r.Purpose == DomainRecordPurpose.InboundMx);
 
         Assert.True(ZoneFile.BelongsInZone(mx, Domain));
-        Assert.Contains("example.com. 3600 IN MX 10 mta.mail.test.", ZoneFile.Render(Domain, plan), StringComparison.Ordinal);
+        string zone = ZoneFile.Render(Domain, plan);
+        Assert.Contains("\n; example.com. 3600 IN MX 10 mta.mail.test.\n", zone, StringComparison.Ordinal);
+        Assert.DoesNotContain("\nexample.com. 3600 IN MX", zone, StringComparison.Ordinal);   // no uncommented MX line to import
         Assert.Contains("; Inbound MX (recommended)", ZoneFile.Render(Domain, plan), StringComparison.Ordinal);
     }
 }

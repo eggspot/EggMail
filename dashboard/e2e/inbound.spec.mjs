@@ -18,7 +18,6 @@ const rowOf = (page, text) => page.getByRole('row').filter({ hasText: text });
 test.describe('inbound mail', () => {
   test('a domain is turned on, the MX is explained and checked, and the page is shown only while the server accepts inbound mail', async ({ adminPage: page, admin, tenant, stack }) => {
     const domain = await createVerifiedDomain(admin, stack, tenant, 'inb');
-    const verifiedAt = Date.now();
 
     // The navigation has the page because the server accepts inbound mail.
     await page.goto(`/domains/${domain.id}`);
@@ -48,10 +47,12 @@ test.describe('inbound mail', () => {
     await expect(mxRow).toBeVisible();
     await expect(mxRow).toContainText(`10 ${SERVER_HOST}`);
     publishDomainRecords(stack.dns, await admin.ok('GET', `/api/v1/domains/${domain.id}`, undefined, { tenantId: tenant.id }), { only: ['inbound_mx'] });
-    // A check is limited to once per 30 seconds per domain, and the domain was verified a moment ago.
-    await page.waitForTimeout(Math.max(0, 31_000 - (Date.now() - verifiedAt)));
-    await page.getByRole('button', { name: /Check DNS/ }).click();
-    await expect(mxRow).toContainText('OK', { timeout: 30_000 });
+    // A check is limited to once per 30 seconds per domain and the domain was verified a moment ago: while the button counts down it is not named "Check DNS", so the click
+    // waits for the real condition (and the answer is awaited) instead of a fixed pause.
+    await expect(async () => {
+      await page.getByRole('button', { name: /Check DNS/ }).click({ timeout: 2_000 });
+      await expect(mxRow).toContainText('OK', { timeout: 3_000 });
+    }).toPass({ timeout: 60_000, intervals: [500, 1_000, 2_000] });
   });
 
   test('routes are added, tried, reordered, disabled and deleted; a forward needs valid addresses', async ({ adminPage: page, admin, tenant, stack }) => {
@@ -170,15 +171,17 @@ test.describe('inbound mail', () => {
   });
 
   test('hostile mail is shown as text, never as markup, and its HTML cannot reach the page', async ({ adminPage: page, admin, tenant, stack, allowProblems }) => {
-    // The browser reports (as a console error) that it refused the remote image of the sandboxed message: that is the protection working.
-    allowProblems.push(/Refused to load the image|tracker\.invalid|Content Security Policy/);
+    // The browser reports (as a console error and a CSP violation) that it refused the remote image of the sandboxed message: that is the protection working.
+    // Only that image is expected; any other report (a script, a form, a frame) still fails the test.
+    allowProblems.push(/^console\.error: Loading the image 'https:\/\/tracker\.invalid\/p\.gif' violates the following Content Security Policy directive: "img-src [^"]*"\. The action has been blocked\.$/, /^CSP violation: img-src blocked https:\/\/tracker\.invalid\/p\.gif$/);
     const domain = await enabledDomain(admin, stack, tenant);
     const subject = '<img src=x onerror=window.__pwned=1> <script>window.__pwned=2</script>';
     const to = `support@${domain.name}`;
     const html = '<script>parent.__pwned=3</script><img src="https://tracker.invalid/p.gif"><a href="javascript:parent.__pwned=4">x</a><form action="https://evil.invalid"><input name=a></form>hostile html';
     const id = seedInboundMessage(stack, {
       tenantId: tenant.id, domainId: domain.id, domain: domain.name, to, from: '"><script>window.__pwned=5</script>@sender.test', subject,
-      raw: sampleMessage({ to, subject, text: '<b>not bold</b> <img src=x onerror=window.__pwned=6>', html }),
+      // The attachment name hides its extension on screen with a right-to-left override (U+202E): "invoice" + override + "gpj.exe" reads "invoiceexe.jpg".
+      raw: sampleMessage({ to, subject, text: '<b>not bold</b> <img src=x onerror=window.__pwned=6>', html, attachmentFilename: "filename*=UTF-8''invoice%E2%80%AEgpj.exe" }),
     });
 
     await page.goto('/inbound');
@@ -194,6 +197,14 @@ test.describe('inbound mail', () => {
     expect(await page.evaluate(() => window.__pwned)).toBeUndefined();
     await page.getByRole('tab', { name: /Headers/ }).click();
     await expect(page.getByRole('table', { name: 'Header fields of the stored message' })).toContainText('<script>');
+
+    // The disguised name is shown and saved without the override character.
+    await page.getByRole('tab', { name: /Attachments/ }).click();
+    const download = page.getByRole('button', { name: 'Download invoicegpj.exe' });
+    await expect(download).toBeVisible();
+    expect(await page.locator('main').innerText()).not.toContain('\u202E');
+    const [saved] = await Promise.all([page.waitForEvent('download'), download.click()]);
+    expect(saved.suggestedFilename()).toBe('invoicegpj.exe');
   });
 
   test('a failed webhook action is explained and retried: the receiver gets the message as a new, signed event', async ({ adminPage: page, admin, tenant, stack }) => {
@@ -274,5 +285,15 @@ test.describe('inbound mail', () => {
     expect(list.items).toEqual([]);
     await page.goto(`/inbound/messages/${id}`);
     await expect(page.getByRole('heading', { name: /Mine/ })).toBeVisible();
+
+    // The same in the dashboard once the administrator acts on the other tenant: the list is empty, the message is "not found", and its downloads are refused.
+    await page.evaluate((tenantId) => sessionStorage.setItem('eggmail.tenant', tenantId), other.id);
+    await page.goto('/inbound');
+    await expect(page.getByText('No received messages')).toBeVisible();
+    await expect(page.getByRole('link', { name: /Mine/ })).toHaveCount(0);
+    await page.goto(`/inbound/messages/${id}`);
+    await expect(page.getByText('Message not found')).toBeVisible();
+    expect((await admin.request('GET', `/api/v1/inbound/messages/${id}/raw`, undefined, { tenantId: other.id })).status).toBe(404);
+    expect((await admin.request('GET', `/api/v1/inbound/messages/${id}/attachments/0`, undefined, { tenantId: other.id })).status).toBe(404);
   });
 });

@@ -564,7 +564,7 @@ export default function DomainInbound({ id }: { id?: string }) {
           <a href={`/domains/${domainId}`}>domain page</a> first.
         </Notice>
       )}
-      <SettingsCard domainId={domainId} settings={settings.data} onSaved={(s) => settings.setData(s)} />
+      <SettingsCard key={domainId} domainId={domainId} settings={settings.data} onSaved={(s) => settings.setData(s)} />
       <MxCard domainName={domain.data.name} settings={settings.data} />
       <RoutesCard domainId={domainId} enabled={settings.data.enabled} />
       <ProbeCard domainId={domainId} domainName={domain.data.name} />

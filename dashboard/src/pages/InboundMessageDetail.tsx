@@ -225,7 +225,12 @@ function Content({ m }: { m: Detail }) {
   );
 }
 
+/** Keyed by the message, so the open tab, a dialog and a download error of one message never carry over to the next. */
 export default function InboundMessageDetail({ id }: { id?: string }) {
+  return <MessageView key={id ?? ''} id={id} />;
+}
+
+function MessageView({ id }: { id?: string }) {
   const messageId = id ?? '';
   const location = useLocation();
   const { data: m, error, loading, reload } = useApi(() => api.inboundMessage(messageId), [messageId]);

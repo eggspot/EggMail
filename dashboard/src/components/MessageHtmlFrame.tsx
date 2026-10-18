@@ -15,7 +15,7 @@ export const FRAME_CSP = "default-src 'none'; img-src data:; base-uri 'none'; fo
  * (additional CSP policies can only tighten) or redirect the frame with a meta refresh.
  */
 export function buildSrcDoc(html: string): string {
-  const cleaned = html.replace(/<meta\b[^>]*\bhttp-equiv\b[^>]*>/gi, '').replace(/<base\b[^>]*>/gi, '');
+  const cleaned = removeHeadTags(html);
   return (
     '<!doctype html><html><head><meta charset="utf-8">' +
     `<meta http-equiv="Content-Security-Policy" content="${FRAME_CSP}">` +
@@ -24,6 +24,19 @@ export function buildSrcDoc(html: string): string {
     cleaned +
     '</body></html>'
   );
+}
+
+/**
+ * Removes every <meta>, <base> and <link> tag from the message HTML, however it is written: attribute values may contain `>` inside quotes, and an unterminated tag is neutralized
+ * by turning its `<` into a character reference, so no HTML parser sees a tag start there. (A meta refresh or a base inside the body would still be honored by a browser; the sandbox
+ * and the policies above do not rely on it being gone, this is the layer that makes it gone.)
+ */
+export function removeHeadTags(html: string): string {
+  const tag = /<\s*(?:meta|base|link)(?![A-Za-z0-9-])(?:[^>"']|"[^"]*"|'[^']*')*>/gi;
+  let out = html.replace(tag, '');
+  // What is left of such a tag (an unterminated quote, a nested start) cannot be matched safely: make its `<` plain text.
+  out = out.replace(/<(?=\s*(?:meta|base|link)(?![A-Za-z0-9-]))/gi, '&lt;');
+  return out;
 }
 
 export function MessageHtmlFrame({ html, title = 'Message HTML (sandboxed)' }: { html: string; title?: string }) {

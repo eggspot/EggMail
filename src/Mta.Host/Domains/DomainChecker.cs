@@ -96,7 +96,8 @@ public sealed class DomainChecker
         DomainRecordPurpose.TlsRpt => CheckTlsRptAsync(record, ct),
         DomainRecordPurpose.MtaSts => CheckMtaStsAsync(record, ct),
         DomainRecordPurpose.MtaStsHost => CheckMtaStsHostAsync(record, ct),
-        DomainRecordPurpose.BounceMx or DomainRecordPurpose.InboundMx => CheckMxAsync(record, ct),
+        DomainRecordPurpose.BounceMx => CheckMxAsync(record, ct),
+        DomainRecordPurpose.InboundMx => CheckInboundMxAsync(record, ct),
         _ => CheckPtrAsync(record, ct),
     };
 
@@ -331,6 +332,27 @@ public sealed class DomainChecker
         string wanted = DomainRecordPlanner.Normalize(record.Value[(record.Value.IndexOf(' ', StringComparison.Ordinal) + 1)..]);
         string found = string.Join(", ", mx.Select(m => $"{m.Preference} {DomainRecordPlanner.Normalize(m.Exchange)}"));
         return new DomainRecordCheck(record, mx.Any(m => DomainRecordPlanner.Normalize(m.Exchange) == wanted) ? DomainRecordStatus.Ok : DomainRecordStatus.Mismatch, found);
+    }
+
+    /// <summary>
+    /// The MX of a domain that receives mail here: <c>ok</c> only while this server is where senders go first, that is among the MX records with the lowest preference number. A record
+    /// that names this server at a higher number than another host's is a <c>mismatch</c> (the other host still gets the mail, so inbound mail would be split between two providers).
+    /// </summary>
+    private async Task<DomainRecordCheck> CheckInboundMxAsync(ExpectedDomainRecord record, CancellationToken ct)
+    {
+        var response = await _dns.QueryAsync(record.Host, DnsRecordType.MX, ct).ConfigureAwait(false);
+        ThrowIfServerFailure(response);
+        var mx = response.Get<MxRecord>().OrderBy(m => m.Preference).ToList();
+        if (mx.Count == 0)
+        {
+            return new DomainRecordCheck(record, DomainRecordStatus.Missing, null);
+        }
+
+        string wanted = DomainRecordPlanner.Normalize(record.Value[(record.Value.IndexOf(' ', StringComparison.Ordinal) + 1)..]);
+        string found = string.Join(", ", mx.Select(m => $"{m.Preference} {DomainRecordPlanner.Normalize(m.Exchange)}"));
+        int lowest = mx[0].Preference;
+        bool first = mx.Any(m => m.Preference == lowest && DomainRecordPlanner.Normalize(m.Exchange) == wanted);
+        return new DomainRecordCheck(record, first ? DomainRecordStatus.Ok : DomainRecordStatus.Mismatch, found);
     }
 
     /// <summary>

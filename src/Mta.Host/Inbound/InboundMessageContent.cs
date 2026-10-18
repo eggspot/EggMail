@@ -125,9 +125,14 @@ public static class InboundContentReader
         return body;
     }
 
-    /// <summary>Control characters become a space, the length is bounded: a value shown or put in a header is a single line.</summary>
+    /// <summary>
+    /// Control characters become a space, the length is bounded: a value shown or put in a header is a single line. Characters that change how text is displayed without being visible are removed:
+    /// the bidirectional controls (U+202A to U+202E, U+2066 to U+2069, the marks U+200E, U+200F, U+061C), zero-width characters (U+200B to U+200D, U+2060, U+FEFF) and the line and paragraph
+    /// separators U+2028 and U+2029 (every <c>Cf</c>, <c>Zl</c> and <c>Zp</c> character). A right-to-left override in an attachment name turns <c>invoice\u202Egpj.exe</c> into <c>invoiceexe.jpg</c> on screen.
+    /// </summary>
     private static string Clean(string value, int max)
     {
+        value = StripInvisible(value);
         if (value.Length > max)
         {
             value = value[..max];
@@ -174,6 +179,31 @@ public static class InboundContentReader
 
         return sb.ToString().Trim();
     }
+
+    internal static string StripInvisible(string value)
+    {
+        foreach (char c in value)
+        {
+            if (IsInvisibleFormatting(c))
+            {
+                var sb = new StringBuilder(value.Length);
+                foreach (char d in value)
+                {
+                    if (!IsInvisibleFormatting(d))
+                    {
+                        sb.Append(d);
+                    }
+                }
+
+                return sb.ToString();
+            }
+        }
+
+        return value;
+    }
+
+    private static bool IsInvisibleFormatting(char c) =>
+        char.GetUnicodeCategory(c) is System.Globalization.UnicodeCategory.Format or System.Globalization.UnicodeCategory.LineSeparator or System.Globalization.UnicodeCategory.ParagraphSeparator;
 
     /// <summary>
     /// A file name that is safe as the <c>filename</c> parameter of a <c>Content-Disposition</c> header: ASCII letters, digits and <c>. _ - ( ) space</c>,

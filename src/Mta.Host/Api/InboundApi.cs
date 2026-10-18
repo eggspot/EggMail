@@ -252,7 +252,7 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
 
         return new InboundSettingsResponse(
             s.DomainId, s.Enabled, InboundNames.Of(s.DmarcAction), s.MaxMessageBytes, s.MaxMessagesPerMinute, s.MaxMessagesPerMinutePerRemote, s.MaxStoredBytes, s.RetentionDays,
-            stored ? s.UpdatedAt : null, effective, new InboundMxAdviceResponse(options.DomainRecords?.ServerHostname, 10), all.Count == 0 ? null : all);
+            stored ? s.UpdatedAt : null, effective, new InboundMxAdviceResponse(options.DomainRecords?.ServerHostname, DomainRecordPlanner.MxPreference), all.Count == 0 ? null : all);
     }
 
     private async Task<IResult> GetSettingsAsync(HttpContext context, string id)
@@ -617,7 +617,7 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
         }
 
         var keys = await Config.GetDkimKeysAsync(domain.Id, ct).ConfigureAwait(false);
-        ExpectedDomainRecord? spf = verification.PlanRecords(domain, keys, clock.UtcNow).FirstOrDefault(r => r.Purpose == DomainRecordPurpose.Spf);
+        ExpectedDomainRecord? spf = verification.PlanRecords(domain, keys, clock.UtcNow, inboundEnabled: false).FirstOrDefault(r => r.Purpose == DomainRecordPurpose.Spf);
         if (spf is null)
         {
             return [];
