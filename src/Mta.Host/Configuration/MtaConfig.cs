@@ -506,14 +506,14 @@ public sealed class InboundSection
     /// <summary>Check SPF for clients with a private, loopback or link-local address. Off (the default), SPF is not checked for them (behind source NAT the address is the NAT's); turn it on for a lab or a network that really sends from such addresses.</summary>
     public bool CheckSpfForInternalClients { get; init; }
 
-    /// <summary>Connections the port-25 listener may hold at once; <c>Smtp:MaxConnections</c> minus this is what stays available to submission when anonymous senders open as many as they can.</summary>
-    public int MaxConnections { get; init; } = 1500;
+    /// <summary>Connections the port-25 listener may hold at once. At most half of <c>Smtp:MaxConnections</c> is used whatever this says: the rest stays available to submission when anonymous senders open as many as they can.</summary>
+    public int MaxConnections { get; init; } = 1000;
 
-    /// <summary>Bytes of messages the port-25 listener may be receiving at once; <c>Smtp:MaxInFlightBytes</c> minus this stays available to submission.</summary>
+    /// <summary>Bytes of messages the port-25 listener may be receiving at once, copies the receive path makes included (about four times the size of a message while it is handled). At most half of <c>Smtp:MaxInFlightBytes</c> is used; it must cover about 4.2 times the largest inbound message.</summary>
     public long MaxInFlightBytes { get; init; } = 256L * 1024 * 1024;
 
-    /// <summary>The share of <c>Inbound:MaxInFlightBytes</c> one client network (an IPv4 address or an IPv6 /64) may use.</summary>
-    public long MaxInFlightBytesPerRemote { get; init; } = 64L * 1024 * 1024;
+    /// <summary>The share of <c>Inbound:MaxInFlightBytes</c> one client network (an IPv4 address or an IPv6 /64) may use. <c>0</c> derives it from the largest inbound message (4.5 times it); a value must cover about 4.2 times that message.</summary>
+    public long MaxInFlightBytesPerRemote { get; init; }
 
     /// <summary>The longest an anonymous session lives, checked between commands: a client that keeps a connection open with NOOP or empty BDAT chunks is closed after it (a message being received is finished).</summary>
     public TimeSpan MaxSessionDuration { get; init; } = TimeSpan.FromMinutes(10);

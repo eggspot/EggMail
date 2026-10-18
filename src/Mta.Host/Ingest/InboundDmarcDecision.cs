@@ -35,7 +35,6 @@ public static class InboundDmarcDecision
     {
         ArgumentNullException.ThrowIfNull(verification);
         bool allReject = actionsPerRecipient.Count > 0 && actionsPerRecipient.All(a => a == InboundDmarcAction.Reject);
-        DmarcEvaluation? dmarc = verification.Dmarc;
 
         // No usable From: there is no identity to apply a policy to, which a spoofer could use to be rid of every policy. It counts as a failure under a reject policy.
         if (verification.NoUsableFrom)
@@ -54,9 +53,10 @@ public static class InboundDmarcDecision
             return new InboundDmarcOutcome(InboundDmarcRefusal.None, unusable);
         }
 
-        // A trusted sealer's chain turns a failure into a pass for this decision; the recorded verdicts keep the original.
-        bool failed = dmarc?.Result == DmarcResult.Fail && !verification.ArcOverridesDmarc && !verification.Unsettled;
-        DmarcDisposition policy = dmarc?.Disposition ?? DmarcDisposition.None;
+        // A trusted sealer's chain turns a failure into a pass for this decision; the recorded verdicts keep the original. A settled failure under a quarantine or reject policy decides
+        // whatever the other From domains of the message did (the verifier has already looked at all of them).
+        DmarcDisposition policy = verification.DecisiveFailure;
+        bool failed = policy != DmarcDisposition.None && !verification.ArcOverridesDmarc;
 
         if (allReject)
         {

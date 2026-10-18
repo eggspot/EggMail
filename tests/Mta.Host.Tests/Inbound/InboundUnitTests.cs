@@ -24,6 +24,7 @@ public class InboundUnitTests
         Auth = InboundAuthResults.NotChecked,
         Dmarc = Evaluation(result, disposition),
         Unsettled = unsettled,
+        DecisiveFailure = result == DmarcResult.Fail && !unsettled ? disposition : DmarcDisposition.None,   // what the verifier computes: a settled failure
         ArcOverridesDmarc = arc,
         AuthenticationResultsHeader = "Authentication-Results: x\r\n",
     };
@@ -285,14 +286,14 @@ public class InboundUnitTests
 
         Assert.Equal((300, 1_000_000L, 200_000L, TimeSpan.FromMinutes(2), true), (listener.MaxConnections, listener.MaxInFlightBytes, listener.MaxInFlightBytesPerRemote, listener.MaxSessionDuration, o.CheckSpfForInternalClients));
         Assert.Equal(ListenerRole.Inbound, listener.Role);
-        Assert.Equal((1500, 256L << 20, 64L << 20), (InboundReceiveOptions.From(Load()).MaxConnections, InboundReceiveOptions.From(Load()).MaxInFlightBytes, InboundReceiveOptions.From(Load()).MaxInFlightBytesPerRemote));
+        InboundReceiveOptions defaults = InboundReceiveOptions.From(Load());
+        Assert.Equal((1000, 256L << 20, 0L), (defaults.MaxConnections, defaults.MaxInFlightBytes, defaults.MaxInFlightBytesPerRemote));   // per network: derived from the largest message
     }
 
     [Theory]
     [InlineData("Inbound:MaxTransactionBytes", "1048576")]   // smaller than the largest message (Smtp:MaxMessageSize is 25 MiB)
     [InlineData("Inbound:MaxConnections", "0")]
     [InlineData("Inbound:MaxInFlightBytes", "0")]
-    [InlineData("Inbound:MaxInFlightBytesPerRemote", "0")]
     [InlineData("Inbound:MaxSessionDuration", "00:00:00")]
     public void An_unusable_share_or_a_transaction_budget_below_the_largest_message_is_a_configuration_error(string key, string value)
     {

@@ -26,7 +26,10 @@ public enum BounceRecipientClass : byte
 /// <summary>The bounce half of the port-25 listener, as the receive path sees it. Implemented by <see cref="IngestHandler"/>, which owns the bounce address rules.</summary>
 public interface IBounceNamespace
 {
-    ValueTask<BounceRecipientClass> ClassifyAsync(EmailAddress recipient, CancellationToken cancellationToken);
+    /// <param name="recipient">The recipient.</param>
+    /// <param name="clientKey">The client network (<see cref="NetworkKey.Remote"/>): uncached lookups are budgeted per client.</param>
+    /// <param name="cancellationToken">Cancels the lookup.</param>
+    ValueTask<BounceRecipientClass> ClassifyAsync(EmailAddress recipient, string clientKey, CancellationToken cancellationToken);
 
     ValueTask<SmtpReply> HandleMessageAsync(SmtpMessage message, CancellationToken cancellationToken);
 }
@@ -186,7 +189,7 @@ public sealed class InboundReceiver
     private async ValueTask<SmtpReply> ClassifyAsync(SmtpSessionContext session, State state, MailFromInfo mail, EmailAddress recipient, CancellationToken ct)
     {
         // 1. A bounce recipient, exactly what the bounce listener accepts (decision 92).
-        switch (await _bounces.ClassifyAsync(recipient, ct).ConfigureAwait(false))
+        switch (await _bounces.ClassifyAsync(recipient, NetworkKey.Remote(state.Client), ct).ConfigureAwait(false))
         {
             case BounceRecipientClass.Accepted:
                 if (state.Kind is not (Kind.None or Kind.Bounce))
@@ -195,7 +198,7 @@ public sealed class InboundReceiver
                 }
 
                 state.Kind = Kind.Bounce;
-                LimitBounceClassMessage(session);
+                LimitBounceClassMessage(session, mail);
                 InboundMetrics.Recipient("bounce");
                 return SmtpReplies.RecipientOk;
 
@@ -235,7 +238,7 @@ public sealed class InboundReceiver
             }
 
             state.Kind = Kind.Srs;
-            LimitBounceClassMessage(session);
+            LimitBounceClassMessage(session, mail);
             InboundMetrics.Recipient("srs_bounce");
             return SmtpReplies.RecipientOk;
         }
@@ -325,9 +328,15 @@ public sealed class InboundReceiver
         return SmtpReplies.RecipientOk;
     }
 
-    // A bounce or an SRS bounce is a few kilobytes of headers and a piece of the original; the anonymous port does not take more than that for one.
-    private static void LimitBounceClassMessage(SmtpSessionContext session) =>
-        session.TransactionMaxMessageSize = session.TransactionMaxMessageSize is { } existing ? Math.Min(existing, InboundReceiveOptions.BounceMessageLimit) : InboundReceiveOptions.BounceMessageLimit;
+    // A report from the null sender may be large (some servers return the whole original) and is accepted up to the normal limit: only its head is read. A message to a bounce address from anybody else is
+    // not a report, and the anonymous port does not take more than a mebibyte of it.
+    private static void LimitBounceClassMessage(SmtpSessionContext session, MailFromInfo mail)
+    {
+        if (!mail.Sender.IsNull)
+        {
+            session.TransactionMaxMessageSize = session.TransactionMaxMessageSize is { } existing ? Math.Min(existing, InboundReceiveOptions.BounceMessageLimit) : InboundReceiveOptions.BounceMessageLimit;
+        }
+    }
 
     private static SmtpReply Mixed()
     {
@@ -519,9 +528,11 @@ public sealed class InboundReceiver
                 return AuthTryLater;
         }
 
-        // One stamped copy per distinct state (flagged or not), each as large as the message plus the headers we add.
+        // One stamped copy per distinct state (flagged or not), each as large as the message plus the headers we add (known now: the Received field, our Authentication-Results and the markers).
+        // The buffer and the contiguous copy were counted when they were made; only the extra copies are reserved here, so one message is not counted three times.
         int variants = decision.Flagged.Distinct().Count();
-        if (!message.Session.TryReserveMemory(variants * (size + 64 * 1024)))
+        long stamped = message.ReceivedHeader.Length + Encoding.UTF8.GetByteCount(verification.AuthenticationResultsHeader) + 256;
+        if (!message.Session.TryReserveMemory(variants * (size + stamped)))
         {
             InboundMetrics.Message("rejected_other");
             return StorageFull;

@@ -63,14 +63,29 @@ public sealed class InboundReceiveOptions
     /// <summary><c>Inbound:CheckSpfForInternalClients</c>: check SPF for clients with a private, loopback or link-local address (lab setups and networks that really send from them). Off, SPF is not checked for them: behind source NAT the address is the NAT's.</summary>
     public bool CheckSpfForInternalClients { get; init; }
 
-    /// <summary><c>Inbound:MaxConnections</c>: connections the port-25 listener may hold, below <c>Smtp:MaxConnections</c> so anonymous senders cannot take the connections submission needs.</summary>
-    public int MaxConnections { get; init; } = 1500;
+    /// <summary>
+    /// What one message of the largest size takes from the in-flight budget, in multiples of its size: the buffer it is received into, the contiguous copy the checks read, and one stamped copy per distinct
+    /// state (flagged or not: two when the recipients differ). A budget share smaller than this times the largest message makes that message impossible to accept. The rule the configuration is checked against.
+    /// </summary>
+    public const double SizingFactor = 4.2;
+
+    /// <summary>The share of the budget one client network gets when none is configured (<c>Inbound:MaxInFlightBytesPerRemote</c> <c>0</c>): room for one largest message and a margin.</summary>
+    public const double DerivedPerRemoteFactor = 4.5;
+
+    /// <summary><c>Inbound:MaxConnections</c>: connections the port-25 listener may hold, below <c>Smtp:MaxConnections</c> (at most half of it) so anonymous senders cannot take the connections submission needs.</summary>
+    public int MaxConnections { get; init; } = 1000;
 
     /// <summary><c>Inbound:MaxInFlightBytes</c>: bytes of messages the port-25 listener may be receiving at once, below <c>Smtp:MaxInFlightBytes</c> for the same reason.</summary>
     public long MaxInFlightBytes { get; init; } = 256L << 20;
 
-    /// <summary><c>Inbound:MaxInFlightBytesPerRemote</c>: the share of that budget one client network (IPv4 address, IPv6 /64) may use.</summary>
-    public long MaxInFlightBytesPerRemote { get; init; } = 64L << 20;
+    /// <summary><c>Inbound:MaxInFlightBytesPerRemote</c>: the share of that budget one client network (IPv4 address, IPv6 /64) may use. <c>0</c>: derived from the largest inbound message (<see cref="DerivedPerRemoteFactor"/> times it).</summary>
+    public long MaxInFlightBytesPerRemote { get; init; }
+
+    /// <summary>The per-network share in effect: the configured one, or the derived one.</summary>
+    public long EffectiveMaxInFlightBytesPerRemote => MaxInFlightBytesPerRemote > 0 ? MaxInFlightBytesPerRemote : Math.Max(DerivedPerRemoteFloor, (long)(DerivedPerRemoteFactor * Ceilings.MaxMessageBytes));
+
+    /// <summary>The least a derived per-network share is: message buffers come in segments of 16 KiB and up, so even a tiny message needs room.</summary>
+    public const long DerivedPerRemoteFloor = 2L << 20;
 
     /// <summary><c>Inbound:MaxSessionDuration</c>: the longest an anonymous session lives between commands (a message being received is finished).</summary>
     public TimeSpan MaxSessionDuration { get; init; } = TimeSpan.FromMinutes(10);
@@ -99,8 +114,9 @@ public sealed class InboundReceiveOptions
             DnsblTimeout = i.Dnsbl.Timeout,
             SrsMaxAgeDays = i.Srs.MaxAgeDays,
             CheckSpfForInternalClients = i.CheckSpfForInternalClients,
-            MaxConnections = i.MaxConnections,
-            MaxInFlightBytes = i.MaxInFlightBytes,
+            // The anonymous port may take at most half of what the server allows in all: the other half stays for submission whatever the defaults say.
+            MaxConnections = Math.Min(i.MaxConnections, Math.Max(1, config.Smtp.MaxConnections / 2)),
+            MaxInFlightBytes = Math.Min(i.MaxInFlightBytes, Math.Max(1, config.Smtp.MaxInFlightBytes / 2)),
             MaxInFlightBytesPerRemote = i.MaxInFlightBytesPerRemote,
             MaxSessionDuration = i.MaxSessionDuration,
         };

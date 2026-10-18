@@ -215,13 +215,25 @@ internal sealed class InboundHeaderAnalysis
 
         foreach (Mailbox mailbox in list.Mailboxes)
         {
-            if (!mailbox.IsValid)
+            string domain;
+            if (mailbox.IsValid)
             {
-                FromInvalid = true;
+                domain = mailbox.Address.Domain.ToLowerInvariant();
+            }
+            else if (TryRecoverDomain(mailbox.AddrSpec, out string? recovered))
+            {
+                domain = recovered;   // a local part the strict parser refuses (john.@x, jo..hn@x) still names the domain whose policy applies
+            }
+            else if (!mailbox.AddrSpec.Contains('@', StringComparison.Ordinal))
+            {
+                continue;   // a piece of a display name split at an unquoted comma ("Doe, John <john@x>"): it claims no identity; the other pieces decide whether there is one
+            }
+            else
+            {
+                FromInvalid = true;   // an "@" with no domain that can be read after it
                 continue;
             }
 
-            string domain = mailbox.Address.Domain.ToLowerInvariant();
             if (!FromDomains.Contains(domain, StringComparer.Ordinal))
             {
                 if (FromDomains.Count >= MaxFromDomains)
@@ -233,6 +245,26 @@ internal sealed class InboundHeaderAnalysis
                 FromDomains.Add(domain);
             }
         }
+    }
+
+    /// <summary>The domain after the last <c>@</c> of an address the strict parser refused, when it is a plausible domain name (at least two labels).</summary>
+    private static bool TryRecoverDomain(string addrSpec, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out string? domain)
+    {
+        domain = null;
+        int at = addrSpec.LastIndexOf('@');
+        if (at < 0)
+        {
+            return false;
+        }
+
+        string candidate = addrSpec[(at + 1)..].Trim().TrimEnd('>', ' ');
+        if (!Mta.Host.Domains.DomainNames.TryNormalize(candidate, out string normalized) || !normalized.Contains('.', StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        domain = normalized.ToLowerInvariant();
+        return true;
     }
 
     private static string? CleanSubject(MimeHeader header)

@@ -538,9 +538,24 @@ public static class ConfigLoader
             errors.Add("Inbound:MaxTransactionBytes must be at least the largest inbound message (Inbound:MaxMessageSize, else Smtp:MaxMessageSize): otherwise a single message could never be accepted.");
         }
 
-        if (i.MaxConnections < 1 || i.MaxInFlightBytes < 1 || i.MaxInFlightBytesPerRemote < 1 || i.MaxSessionDuration < TimeSpan.FromSeconds(1))
+        if (i.MaxConnections < 1 || i.MaxInFlightBytes < 1 || i.MaxInFlightBytesPerRemote < 0 || i.MaxSessionDuration < TimeSpan.FromSeconds(1))
         {
-            errors.Add("Inbound:MaxConnections, Inbound:MaxInFlightBytes and Inbound:MaxInFlightBytesPerRemote must be at least 1 and Inbound:MaxSessionDuration at least one second.");
+            errors.Add("Inbound:MaxConnections and Inbound:MaxInFlightBytes must be at least 1, Inbound:MaxInFlightBytesPerRemote not negative (0 derives it) and Inbound:MaxSessionDuration at least one second.");
+        }
+
+        // The sizing rule: a message of the largest size takes about 4 times its size from the in-flight budget while it is handled (the buffer, the copy the checks read, one or two stamped copies). A share
+        // smaller than that makes the largest messages impossible to accept, with a 452 that looks temporary and never ends.
+        double largest = i.MaxMessageSize ?? c.Smtp.MaxMessageSize;
+        double need = Mta.Host.Ingest.InboundReceiveOptions.SizingFactor * largest;
+        long usable = Math.Min(i.MaxInFlightBytes, Math.Max(1, c.Smtp.MaxInFlightBytes / 2));
+        if (usable < need)
+        {
+            errors.Add($"Inbound:MaxInFlightBytes (at most half of Smtp:MaxInFlightBytes is used: {usable}) must be at least {Mta.Host.Ingest.InboundReceiveOptions.SizingFactor} times the largest inbound message ({(long)need} bytes for {(long)largest}): raise it and Smtp:MaxInFlightBytes, or lower Inbound:MaxMessageSize.");
+        }
+
+        if (i.MaxInFlightBytesPerRemote > 0 && i.MaxInFlightBytesPerRemote < need)
+        {
+            errors.Add($"Inbound:MaxInFlightBytesPerRemote must be at least {Mta.Host.Ingest.InboundReceiveOptions.SizingFactor} times the largest inbound message ({(long)need} bytes), or 0 to derive it.");
         }
 
         if (i.MaxMessageSize is < 1024)

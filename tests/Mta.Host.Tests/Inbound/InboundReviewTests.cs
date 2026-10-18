@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Configuration;
 using System.Net;
 using System.Text;
 using Mta.Core;
@@ -249,22 +250,6 @@ public class InboundReviewTests
     // ------------------------------------------------------------------ 4. anonymous senders and shared budgets
 
     [Fact]
-    public async Task A_bounce_or_an_srs_bounce_is_limited_to_one_mebibyte()
-    {
-        await using InboundFixture f = await InboundFixture.CreateAsync();
-        string bounce = $"{f.Verp.CreateLocalPart(InboundFixture.Acme, f.ExampleOrg, f.Clock.Now, "dest.example")}@{InboundFixture.BounceDomain}";
-        string srs = new SrsCodec(f.Verp).CreateLocalPart("sender.test", "bob", f.Clock.Now) + "@example.org";
-        string big = "Subject: x\r\n\r\n" + new string('x', 1_300_000) + "\r\n";
-
-        foreach (string recipient in new[] { bounce, srs })
-        {
-            await using FakeMta mta = await f.ConnectedAsync();
-            Assert.Equal(552, (await mta.SendAsync("", recipient, big)).Code);
-            Assert.Equal(250, (await mta.SendAsync("", recipient, "Subject: x\r\n\r\nsmall\r\n")).Code);   // and the connection goes on
-        }
-    }
-
-    [Fact]
     public async Task A_message_whose_copies_do_not_fit_the_listeners_memory_share_is_refused_with_452_before_they_are_made()
     {
         // The listener may have 700 KB in flight; the message buffer is counted, and so are the copies the handler makes of it.
@@ -361,19 +346,34 @@ public class InboundReviewTests
     }
 
     [Fact]
-    public async Task Unknown_return_path_looking_names_cost_a_bounded_number_of_storage_lookups_and_a_valid_token_gets_a_temporary_failure_when_they_run_out()
+    public async Task Return_path_looking_names_cost_storage_lookups_only_for_callers_with_a_token_and_only_a_few_a_second_each()
     {
         await using InboundFixture f = await InboundFixture.CreateAsync();
         string token = f.Verp.CreateLocalPart(InboundFixture.Acme, f.ExampleOrg, f.Clock.Now, "dest.example");
         IBounceNamespace bounces = f.Handler;
-        int refusedForNow = 0;
+        EmailAddress Address(string local, string host)
+        {
+            Assert.True(EmailAddress.TryParse($"{local}@{host}", allowUtf8: false, out EmailAddress address));
+            return address;
+        }
 
+        // Without a token no lookup is made at all, however many names are tried: not ours (the host is not known to the cache).
         for (int i = 0; i < 300; i++)
         {
-            EmailAddress.TryParse($"{token}@bounce.unknown{i}.example", allowUtf8: false, out EmailAddress address);
+            Assert.Equal(BounceRecipientClass.NotBounce, await bounces.ClassifyAsync(Address("b+invalid", $"bounce.unknown{i}.example"), "203.0.113.9", default));
+        }
+
+        // A valid token at a verified host is accepted, and the host is then known: the same host with a bad token gets the bounce answer from the cache.
+        Assert.Equal(BounceRecipientClass.Accepted, await bounces.ClassifyAsync(Address(token, "bounce.dedicated.example"), "203.0.113.9", default));
+        Assert.Equal(BounceRecipientClass.Refused, await bounces.ClassifyAsync(Address("b+invalid", "bounce.dedicated.example"), "198.51.100.7", default));
+
+        // With a token, unknown names are looked up, a few a second per client: past that the client gets a temporary failure, another client does not.
+        int refusedForNow = 0;
+        for (int i = 0; i < 40; i++)
+        {
             try
             {
-                Assert.Equal(BounceRecipientClass.NotBounce, await bounces.ClassifyAsync(address, default));
+                Assert.Equal(BounceRecipientClass.NotBounce, await bounces.ClassifyAsync(Address(token, $"bounce.another{i}.example"), "203.0.113.50", default));
             }
             catch (StorageUnavailableException)
             {
@@ -381,9 +381,8 @@ public class InboundReviewTests
             }
         }
 
-        Assert.True(refusedForNow > 0);
-        EmailAddress.TryParse("b+invalid@bounce.another.example", allowUtf8: false, out EmailAddress noToken);
-        Assert.Equal(BounceRecipientClass.NotBounce, await bounces.ClassifyAsync(noToken, default));   // without a token the answer is "not ours" at once, not an error
+        Assert.True(refusedForNow >= 20, $"{refusedForNow} refusals");   // 10 a second: the loop is far faster than that
+        Assert.Equal(BounceRecipientClass.NotBounce, await bounces.ClassifyAsync(Address(token, "bounce.yet-another.example"), "192.0.2.77", default));
     }
 
     // ------------------------------------------------------------------ surviving mutations
@@ -499,5 +498,147 @@ public class InboundReviewTests
         InboundHeaderAnalysis analysis = InboundHeaderAnalysis.Analyze(Encoding.UTF8.GetBytes("Subject: invoice ‮txt.exe⁦ now\r\n\r\n"), ["mx.egg.test"], null);
 
         Assert.Equal("invoice  txt.exe  now", analysis.Subject);
+    }
+
+    // ------------------------------------------------------------------ the second review
+
+    [Fact]
+    public async Task A_message_of_the_advertised_maximum_size_is_accepted_with_the_default_options()
+    {
+        await using InboundFixture f = await InboundFixture.CreateAsync();
+        await using FakeMta mta = await f.ConnectedAsync();
+        string Of(int mebibytes) => "Subject: big\r\nFrom: bob@sender.test\r\n\r\n" + new string('x', mebibytes * 1024 * 1024 - 100) + "\r\n";
+
+        Assert.Equal(250, (await mta.SendAsync("bob@sender.test", "support@example.org", Of(24))).Code);   // used to be a 452 above ~21 MiB: one message counted three times against the share
+        Assert.Equal(552, (await mta.SendAsync("bob@sender.test", "support@example.org", Of(26))).Code);
+        Assert.Single(await f.StoredAsync(InboundFixture.Acme));
+    }
+
+    [Fact]
+    public void The_sizing_rule_is_checked_and_the_per_network_share_is_derived_from_the_largest_message()
+    {
+        var derived = new InboundReceiveOptions { Enabled = true, Ceilings = new InboundCeilings(10L << 20, 600, 60, 0, 0, 0) };
+        Assert.Equal((long)(InboundReceiveOptions.DerivedPerRemoteFactor * (10L << 20)), derived.EffectiveMaxInFlightBytesPerRemote);
+        Assert.Equal(123L, new InboundReceiveOptions { MaxInFlightBytesPerRemote = 123 }.EffectiveMaxInFlightBytesPerRemote);
+
+        var errors = new List<string>();
+        Mta.Host.Configuration.ConfigLoader.Validate(Load(("Inbound:MaxInFlightBytesPerRemote", "10485760")), errors);   // 10 MiB for 25 MiB messages
+        Assert.Contains(errors, e => e.Contains("MaxInFlightBytesPerRemote", StringComparison.Ordinal));
+
+        errors.Clear();
+        Mta.Host.Configuration.ConfigLoader.Validate(Load(("Smtp:MaxInFlightBytes", "134217728")), errors);   // half of 128 MiB is less than 4.2 x 25 MiB
+        Assert.Contains(errors, e => e.Contains("Inbound:MaxInFlightBytes", StringComparison.Ordinal));
+
+        errors.Clear();
+        Mta.Host.Configuration.ConfigLoader.Validate(Load(), errors);
+        Assert.DoesNotContain(errors, e => e.Contains("Inbound", StringComparison.Ordinal));   // the defaults satisfy the rule
+
+        InboundReceiveOptions clamped = InboundReceiveOptions.From(Load(("Smtp:MaxConnections", "100"), ("Inbound:MaxConnections", "1000")));
+        Assert.Equal(50, clamped.MaxConnections);   // at most half of the server's, whatever the default says
+    }
+
+    private static Mta.Host.Configuration.MtaConfig Load(params (string Key, string Value)[] values) =>
+        Mta.Host.Configuration.ConfigLoader.Load(new Microsoft.Extensions.Configuration.ConfigurationBuilder().AddInMemoryCollection(values.Select(v => new KeyValuePair<string, string?>(v.Key, v.Value))).Build()).Config;
+
+    [Fact]
+    public async Task The_policy_lookup_of_the_from_domain_has_a_budget_of_its_own_that_a_hostile_spf_record_cannot_use_up()
+    {
+        await using InboundFixture f = await InboundFixture.CreateAsync();
+        var mechanisms = new StringBuilder("v=spf1");
+        for (int i = 0; i < 10; i++)
+        {
+            mechanisms.Append(" mx:m").Append(i).Append(".test");
+            for (int k = 0; k < 10; k++)
+            {
+                f.Dns.AddMx($"m{i}.test", 10, $"h{i}-{k}.test").AddA($"h{i}-{k}.test", "192.0.2.1");
+            }
+        }
+
+        f.Dns.AddTxt("attacker.test", mechanisms + " -all");
+        f.PublishDmarc("victim.test", "reject");
+        await f.EnableAsync(f.ExampleOrg, InboundFixture.Acme, InboundDmarcAction.Flag);
+        await f.RefreshConfigAsync();
+        await using FakeMta mta = await f.ConnectedAsync();
+
+        Assert.Equal(250, (await mta.SendAsync("x@attacker.test", "support@example.org", InboundFixture.Message(from: "ceo@victim.test"))).Code);
+
+        InboundMessage m = Assert.Single(await f.StoredAsync(InboundFixture.Acme));
+        Assert.Equal((InboundVerdict.Fail, InboundDmarcDisposition.Flagged), (m.Auth.Dmarc, m.Disposition));   // the lookup of _dmarc.victim.test still worked
+    }
+
+    [Fact]
+    public async Task A_settled_failure_decides_whatever_another_from_domain_could_not_be_settled()
+    {
+        await using InboundFixture f = await InboundFixture.CreateAsync();
+        f.PublishDmarc("victim.test", "reject");
+        f.Dns.Fail("_dmarc.attacker.test", DnsRecordType.TXT);   // one of the attacker's own domains is made to fail
+        string message = InboundFixture.Message(from: "ceo@victim.test, x@attacker.test");
+
+        await f.EnableAsync(f.ExampleOrg, InboundFixture.Acme, InboundDmarcAction.Flag);
+        await f.RefreshConfigAsync();
+        await using (FakeMta mta = await f.ConnectedAsync())
+        {
+            Assert.Equal(250, (await mta.SendAsync("x@elsewhere.test", "support@example.org", message)).Code);
+        }
+
+        Assert.Equal(InboundDmarcDisposition.Flagged, Assert.Single(await f.StoredAsync(InboundFixture.Acme)).Disposition);
+
+        await f.EnableAsync(f.ExampleOrg, InboundFixture.Acme, InboundDmarcAction.Reject);
+        await f.RefreshConfigAsync();
+        await using (FakeMta mta = await f.ConnectedAsync())
+        {
+            var reply = await mta.SendAsync("x@elsewhere.test", "support@example.org", message);
+            Assert.Equal((550, "5.7.1"), (reply.Code, reply.Enhanced));   // not deferred: the settled failure under reject needs nothing more
+        }
+    }
+
+    [Theory]
+    [InlineData("From: john.@victim.test\r\n", "victim.test")]
+    [InlineData("From: jo..hn@victim.test\r\n", "victim.test")]
+    [InlineData("From: Doe, John <john@victim.test>\r\n", "victim.test")]
+    [InlineData("From: \"Doe, John\" <john@victim.test>\r\n", "victim.test")]
+    public void A_local_part_or_display_name_the_strict_parser_refuses_still_names_the_domain_whose_policy_applies(string fromHeader, string domain)
+    {
+        InboundHeaderAnalysis analysis = InboundHeaderAnalysis.Analyze(Encoding.ASCII.GetBytes(fromHeader + "\r\nbody\r\n"), ["mx.egg.test"], null);
+
+        Assert.Equal([domain], analysis.FromDomains);
+        Assert.False(analysis.FromUnusable);
+    }
+
+    [Theory]
+    [InlineData("From: MAILER-DAEMON\r\n")]
+    [InlineData("From: <>\r\n")]
+    [InlineData("From: ceo@victim.test <x\r\n")]
+    [InlineData("From: x@evil.test, victim@bank..test\r\n")]
+    [InlineData("From: a@b@\r\n")]
+    public void Only_a_from_with_no_recoverable_domain_is_unusable(string fromHeader)
+    {
+        InboundHeaderAnalysis analysis = InboundHeaderAnalysis.Analyze(Encoding.ASCII.GetBytes(fromHeader + "\r\nbody\r\n"), ["mx.egg.test"], null);
+
+        Assert.True(analysis.FromUnusable);
+    }
+
+    [Fact]
+    public async Task A_large_report_from_the_null_sender_is_accepted_and_read_from_its_head_but_anybody_elses_message_to_a_bounce_address_stays_at_one_mebibyte()
+    {
+        await using InboundFixture f = await InboundFixture.CreateAsync();
+        string local = f.Verp.CreateLocalPart(InboundFixture.Acme, f.ExampleOrg, f.Clock.Now, "dest.example");
+        string address = $"{local}@{InboundFixture.BounceDomain}";
+        string dsn = $"From: MAILER-DAEMON@remote.example\r\nTo: {address}\r\nContent-Type: multipart/report; report-type=delivery-status; boundary=\"BB\"\r\n\r\n" +
+                     "--BB\r\nContent-Type: text/plain\r\n\r\nCould not deliver.\r\n" +
+                     "--BB\r\nContent-Type: message/delivery-status\r\n\r\nReporting-MTA: dns; remote.example\r\n\r\nFinal-Recipient: rfc822; gone@dest.example\r\nAction: failed\r\nStatus: 5.1.1\r\n\r\n" +
+                     "--BB\r\nContent-Type: message/rfc822\r\n\r\nSubject: original\r\n\r\n" + new string('x', 3_000_000) + "\r\n--BB--\r\n";
+
+        await using (FakeMta mta = await f.ConnectedAsync())
+        {
+            Assert.Equal(250, (await mta.SendAsync("", address, dsn)).Code);   // 3 MB from the null sender: Exchange returns the whole original
+        }
+
+        Assert.True(await f.Storage.Config.IsSuppressedAsync(InboundFixture.Acme, "gone@dest.example", default));   // the status part was in the head
+
+        await using (FakeMta mta = await f.ConnectedAsync())
+        {
+            Assert.Equal(552, (await mta.SendAsync("someone@sender.test", address, dsn)).Code);
+        }
     }
 }

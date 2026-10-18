@@ -179,20 +179,23 @@ public class AnonymousListenerLimitsTests
         using RawClient holder = await OpenAsync(port);
         using RawClient other = await OpenAsync(port);
         await StartPartialBodyAsync(holder, 30_000);
-
-        int code = 250;
-        for (int i = 0; i < 100 && code == 250; i++)   // until the server has taken the holder's bytes into its budget
+        for (int i = 0; i < 1000 && server.Budget.Used < 30_000; i++)   // until the server has taken the holder's bytes into its budget
         {
-            code = await TrySendWholeAsync(other, 30_000);
-            if (code == 250)
-            {
-                await Task.Delay(50);
-            }
+            await Task.Delay(10);
         }
+
+        Assert.True(server.Budget.Used >= 30_000, "the holder's bytes were not counted");
+        int code = await TrySendWholeAsync(other, 30_000);
 
         Assert.Equal(452, code);
         await holder.SendAsync("\r\n.\r\n");
         await holder.ExpectAsync(250);
+        for (int i = 0; i < 1000 && server.Budget.Used > 0; i++)   // the reply is flushed before the session gives its bytes back
+        {
+            await Task.Delay(10);
+        }
+
+        Assert.Equal(0, server.Budget.Used);
         Assert.Equal(250, await TrySendWholeAsync(other, 1_000));   // the shares are free again
     }
 

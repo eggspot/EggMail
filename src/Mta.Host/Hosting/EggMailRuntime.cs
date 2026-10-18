@@ -293,7 +293,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
         }
 
         // The anonymous listener has its own share of connections and message memory (and a share of that per client network), so a flood of senders cannot starve submission, and its sessions do not live for ever.
-        return listener.With(ListenerRole.Inbound, inbound.Ceilings.MaxMessageBytes, inbound.MaxRecipients + 1, inbound.MaxConnections, inbound.MaxInFlightBytes, inbound.MaxInFlightBytesPerRemote, inbound.MaxSessionDuration, authRequired: false);
+        return listener.With(ListenerRole.Inbound, inbound.Ceilings.MaxMessageBytes, inbound.MaxRecipients + 1, inbound.MaxConnections, inbound.MaxInFlightBytes, inbound.EffectiveMaxInFlightBytesPerRemote, inbound.MaxSessionDuration, authRequired: false);
     }
 
     /// <summary>The built-in ladder unless <c>Delivery:RetryDelays</c> overrides it (used by operators with unusual needs and by the chaos tests).</summary>

@@ -155,6 +155,14 @@ public class InboundSecurityTests : IAsyncLifetime
     public async Task An_address_in_the_bounce_namespace_that_is_none_of_the_accepted_forms_is_550_5_1_1_and_never_an_inbound_recipient(string recipient)
     {
         await using FakeMta mta = await _f.ConnectedAsync();
+        if (recipient.EndsWith("@bounce.dedicated.example", StringComparison.Ordinal))
+        {
+            // The return-path host is known from the traffic that carries a real token (a caller without one never causes a lookup); one real bounce primes it.
+            Assert.Equal(250, (await mta.MailFromAsync("")).Code);
+            Assert.Equal(250, (await mta.RcptAsync($"{_f.Verp.CreateLocalPart(InboundFixture.Acme, _f.ExampleOrg, _f.Clock.Now, "dest.example")}@bounce.dedicated.example")).Code);
+            await mta.CommandAsync("RSET");
+        }
+
         Assert.Equal(250, (await mta.MailFromAsync("bob@sender.test")).Code);
 
         var r = await mta.RcptAsync(recipient);

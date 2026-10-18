@@ -107,6 +107,12 @@ public sealed class ForwardHopMarker
         return highest;
     }
 
+    /// <summary><see cref="ReadValidHops(ReadOnlyMemory{byte})"/> for a message held in an array.</summary>
+    public int ReadValidHops(byte[] message) => ReadValidHops(new ReadOnlyMemory<byte>(message));
+
+    /// <summary><see cref="ReadValidHops(ReadOnlyMemory{byte})"/> for a message held in a span (it is copied once: the header parser works on memory).</summary>
+    public int ReadValidHops(ReadOnlySpan<byte> message) => ReadValidHops(new ReadOnlyMemory<byte>(message.ToArray()));
+
     /// <summary>The message with every marker removed and exactly one, for <paramref name="hops"/>, at the top. Nothing else about the message changes.</summary>
     public byte[] Apply(ReadOnlyMemory<byte> message, int hops)
     {

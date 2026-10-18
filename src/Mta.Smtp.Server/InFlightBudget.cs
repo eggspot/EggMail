@@ -138,8 +138,9 @@ internal sealed class SessionBudget(InFlightBudget global, InFlightBudget? liste
             return;
         }
 
-        global.Release(bytes);
-        perRemote?.Release(remoteKey, bytes);
+        // The narrow shares first, the server-wide budget last: whoever sees the server-wide figure at zero can rely on the shares being free too.
         listener?.Release(bytes);
+        perRemote?.Release(remoteKey, bytes);
+        global.Release(bytes);
     }
 }

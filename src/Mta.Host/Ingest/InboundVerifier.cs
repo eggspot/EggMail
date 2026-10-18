@@ -30,6 +30,12 @@ public sealed class InboundVerification
     /// </summary>
     public bool Unsettled { get; init; }
 
+    /// <summary>
+    /// The strictest policy among the From domains whose DMARC failure is <b>settled</b> (<see cref="DmarcDisposition.Reject"/> or <see cref="DmarcDisposition.Quarantine"/>); <see cref="DmarcDisposition.None"/> when there is none.
+    /// A settled failure decides on its own: another From domain whose verdict could not be settled (an attacker can make one of his own domains fail to resolve) must not hide it.
+    /// </summary>
+    public DmarcDisposition DecisiveFailure { get; init; }
+
     /// <summary>The message has no usable From (none, an empty or group-only one, or a mailbox that does not parse): there is no domain whose policy could be applied, which is treated as a DMARC failure under a reject policy.</summary>
     public bool NoUsableFrom { get; init; }
 
@@ -49,8 +55,21 @@ public sealed class InboundVerification
 /// </summary>
 public sealed class InboundVerifier
 {
-    /// <summary>The most DNS queries all the checks of one message may make together (SPF alone may use up to 10 terms, each expanding to several lookups). Over it the answer is a temporary failure.</summary>
-    public const int MaxQueriesPerMessage = 80;
+    // The DNS work of a message is bounded per stage, by backstops over the RFC limits the libraries enforce themselves (SPF: 10 DNS-querying terms, 10 names per mx, 2 voids; DKIM: 5 signatures; ARC: 25 keys):
+    // a record set that is legal but hostile costs a bounded number of queries, and a stage that uses its budget up cannot starve another one (the DMARC lookup of the victim's domain has its own).
+
+    /// <summary>Queries the SPF check of the MAIL FROM identity may make (a legal record with ten <c>mx:</c> terms of ten hosts needs about 170).</summary>
+    public const int MaxSpfQueries = 200;
+
+    /// <summary>Queries the SPF check of the HELO name may make.</summary>
+    public const int MaxHeloSpfQueries = 30;
+
+    public const int MaxDkimQueries = 20;
+    public const int MaxArcQueries = 40;
+    public const int MaxDmarcQueries = 8;
+
+    /// <summary>The most queries all the checks of one message can make together.</summary>
+    public const int MaxQueriesPerMessage = MaxSpfQueries + MaxHeloSpfQueries + MaxDkimQueries + MaxArcQueries + MaxDmarcQueries;
 
     /// <summary>DMARC needs one or two lookups; it gets its own short time so a stage that used up the total still leaves it room.</summary>
     private static readonly TimeSpan DmarcTimeLimit = TimeSpan.FromSeconds(5);
@@ -88,11 +107,10 @@ public sealed class InboundVerifier
         long started = _clock.Timestamp;
         client = NetworkKey.Normalize(client);
         helo = string.IsNullOrWhiteSpace(helo) ? string.Empty : helo.Trim();
-        IDnsResolver dns = new QueryBudgetResolver(_dns, MaxQueriesPerMessage);
-        var spfHelo = new SpfEvaluator(dns, new SpfOptions { ReceivingHostName = _hostname, EvaluateExplanations = false, Clock = _clock, MaxDnsLookups = 4, MaxVoidLookups = 1, MaxMxPtrNames = 3 });
-        var spfMail = new SpfEvaluator(dns, new SpfOptions { ReceivingHostName = _hostname, EvaluateExplanations = false, Clock = _clock });
-        var dkim = new DkimVerifier(dns, new DkimVerifierOptions { Clock = _clock });
-        var arcValidator = new ArcValidator(dns, new ArcValidatorOptions { MaxInstances = InboundReceiveOptions.MaxArcInstances });
+        var spfHelo = new SpfEvaluator(new QueryBudgetResolver(_dns, MaxHeloSpfQueries), new SpfOptions { ReceivingHostName = _hostname, EvaluateExplanations = false, Clock = _clock, MaxDnsLookups = 4, MaxVoidLookups = 1, MaxMxPtrNames = 3 });
+        var spfMail = new SpfEvaluator(new QueryBudgetResolver(_dns, MaxSpfQueries), new SpfOptions { ReceivingHostName = _hostname, EvaluateExplanations = false, Clock = _clock });
+        var dkim = new DkimVerifier(new QueryBudgetResolver(_dns, MaxDkimQueries), new DkimVerifierOptions { Clock = _clock });
+        var arcValidator = new ArcValidator(new QueryBudgetResolver(_dns, MaxArcQueries), new ArcValidatorOptions { MaxInstances = InboundReceiveOptions.MaxArcInstances });
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(_options.VerificationTimeout);
@@ -127,7 +145,7 @@ public sealed class InboundVerifier
         var dkimForDmarc = dkimResults.Where(r => r.Domain is not null).Select(r => new DkimAuthResult(r.Domain!, r.IsPass, r.Selector)).ToList();
         if (fromDomains.Count > 0)
         {
-            var dmarc = new DmarcEvaluator(dns);
+            var dmarc = new DmarcEvaluator(new QueryBudgetResolver(_dns, MaxDmarcQueries));   // its own budget: nothing the SPF record of the sender does can make the policy lookup fail
             using var dmarcTime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             dmarcTime.CancelAfter(_options.VerificationTimeout < DmarcTimeLimit ? _options.VerificationTimeout : DmarcTimeLimit);
             foreach (string fromDomain in fromDomains)
@@ -151,10 +169,21 @@ public sealed class InboundVerifier
 
         DmarcEvaluation? chosen = evaluations.Count == 0 ? null : evaluations.Select(e => e.Evaluation).MaxBy(Rank);
         bool anyUnsettled = evaluations.Any(e => e.Unsettled);
+
+        // A settled failure under a quarantine or reject policy decides for its own domain whatever another From domain does; the strictest of them wins.
+        DmarcDisposition decisive = DmarcDisposition.None;
+        foreach ((DmarcEvaluation evaluation, bool unsettled) in evaluations)
+        {
+            if (!unsettled && evaluation.Result == DmarcResult.Fail && evaluation.Disposition > decisive)
+            {
+                decisive = evaluation.Disposition;
+            }
+        }
+
         bool arcOverride = !anyUnsettled && chosen?.Result == DmarcResult.Fail && evaluations.Count == 1 && ArcVouches(arc, headers, fromDomains[0]);
 
         (InboundVerdict dkimVerdict, string? dkimDomain) = dkimTimedOut ? (InboundVerdict.TempError, null) : ReduceDkim(dkimResults);
-        InboundVerdict dmarcVerdict = chosen is null ? InboundVerdict.PermError : anyUnsettled ? InboundVerdict.TempError : ToVerdict(chosen.Result);
+        InboundVerdict dmarcVerdict = chosen is null ? InboundVerdict.PermError : decisive != DmarcDisposition.None ? InboundVerdict.Fail : anyUnsettled ? InboundVerdict.TempError : ToVerdict(chosen.Result);
         var auth = new InboundAuthResults(
             ToVerdict(effective.Result), effective.Domain,
             ToVerdict(heloResult.Result),
@@ -168,11 +197,12 @@ public sealed class InboundVerifier
         {
             Auth = auth,
             Dmarc = chosen,
-            Unsettled = anyUnsettled,
+            Unsettled = anyUnsettled && decisive != DmarcDisposition.Reject,   // a settled failure under reject needs no more information
+            DecisiveFailure = decisive,
             NoUsableFrom = !fromUsable || fromDomains.Count == 0,
             ArcOverridesDmarc = arcOverride,
             TimedOut = timedOut,
-            AuthenticationResultsHeader = BuildHeader(client, helo, mailFrom, heloResult, mailResult, dkimResults, dkimTimedOut, chosen, dmarcVerdict, arc, arcTimedOut),
+            AuthenticationResultsHeader = BuildHeader(client, helo, mailFrom, heloResult, mailResult, dkimResults, dkimTimedOut, decisive != DmarcDisposition.None ? evaluations.First(e => !e.Unsettled && e.Evaluation.Result == DmarcResult.Fail && e.Evaluation.Disposition == decisive).Evaluation : chosen, dmarcVerdict, arc, arcTimedOut),
         };
     }
 
