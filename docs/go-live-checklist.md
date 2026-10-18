@@ -11,7 +11,7 @@ Work through it in order. Each step has the same four parts:
 
 Examples use `example.com` for your domain, `mail.example.com` for the host that runs EggMail (its `Hostname`), `bounces.example.com` for the bounce domain and `203.0.113.10` for the server's public IPv4 address. Replace them everywhere. Commands that start with `$` run on your laptop unless the step says "on the server".
 
-Steps 1 to 5 get one domain sending with valid SPF, DKIM and DMARC. Step 6 (security audit) and step 7 (soak) are what separates "it works" from "production-ready" in [plan.md](plan.md)'s phase 6 gate. Steps 8 to 10 are the first release and the settings around it. Do 9 early: it costs minutes and protects everything else.
+Steps 1 to 5 get one domain sending with valid SPF, DKIM and DMARC (the image needs no configuration to start; these steps are what a real server needs on top). Step 6 (security audit) and step 7 (soak) are what separates "it works" from "production-ready" in [plan.md](plan.md)'s phase 6 gate. Steps 8 to 10 are the first release and the settings around it. Do 9 early: it costs minutes and protects everything else.
 
 | Step | What | Needs | Time |
 |---|---|---|---|
@@ -26,6 +26,7 @@ Steps 1 to 5 get one domain sending with valid SPF, DKIM and DMARC. Step 6 (secu
 | [8](#8-first-release) | Version bump, CHANGELOG, tag, verify image, flip compose defaults | | 1 h |
 | [9](#9-github-settings) | Vulnerability reporting, Sponsors, tag ruleset, branch protection | org admin | 30 min |
 | [10](#10-rollback-and-backup-restore-drill) | Rollback and restore drill | step 1 | 1 h |
+| [11](#11-inbound-mail-go-live-once-the-inbound-pull-requests-are-merged) | **Inbound mail** (MX record, port 25 and the client address, `Inbound:Enabled`, DMARC action, DNSBL, retention): only once the inbound pull requests are merged | steps 1 to 4 | 1 h |
 
 ## 0. What you need before you start
 
@@ -35,11 +36,11 @@ Steps 1 to 5 get one domain sending with valid SPF, DKIM and DMARC. Step 6 (secu
 | Name | Purpose |
 |---|---|
 | `mail.example.com` | A record to the server. The `Hostname` of EggMail (SMTP greeting, EHLO, TLS certificate, dashboard host). Must equal the PTR of the IP |
-| `bounces.example.com` | The bounce domain (`Delivery:BounceDomain`): the envelope sender of every message is `b+<signed token>@bounces.example.com`. MX to `mail.example.com` |
+| `bounces.example.com` | The bounce domain (`Delivery:BounceDomain`): the envelope sender is `b+<signed token>@bounce.<your domain>` (a CNAME to this name) or `@bounces.example.com`. MX to `mail.example.com` |
 | `example.com` (and any other sending domain) | What your customers (or you) put in the `From:` header. Gets the DKIM record |
 
 - Two or more test mailboxes you can read the raw headers of: a Gmail account, an Outlook.com or Microsoft 365 account, a Yahoo account. A throw-away address at [mail-tester.com](https://www.mail-tester.com) for the score check.
-- A DNS provider you can edit quickly. For ACME (step 4) the zone of `mail.example.com` must be in **Cloudflare**; that is the only supported DNS provider ([operations.md](operations.md#tls-certificates-and-acme)).
+- A DNS provider you can edit quickly. For ACME (step 4) the default HTTP-01 needs only port 80 and an `A` record; DNS-01 (wildcards, or no inbound port 80) needs the zone in **Cloudflare**, the only supported DNS provider ([operations.md](operations.md#tls-certificates-and-acme)).
 - On your laptop: `dig` (package `dnsutils` or `bind-utils`; macOS has it), `openssl`, `curl`, `jq`, Python 3. Optional: `swaks`.
 
 Set these once in your shell, they are used in every example:
@@ -149,29 +150,31 @@ In the compose file, restrict the dashboard to your address by changing `"8443:8
 
 ### 1.4 Install (Docker Compose, SQLite)
 
+The image needs no configuration: `docker run -d -p 587:5587 -p 465:4465 -p 2525:2525 -p 8443:8443 -v eggmail-data:/data ghcr.io/eggspot/eggmail:nightly` already gives a working server with a generated administrator password ([README quick start](../README.md#quick-start)). For a real server use the Compose file; it takes the same `EGGMAIL_*` variables ([operations.md, "The simple environment variables"](operations.md#the-simple-environment-variables)):
+
 ```sh
 # on the server
 git clone https://github.com/eggspot/EggMail.git && cd EggMail/deploy/compose
 cp .env.example .env
 sed -i 's/^EGGMAIL_HOSTNAME=.*/EGGMAIL_HOSTNAME=mail.example.com/' .env
-# EGGMAIL_IMAGE stays on :nightly until the first release (step 8); then pin a version.
-mkdir -p secrets && chmod 700 secrets
-umask 077; openssl rand -base64 24 | tr -d '\n' > secrets/admin_password.txt; chmod 644 secrets/admin_password.txt
-cat secrets/admin_password.txt; echo           # note it: this is the first dashboard password
+# EGGMAIL_IMAGE stays on :nightly until the first release (step 8); then pin a version or a digest.
+# EGGMAIL_ADMIN_PASSWORD stays empty: a password is generated on the first start and printed ONCE in the log (1.5).
 ```
 
-(`644` is not a mistake: the application runs as uid 1654 and Compose does not apply owner or mode to file secrets; the `secrets/` directory itself is `700` so only you can reach the file. [release.md](release.md#docker-compose) explains why.)
-
-Edit `compose.yaml` to publish the bounce listener and set the bounce domain (remove the leading `#` of the port line and add the environment line):
+In `compose.yaml` add the lines below (each is a comment or a port line there already: uncomment it, or add it). `EGGMAIL_DOMAINS` registers your sending domain at the first start and writes its DNS records to the log (step 2); `Delivery__BounceDomain` and `Delivery__PublicSendingIp` make the bounce path and the SPF record complete:
 
 ```yaml
     environment:
-      Hostname: ${EGGMAIL_HOSTNAME}
+      EGGMAIL_HOSTNAME: ${EGGMAIL_HOSTNAME}
+      EGGMAIL_DOMAINS: example.com
       Delivery__BounceDomain: bounces.example.com
+      Delivery__PublicSendingIp: 203.0.113.10
       # Sqlite__SyncMode: Normal       # see 1.7: Off survives a process kill but NOT power loss
     ports:
-      - "25:2526"
+      - "25:2526"                      # the port-25 listener: bounces today, inbound mail later (step 11)
 ```
+
+(ACME and port 80 are added in step 4. There is no password file to prepare; if you prefer one to a generated password, `EGGMAIL_ADMIN_PASSWORD_FILE` and the file-secret recipe in the header of `compose.yaml` do that.)
 
 Start it:
 
@@ -180,29 +183,35 @@ docker compose pull && docker compose up -d --wait
 docker compose ps
 curl -s http://127.0.0.1:8080/healthz ; echo
 curl -s http://127.0.0.1:8080/readyz ; echo
-docker compose logs eggmail | tail -20
+docker compose logs eggmail | sed -n '/FIRST START/,/END OF THE ONE-TIME PASSWORD/p'      # the generated administrator password
 ```
 
-- **Expect**: `docker compose ps` shows `eggmail` as `healthy`; `healthz` prints `{"status":"ok"}`; `/readyz` prints `{"status":"ready","warnings":[ ... ]}` with warnings that include `sqlite_sync_off` and `self_signed_certificate` (both are expected at this point; the first is dealt with in 1.7, the second by step 4). The log is JSON lines and contains a start-up warning about `synchronous=OFF`.
+- **Expect**: `docker compose ps` shows `eggmail` as `healthy`; `healthz` prints `{"status":"ok"}`; `/readyz` prints `{"status":"ready","warnings":[ ... ]}` with warnings that include `sqlite_sync_off` and `self_signed_certificate` (both are expected at this point; the first is dealt with in 1.7, the second by step 4). The log block between `==== EGGMAIL FIRST START: DASHBOARD ADMINISTRATOR ====` and `==== END OF THE ONE-TIME PASSWORD ... ====` holds the password; the log also shows the DNS records of `example.com` (`DNS records for example.com`).
 - **Works if**: from your laptop `curl -sk https://mail.example.com:8443/api/v1/capabilities | jq .` prints `"backend": "sqlite"`, and `openssl s_client -starttls smtp -connect $HOST:587 -servername $HOST -crlf -quiet </dev/null` prints a `220 mail.example.com` banner (certificate errors are fine until step 4).
-- **If not**: `docker compose logs eggmail`. Exit code 2 means a configuration error and the message names the key. `permission denied` on `/data` means the volume is not owned by uid 1654 (a bind mount; use the named volume of the compose file). `Cannot read /run/secrets/...` means the password file mode. A port already in use: another MTA (`postfix`, `exim`) listens on 25 or 587; stop and disable it.
+- **If not**: `docker compose logs eggmail`. Exit code 2 is a configuration error and the message names the variable and says what to set (for example `EGGMAIL_ACME_EMAIL needs EGGMAIL_HOSTNAME`). `permission denied` on `/data` means the volume is not owned by uid 1654 (a bind mount; use the named volume of the compose file). A port already in use: another MTA (`postfix`, `exim`) listens on 25 or 587; stop and disable it. The password block is printed only on the first start and only while no administrator exists: if you lost it, create another administrator with `docker compose stop eggmail && docker compose run --rm -e MTA_ADMIN_PASSWORD='a-new-password-1' eggmail admin create --user rescue && docker compose start eggmail`.
 
 ### 1.5 First sign-in and a tenant
 
+The generated password is **temporary**: the dashboard asks for a new one at the first sign-in, and until then the API answers `403 password_change_required` to everything except `GET /me`, `POST /me/password` and `DELETE /session`. It is as readable as the container log until you change it, so do this right after the start.
+
 ```sh
 $ export API=https://$HOST:8443/api/v1
-$ PASS='<content of secrets/admin_password.txt>'
-$ curl -sk -c jar -H 'content-type: application/json' -d "{\"user\":\"admin\",\"password\":\"$PASS\"}" $API/session
+$ TEMP='<the password from the log block>'
+$ curl -sk -c jar -H 'content-type: application/json' -d "{\"user\":\"admin\",\"password\":\"$TEMP\"}" $API/session
 {"user":"admin","role":"admin","tenantId":null}
+$ curl -sk -b jar $API/me | jq '{user, role, mustChangePassword}'
+{ "user": "admin", "role": "admin", "mustChangePassword": true }
 $ CSRF=$(curl -sk -b jar $API/me | jq -r .csrfToken)
+$ curl -sk -b jar -H "X-CSRF-Token: $CSRF" -H 'content-type: application/json' -d "{\"currentPassword\":\"$TEMP\",\"newPassword\":\"<your own, 10 to 1024 characters>\"}" $API/me/password -w '%{http_code}\n'
+204
+$ curl -sk -b jar $API/admin/tenants | jq '.[] | {id, name, slug}'       # "Default" exists when EGGMAIL_DOMAINS was set
+$ export TENANT=<the id of that tenant>
+# no tenant yet (EGGMAIL_DOMAINS not set)? create one:
 $ curl -sk -b jar -H "X-CSRF-Token: $CSRF" -H 'content-type: application/json' -d '{"name":"My company"}' $API/admin/tenants
-{"id":"0192...","name":"My company","slug":"my-company","status":"active", ...}
-$ export TENANT=<the id from the answer>
 ```
 
-- **Works if**: the three calls return the shapes shown. You can also open `https://mail.example.com:8443/` in a browser (accept the self-signed certificate warning until step 4), sign in as `admin`, and create the tenant under **Tenants**.
-- **If not**: `429 rate_limited` after ten wrong passwords (wait 15 minutes); `401` is a wrong password; the password file content is exactly the password (no trailing newline: the command above wrote none).
-- **Change the bootstrap password at once**: dashboard **Account**, or `curl -sk -b jar -H "X-CSRF-Token: $CSRF" -H 'content-type: application/json' -d '{"currentPassword":"...","newPassword":"..."}' $API/me/password`.
+- **Works if**: `mustChangePassword` was `true` before and the change answers `204`. You can do the same in a browser: open `https://mail.example.com:8443/` (accept the self-signed certificate warning until step 4), sign in as `admin`, choose your password when asked.
+- **If not**: `429 rate_limited` after ten wrong passwords (wait 15 minutes); `401` is a wrong password (copy it from between the marker lines, without the lines themselves).
 
 ### 1.6 HELO name
 
@@ -299,7 +308,7 @@ $ swaks --to postmaster@$BOUNCE --from you@gmail.com --server $HOST --port 25 -t
 - **Works if**: `RCPT TO:<postmaster@bounces.example.com>` is accepted and `RCPT TO:<anyone@example.org>` is refused (`550`/`554`: the listener is not an open relay). The dashboard/API `returnPathVerified` is `true` once the CNAME is found.
 - **If not**: a connection that hangs or times out means port 25 inbound is blocked (provider or the `25:2526` mapping missing). A refused `postmaster@` means `Delivery:BounceDomain` is not set to the domain in the RCPT.
 
-> **Which build.** The envelope sender is on the sending domain's own `bounce.example.com` host (so SPF aligns with the `From` domain) only in builds that contain decision 91 ([progress.md](progress.md#plan-coverage), PR 90). Older builds, including every `nightly` before it, always used the shared bounce domain (`b+token@bounces.example.com`): SPF then passes for `bounces.example.com` but does not align with the `From` domain, and `dmarc=pass` comes from DKIM alone. Check which one you run: the `Authentication-Results` of step 3 shows `smtp.mailfrom=b+...@bounce.example.com` (new) or `@bounces.example.com` (old). The records are the same for both.
+> **Which build.** The envelope sender is on the sending domain's own `bounce.example.com` host (so SPF aligns with the `From` domain) only in builds that contain decision 92 ([progress.md](progress.md#plan-coverage), PR 90). Older builds, including every `nightly` before it, always used the shared bounce domain (`b+token@bounces.example.com`): SPF then passes for `bounces.example.com` but does not align with the `From` domain, and `dmarc=pass` comes from DKIM alone. Check which one you run: the `Authentication-Results` of step 3 shows `smtp.mailfrom=b+...@bounce.example.com` (new) or `@bounces.example.com` (old). The records are the same for both.
 
 ### 2.3 SPF for the sending domain (advice) and the DMARC record
 
@@ -508,22 +517,25 @@ Until now the server uses a self-signed certificate (the dashboard and `/readyz`
 |---|---|---|
 | Needs | port 80 of `mail.example.com` reachable from the internet and published to the container; an `A` record | the zone in Cloudflare and an API token (4.1); no inbound port |
 | Wildcards | no | yes |
-| Selected by | `Acme__Enabled` and `Acme__Email`, no token | the presence of `Acme__CloudflareApiToken(File)` (or `Acme__Challenge: Dns01`) |
+| Selected by | `EGGMAIL_ACME_EMAIL` (with `EGGMAIL_HOSTNAME`), no token | `CLOUDFLARE_API_TOKEN` or `CLOUDFLARE_API_TOKEN_FILE` (or `Acme__Challenge: Dns01`) |
 
 It is verified in CI against the Pebble test CA (both challenge types and external account binding); this is its first run against a real CA, and for DNS-01 the first against the real Cloudflare API. **Do the staging run first**: production Let's Encrypt rate-limits failed validations and new accounts.
 
 ### 4.0 HTTP-01 (skip to 4.1 if you use DNS-01)
 
-Publish port 80 and allow it in the cloud firewall (it must be open to the whole internet: the CA validates from several places). In `deploy/compose/compose.yaml` add `- "80:80"` under `ports:` (the listener binds port 80 inside the container; Docker allows the non-root user to; under Kubernetes or rootless Podman set `Acme__Http01ListenPort: "8081"` and map 80 to 8081). Create `deploy/compose/compose.acme.yaml`:
+Publish port 80 and allow it in the cloud firewall (it must be open to the whole internet: the CA validates from several places). The built-in listener answers `/.well-known/acme-challenge/<token>` there and nothing else. Create `deploy/compose/compose.acme.yaml` (the `ports` list is added to the one in `compose.yaml`):
 
 ```yaml
 services:
   eggmail:
     environment:
-      Acme__Enabled: "true"
-      Acme__Email: you@example.com
-      Acme__Directory: LetsEncryptStaging      # staging first; remove this line for production (4.3)
+      EGGMAIL_ACME_EMAIL: you@example.com       # with EGGMAIL_HOSTNAME this turns ACME on for that name
+      EGGMAIL_ACME_STAGING: "true"              # staging first; remove this line for production (4.3)
+    ports:
+      - "80:80"
 ```
+
+(Under Kubernetes or rootless Podman the container cannot bind port 80: set `Acme__Http01ListenPort: "8081"` and map 80 to 8081.)
 
 ```sh
 docker compose -f compose.yaml -f compose.acme.yaml up -d
@@ -557,26 +569,25 @@ $ curl -s "https://api.cloudflare.com/client/v4/zones?name=$DOMAIN" -H "Authoriz
 - **Works if**: `status` is `active` and the second call lists your zone (that proves `Zone:Read` and the zone scope).
 - **If not**: `Invalid API Token` is a typo or a wrong header; an empty `result` is a token that does not include this zone.
 
-Store it as a file secret readable by uid 1654, next to the admin password:
+Store it as a file secret readable by uid 1654 (Compose does not apply owner or mode to file secrets, hence `644`; keep the directory itself private):
 
 ```sh
 # on the server, in deploy/compose
+mkdir -p secrets && chmod 700 secrets
 printf '%s' "$CF_TOKEN" > secrets/cloudflare_token.txt && chmod 644 secrets/cloudflare_token.txt
 ```
 
 ### 4.2 Staging first (DNS-01)
 
-Create `deploy/compose/compose.acme.yaml` (this replaces the file of 4.0 if you use DNS-01):
+Create `deploy/compose/compose.acme.yaml` (this replaces the file of 4.0 if you use DNS-01; the token selects the DNS-01 challenge and no port 80 is needed):
 
 ```yaml
 services:
   eggmail:
     environment:
-      Acme__Enabled: "true"
-      Acme__Directory: LetsEncryptStaging
-      Acme__Email: you@example.com
-      Acme__Domains__0: mail.example.com
-      Acme__CloudflareApiTokenFile: /run/secrets/cloudflare_token
+      EGGMAIL_ACME_EMAIL: you@example.com
+      EGGMAIL_ACME_STAGING: "true"
+      CLOUDFLARE_API_TOKEN_FILE: /run/secrets/cloudflare_token
       Acme__PropagationDelay: "00:01:00"      # the default 30 s is a guess; raise it if validation fails
     secrets:
       - cloudflare_token
@@ -592,7 +603,7 @@ curl -sk -b jar $API/admin/certificates/acme | jq .
 curl -sk -b jar $API/admin/certificates | jq '.[] | {name, subject, issuer, source, active, notAfter}'
 ```
 
-(Add `Acme__Domains__1: bounces.example.com`... only if you want the same certificate to cover other names; for the bounce listener the SMTP certificate selection uses the `Hostname` certificate, so `mail.example.com` is the name that matters.)
+(`Acme__Domains__0`, `Acme__Domains__1`, ... name further host names for the same certificate, wildcards with DNS-01 only; the default is the `Hostname`, which is the name that matters for SMTP and the dashboard.)
 
 - **Expect**: within a few minutes the renewal state shows `failures: 0`, a `lastAttemptAt` and no `lastError`, and the certificate list has an entry `source: "acme"`, `active: true`, issuer starting `(STAGING)`. In the Cloudflare DNS panel a `_acme-challenge.mail.example.com` TXT record appears briefly and is removed again.
 - **Works if**: `source: acme` appears and `lastError` is null.
@@ -601,7 +612,7 @@ curl -sk -b jar $API/admin/certificates | jq '.[] | {name, subject, issuer, sour
 ### 4.3 Production
 
 ```sh
-# remove the line  Acme__Directory: LetsEncryptStaging  from compose.acme.yaml (production Let's Encrypt is the default)
+# remove the line  EGGMAIL_ACME_STAGING: "true"  from compose.acme.yaml (production Let's Encrypt is the default)
 docker compose -f compose.yaml -f compose.acme.yaml up -d
 curl -sk -b jar -H "X-CSRF-Token: $CSRF" -H 'content-type: application/json' -d "{\"domains\":[\"$HOST\"]}" $API/admin/certificates/acme
 # {"status":"pending", ...}   (202)  -- a second account is created for the production directory; the staging certificate is not re-ordered by itself
@@ -694,7 +705,14 @@ The plan's phase 6 gate is "no open critical or high findings"; no independent r
 
 Ask three security firms with mail or network-protocol experience for a quote for a **grey-box review with source access** (not a pure black-box scan): that finds more per euro. Time-box from the design's estimate: about 2 to 4 weeks with 2 to 4 testers ([design.md §9.2](design.md#92-in-house-security-review); the cost is not estimated anywhere, so budget by quotes). Agree in writing: scope, testing window, the IP addresses they test from, an NDA, a disclosure timeline (for example 90 days), and a free **retest** of the fixes.
 
-### 6.2 Scope list (copy into the request for quote)
+### 6.2 What is already tested in-house, and scope list (copy into the request for quote)
+
+Give the auditors these two documents first, so that their time goes to what we could not test ourselves:
+
+- [security-test-map.md](security-test-map.md): every threat in `security.md` and the design, and every finding of our own reviews, mapped to the automated test that guards it (SMTP smuggling and STARTTLS injection, open relay, authentication, API authorization over every route, tenant isolation, injection, SSRF, secrets, browser and session controls, hostile content), with its status (`new`, `existing`, `fixed`, `gap`) and the defects the tests found. **It is not an audit**: the tests were written by the team that wrote the code. Ask the auditors to attack the rows marked as pinning an outcome only, the listed gaps, and everything the map does not name.
+- [testing-offline-coverage.md](testing-offline-coverage.md): what the offline tests prove and, as important, what they do not (ACME and Cloudflare against doubles, a fake remote MTA harness with Gmail/Outlook/Postfix/Exim shapes, independent DKIM and Authentication-Results fixtures, the accelerated lifecycle and leak tests).
+
+The scope list:
 
 | # | Area | What to examine | Where it is described |
 |---|---|---|---|
@@ -714,13 +732,14 @@ Ask three security firms with mail or network-protocol experience for a quote fo
 | 14 | Container and deployment | Image contents, non-root, read-only filesystem, capabilities, the compose and Kubernetes manifests, NetworkPolicy, secret mounting | `Dockerfile`, `deploy/` |
 | 15 | Supply chain and release pipeline | GitHub Actions workflows (permissions, pinned actions, tag-driven release, the one-job trade-off in [release.md](release.md#the-release-workflow-as-built)), attestation and SBOM verification, package-free guard for the protocol assemblies, Dependabot/NuGet/npm inventory | `.github/workflows`, `Directory.Packages.props`, `dashboard/package-lock.json` |
 | 16 | Backend switch | Data-moving feature: bundle tampering, rollback, quiesce/fence races, secrets re-protection | [components/switch.md](components/switch.md) |
+| 17 | **Inbound mail** (add once the inbound pull requests are merged; step 11) | The only unauthenticated mail path that stores data: open relay and backscatter (RCPT-time refusals only), SRS bounce handling, one-kind-per-transaction rule, SPF/DKIM/DMARC/ARC verification as a DNS and CPU amplifier (slots, timeouts, per-remote shares), DNSBL lookups, per-domain and per-remote limits, stored-bytes quotas, the route actions (webhook SSRF, forward loops, the laundering case in decision 98), hostile stored content in the dashboard (sandboxed HTML, downloads only), retention and erasure | [design.md section 11](design.md#11-inbound-mail), [security.md](security.md) |
 
 Explicitly out of scope: deliverability and reputation, the hosting provider, third-party mail providers, social engineering.
 
 ### 6.3 What to hand the auditors
 
 - Repository access (it is public: <https://github.com/eggspot/EggMail>), the commit hash or release tag to freeze for the test, and a read-only fork they can push findings to if they want.
-- The documents: [security.md](security.md), [design.md](design.md), [decisions.md](decisions.md), [plan.md](plan.md), [api.md](api.md), [operations.md](operations.md), [components/](components/).
+- The documents: [security-test-map.md](security-test-map.md) and [testing-offline-coverage.md](testing-offline-coverage.md) first, then [security.md](security.md), [design.md](design.md), [decisions.md](decisions.md), [plan.md](plan.md), [api.md](api.md), [operations.md](operations.md), [components/](components/), and the fuzz targets and their findings ([security.md, Fuzzing](security.md#fuzzing)).
 - A **dedicated test environment**, deployed as in step 1 on its own IP and domain (never the production one), with: two tenants with a verified domain each, an admin account, a tenant-user account per tenant, an API key per tenant, an SMTP credential per tenant, a webhook endpoint they control, and a bounce domain. Give them the logs (JSON console) and the `/metrics` endpoint.
 - The test accounts in a password manager share, with the roles written down: `admin` (all tenants), `tenant-a-user`, `tenant-b-user`, `tenant-a-apikey (send, read)`, `tenant-b-apikey`.
 - A way to reach you quickly during the test, and agreement that you may restart or reset the instance.
@@ -737,59 +756,55 @@ Every finding becomes a pull request with a regression test (the project's rule,
 
 ## 7. The 7-day soak
 
-The only soak run so far is 14 minutes on a laptop ([progress.md](progress.md#hardening-done-after-interop-and-drills-2026-10-13)). The phase 6 gate needs 7 days. A GitHub-hosted runner stops a job after 6 hours, so the 7 days run on **a machine of yours**.
+The harness exists and is described in [soak.md](soak.md): `bench/soak/run-soak.sh` publishes the real host, starts it as `mta serve` next to a sink MX and a DNS stub on loopback, drives numbered mail at a fixed rate with a size mix, kills the server with `kill -9` on a schedule, restores backups into a second instance, samples memory, descriptors, threads, GC and queue depth every minute, reconciles the ack log against the sink, and `evaluate.py` applies 19 fixed criteria and writes `verdict.json` and `summary.md`. **What has run so far is short** (6 to 20 minutes of load per backend, locally and on a hosted runner; the table "Runs so far" in soak.md): nothing says yet that EggMail passes a long soak. The phase 6 gate needs 7 days. A GitHub-hosted runner stops a job after 6 hours (about 5.4 hours of load), so the week runs on **a machine of yours**; the hosted workflow is the stepping stone.
 
-The harness is `bench/soak/run-soak.sh` with the criteria in [soak.md](soak.md) (both come with PR 92; merge it first, then `git pull`). It publishes the real host, starts it as `mta serve` next to a sink, a DNS stub and a numbered-message load generator, kills it with `kill -9` on a schedule, restores backups into a second instance, samples memory, descriptors, threads, GC and queue depth every minute and writes `verdict.json` and `summary.md`. This section says how to run it for 168 hours and adds the criteria that only matter over a week; the criteria of soak.md apply unchanged.
+### 7.1 Stepping stone: the workflow on a hosted runner (up to about 5 hours per backend)
 
-### 7.1 Set-up
+```sh
+gh workflow run soak --ref main -f hours=5 -f backend=both -f history=full -f sync=normal
+gh run list --workflow soak --limit 1
+gh run watch <id>        # the summary page shows the verdict table and the trend lines; the artifact soak-results-<id> keeps samples.csv, verdict.json, host.log, ack.log
+```
 
-- A **dedicated machine** of the size you will run in production (not the production server): Linux, the .NET 10 SDK (`dotnet --version`), Python 3.9 or newer, 20 GB free, and, for the PostgreSQL run, PostgreSQL 17 binaries on `PATH` (`initdb`, `pg_ctl`, `psql`, `pg_dump`, `pg_restore`, `createdb`) or Docker (the script then starts a `postgres:17` container). It must not sleep, update itself or reboot for a week: disable unattended upgrades and automatic reboots, and run under `tmux`.
-- The run is **loopback only** (a sink and a DNS stub on the same machine, no real recipients). Never point a soak at real mail servers.
+Inputs: `hours`, `backend` (`sqlite`, `postgres`, `both`), `history` (`full`, `statsonly`), `sync` (`off`, `normal`, `full`), `rate`, `size_mix`, `connections`, `crash_interval_min`, `backup_interval_min`, `quiet_tail`, `sample_interval_s`, `claim_lease_min`. **It bills its wall time** (about 360 Linux minutes for a 6-hour job), so it never runs on a push or a pull request; the monthly schedule is off unless the repository variable `SOAK_SCHEDULE_ENABLED=true`. A run of an hour or more is strict: a trend that could not be judged is a `FAIL`. Treat a hosted result as "noisy, not publishable" (shared machine).
+
+### 7.2 The week, on your own machine
+
+- A **dedicated machine** of the size you will run in production (not the production server): Linux, the .NET 10 SDK, Python 3.9 or newer, 20 GB free, and for the PostgreSQL run `initdb`, `pg_ctl`, `psql`, `pg_dump`, `pg_restore` and `createdb` on `PATH` (or Docker: the script then starts a `postgres:17` container). It must not sleep, update itself or reboot for a week: disable unattended upgrades and automatic reboots, and run under `tmux`.
+- The run is **loopback only** (a sink and a DNS stub on the same machine). Never point a soak at real mail servers.
 
 ```sh
 git clone https://github.com/eggspot/EggMail.git && cd EggMail && git checkout <the commit or tag you intend to release>
 ulimit -n 65536
 tmux new -s soak
-# SQLite as you will run it in production (decide Sqlite:SyncMode; see 1.7), history Full:
+# SQLite as you will run it in production (decide Sqlite:SyncMode, see 1.7), history Full:
 bench/soak/run-soak.sh --hours 168 --backend sqlite --sync normal --history full --out /srv/soak/sqlite-168h
-# afterwards, or on a second machine, the PostgreSQL backend:
+# then, or on a second machine, PostgreSQL:
 bench/soak/run-soak.sh --hours 168 --backend postgres --sync full --history full --out /srv/soak/postgres-168h
 ```
 
-The defaults (30 messages a second, a size mix up to 512 KB, a `kill -9` every 20 minutes, a backup restore every 30, the last quarter of the run without drills) are the contract of soak.md; do not lower the rate or the drill frequency to make a run pass. Raise `--rate` to your real peak if it is higher.
+`--hours 168` is strict automatically. Defaults you should not lower to make a run pass: 30 messages a second with the size mix up to 512 KB, a `kill -9` every 20 minutes, a backup restore every 30, no drills in the last quarter. Raise `--rate` to your real peak if it is higher. Check after the first hour: `tail -f /srv/soak/sqlite-168h/events.jsonl`, `tail /srv/soak/sqlite-168h/samples.csv`.
 
-Check after the first hour (`tail -f /srv/soak/sqlite-168h/events.jsonl`, `tail /srv/soak/sqlite-168h/samples.csv`): load is accepted, `queue_depth` is low, a crash drill has happened and the server was ready again.
+- **Expect**: the final line `PASS`, exit code 0, `summary.md` next to `verdict.json`.
+- **If a criterion fails**: [soak.md, "Interpreting a failure"](soak.md#interpreting-a-failure). A lost acknowledged message or an unflagged duplicate is a bug: stop, keep the whole results directory, open an issue. Fix, then **restart from zero**: a partial run proves nothing about a leak. A latency or error-rate failure on a busy machine: rerun before believing it (never rerun a lost message).
 
-- **Expect**: a final line `PASS` (or `PASS (n criteria skipped)`) and exit code 0; `summary.md` next to `verdict.json`.
-- **If a criterion fails**: [soak.md, "Interpreting a failure"](soak.md#interpreting-a-failure). A lost acknowledged message or an unflagged duplicate is a bug: stop, keep the whole results directory, open an issue. Fix, then **restart from zero**: a partial run proves nothing about a leak.
+### 7.3 PASS/FAIL
 
-### 7.2 PASS/FAIL criteria
-
-All of soak.md's criteria must PASS, with these readings for a 168-hour run (the numbers are theirs; the table says what to check in the result):
-
-| # | Criterion | Where | PASS | FAIL |
-|---|---|---|---|---|
-| 1 | Throughput | `samples.csv` (`load_accepted`), `summary.md` | The load generator ran at least 95 % of the 168 hours; accepted messages per hour stay within 10 % of the offered rate in every hour outside a drill | An hour without load accepted for a reason that is not a drill |
-| 2 | No acknowledged message lost, no unflagged duplicate | `verification.json` | `lost = 0`, `unflagged = 0` | Anything else |
-| 3 | Error rate | `verdict.json` | At most 0.5 % of submissions failed outside crash windows | More |
-| 4 | Memory flat | `rss_mb` (and `working_set_mb`) | Median of the last quarter of the uninterrupted tail within 20 % of the first quarter; **and** the Theil-Sen slope reported in the verdict is below 1 MB per hour | A steady climb, even if under 20 % |
-| 5 | Descriptors and threads flat | `fds`, `threads` | Within `max(10, 10 %)` and `max(6, 10 %)` | A climb |
-| 6 | Queue drains | final drain | `queue.depth` and `deferred` 0 after the load stops, within the drain limit | Not drained |
-| 7 | Crash drills (about 380 `kill -9` in 7 days) | `events.jsonl` | Every one ready within 120 s, every acknowledged message delivered after the recovery grace | One that is not |
-| 8 | Backup and restore drills (about 250) | `events.jsonl` | Every restored copy passes `integrity_check`, becomes ready, signs the administrator in, lists messages | One that does not |
-| 9 | Graceful shutdown and host log | `verdict.json` | `SIGTERM` exits 0; no `Critical` or `Error` line in `host.log` that is not understood | Otherwise |
+**PASS** is the verdict `PASS` of `evaluate.py` for each backend you ship, over the full 168 hours, with no skipped criterion. The 19 criteria are [soak.md, "Pass and fail criteria"](soak.md#pass-and-fail-criteria); the ones that decide a week, in short: (1) zero acknowledged messages lost; (2) no duplicate without a `possible_duplicate` flag; (3) at most 0.5 % failed submissions outside crash windows; (4) the queue drains to zero; (5 to 7) resident memory, descriptors and threads flat on the uninterrupted tail (median of the last quarter within 20 % of the first, and the drift line under its limit); (8) every `kill -9` followed by a ready server within 120 s with every earlier acknowledgement delivered; (9) every backup restores, signs in and lists messages; (10 to 13) the drills ran, the sampler and the ack log are complete; (14, 15) the duplicate path was exercised and `possible_duplicate` is not sprayed; (16 to 19) the load ran, the server stayed up, `SIGTERM` exits 0, no `Critical` in the host log. **FAIL** is any `FAIL` verdict line.
 
 Add these checks that only a week shows (soak.md does not judge them; the data is in the results directory):
 
 | # | Check | How | PASS | FAIL |
 |---|---|---|---|---|
-| A | Disk growth settles | `disk_mb` in `samples.csv`; set the retention knobs to a short value for the run with `--extra-env Retention__MetadataDays=1 --extra-env Content__RetentionDays=6` (the minimum) so that retention starts within the week | After retention starts, `disk_mb` oscillates in a band; the last day's maximum is within 15 % of the third day's | Unbounded growth, or a WAL that keeps growing (`mta_storage_sqlite_wal_size_bytes`) |
-| B | Throughput does not decay | compare the latency columns of day 1 and day 7 (`lat_p95_ms`) | Day 7 within 25 % of day 1 on the same load | A slowly rising latency at constant load (index or retention cost) |
-| C | Memory does not creep across days | `rss_mb` per generation | The **median RSS of day 7's last generation** within 20 % of day 2's | Each generation starting higher than the one before |
+| A | Disk growth settles | `disk_mb` in `samples.csv`; set short retention for the run with `--extra-env Retention__MetadataDays=1 --extra-env Content__RetentionDays=6` so retention starts within the week | After retention starts, `disk_mb` oscillates in a band; the last day's maximum is within 15 % of the third day's | Unbounded growth, or a WAL that keeps growing (`mta_storage_sqlite_wal_size_bytes`) |
+| B | Latency does not decay | the `lat_p95_ms` column of day 1 against day 7 | Day 7 within 25 % of day 1 at the same load | A slowly rising latency at constant load (index or retention cost) |
+| C | Memory does not creep across days | `rss_mb` per generation | The median RSS of day 7's last generation within 20 % of day 2's | Each generation starting higher than the one before |
 | D | Disk full behaves | once, after day 3: fill the volume until about 100 MB are left (`fallocate -l <size> /srv/soak/filler`), watch the load generator get `452` replies and `host.log` say "the disk is full", then delete the filler | Intake resumes by itself, no corruption (`mta_storage_sqlite_quarantined` 0), every acknowledged message still delivered | A crash, a quarantine, an acknowledged message lost |
 | E | The image, not only the published host | on day 1 and day 7, on another machine: run the compose file of step 1 for an hour under `mta-tools load` (`dotnet run --project src/Mta.Tools -c Release -- load --help`), `docker kill`, `docker compose up -d`, check `/readyz` and the queue | The container comes back healthy, the queue resumes | Otherwise |
 
-Record the result in [progress.md](progress.md): date, commit and image digest, machine, options, the `summary.md`, and keep `samples.csv`. **Works if** the soak PASSes for each backend you ship and A to E hold.
+Power loss is not covered by the soak (`kill -9` is a process crash): whether `Sqlite:SyncMode=Off` survives losing power is a different test, and `--sync full` or PostgreSQL are the configurations to claim durability for.
+
+Record the result in [soak.md, "Runs so far"](soak.md#runs-so-far) (date, commit and image digest, machine, options, verdict, a link to the results) and in [progress.md](progress.md). **Works if** the soak PASSes for each backend you ship and A to E hold.
 
 ## 8. First release
 
@@ -896,7 +911,7 @@ JSON
 ```
 
    - **Works if**: a test pull request cannot be merged until `build-test` is green, and a direct push to `main` is refused.
-   - **Pitfall (read before enabling)**: `ci` has `paths-ignore: docs/**, **.md` on `pull_request`. A pull request that changes only documentation never starts the workflow, so the required check stays "Expected: waiting for status" forever and the pull request can never be merged. Builds of the repository that contain decision 90 (PR 89) start the workflow on every pull request and skip the work inside the job for documentation-only changes, which a required check can live with. Before that, either merge that change first or do not mark the check required: look at `.github/workflows/ci.yml` (`paths-ignore` under `pull_request` means the old behaviour).
+   - **Pitfall (read before enabling)**: `ci` has `paths-ignore: docs/**, **.md` on `pull_request`. A pull request that changes only documentation never starts the workflow, so the required check stays "Expected: waiting for status" forever and the pull request can never be merged. Builds of the repository that contain decision 91 (PR 89) start the workflow on every pull request and skip the work inside the job for documentation-only changes, which a required check can live with. Before that, either merge that change first or do not mark the check required: look at `.github/workflows/ci.yml` (`paths-ignore` under `pull_request` means the old behaviour).
 
 5. Also worth a minute: Settings, **Actions**, General: "Workflow permissions: read repository contents" (the workflows declare their own), "Require approval for first-time contributors"; **Code security**: enable Dependabot alerts and secret scanning with push protection (free for public repositories).
 
@@ -954,6 +969,87 @@ docker compose exec eggmail /app/mta --version      # the image has no shell, bu
 ### 10.3 Switching the backend (SQLite to PostgreSQL) has its own rollback
 
 The guided switch in the dashboard (**Storage switch**) and `mta migrate-storage` keep the source read-only until you finalize, so rolling back before finalize is a button: [components/switch.md](components/switch.md). Rehearse it once on the soak server with realistic data before you ever need it.
+
+## 11. Inbound mail go-live (once the inbound pull requests are merged)
+
+**This step applies only when your image contains the inbound work**: the receive path (PR 107), the route actions (PR 103), forward (PR 108) and the dashboard pages (PR 110) must be merged and released. Check: `curl -sk https://$HOST:8443/api/v1/capabilities | jq .inbound` prints `{"enabled": ...}`; if there is no `inbound` member, the image is older and port 25 accepts nothing but signed bounces. Design: [design.md section 11](design.md#11-inbound-mail); operations: [operations.md, Inbound mail](operations.md#inbound-mail). Do steps 1 to 4 first: an MX that answers with a self-signed certificate and a wrong PTR is a bad MX.
+
+### 11.1 Decide what you are turning on
+
+- Inbound is **per domain**, not per server: a tenant can send from `example.com` without receiving for it. The domain must be one of the tenant's **verified** domains (otherwise `403 domain_not_verified`), and it cannot be the bounce domain or a return-path host.
+- **Received mail is read through the API, the dashboard and webhooks, or forwarded. There is no IMAP or POP3 server**: people cannot read it with a mail client ([open-questions.md](open-questions.md)). If you need mailboxes, keep the MX of the domain at your mailbox provider and use EggMail for sending only, or use a subdomain (`in.example.com`) for the inbound routes.
+- No spam filtering beyond the optional DNSBL, no automatic replies, no DMARC aggregate reports about received mail.
+
+### 11.2 Port 25 and the client address
+
+The container listens on 2526; publish it as 25 (`ports: ["25:2526"]`, already in 1.4). **The server must see the address the sender connected from**: SPF, the DNSBL and the per-remote rate limit depend on it. With `-p 25:2526`:
+
+- **Docker on Linux with the default engine** keeps the client address (kernel NAT).
+- **Docker Desktop, the rootless engine and the userland proxy (`docker-proxy`)** connect from the gateway or loopback, so every sender looks like `172.x` or `127.0.0.1`: SPF then passes or fails for the wrong reasons and one sender can use up everyone's per-remote budget. Check on the host: `docker info | grep -i rootless`, and `sudo iptables -t nat -S DOCKER | grep 2526` (a `DNAT` rule means kernel NAT).
+- **Kubernetes**: a `Service` with `externalTrafficPolicy: Local`, or `hostNetwork`. **Behind a NAT or a load balancer that terminates TCP**: use a layer-4 balancer that keeps the address (the PROXY protocol is not supported yet).
+- On a host that cannot keep the address, use host networking: `network_mode: host` in the service and `Smtp__Listeners__bounce__Port: "25"` (the host must let the unprivileged container user bind port 25, for example `sudo sysctl -w net.ipv4.ip_unprivileged_port_start=25`; this is the part to test on your host).
+
+The server warns in the log once an hour when inbound connections arrive from a private, loopback or link-local address on a listener that is not loopback-bound: `docker compose logs eggmail | grep -i "private"`.
+
+### 11.3 DNS
+
+```sh
+# the MX of the domain: the host name of this server, priority 10
+example.com.   MX  10 mail.example.com.
+$ dig +short MX $DOMAIN
+10 mail.example.com.
+$ dig +short A mail.example.com ; dig +short AAAA mail.example.com     # the host resolves; both families must reach port 25 or leave AAAA out
+$ dig -x $IP +short                                                  # the PTR of step 1.2
+```
+
+When inbound is enabled for a domain, its page lists an advisory `inbound_mx` record (`MX 10 <Hostname>`) and **Check DNS** turns it OK. If the domain has other MX records for other mail hosts, you are splitting your mail: do not do it by accident.
+
+### 11.4 Turn it on
+
+```yaml
+    environment:
+      Inbound__Enabled: "true"            # master switch, default false: off, the server behaves exactly as before
+```
+
+```sh
+docker compose up -d
+$ curl -sk $API/capabilities | jq .inbound                                          # {"enabled": true}
+# the domain: receive on, DMARC action (start with record_only or flag)
+$ curl -sk -b jar -H "X-CSRF-Token: $CSRF" -H "X-Tenant-Id: $TENANT" -H 'content-type: application/json' -X PATCH -d '{"enabled":true,"dmarcAction":"flag"}' $API/domains/$DOMAIN_ID/inbound | jq .
+# a route: without one every recipient except postmaster is refused with 550 5.1.1
+$ curl -sk -b jar -H "X-CSRF-Token: $CSRF" -H "X-Tenant-Id: $TENANT" -H 'content-type: application/json' -d '{"name":"everything","match":{"kind":"catch_all"},"action":{"kind":"store"}}' $API/domains/$DOMAIN_ID/inbound/routes | jq .
+$ curl -sk -b jar -H "X-Tenant-Id: $TENANT" "$API/domains/$DOMAIN_ID/inbound/routes/match?address=hello%40example.com" | jq .reply      # "250"
+```
+
+The dashboard does the same: **Domains**, the domain, **Inbound**. Route actions: `store` (keep it), `webhook` (a signed POST to an endpoint of the tenant: JSON or the raw message), `forward` (to up to 10 addresses outside this server's inbound domains; needs the `send` scope; the envelope sender is rewritten with SRS and the mail is ARC-sealed), `discard`. Routes are matched in order, the first match wins.
+
+### 11.5 The DMARC action, DNSBL, retention: decisions
+
+| Setting | Where | Default | What to choose |
+|---|---|---|---|
+| DMARC action | per domain (`dmarcAction`) | `record_only` | `record_only` records the verdict and never acts. `flag` marks a message that fails DMARC under `p=quarantine` or `p=reject` (header `X-EggMail-Dmarc: flagged`, `dmarcFlagged` in the webhook); nothing is moved or dropped. `reject` answers `550 5.7.1` in the SMTP dialog for `p=reject` failures. **Start with `record_only`, move to `flag` after a week of reading the verdicts, and use `reject` only when you have seen no false positive**: forwarded mail and mailing lists fail DMARC legitimately. A transaction with recipients of several domains is refused only when every recipient's domain says `reject` |
+| DNSBL | `Inbound:Dnsbl:Zones` (empty = off), `Inbound:Dnsbl:Action` (`Flag` or `Reject`) | off | **Privacy**: every lookup sends the connecting sender's IP address to the blocklist operator (and to your resolver). Use a list whose terms you accept, and a resolver of your own: Spamhaus and others answer `127.255.255.x` to public resolvers, which is "your resolver is blocked", not a listing (EggMail counts it as an error, never as a hit). `Reject` refuses with `554 5.7.1` at the first inbound recipient |
+| Retention | `Inbound:RetentionDays` (and per domain `retentionDays`) | 7 | A finite number. **`0` keeps mail forever** and raises the health warning `retention_unlimited:Inbound:RetentionDays`. A message whose action is still pending is never deleted by retention |
+| Quotas | `Inbound:MaxStoredBytesPerDomain` (2 GiB), `Inbound:MaxStoredBytesPerTenant` (10 GiB) | as shown | At the limit new mail is refused with `452 4.2.2` (senders retry). Stored mail grows `queue.db` on SQLite: a deployment that keeps a lot of it should use PostgreSQL or a short retention. Backups and the backend-switch bundle carry all of it |
+| Limits | `Inbound:MaxMessageSize`, `Inbound:MaxMessagesPerMinute` (600), `Inbound:MaxMessagesPerMinutePerRemote` (60) | as shown | Ceilings: a tenant can only lower them for its domains |
+
+### 11.6 Test it
+
+```sh
+# 1. from a Gmail/Outlook account, write to test@example.com; then read it:
+$ curl -sk -b jar -H "X-Tenant-Id: $TENANT" "$API/inbound/messages?limit=5" | jq '.items[] | {id, from, recipient, spf, dkim, dmarc, state}'
+$ curl -sk -b jar -H "X-Tenant-Id: $TENANT" "$API/inbound/messages/<id>/raw" | head -30       # Received + Authentication-Results added by EggMail
+# 2. the client address is the real one (11.2): the stored connection address must be the sender's public IP, not 172.x / 127.0.0.1
+# 3. not an open relay, no backscatter: both must be refused in the dialog
+$ swaks --to someone@gmail.com --from you@example.org --server $HOST --port 25 --quit-after RCPT       # expect 550 5.7.1 (relaying denied)
+$ swaks --to nobody@example.com --from you@example.org --server $HOST --port 25 --quit-after RCPT     # expect 550 5.1.1 when no route matches
+# 4. a message that fails DMARC: send with a forged From of a domain with p=reject from a host that is not authorized; with flag it is stored with dmarcFlagged, with reject it is refused 550 5.7.1
+# 5. a webhook route: the receiver gets a signed POST (webhook-id evt_<id>); a forward route: the copy arrives with an SRS0=... envelope sender and your d=example.com signature
+```
+
+- **Works if**: mail from three different providers is stored with `spf`, `dkim` and `dmarc` verdicts that match what their own `Authentication-Results` say for the same message, the connection address is the sender's, and the two `swaks` probes are refused in the dialog (nothing is ever accepted and bounced later).
+- **If not**: `450 4.2.1` means the domain is not verified (or the tenant is suspended): senders keep the mail and retry; fix the records and **Check DNS**. `451 4.3.0` right after a restart is the configuration cache loading (it refreshes every 30 s). A stored `spf=fail` for mail you know is fine points at 11.2 (the address). Failed route actions are visible on the message (`actionLastError` codes) and in the metric `mta_inbound_actions_total{outcome="failed"}`; **Retry** re-queues a failed webhook or forward.
+- Monitor: the `mta_inbound_*` metrics ([operations.md](operations.md#monitoring)), the stored-bytes usage (`GET /inbound/usage`), and the health warnings.
 
 ## When everything above is done
 
