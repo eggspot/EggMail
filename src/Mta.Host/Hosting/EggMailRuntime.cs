@@ -98,7 +98,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
         await certificates.InitializeAsync(ct).ConfigureAwait(false);
         var certificateMeters = Mta.Host.Tls.TlsMetrics.Attach(certificates, clock);
         System.Runtime.CompilerServices.RuntimeHelpers.RunClassConstructor(typeof(ProcessMetrics).TypeHandle);   // publishes the Mta.Process gauges (descriptors, threads) to the exporters
-        var verp = await VerpKeyStore.LoadOrCreateAsync(storage.Config, ct).ConfigureAwait(false);
+        var verp = await VerpKeyStore.LoadOrCreateAsync(storage.Config, ct, clock).ConfigureAwait(false);
 
         var dns = dnsOverride ?? CreateDns(config);
         var storageOptions = config.Storage;

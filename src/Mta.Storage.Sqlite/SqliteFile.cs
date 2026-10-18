@@ -205,7 +205,7 @@ internal sealed class SqliteFile
                 UpgradeFromV5(connection);
             }
 
-            UpgradeFromV7(connection);
+            UpgradeFromV7(connection);   // also takes a file at version 8 to 9: every statement is "if not exists" and comes from the generated script
             return;
         }
 
@@ -456,7 +456,7 @@ internal sealed class SqliteFile
 
         if (statements.Any(string.IsNullOrEmpty))
         {
-            throw new InvalidOperationException($"Could not derive the version 8 upgrade of {FileName} from the generated schema script.");
+            throw new InvalidOperationException($"Could not derive the inbound upgrade (versions 8 and 9) of {FileName} from the generated schema script.");
         }
 
         using var tx = connection.BeginTransaction();

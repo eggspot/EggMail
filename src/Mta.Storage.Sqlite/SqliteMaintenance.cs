@@ -322,23 +322,49 @@ internal sealed class SqliteMaintenance(SqliteRuntime rt, SqliteQueueStore queue
     public async ValueTask<string?> BackupAsync(string directory, CancellationToken ct)
     {
         string target = Path.Combine(directory, "eggmail-backup-" + rt.Clock.UtcNow.ToString("yyyyMMddTHHmmssfff'Z'", CultureInfo.InvariantCulture));
-        Directory.CreateDirectory(target);
-        foreach (SqliteFile f in rt.Files)
+        // The files are written under a work name and the directory is renamed when it is complete: a backup that is cancelled by a shutdown, fails (a full
+        // disk) or is killed half-way never has the name of a backup, which the scheduler would count as the newest one.
+        string work = target + ".partial";
+        if (Directory.Exists(work))
         {
-            if (f.IsMemory)
+            Directory.Delete(work, recursive: true);   // the work directory of a killed run that had this very name (the same millisecond)
+        }
+
+        Directory.CreateDirectory(work);
+        try
+        {
+            foreach (SqliteFile f in rt.Files)
             {
-                continue;
+                if (f.IsMemory)
+                {
+                    continue;
+                }
+
+                // VACUUM INTO reads a consistent snapshot on its own connection; WAL lets the writer keep committing meanwhile.
+                await Task.Run(() =>
+                {
+                    using SqliteConnection c = f.OpenReader();
+                    using SqliteCommand cmd = c.CreateCommand();
+                    cmd.CommandText = "VACUUM INTO @path";
+                    cmd.Parameters.AddWithValue("@path", Path.Combine(work, f.FileName));
+                    cmd.ExecuteNonQuery();
+                }, ct).ConfigureAwait(false);
             }
 
-            // VACUUM INTO reads a consistent snapshot on its own connection; WAL lets the writer keep committing meanwhile.
-            await Task.Run(() =>
+            Directory.Move(work, target);
+        }
+        catch
+        {
+            try
             {
-                using SqliteConnection c = f.OpenReader();
-                using SqliteCommand cmd = c.CreateCommand();
-                cmd.CommandText = "VACUUM INTO @path";
-                cmd.Parameters.AddWithValue("@path", Path.Combine(target, f.FileName));
-                cmd.ExecuteNonQuery();
-            }, ct).ConfigureAwait(false);
+                Directory.Delete(work, recursive: true);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // The scheduler removes leftovers of this name at its next run.
+            }
+
+            throw;
         }
 
         return target;

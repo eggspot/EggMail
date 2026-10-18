@@ -257,14 +257,30 @@ public sealed class InboundActionRunner
     }
 
     /// <summary>
-    /// One tenant never takes every worker of a replica (design section 11.7): a claim returns at most <see cref="InboundActionOptions.MaxConcurrencyPerTenant"/> rows of a tenant and nothing
-    /// of a tenant that has attempts in flight here, so a slow receiver and a large backlog of one tenant leave the other tenants' actions to be claimed. Nothing waits for a slot while holding
-    /// a claim: an over-share row is simply not claimed.
+    /// One tenant never takes every worker of a replica (design section 11.7): a tenant holds at most <see cref="InboundActionOptions.MaxConcurrencyPerTenant"/> attempts here at once. A claim
+    /// returns a tenant's rows up to that number less what it already has in flight, and nothing of a tenant that is at the number, so a slow receiver and a large backlog of one tenant leave the
+    /// other tenants' actions to be claimed. Nothing waits for a slot while holding a claim: an over-share row is simply not claimed.
     /// </summary>
     private InboundClaimLimits FairnessLimits()
     {
-        Guid[] busy = [.. _tenantInFlight.Where(t => t.Value > 0).Select(t => t.Key)];
-        return new InboundClaimLimits(_options.MaxConcurrencyPerTenant, busy);
+        int cap = _options.MaxConcurrencyPerTenant;
+        var inUse = new Dictionary<Guid, int>();
+        var full = new List<Guid>();
+        foreach ((Guid tenant, int count) in _tenantInFlight)
+        {
+            if (count <= 0)
+            {
+                continue;
+            }
+
+            inUse[tenant] = count;
+            if (cap > 0 && count >= cap)
+            {
+                full.Add(tenant);
+            }
+        }
+
+        return new InboundClaimLimits(cap, full, inUse);
     }
 
     /// <summary>
@@ -465,21 +481,39 @@ public sealed class InboundActionRunner
         WebhookMetrics.DeliveryDuration.Record(sent.Duration.TotalSeconds);
         if (sent.ErrorClass is not { } errorClass)
         {
-            await _health.RecordSuccessAsync(endpoint, ct).ConfigureAwait(false);
+            await BookkeepAsync("record the success of", endpoint, (token) => _health.RecordSuccessAsync(endpoint, token)).ConfigureAwait(false);
             return InboundActionResult.Done();
         }
 
         if (errorClass == "gone")
         {
             // The receiver says the address is gone for good: the endpoint is switched off (the tenant is told). The message keeps its ladder, so re-enabling or repointing the route in time delivers it.
-            await _health.DisableAsync(endpoint, "The receiver answered 410 Gone", now, ct).ConfigureAwait(false);
+            await BookkeepAsync("switch off", endpoint, (token) => _health.DisableAsync(endpoint, "The receiver answered 410 Gone", now, token)).ConfigureAwait(false);
         }
         else
         {
-            await _health.RecordFailureAsync(endpoint, now, ct).ConfigureAwait(false);
+            await BookkeepAsync("record the failure of", endpoint, (token) => _health.RecordFailureAsync(endpoint, now, token)).ConfigureAwait(false);
         }
 
         return InboundActionResult.Retry("webhook_" + errorClass, errorClass == "throttled" ? _options.ThrottleExtraDelay : TimeSpan.Zero);
+    }
+
+    /// <summary>
+    /// What an attempt does to the endpoint after the receiver has answered (the success streak, the failure streak, switching it off). It runs with its own short limit, not the runner's token, and
+    /// a failure of it is only logged: the receiver's answer is already known, and an exception here must not turn a webhook the receiver accepted into <c>internal_error</c> (it would be sent again), nor
+    /// make a host that is stopping lose the result.
+    /// </summary>
+    private async ValueTask BookkeepAsync(string what, WebhookEndpointRecord endpoint, Func<CancellationToken, ValueTask> work)
+    {
+        using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        try
+        {
+            await work(limit.Token).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _log.Write(MtaLogLevel.Warning, "inbound", $"could not {what} webhook endpoint {endpoint.Id:N} after the receiver answered", ex);
+        }
     }
 
     /// <summary>

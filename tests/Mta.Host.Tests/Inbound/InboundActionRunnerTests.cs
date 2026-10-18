@@ -273,6 +273,39 @@ public class InboundActionRunnerTests
     }
 
     [Fact]
+    public async Task A_tenant_below_its_share_is_claimed_again_while_it_has_attempts_in_flight_and_is_cut_off_exactly_at_the_share()
+    {
+        var options = new InboundActionOptions { Concurrency = 6, MaxConcurrencyPerTenant = 3, PollInterval = TimeSpan.FromMilliseconds(20) };
+        await using var h = await new InboundActionHarness(options).InitializeAsync();
+        var release = new TaskCompletionSource();
+        h.Receiver.Gate = () => release.Task;
+        using var cts = new CancellationTokenSource();
+        Task loop = h.Runner.RunAsync(cts.Token);
+
+        // Mail that arrives one message at a time while the receiver is slow: each is claimed at once because the tenant is below its share of three.
+        for (int expected = 1; expected <= 3; expected++)
+        {
+            await h.ReceiveAsync();
+            await WaitUntilAsync(() => Task.FromResult(h.Receiver.Requests.Count >= expected));
+        }
+
+        // The fourth and fifth wait: three in flight is the share.
+        await h.ReceiveAsync();
+        await h.ReceiveAsync();
+        for (int i = 0; i < 300; i++)
+        {
+            await Task.Yield();
+        }
+
+        Assert.Equal(3, h.Receiver.Requests.Count);
+        release.SetResult();
+        await WaitUntilAsync(async () => (await h.Storage.Inbound.SearchAsync(new InboundMessageQuery(h.TenantId, ActionState: InboundActionState.Done), default)).Items.Count == 5);
+        Assert.Equal(3, h.Receiver.MaxConcurrent);
+        await cts.CancelAsync();
+        await loop.WaitAsync(TimeSpan.FromSeconds(30));
+    }
+
+    [Fact]
     public async Task The_pool_delivers_new_mail_and_stops_cleanly_releasing_what_it_still_holds()
     {
         await using var h = await new InboundActionHarness(new InboundActionOptions { PollInterval = TimeSpan.FromMilliseconds(20) }).InitializeAsync();

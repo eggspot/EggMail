@@ -355,8 +355,17 @@ public sealed record ClaimedInboundAction(InboundMessage Message, byte[]? Raw, l
 /// the first rows of the queue, and without a limit it would be the only thing a replica ever claims.
 /// </summary>
 /// <param name="MaxPerTenant">At most this many rows of one tenant in the call (0: no limit). Rows are still chosen oldest due first within the tenant.</param>
-/// <param name="ExcludeTenants">Tenants that get nothing in this call (the ones the caller already has enough of in flight).</param>
-public sealed record InboundClaimLimits(int MaxPerTenant, IReadOnlyCollection<Guid>? ExcludeTenants = null);
+/// <param name="ExcludeTenants">Tenants that get nothing in this call.</param>
+/// <param name="SlotsInUse">Rows of a tenant the caller already has in flight, by tenant: the tenant gets at most <c>MaxPerTenant - SlotsInUse[tenant]</c> rows in this call (nothing when that is not above zero), so a tenant never holds more than <c>MaxPerTenant</c> at once. Ignored when <c>MaxPerTenant</c> is 0.</param>
+public sealed record InboundClaimLimits(int MaxPerTenant, IReadOnlyCollection<Guid>? ExcludeTenants = null, IReadOnlyDictionary<Guid, int>? SlotsInUse = null)
+{
+    /// <summary>The rows of <paramref name="tenant"/> this call may claim (<see cref="int.MaxValue"/>: no limit).</summary>
+    public int AllowanceOf(Guid tenant) =>
+        MaxPerTenant <= 0 ? int.MaxValue : Math.Max(0, MaxPerTenant - (SlotsInUse is not null && SlotsInUse.TryGetValue(tenant, out int used) ? used : 0));
+
+    /// <summary>True when the call is the plain oldest-due-first claim (no cap, nobody left out).</summary>
+    public bool IsUnrestricted => MaxPerTenant <= 0 && ExcludeTenants is null or { Count: 0 };
+}
 
 public sealed record InboundActionOutcome(InboundActionState State, DateTimeOffset At, DateTimeOffset? NextAttemptAt, string? Error, Guid? ForwardMessageId = null, bool FreeBody = false, string? Note = null, long? ClaimToken = null);
 
@@ -468,7 +477,7 @@ public interface IInboundMessageStore
     /// (<see cref="ReleaseOwnedActionLeasesAsync"/>).
     /// </summary>
     /// <remarks>
-    /// <paramref name="limits"/> (optional) caps the rows of one tenant in the call and leaves some tenants out, so the other tenants' work is claimed instead: the same rows the unlimited
+    /// <paramref name="limits"/> (optional) caps the rows of one tenant in the call (less what the caller already has in flight for it) and leaves some tenants out, so the other tenants' work is claimed instead: the same rows the unlimited
     /// claim would skip are not touched, claimed or counted. Without limits the claim is exactly the oldest-due-first one.
     /// </remarks>
     ValueTask<IReadOnlyList<ClaimedInboundAction>> ClaimActionsAsync(string owner, int max, DateTimeOffset now, TimeSpan lease, CancellationToken cancellationToken, InboundClaimLimits? limits = null);

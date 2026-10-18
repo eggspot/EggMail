@@ -300,8 +300,11 @@ public sealed class EfInboundMessageStore<TContext>(IInboundDbAccess<TContext> d
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    public async ValueTask<long> CountActionsAsync(InboundActionState state, CancellationToken cancellationToken) =>
-        await Read(c => c.InboundMessages.AsNoTracking().LongCount(x => x.ActionState == state)).ConfigureAwait(false);
+    public async ValueTask<long> CountActionsAsync(InboundActionState state, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();   // the count is a synchronous query: a caller that is stopping should not start it
+        return await Read(c => c.InboundMessages.AsNoTracking().LongCount(x => x.ActionState == state)).ConfigureAwait(false);
+    }
 
     public async ValueTask<IReadOnlyList<ClaimedInboundAction>> ClaimActionsAsync(string owner, int max, DateTimeOffset now, TimeSpan lease, CancellationToken cancellationToken, InboundClaimLimits? limits = null)
     {
@@ -315,7 +318,7 @@ public sealed class EfInboundMessageStore<TContext>(IInboundDbAccess<TContext> d
         DateTimeOffset until = StorageTime.Normalize(now + lease);
         return await Write(c =>
         {
-            IReadOnlyList<Guid> ids = db.ClaimIds(c, owner, max, at, until, limits is { MaxPerTenant: <= 0, ExcludeTenants: null or { Count: 0 } } ? null : limits);
+            IReadOnlyList<Guid> ids = db.ClaimIds(c, owner, max, at, until, limits is null or { IsUnrestricted: true } ? null : limits);
             if (ids.Count == 0)
             {
                 return (IReadOnlyList<ClaimedInboundAction>)[];
