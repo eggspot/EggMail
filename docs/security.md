@@ -63,7 +63,7 @@ The `smtp-session` target also showed that a long loopback run exhausts the ephe
 
 ## Inbound mail (the port-25 receive path)
 
-Design: [design.md section 11.12](design.md#11-inbound-mail); decisions 95, 96 and 100. What is enforced in code and pinned by tests (`tests/Mta.Host.Tests/Inbound`):
+Design: [design.md section 11.12](design.md#11-inbound-mail); decisions 95, 96 and 101. What is enforced in code and pinned by tests (`tests/Mta.Host.Tests/Inbound`):
 
 - **Open relay.** Three independent layers: the `Inbound` listener role accepts a recipient only for an inbound-enabled domain with a matching enabled route (everything else is `550 5.7.1` at `RCPT`); inbound sessions offer and accept no AUTH; and the only path from a received message to the outbound queue is a forward route that an authenticated tenant created, with targets fixed in the route. Regression tests: unknown domain, registered-but-not-enabled domain, domain with no route, disabled route, an external recipient after a valid one, an unauthenticated `MAIL FROM` of a local domain (accepted as an external sender, verified, never relayed), AUTH refused even on a TLS session.
 - **Backscatter.** Nothing is accepted and bounced. Every refusal is a reply in the dialog; a message refused after DATA (DMARC reject, size) produces no message of any kind; SRS bounces are verified and dropped, never relayed.
