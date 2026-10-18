@@ -120,6 +120,7 @@ public sealed partial class EfConfigStore<TContext>(IConfigDbAccess<TContext> db
 
     public async ValueTask<Tenant?> GetTenantBySlugAsync(string slug, CancellationToken ct)
     {
+        if (!StorageText.IsStorable(slug)) { return null; }   // no stored value can equal text that cannot be stored (PostgreSQL would throw)
         string s = ConfigMapping.NormalizeSlug(slug);
         return await Read(c => c.Tenants.AsNoTracking().Where(t => t.Slug == s).AsEnumerable().Select(t => t.ToRecord()).FirstOrDefault()).ConfigureAwait(false);
     }
@@ -160,7 +161,7 @@ public sealed partial class EfConfigStore<TContext>(IConfigDbAccess<TContext> db
     }
 
     public async ValueTask<SmtpCredential?> FindSmtpCredentialAsync(string userName, CancellationToken ct) =>
-        await Read(c => c.SmtpCredentials.AsNoTracking().Where(x => x.UserName == userName).AsEnumerable().Select(x => x.ToRecord()).FirstOrDefault()).ConfigureAwait(false);
+        !StorageText.IsStorable(userName) ? null : await Read(c => c.SmtpCredentials.AsNoTracking().Where(x => x.UserName == userName).AsEnumerable().Select(x => x.ToRecord()).FirstOrDefault()).ConfigureAwait(false);
 
     public async ValueTask UpsertSmtpCredentialAsync(SmtpCredential credential, CancellationToken ct)
     {
@@ -184,6 +185,7 @@ public sealed partial class EfConfigStore<TContext>(IConfigDbAccess<TContext> db
 
     public async ValueTask<DashboardUser?> FindDashboardUserAsync(string userName, CancellationToken ct)
     {
+        if (!StorageText.IsStorable(userName)) { return null; }
         string n = ConfigMapping.NormalizeUserName(userName);
         return await Read(c => c.Set<DashboardUserEntity>().AsNoTracking().Where(u => u.UserName == n).AsEnumerable().Select(u => u.ToRecord()).FirstOrDefault()).ConfigureAwait(false);
     }
@@ -314,6 +316,7 @@ public sealed partial class EfConfigStore<TContext>(IConfigDbAccess<TContext> db
 
     public async ValueTask<DomainRecord?> FindDomainByNameAsync(string name, CancellationToken ct)
     {
+        if (!StorageText.IsStorable(name)) { return null; }
         string n = ConfigMapping.NormalizeDomain(name);
         return await Read(c => c.Domains.AsNoTracking().Where(d => d.Name == n).AsEnumerable().Select(d => d.ToRecord()).FirstOrDefault()).ConfigureAwait(false);
     }
@@ -336,6 +339,7 @@ public sealed partial class EfConfigStore<TContext>(IConfigDbAccess<TContext> db
         {
             c.DkimKeys.Where(k => k.DomainId == domainId).ExecuteDelete();
             c.Set<DomainRecordCheckEntity>().Where(k => k.DomainId == domainId).ExecuteDelete();
+            DeleteInboundOfDomain(c, domainId);
             c.Domains.Where(d => d.Id == domainId).ExecuteDelete();
         }, ct).ConfigureAwait(false);
 
@@ -375,6 +379,7 @@ public sealed partial class EfConfigStore<TContext>(IConfigDbAccess<TContext> db
 
     public ValueTask<bool> IsSuppressedAsync(Guid tenantId, string address, CancellationToken ct)
     {
+        if (!StorageText.IsStorable(address)) { return ValueTask.FromResult(false); }
         string a = ConfigMapping.NormalizeAddress(address);
         try
         {
@@ -403,6 +408,7 @@ public sealed partial class EfConfigStore<TContext>(IConfigDbAccess<TContext> db
 
     public async ValueTask<bool> RemoveSuppressionAsync(Guid tenantId, string address, CancellationToken ct)
     {
+        if (!StorageText.IsStorable(address)) { return false; }
         string a = ConfigMapping.NormalizeAddress(address);
         return await Write(c => c.Suppressions.Where(s => s.TenantId == tenantId && s.Address == a).ExecuteDelete() > 0, ct).ConfigureAwait(false);
     }
@@ -410,7 +416,7 @@ public sealed partial class EfConfigStore<TContext>(IConfigDbAccess<TContext> db
     public async ValueTask<Page<SuppressionRecord>> GetSuppressionsAsync(Guid tenantId, string? cursor, int limit, CancellationToken ct)
     {
         limit = Math.Clamp(limit, 1, 1000);
-        string? after = Cursors.TryDecode(cursor, out string decoded) ? decoded : null;
+        string? after = Cursors.TryDecode(cursor, out string decoded) && StorageText.IsStorable(decoded) ? decoded : null;
         return await Read(c =>
         {
             IQueryable<SuppressionEntity> q = c.Suppressions.AsNoTracking().Where(s => s.TenantId == tenantId);
@@ -447,16 +453,26 @@ public sealed partial class EfConfigStore<TContext>(IConfigDbAccess<TContext> db
 
     public async ValueTask DeleteWebhookEndpointAsync(Guid tenantId, Guid id, CancellationToken ct)
     {
-        await Write(c => c.WebhookEndpoints.Where(w => w.Id == id && w.TenantId == tenantId).ExecuteDelete(), ct).ConfigureAwait(false);
+        // The schema has no foreign keys (references are soft by design), so the rule that a route's webhook endpoint cannot disappear is kept here, in the same write as the delete.
+        await Write(c =>
+        {
+            if (c.InboundRoutes.Any(r => r.ActionKind == InboundActionKind.Webhook && r.WebhookEndpointId == id && c.WebhookEndpoints.Any(w => w.Id == id && w.TenantId == tenantId)))
+            {
+                throw new StorageConflictException("The webhook endpoint is the target of inbound routes.", StorageConflictReasons.WebhookEndpointInUse);
+            }
+
+            return c.WebhookEndpoints.Where(w => w.Id == id && w.TenantId == tenantId).ExecuteDelete();
+        }, ct).ConfigureAwait(false);
         Interlocked.Increment(ref _webhookVersion);
     }
 
-    public async ValueTask DisableWebhookEndpointAsync(Guid id, string reason, DateTimeOffset at, CancellationToken ct)
+    public async ValueTask<bool> DisableWebhookEndpointAsync(Guid id, string reason, DateTimeOffset at, CancellationToken ct)
     {
         DateTimeOffset when = StorageTime.Normalize(at);
-        await Write(c => c.WebhookEndpoints.Where(w => w.Id == id)
-            .ExecuteUpdate(u => u.SetProperty(w => w.Enabled, false).SetProperty(w => w.DisabledReason, reason).SetProperty(w => w.DisabledAt, when)), ct).ConfigureAwait(false);
+        bool changed = await Write(c => c.WebhookEndpoints.Where(w => w.Id == id && w.Enabled)
+            .ExecuteUpdate(u => u.SetProperty(w => w.Enabled, false).SetProperty(w => w.DisabledReason, reason).SetProperty(w => w.DisabledAt, when)) > 0, ct).ConfigureAwait(false);
         Interlocked.Increment(ref _webhookVersion);
+        return changed;
     }
 
     // Settings, policies, routes
@@ -516,7 +532,7 @@ public sealed partial class EfConfigStore<TContext>(IConfigDbAccess<TContext> db
     }
 
     public async ValueTask<AcmeAccountRecord?> GetAcmeAccountAsync(string directoryUrl, CancellationToken ct) =>
-        await Read(c => c.AcmeAccounts.AsNoTracking().Where(a => a.DirectoryUrl == directoryUrl).AsEnumerable().Select(a => a.ToRecord()).FirstOrDefault()).ConfigureAwait(false);
+        !StorageText.IsStorable(directoryUrl) ? null : await Read(c => c.AcmeAccounts.AsNoTracking().Where(a => a.DirectoryUrl == directoryUrl).AsEnumerable().Select(a => a.ToRecord()).FirstOrDefault()).ConfigureAwait(false);
 
     public async ValueTask UpsertAcmeAccountAsync(AcmeAccountRecord account, CancellationToken ct)
     {

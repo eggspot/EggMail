@@ -42,6 +42,7 @@ internal sealed class PgHarness
             Postgres = tune?.Invoke(pg) ?? pg,
             Content = o.Content,
             Queue = o.Queue,
+            Inbound = o.Inbound,
         };
     }
 

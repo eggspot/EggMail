@@ -1,0 +1,175 @@
+name: soak
+
+# Soak test of the REAL host: `dotnet publish`, then `mta serve` on SQLite or a PostgreSQL 17 container, a sink MX and a DNS stub on loopback, sustained
+# mixed-size load, kill -9 crash drills, backup + restore drills, a sample every minute, and a PASS/FAIL verdict from fixed criteria.
+# Everything it does and every threshold is in docs/soak.md. Run it by hand:
+#
+#   gh workflow run soak --ref <branch> -f hours=2 -f backend=sqlite
+#   gh workflow run soak --ref <branch> -f hours=0.33 -f backend=both -f crash_interval_min=4 -f backup_interval_min=5 -f quiet_tail=0.4 -f sample_interval_s=15 -f claim_lease_min=2   # a 20 minute proof per backend
+#
+# BILLING. One job on one standard ubuntu-latest runner, billed for its whole wall time rounded up to the minute: a 6 hour soak bills about 360 minutes
+# (Linux, 1x). Nothing here runs on a push or a pull request. The scheduled run is OFF until the repository variable SOAK_SCHEDULE_ENABLED is
+# set to 'true' (Settings, Secrets and variables, Actions, Variables); with it unset the schedule starts the workflow, the job is skipped and nothing is billed.
+#
+# LIMIT. A GitHub-hosted job may run 6 hours (360 minutes) including checkout, publish and the end-of-run drain. With backend=both the hours below
+# are per backend and both run in this one job, so the total must still fit. A longer soak needs a self-hosted runner (the same script runs there),
+# or chained runs: start the next dispatch when this one ends; each run is judged on its own (docs/soak.md).
+
+on:
+  workflow_dispatch:
+    inputs:
+      hours:
+        description: Hours of load per backend (the job is limited to 6 h in all; with backend=both both runs share that)
+        default: '2'
+      backend:
+        description: Storage backend under test; both runs SQLite, then PostgreSQL 17, one after the other in this job
+        type: choice
+        options: [sqlite, postgres, both]
+        default: sqlite
+      history:
+        description: History:Mode
+        type: choice
+        options: [full, statsonly]
+        default: full
+      sync:
+        description: SQLite Sqlite:SyncMode; for PostgreSQL off sets synchronous_commit=off, normal and full keep the durable default
+        type: choice
+        options: ['off', normal, full]
+        default: 'off'
+      rate:
+        description: Messages per second submitted, in total
+        default: '30'
+      size_mix:
+        description: 'Message sizes in bytes and weights, "bytes:weight,..."'
+        default: '1024:55,8192:30,65536:12,524288:3'
+      connections:
+        description: Concurrent submission connections
+        default: '8'
+      crash_interval_min:
+        description: Minutes between kill -9 drills (0 turns them off)
+        default: '20'
+      backup_interval_min:
+        description: Minutes between backup and restore drills (0 turns them off)
+        default: '30'
+      quiet_tail:
+        description: Fraction of the run at its end without drills (the stretch the memory, descriptor and thread trends are judged on)
+        default: '0.25'
+      sample_interval_s:
+        description: Seconds between samples
+        default: '60'
+      claim_lease_min:
+        description: Delivery:ClaimLease in minutes (0 keeps the product default of 15); a short value lets a short proof run see crash recovery
+        default: '0'
+  # Rare and off by default: needs the repository variable SOAK_SCHEDULE_ENABLED=true (see BILLING above). When on, it runs once a month with exactly
+  # the input defaults: 2 hours of load on SQLite, history full, Sqlite:SyncMode=Off, 30 messages a second, a kill -9 every 20 minutes, a backup and
+  # restore drill every 30, a sample a minute (docs/soak.md, "Schedule").
+  schedule:
+    - cron: '23 3 1 * *'
+
+concurrency:
+  group: soak-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: 1
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+
+jobs:
+  soak:
+    if: github.event_name != 'schedule' || vars.SOAK_SCHEDULE_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 358
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('Directory.Packages.props', 'global.json') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      # Validates every input (clear annotation and a summary page when one is wrong), applies the declared defaults in one place, checks that the plan fits
+      # in one job, and writes the arguments for soak.py to soak-args.txt. No `${{ inputs.x || 'default' }}` anywhere: a falsy value would become the default.
+      # bench/soak/plan.py --self-test (run by ci) checks this file for that and for YAML 1.1 traps such as an unquoted `off`.
+      - name: Plan (validate the inputs, does it fit in one job?)
+        id: plan
+        env:
+          INPUTS_JSON: ${{ toJSON(inputs) }}
+        run: python3 bench/soak/plan.py --github
+
+      - name: Machine
+        run: |
+          echo "cores: $(nproc)"; grep -m1 'model name' /proc/cpuinfo || true; free -m | head -2; df -h . | tail -1
+          python3 --version; ulimit -n
+
+      - name: Soak
+        timeout-minutes: 345
+        env:
+          BACKENDS: ${{ steps.plan.outputs.backends }}
+          LOAD_MINUTES: ${{ steps.plan.outputs.load_minutes }}
+        run: |
+          set -uo pipefail
+          started=$(date +%s)
+          read -r -a backends <<< "$BACKENDS"
+          mapfile -t common < soak-args.txt
+          mkdir -p soak-results soak-logs
+          status=0
+          index=0
+          for b in "${backends[@]}"; do
+            # The drain after the load may take up to 30 minutes in the worst case. Never more than the step has left (345 minute limit) after
+            # reserving what the backends still to run need: their load, 8 minutes of start-up and shutdown, and a 6 minute drain.
+            used=$(( ($(date +%s) - started) / 60 ))
+            later=$(( ${#backends[@]} - 1 - index ))
+            drain=$(( 335 - used - LOAD_MINUTES - 8 - later * (LOAD_MINUTES + 14) ))
+            [ "$drain" -le 30 ] || drain=30; [ "$drain" -ge 5 ] || drain=5
+            echo "::group::soak $b (drain limit $drain min)"
+            bench/soak/run-soak.sh --skip-build "${common[@]}" --backend "$b" --drain-timeout-min "$drain" --out "soak-results/$b" 2>&1 | tee "soak-logs/$b.log"
+            code=${PIPESTATUS[0]}
+            echo "::endgroup::"
+            if [ "$code" -ne 0 ]; then status=1; fi
+            # Whatever happened, leave a summary to read: a run that failed before it could write one (a bad argument, a publish error) is still a result.
+            if [ ! -s "soak-results/$b/summary.md" ]; then
+              mkdir -p "soak-results/$b"
+              { echo "## Soak $b did not produce a summary (exit code $code)"; echo; echo '```'; tail -n 40 "soak-logs/$b.log"; echo '```'; } > "soak-results/$b/summary.md"
+            fi
+            index=$(( index + 1 ))
+          done
+          exit $status
+
+      - name: Summary
+        if: always()
+        run: |
+          label="GitHub-hosted ubuntu-latest $(nproc)-core runner, noisy, not publishable"
+          echo "**$label**" >> "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
+          for f in soak-results/*/summary.md; do
+            [ -f "$f" ] && { cat "$f"; echo; } >> "$GITHUB_STEP_SUMMARY"
+          done
+          ls soak-results/*/ 2>/dev/null || true
+
+      - name: Upload the CSV, logs and summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-results-${{ github.run_id }}
+          # The data directories, restored copies and the throwaway password are not evidence; everything else (samples.csv, events.jsonl,
+          # ack.log, load-stats.jsonl, host.log, load.log, verification.json, verdict.json, summary.md, config.json, and the console log of each run in
+          # soak-logs) is.
+          path: |
+            soak-results
+            soak-logs
+            !soak-results/*/data/**
+            !soak-results/*/restore-*/**
+            !soak-results/*/restore-*.dump
+            !soak-results/*/pgdata/**
+            !soak-results/*/admin-password.txt
+          retention-days: 14
+          if-no-files-found: warn

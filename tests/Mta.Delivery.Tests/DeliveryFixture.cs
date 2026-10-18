@@ -94,7 +94,7 @@ internal sealed class DeliveryFixture : IAsyncDisposable
     /// <summary>The port of the listener that offers AUTH after STARTTLS (only with <c>authListener</c>), like a relay provider's submission port.</summary>
     public int RelayPort { get; }
 
-    public DeliveryFixture(Func<DeliveryOptions, DeliveryOptions>? tweak = null, bool serverTls = false, bool startEngine = true, Func<DeliveryServices, IDkimSignerProvider>? dkim = null, SendingLimitsOptions? limits = null, VerpCodec? verp = null, bool eightBitMime = true, bool smtpUtf8 = true, Mta.Tls.TlsRpt.TlsRptCollector? tlsReports = null, Func<StaticDnsResolver, Mta.Tls.OutboundTlsPolicyResolver>? tlsResolver = null, IMtaLog? log = null, bool authListener = false, ISecretProtector? secrets = null)
+    public DeliveryFixture(Func<DeliveryOptions, DeliveryOptions>? tweak = null, bool serverTls = false, bool startEngine = true, Func<DeliveryServices, IDkimSignerProvider>? dkim = null, SendingLimitsOptions? limits = null, VerpCodec? verp = null, bool eightBitMime = true, bool smtpUtf8 = true, Mta.Tls.TlsRpt.TlsRptCollector? tlsReports = null, Func<StaticDnsResolver, Mta.Tls.OutboundTlsPolicyResolver>? tlsResolver = null, IMtaLog? log = null, bool authListener = false, ISecretProtector? secrets = null, MxResolverOptions? mxOptions = null)
     {
         var clock = SystemClock.Instance;
         Storage = new InMemoryStorage(new StorageOptions { History = new HistoryOptions { Mode = HistoryMode.Full } }, clock);
@@ -131,7 +131,7 @@ internal sealed class DeliveryFixture : IAsyncDisposable
         {
             Storage = Storage,
             Clock = clock,
-            Mx = new MxResolver(Dns, new MxResolverOptions { ExcludeSpecialAddresses = false }),
+            Mx = new MxResolver(Dns, mxOptions ?? new MxResolverOptions { ExcludeSpecialAddresses = false }),
             Tls = tlsResolver?.Invoke(Dns) ?? new OutboundTlsPolicyResolver(null, null),
             TlsReports = tlsReports,
             TlsPolicies = new TlsPolicyTable(OutboundTlsConfiguration.Default),

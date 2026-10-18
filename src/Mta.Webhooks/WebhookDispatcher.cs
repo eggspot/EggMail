@@ -35,7 +35,11 @@ public sealed class WebhookDispatcher : IAsyncDisposable
     private readonly ConcurrentDictionary<string, HttpClient> _clients = new();
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _endpointGates = new();
     private readonly SemaphoreSlim _global;
-    private readonly string _owner = $"webhooks-{Ids.ToCompact(Ids.New())[..12]}";
+    // The whole random GUID: the first 12 hex digits of a UUIDv7 are only its millisecond timestamp, so two dispatchers created in the same millisecond (two replicas
+    // starting together) would share an owner name and both be handed the same outbox items.
+    private readonly string _owner = "webhooks-" + Guid.NewGuid().ToString("N");
+
+    internal string Owner => _owner;
 
     public WebhookDispatcher(
         IWebhookOutbox outbox,
@@ -261,8 +265,13 @@ public sealed class WebhookDispatcher : IAsyncDisposable
 
     private async ValueTask DisableAsync(WebhookEndpointRecord endpoint, string reason, DateTimeOffset now, CancellationToken ct)
     {
+        // Items of one endpoint fail side by side (and so do replicas): only the attempt that really switched the endpoint off counts it and tells the tenant.
+        if (!await _config.DisableWebhookEndpointAsync(endpoint.Id, reason, now, ct).ConfigureAwait(false))
+        {
+            return;
+        }
+
         WebhookMetrics.EndpointsDisabled.Add(1);
-        await _config.DisableWebhookEndpointAsync(endpoint.Id, reason, now, ct).ConfigureAwait(false);
         _log.Write(MtaLogLevel.Warning, "webhooks", $"endpoint {endpoint.Id} of tenant {endpoint.TenantId} disabled: {reason}");
         if (_notifier is not null)
         {
@@ -320,21 +329,24 @@ public sealed class WebhookDispatcher : IAsyncDisposable
         return _clients.GetOrAdd(key, _ => CreateClient());
     }
 
-    private HttpClient CreateClient()
+    private HttpClient CreateClient() =>
+        new(_handlerOverride ?? CreateHandler(), disposeHandler: _handlerOverride is null) { Timeout = Timeout.InfiniteTimeSpan };
+
+    /// <summary>The handler of production deliveries (a test can inspect it).</summary>
+    internal SocketsHttpHandler CreateHandler() => new()
     {
-        HttpMessageHandler handler = _handlerOverride ?? new SocketsHttpHandler
-        {
-            AllowAutoRedirect = false,
-            UseCookies = false,
-            PooledConnectionLifetime = TimeSpan.FromMinutes(2),
-            ConnectTimeout = _options.Timeout,
-            ConnectCallback = ConnectGuardedAsync,
-            // While our webhook span is the current activity the handler would add traceparent/tracestate to the request, handing customers'
-            // receivers our trace ids. Nothing of ours belongs on a request to a third party.
-            ActivityHeadersPropagator = DistributedContextPropagator.CreateNoOutputPropagator(),
-        };
-        return new HttpClient(handler, disposeHandler: _handlerOverride is null) { Timeout = Timeout.InfiniteTimeSpan };
-    }
+        AllowAutoRedirect = false,
+        UseCookies = false,
+        // The connect callback below validates the address it connects to. Through a proxy that address would be the proxy's, and the
+        // proxy would reach whatever the URL says: the SSRF guard would check the wrong hop. Never use one, whatever HTTP(S)_PROXY says.
+        UseProxy = false,
+        PooledConnectionLifetime = TimeSpan.FromMinutes(2),
+        ConnectTimeout = _options.Timeout,
+        ConnectCallback = ConnectGuardedAsync,
+        // While our webhook span is the current activity the handler would add traceparent/tracestate to the request, handing customers'
+        // receivers our trace ids. Nothing of ours belongs on a request to a third party.
+        ActivityHeadersPropagator = DistributedContextPropagator.CreateNoOutputPropagator(),
+    };
 
     private async ValueTask<Stream> ConnectGuardedAsync(SocketsHttpConnectionContext context, CancellationToken ct)
     {

@@ -133,7 +133,7 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
                         "INSERT INTO api_idempotency_key (tenant_id, idempotency_key, message_id, created_at, expires_at, fingerprint) VALUES ($1, $2, $3, $4, $5, $6) " +
                         "ON CONFLICT (tenant_id, idempotency_key) DO UPDATE SET message_id = excluded.message_id, created_at = excluded.created_at, expires_at = excluded.expires_at, fingerprint = excluded.fingerprint " +
                         "WHERE api_idempotency_key.expires_at <= $7", connection, tx);
-                    upsert.Parameters.Uuid(m.TenantId).Text(key).Uuid(m.MessageId).Time(now).Time(now + rt.Options.Queue.IdempotencyKeyLifetime).Text(m.IdempotencyFingerprint).Time(now);
+                    upsert.Parameters.Uuid(m.TenantId).Text(key).Uuid(m.MessageId).Time(now).Time(now + (m.IdempotencyKeyLifetime ?? rt.Options.Queue.IdempotencyKeyLifetime)).Text(m.IdempotencyFingerprint).Time(now);
                     if (await upsert.ExecuteNonQueryAsync(ct).ConfigureAwait(false) > 0)
                     {
                         break; // the key is ours

@@ -66,7 +66,7 @@ public static class ObservabilityExtensions
         var otel = services.AddOpenTelemetry().ConfigureResource(r => r.AddService(options.ServiceName, serviceVersion: options.ServiceVersion));
         otel.WithMetrics(m =>
         {
-            m.AddMeter("Mta.*", "Npgsql");
+            m.AddMeter("Mta.*", "Npgsql", "System.Runtime");
             m.AddOtlpExporter(o => Configure(o, options, "v1/metrics"));
         });
         otel.WithTracing(t =>

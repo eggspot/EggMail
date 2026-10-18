@@ -37,6 +37,13 @@ public sealed class DeliveryServices
 
     /// <summary>Collects TLS-RPT data about sessions to MTA-STS / DANE domains; null disables reporting.</summary>
     public Mta.Tls.TlsRpt.TlsRptCollector? TlsReports { get; init; }
+
+    /// <summary>
+    /// How the certificate of an MX host is validated when the policy asks for PKIX validation: private trust anchors instead of the system store, and the
+    /// clock used for validity. Null (the default, and what production uses) means the system store and the system time. Tests and labs with a private CA set it.
+    /// <para>Never expose this in configuration (<c>MtaConfig</c>, the stored settings or the API): trust anchors that an operator or a tenant can add here would let a forged certificate pass a validated policy.</para>
+    /// </summary>
+    public RemoteCertificateValidatorOptions? CertificateValidation { get; init; }
 }
 
 /// <summary>
@@ -278,7 +285,9 @@ public sealed class DeliveryProcessor
 
     // ---------------------------------------------------------------- envelope
 
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (Guid Id, long ExpiresAt)> _domainIds = new(StringComparer.OrdinalIgnoreCase);
+    private const int MaxAddressLength = 254;   // RFC 5321 4.5.3.1.3: a path is 256 octets with its angle brackets
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (Guid Id, string ReturnPathHost, long ExpiresAt)> _domainIds = new(StringComparer.OrdinalIgnoreCase);
 
     private async ValueTask<EmailAddress> ChooseEnvelopeFromAsync(ClaimedDelivery d, DateTimeOffset now, CancellationToken ct)
     {
@@ -287,14 +296,18 @@ public sealed class DeliveryProcessor
             return d.EnvelopeFrom;
         }
 
-        // The token carries the sending domain's id so a bounce can be attributed without a lookup of the message.
-        Guid domainId = await FindDomainIdAsync(d.SendingDomain, ct).ConfigureAwait(false);
+        // The token carries the sending domain's id so a bounce can be attributed without a lookup of the message. The host after the @ is the
+        // sending domain's own return-path host (bounce.<domain>) once its CNAME has been verified, otherwise the shared bounce domain: only
+        // the first is a domain the customer controls, which is what lets SPF align with the From domain.
+        (Guid domainId, string host) = await FindReturnPathAsync(d.SendingDomain, ct).ConfigureAwait(false);
 
-        // The token only changes with the key, the tenant, the sending domain and the hour: see BounceAddressCache.
+        // The token is also bound to the destination domain (all recipients of a delivery group share it), so a report that names an address in
+        // another domain cannot get that address suppressed (docs/decisions.md 92). It only changes with the key, the tenant, the sending domain,
+        // the host, the destination domain and the hour: see BounceAddressCache.
         var verp = _s.Verp;
-        EmailAddress? bounce = _bounceAddresses.GetOrCreate(verp.ActiveKeyId, d.TenantId, domainId, Mta.Dsn.VerpCodec.HourStamp(now), (verp, d.TenantId, domainId, _options.BounceDomain!, now), static s =>
+        EmailAddress? bounce = _bounceAddresses.GetOrCreate(verp.ActiveKeyId, d.TenantId, domainId, host, d.RecipientDomain, Mta.Dsn.VerpCodec.HourStamp(now), (verp, d.TenantId, domainId, host, d.RecipientDomain, now), static s =>
         {
-            string address = s.verp.CreateAddress(s.TenantId, s.domainId, s.Item4, s.now);
+            string address = s.verp.CreateAddress(s.TenantId, s.domainId, s.host, s.now, s.RecipientDomain);
             // allowUtf8: a bounce domain configured as a U-label is accepted and put on the wire in its A-label form (the local part is ASCII).
             return EmailAddress.TryParse(address, allowUtf8: true, out var parsed) ? parsed : null;
         });
@@ -303,23 +316,32 @@ public sealed class DeliveryProcessor
 
     private readonly BounceAddressCache _bounceAddresses = new();
 
-    private async ValueTask<Guid> FindDomainIdAsync(string? sendingDomain, CancellationToken ct)
+    private async ValueTask<(Guid Id, string Host)> FindReturnPathAsync(string? sendingDomain, CancellationToken ct)
     {
+        string shared = _options.BounceDomain!;
         if (string.IsNullOrEmpty(sendingDomain))
         {
-            return Guid.Empty;
+            return (Guid.Empty, shared);
         }
 
         long now = _s.Clock.Timestamp;
         if (_domainIds.TryGetValue(sendingDomain, out var cached) && now < cached.ExpiresAt)
         {
-            return cached.Id;
+            return (cached.Id, cached.ReturnPathHost);
         }
 
         var record = await _s.Storage.Config.FindDomainByNameAsync(sendingDomain, ct).ConfigureAwait(false);
         Guid id = record?.Id ?? Guid.Empty;
-        _domainIds[sendingDomain] = (id, now + 60 * Stopwatch.Frequency);
-        return id;
+        string host = SenderPolicy.SelectReturnPath(record, shared).Host;
+        if (!string.Equals(host, shared, StringComparison.OrdinalIgnoreCase) && VerpCodec.AddressLengthAt(host) > MaxAddressLength)
+        {
+            // b+<token>@bounce.<very long domain> would not fit the 254 characters of an SMTP address; the shared bounce domain always does.
+            _s.Log.Write(MtaLogLevel.Warning, Source, $"The return-path host {host} is too long for a bounce address; mail of {sendingDomain} uses the shared bounce domain");
+            host = shared;
+        }
+
+        _domainIds[sendingDomain] = (id, host, now + 60 * Stopwatch.Frequency);
+        return (id, host);
     }
 
     // ---------------------------------------------------------------- routes
@@ -428,6 +450,11 @@ public sealed class DeliveryProcessor
                 return Synthetic(RouteAttemptResult.PermanentReply, 550, "5.1.2", mx.Detail ?? "domain has no mail host");
             case MxResolutionStatus.TempFail:
                 return Synthetic(RouteAttemptResult.TemporaryReply, 451, "4.4.3", mx.Detail ?? "temporary DNS failure resolving the mail host");
+            case MxResolutionStatus.AddressesRefused:
+                // Our policy, not a fact about the domain: never a permanent failure (that would bounce the mail and suppress the recipient for good).
+                // The mail waits until it expires, and the bounce then says why. An operator who runs such a mail server sets the switch.
+                _s.Log.Write(MtaLogLevel.Warning, Source, $"delivery to {first.RecipientDomain} is held: its mail hosts resolve only to internal-network or reserved addresses, which are refused unless Delivery:AllowPrivateMxAddresses is true");
+                return Synthetic(RouteAttemptResult.TemporaryReply, 451, "4.4.4", $"the mail hosts of {first.RecipientDomain} resolve only to internal-network or reserved addresses, which this server does not deliver to unless Delivery:AllowPrivateMxAddresses is true");
         }
 
         var domainTls = await _s.Tls.ResolveDomainAsync(first.RecipientDomain, _s.TlsPolicies.For(first.RecipientDomain), ct).ConfigureAwait(false);
@@ -468,7 +495,8 @@ public sealed class DeliveryProcessor
                 }
 
                 hosts++;
-                var decision = await _s.Tls.ResolveForMxAsync(domainTls, exchanger.Host, mx.MxAuthenticated, _options.RemotePort, ct).ConfigureAwait(false);
+                int port = _options.RemotePortFor(exchanger.Host);
+                var decision = await _s.Tls.ResolveForMxAsync(domainTls, exchanger.Host, mx.MxAuthenticated, port, ct).ConfigureAwait(false);
                 if (decision.IsBlocked)
                 {
                     TlsReportRecorder.RecordBlocked(_s.TlsReports, decision, ReportableSendingIp(ProbeSourceAddress(exchanger.Addresses.FirstOrDefault())));
@@ -501,7 +529,7 @@ public sealed class DeliveryProcessor
                     {
                         Host = exchanger.Host,
                         Address = address,
-                        Port = _options.RemotePort,
+                        Port = port,
                         Tls = BuildTlsPolicy(decision, exchanger.Host, out var validator),
                     };
                     var result = await SendOnceAsync(target, current, ct).ConfigureAwait(false);
@@ -510,6 +538,25 @@ public sealed class DeliveryProcessor
                     result.Validator = validator;
                     result.ReceivingIp = address.ToString();
                     ReportTls(first.RecipientDomain, decision, result);
+                    if (result.Route == RouteAttemptResult.TlsPolicyFailure && result.TlsFailure == TlsFailure.HandshakeFailed && decision.AllowsPlaintextFallback)
+                    {
+                        // Opportunistic TLS (RFC 7435): a server whose STARTTLS upgrade breaks (an old TLS stack, a middlebox, a half-configured certificate) must not keep mail
+                        // from being delivered, since the message could have been sent in clear had the server not offered TLS at all. The failure has been reported; the
+                        // message is offered again on a new connection that does not try STARTTLS. Policies that require TLS (encrypt, verify, MTA-STS enforce, DANE) never get here.
+                        Trace($"{exchanger.Host} [{address}] broke the STARTTLS upgrade; retrying in plaintext (opportunistic TLS)");
+                        var clearTarget = new SmtpRemoteTarget { Host = exchanger.Host, Address = address, Port = port, Tls = SmtpTlsPolicy.Disabled };
+                        var clear = await SendOnceAsync(clearTarget, current, ct).ConfigureAwait(false);
+                        clear.MxHost = exchanger.Host;
+                        clear.Decision = decision;
+                        clear.ReceivingIp = address.ToString();
+                        if (clear.Tls is { } clearSession)
+                        {
+                            clear.Tls = clearSession with { StartTlsAdvertised = true, PlaintextFallback = true };
+                        }
+
+                        result = clear;
+                    }
+
                     if (result.Route is RouteAttemptResult.ConnectTimeout or RouteAttemptResult.ConnectRefused)
                     {
                         _s.Routes.ReportMxHost(exchanger.Host, result.Route);
@@ -690,7 +737,7 @@ public sealed class DeliveryProcessor
         };
     }
 
-    private static SmtpTlsPolicy BuildTlsPolicy(TlsPolicyDecision decision, string mxHost, out RemoteCertificateValidator? validator)
+    private SmtpTlsPolicy BuildTlsPolicy(TlsPolicyDecision decision, string mxHost, out RemoteCertificateValidator? validator)
     {
         validator = null;
         if (!decision.AttemptTls)
@@ -698,7 +745,7 @@ public sealed class DeliveryProcessor
             return SmtpTlsPolicy.Disabled;
         }
 
-        validator = new RemoteCertificateValidator(decision);
+        validator = new RemoteCertificateValidator(decision, _s.CertificateValidation);
         return new SmtpTlsPolicy
         {
             Mode = SmtpTlsMode.StartTls,
@@ -770,6 +817,8 @@ public sealed class DeliveryProcessor
             }
             catch (Exception ex) when (ex is IOException or SocketException or SmtpProtocolException or ObjectDisposedException)
             {
+                // A reply that is not SMTP where the verdict on the message should be is as good as no verdict: the server may have accepted the data.
+                bool endOfDataStarted = pooled.Connection.EndOfDataStarted;
                 pooled.Discard();
                 return new AttemptResult
                 {
@@ -777,6 +826,7 @@ public sealed class DeliveryProcessor
                     Reply = SmtpReply.Create(421, "4.4.2", "connection lost: " + ex.Message),
                     Error = ex.Message,
                     Tls = tlsSession,
+                    EndOfDataSent = endOfDataStarted,
                     Stage = ClientSmtpStage.Data,
                     Duration = Stopwatch.GetElapsedTime(started),
                     SendingIp = sendingIp,
@@ -1248,6 +1298,9 @@ public sealed class DeliveryProcessor
             return null;
         }
 
+        // The policy's own verdict decides: the platform alone knows only the system trust store, so a DANE-authenticated server (usually a self-signed
+        // certificate pinned in DNS) or one that chains to a configured private CA would show as unverified.
+        bool verified = a.Validator?.Outcome is { } outcome ? outcome.Verified && s.Used : s.Verified;
         return new TlsInfo(
             s.Used,
             s.Protocol,
@@ -1256,7 +1309,7 @@ public sealed class DeliveryProcessor
             s.PeerIssuer,
             s.PeerSha256,
             s.PolicyErrors == System.Net.Security.SslPolicyErrors.None ? null : s.PolicyErrors.ToString(),
-            s.Verified,
+            verified,
             a.Decision?.Kind.ToString(),
             null,
             s.StartTlsAdvertised,

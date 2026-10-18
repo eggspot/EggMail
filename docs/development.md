@@ -16,6 +16,10 @@ dotnet test tests/Mta.Smtp.Server.Tests  # one project
 
 Postgres-backed tests read `EGGMAIL_TEST_POSTGRES` (a connection string to an existing server and a database the test user may create schemas in). Without it the tests start a throwaway cluster from the PostgreSQL binaries on `PATH` (`initdb`, `pg_ctl`), and are skipped when those are not installed.
 
+## ACME and Cloudflare tests without a CA
+
+`tests/Mta.Host.Tests/Acme` runs in every `dotnet test` and needs nothing: a scriptable mock CA (`MockAcmeServer`), a fake Cloudflare (`FakeCloudflare`) and the real `CertesOrderRunner`, `CloudflareDnsChallengeProvider` and `AcmeRenewalService` with a fake clock. The runner and the provider take a pause function, so no test sleeps. To add a failure case, script the double (`Ca.Fail("newOrder", 429, "rateLimited", ..., retryAfterSeconds: 3600)`, `Ca.CertificateMode`, `cf.Fail("zones", 403, 9109, "...")`) and assert on the exception, the renewal row and the pauses. What these tests do not prove is in [testing-offline-coverage.md](testing-offline-coverage.md).
+
 ## ACME tests (Pebble)
 
 `tests/Mta.Integration.Tests/Acme` runs the certificate issuance and renewal flow against [Pebble](https://github.com/letsencrypt/pebble), Let's Encrypt's ACME test server, and `pebble-challtestsrv` (the DNS server Pebble validates DNS-01 against and resolves the test names with; HTTP-01 is validated against the listener of the tests). They are **skipped** unless `EGGMAIL_TEST_ACME_DIRECTORY` is set. CI runs both as containers; locally, without Docker, use the release binaries from the Pebble releases page (pinned in CI to 2.10.1) and the test certificates in the Pebble source tree:
@@ -65,6 +69,8 @@ Defaults: SQLite backend in `Sqlite:DataDirectory` (default `/data`), SMTP on 55
 
 `src/Mta.Tools` builds `mta-tools` (see [benchmarks.md](benchmarks.md)). Benchmarks use BenchmarkDotNet: `dotnet run -c Release --project bench/Mta.Benchmarks -- --filter "*Dkim*"`.
 
+The throughput matrix of both backends, durable and non-durable, runs with `bench/run-local-matrix.sh` (a results folder and a markdown table; [benchmarks.md](benchmarks.md#the-same-matrix-on-a-laptop-or-a-server-of-your-own)). Hours of load against the real `mta serve`, with `kill -9` and restore drills and a PASS/FAIL verdict, run with `bench/soak/run-soak.sh --hours 2 --backend sqlite` ([soak.md](soak.md)).
+
 ## Fuzzing
 
 `dotnet test` includes `tests/Mta.Fuzz.Tests` (seeds, checked-in corpus, past findings and a fixed number of seeded mutations per parser, no timing assertions). The long, coverage-guided runs are `.github/workflows/fuzz.yml` (weekly, or run it by hand with the `seconds_per_target` and `targets` inputs). Details, the list of targets and how to add a regression input are in [security.md](security.md#fuzzing).
@@ -79,6 +85,8 @@ dotnet run --project fuzz/Mta.Fuzz.Harness -c Release -- replay mime path/to/cra
 
 Tests never assert elapsed time, throughput or process memory (they measure the load of the machine, not the code): waits are signals or polls with a deadline far above any plausible load, "no hang" is a generous limit that only turns a hang into a failure, and "bounded work" is asserted on results and on the allocated bytes of the running thread. Throughput belongs to `bench/`.
 
+The accelerated lifecycle, crash-loop and leak tests (`--filter "FullyQualifiedName~Lifecycle"` or `~Leak`; days to a year of virtual time on both backends in seconds) are described in [testing-offline-coverage.md](testing-offline-coverage.md#accelerated-lifecycle-and-leaks); `EGGMAIL_ACCEL_SCALE=10` makes the loops ten times longer for a local run and `EGGMAIL_ACCEL_SEED` replays a randomized one. They do not replace a wall-clock soak.
+
 ## Conventions
 
 - Branch per milestone (`feat/<slug>`), pull request into `main`, squash merge after the diff has been reviewed twice (correctness, then style/tests/leftovers). Commit messages end with the co-author trailer.
@@ -91,4 +99,8 @@ Tests never assert elapsed time, throughput or process memory (they measure the 
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` builds and tests on Linux in one job with PostgreSQL 17 and Pebble (with its challenge test server) started by `docker run` before the tests, then checks the dashboard. Run `dotnet test EggMail.slnx` locally before pushing; without the environment variables above the PostgreSQL and ACME tests start a local cluster or are skipped. `release.yml` publishes the image and smoke-tests it ([release.md](release.md)); `bench-gate.yml` (weekly allocation gate) and `bench-throughput.yml` (manual) are described in [benchmarks.md](benchmarks.md). The deployment smoke tests in `deploy/smoke/` need Docker and are meant for Actions, but `deploy/smoke/smoke.py` runs against a locally started `mta serve` too (see its docstring).
+`.github/workflows/ci.yml` starts on every pull request (no path filter, so a required `build-test` check always reports); its first step runs `.github/scripts/changed-code.sh` and, when the change is documentation only (`docs/**`, any `*.md`, `.github/FUNDING.yml`; but `docs/operations.md` counts as code because tests compare it with the code), skips everything else and ends green after about a minute. A push to `main` keeps the path filter. Otherwise it builds and tests on Linux in one job with PostgreSQL 17 and Pebble (with its challenge test server) started by `docker run` before the tests, then checks the dashboard. Run `dotnet test EggMail.slnx` locally before pushing; without the environment variables above the PostgreSQL and ACME tests start a local cluster or are skipped. `release.yml` publishes the image and smoke-tests it ([release.md](release.md)); `bench-gate.yml` (weekly allocation gate), `bench-throughput.yml` (manual) and `soak.yml` (manual) are described in [benchmarks.md](benchmarks.md) and [soak.md](soak.md). The deployment smoke tests in `deploy/smoke/` need Docker and are meant for Actions, but `deploy/smoke/smoke.py` runs against a locally started `mta serve` too (see its docstring).
+
+## Offline tests of remote behaviour
+
+`tests/Mta.RemoteMta.Tests` (fake remote MTAs, fake DNS, fake clock) and `tests/Mta.Authentication.Tests` (independent DKIM readings, RFC vectors, Authentication-Results fixtures) are described, with what they do not prove, in [testing-offline-coverage.md](testing-offline-coverage.md).

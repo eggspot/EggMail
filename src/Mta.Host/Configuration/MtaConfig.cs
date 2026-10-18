@@ -33,6 +33,7 @@ public sealed class MtaConfig
     public TlsSection Tls { get; init; } = new();
     public AcmeSection Acme { get; init; } = new();
     public ApiSection Api { get; init; } = new();
+    public InboundSection Inbound { get; init; } = new();
     public DomainsSection Domains { get; init; } = new();
 }
 
@@ -114,6 +115,9 @@ public sealed class DeliverySection
     /// <summary>Per-destination connection and rate limits (adaptive: they start low and grow while the destination keeps accepting).</summary>
     public ThrottleSection Throttle { get; init; } = new();
 
+    /// <summary>A relay (smarthost) from the deployment configuration: the relay route that <see cref="Mta.Host.Hosting.RelayBootstrap"/> keeps in the config store, used when direct delivery fails.</summary>
+    public RelaySection Relay { get; init; } = new();
+
     /// <summary>Delays between retries after the 1st, 2nd, ... failed attempt; the last one repeats until the delivery expires. Empty keeps the built-in ladder (2 m, 5 m, 15 m, 30 m, 1 h, 2 h, 4 h).</summary>
     public List<TimeSpan> RetryDelays { get; init; } = [];
 
@@ -129,7 +133,7 @@ public sealed class DeliverySection
 
 /// <summary>
 /// Caps on how much mail may be sent per UTC hour and per UTC day (0 or unset = unlimited). A tenant can be given its own caps with the
-/// tenant settings <c>Sending:PerHour</c> and <c>Sending:PerDay</c>. Counters are in memory: a restart starts the current hour and day at zero.
+/// tenant settings <c>Sending:PerHour</c> and <c>Sending:PerDay</c>. Counters are kept in memory and written behind to the config store every few seconds and at a graceful stop: a restart resumes the current hour and day, and a crash loses only what was counted since the last write.
 /// </summary>
 public sealed class SendingSection
 {
@@ -175,6 +179,21 @@ public sealed class DnsSection
     public bool TrustAuthenticatedData { get; init; }
 }
 
+public sealed class RelaySection
+{
+    /// <summary><c>host:port</c> of the relay; empty means no relay from configuration.</summary>
+    public string? Address { get; init; }
+
+    public string? User { get; init; }
+    public string? Password { get; init; }
+    public string? PasswordFile { get; init; }
+
+    /// <summary><c>verify</c>, <c>implicit</c>, <c>required</c>, <c>starttls</c> or <c>none</c> (see the relay routes of the dashboard); empty: <c>implicit</c> on port 465, else <c>verify</c>.</summary>
+    public string? TlsMode { get; init; }
+
+    public const string RouteName = "configuration-relay";
+}
+
 public sealed class ThrottleSection
 {
     /// <summary>Ceiling of concurrent connections to one destination domain.</summary>
@@ -183,7 +202,7 @@ public sealed class ThrottleSection
     /// <summary>Ceiling of messages per minute to one destination domain.</summary>
     public double MaxMessagesPerMinute { get; init; } = 600;
 
-    /// <summary>Messages sent over one connection before it is closed.</summary>
+    /// <summary>Reserved: validated and passed on, but the delivery engine does not enforce it yet (see docs/operations.md).</summary>
     public int MaxMessagesPerConnection { get; init; } = 100;
 
     /// <summary>Connections allowed at first, before the destination has shown it accepts more.</summary>
@@ -202,6 +221,12 @@ public sealed class DashboardSection
 
     /// <summary>Path of a file holding the initial admin password (created once if no admin exists).</summary>
     public string? BootstrapAdminPasswordFile { get; init; }
+
+    /// <summary>
+    /// The initial admin password itself, for platforms that only pass environment variables (prefer <see cref="BootstrapAdminPasswordFile"/>: an environment
+    /// variable is visible to anyone who can inspect the container). With neither set and no administrator yet, the server generates a password and prints it once.
+    /// </summary>
+    public string? BootstrapAdminPassword { get; init; }
 
     public string BootstrapAdminUser { get; init; } = "admin";
 }
@@ -431,6 +456,7 @@ public sealed class ApiSection
     public int MaxApiKeysPerTenant { get; init; } = D.MaxApiKeysPerTenant;
     public int MaxSmtpCredentialsPerTenant { get; init; } = D.MaxSmtpCredentialsPerTenant;
     public int MaxWebhooksPerTenant { get; init; } = D.MaxWebhooksPerTenant;
+    public int MaxInboundRoutesPerDomain { get; init; } = D.MaxInboundRoutesPerDomain;
 
     /// <summary>Most rows one statistics query may return.</summary>
     public int MaxStatsRows { get; init; } = D.MaxStatsRows;
@@ -440,6 +466,30 @@ public sealed class ApiSection
 
     /// <summary>SPF <c>include:</c> host suggested to customers in the DNS records of a sending domain.</summary>
     public string? SpfInclude { get; init; } = D.SpfInclude;
+}
+
+/// <summary>
+/// Inbound mail (design section 11, decision 95). The retention of received mail is <c>Inbound:RetentionDays</c>, bound with the storage options.
+/// A domain's own settings override these defaults; <c>null</c> in a domain's settings means the value here.
+/// </summary>
+public sealed class InboundSection
+{
+    private static readonly InboundApiDefaults D = new();
+
+    /// <summary>Largest inbound message, in bytes. Null: <c>Smtp:MaxMessageSize</c>. A domain can lower it, never raise it.</summary>
+    public long? MaxMessageSize { get; init; }
+
+    /// <summary>Messages per minute accepted for one domain.</summary>
+    public int MaxMessagesPerMinute { get; init; } = D.MaxMessagesPerMinute;
+
+    /// <summary>Messages per minute accepted from one client address for one domain.</summary>
+    public int MaxMessagesPerMinutePerRemote { get; init; } = D.MaxMessagesPerMinutePerRemote;
+
+    /// <summary>Message bytes kept for one domain; at the limit new mail is refused with <c>452 4.2.2</c>. <c>0</c> is unlimited.</summary>
+    public long MaxStoredBytesPerDomain { get; init; } = D.MaxStoredBytesPerDomain;
+
+    /// <summary>Message bytes kept for all domains of one tenant together; at the limit new mail is refused with <c>452 4.2.2</c>. <c>0</c> is unlimited.</summary>
+    public long MaxStoredBytesPerTenant { get; init; } = D.MaxStoredBytesPerTenant;
 }
 
 /// <summary>

@@ -1,0 +1,20 @@
+# A message carrying a signature of the author's domain and one of a list service; both are reported, the aligned one carries DMARC.
+client-ip: 198.51.100.9
+helo: mail.example.com
+mail-from: alice@example.com
+authserv-id: mx.receiver.example
+[zone]
+example.com TXT v=spf1 ip4:192.0.2.3 -all
+_dmarc.example.com TXT v=DMARC1; p=reject
+[message]
+From: Alice <alice@example.com>
+To: Bob <bob@receiver.example>
+Subject: Fixture
+Date: Mon, 12 Oct 2026 12:00:00 +0000
+Message-ID: <fx1@example.com>
+
+Hello Bob.
+[sign domain=example.com selector=s1]
+[sign domain=lists.example.org selector=l1]
+[expect]
+mx.receiver.example; spf=fail smtp.mailfrom=alice@example.com; dkim=pass (2048-bit key) header.d=lists.example.org header.s=l1 header.b=Bx+nO57B; dkim=pass (2048-bit key) header.d=example.com header.s=s1 header.b=vbyOuf58; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=example.com

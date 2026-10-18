@@ -74,7 +74,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
     private readonly List<IAsyncDisposable> _owned = [];
 
     public static async Task<EggMailRuntime> CreateAsync(MtaConfig config, IStorage storage, IClock clock, IMtaLog log, CancellationToken ct, IDnsResolver? dnsOverride = null,
-        IAcmeOrderRunner? acmeRunnerOverride = null, IDnsChallengeProvider? acmeDnsOverride = null)
+        IAcmeOrderRunner? acmeRunnerOverride = null, IDnsChallengeProvider? acmeDnsOverride = null, bool hostnameConfigured = true)
     {
         var secrets = Mta.Host.Secrets.SecretsFactory.Create(config.Secrets, storage.Config);
         foreach (string warning in Mta.Host.Secrets.SecretsFactory.Warnings(config.Secrets, storage.Config))
@@ -87,10 +87,11 @@ public sealed class EggMailRuntime : IAsyncDisposable
             log.Write(MtaLogLevel.Warning, "startup", "Secrets:KeyProtection is None: the Data Protection key ring is stored unprotected. Use a certificate in production.");
         }
 
-        var certificates = new DatabaseCertificateProvider(storage.Config, secrets, config.Hostname, config.Tls, clock, log);
+        var certificates = new DatabaseCertificateProvider(storage.Config, secrets, config.Hostname, config.Tls, clock, log, replaceOnHostnameChange: hostnameConfigured);
         await certificates.InitializeAsync(ct).ConfigureAwait(false);
         var certificateMeters = Mta.Host.Tls.TlsMetrics.Attach(certificates, clock);
-        var verp = await VerpKeyStore.LoadOrCreateAsync(storage.Config, ct).ConfigureAwait(false);
+        System.Runtime.CompilerServices.RuntimeHelpers.RunClassConstructor(typeof(ProcessMetrics).TypeHandle);   // publishes the Mta.Process gauges (descriptors, threads) to the exporters
+        var verp = await VerpKeyStore.LoadOrCreateAsync(storage.Config, ct, clock).ConfigureAwait(false);
 
         var dns = dnsOverride ?? CreateDns(config);
         var storageOptions = config.Storage;
@@ -211,7 +212,8 @@ public sealed class EggMailRuntime : IAsyncDisposable
             if (acmeDnsOverride is null && config.Acme.HasDnsCredentials())
             {
                 string token = config.Acme.CloudflareApiToken ?? File.ReadAllText(config.Acme.CloudflareApiTokenFile!).Trim();
-                acmeDnsOverride = new CloudflareDnsChallengeProvider(new HttpClient(), token);
+                // 30 seconds per request (the HttpClient default is 100): the provider retries, and a stalled API must not hold an order for minutes.
+                acmeDnsOverride = new CloudflareDnsChallengeProvider(new HttpClient { Timeout = TimeSpan.FromSeconds(30) }, token);
             }
 
             Http01Challenges? http01 = null;

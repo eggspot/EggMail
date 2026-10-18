@@ -20,7 +20,7 @@ public class OutageTests : StorageTestBase
         TestDatabase db = await PostgresTestServer.Instance.CreateDatabaseAsync();
         var direct = new NpgsqlConnectionStringBuilder(db.ConnectionString);
         _proxy = new TcpProxy(direct.Host!, direct.Port);
-        var viaProxy = new NpgsqlConnectionStringBuilder(db.ConnectionString) { Host = "127.0.0.1", Port = _proxy.Port, Timeout = 3, Pooling = true };
+        var viaProxy = new NpgsqlConnectionStringBuilder(db.ConnectionString) { Host = "127.0.0.1", Port = _proxy.Port, Timeout = 30, Pooling = true };   // Cut() refuses connections at once, so a long connect timeout costs nothing in an outage; 3 s was exceeded by InitializeAsync on a loaded CI runner
         _pg.Adopt(db);
         return PostgresStorage.Create(PgHarness.WithDatabase(options, viaProxy.ConnectionString), Clock);
     }
@@ -66,6 +66,18 @@ public class OutageTests : StorageTestBase
         await Assert.ThrowsAsync<StorageUnavailableException>(async () => await Storage.Maintenance.RunAsync(Clock.UtcNow, ct));
         await Assert.ThrowsAsync<StorageUnavailableException>(async () => await Storage.Config.GetTenantsAsync(ct));
         await Assert.ThrowsAsync<StorageUnavailableException>(async () => await Storage.Config.UpsertTenantAsync(new Tenant(Ids.New(), "T", "t", true, Clock.UtcNow, false), ct));
+
+        var inboundDraft = new InboundMessageDraft
+        {
+            Id = Ids.New(), TenantId = TenantA, DomainId = Ids.New(), Domain = "example.com", ReceivedAt = Clock.UtcNow, RemoteAddress = "203.0.113.9", EnvelopeFrom = "a@sender.test", EnvelopeTo = "x@example.com",
+            Auth = InboundAuthResults.NotChecked, RouteId = Ids.New(), ActionKind = InboundActionKind.Store, Raw = new byte[10],
+        };
+        await Assert.ThrowsAsync<StorageUnavailableException>(async () => await Storage.Inbound.AcceptAsync([inboundDraft], ct));
+        await Assert.ThrowsAsync<StorageUnavailableException>(async () => await Storage.Inbound.SearchAsync(new InboundMessageQuery(TenantId: TenantA), ct));
+        await Assert.ThrowsAsync<StorageUnavailableException>(async () => await Storage.Inbound.GetRawAsync(TenantA, inboundDraft.Id, ct));
+        await Assert.ThrowsAsync<StorageUnavailableException>(async () => await Storage.Inbound.ClaimActionsAsync("w", 5, Clock.UtcNow, TimeSpan.FromMinutes(1), ct));
+        await Assert.ThrowsAsync<StorageUnavailableException>(async () => await Storage.Inbound.GetUsageAsync(null, null, ct));
+        await Assert.ThrowsAsync<StorageUnavailableException>(async () => await Storage.Inbound.LoadEnabledDomainsAsync(ct));
 
         StorageHealth down = await Storage.Maintenance.GetHealthAsync(ct);
         Assert.False(down.Ready);

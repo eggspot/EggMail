@@ -240,6 +240,13 @@ public sealed class SmtpClientConnection : IAsyncDisposable
             _broken = true;
             throw new SmtpConnectionException(stage, $"Timeout waiting for reply from {_target.Host} at {stage}", timedOut: true);
         }
+        catch (OperationCanceledException)
+        {
+            // The caller gave up (a quiesce or a shutdown) with a reply possibly on its way: the conversation is out of step and the connection must not be reused or asked to QUIT politely
+            // (that would wait for an answer that is queued behind the one we abandoned, 5 seconds, for every connection that is cut).
+            _broken = true;
+            throw;
+        }
         catch (Exception ex) when (ex is IOException or SocketException or ObjectDisposedException)
         {
             _broken = true;
@@ -262,6 +269,11 @@ public sealed class SmtpClientConnection : IAsyncDisposable
                 _broken = true;
                 throw new SmtpConnectionException(stage, $"{_target.Host} closed the connection while sending at {stage}");
             }
+        }
+        catch (OperationCanceledException)
+        {
+            _broken = true;   // a partly written command or message cannot be completed later
+            throw;
         }
         catch (Exception ex) when (ex is IOException or SocketException or ObjectDisposedException)
         {
@@ -319,14 +331,25 @@ public sealed class SmtpClientConnection : IAsyncDisposable
         line.Clear();
     }
 
-    private void WriteRcptTo(EmailAddress recipient)
+    private void WriteRcptTo(EmailAddress recipient, SmtpCapabilities caps)
     {
         var line = new DefaultInterpolatedStringHandler(0, 0, System.Globalization.CultureInfo.InvariantCulture, stackalloc char[320]);
         line.AppendLiteral("RCPT TO:");
         AppendPath(ref line, recipient);
+        if (caps.Dsn && !recipient.IsNull && IsAscii(recipient))
+        {
+            // RFC 3461: the address as we were asked to send it. A server that forwards the message passes it on, and the server that finally
+            // reports a failure puts it in Original-Recipient, which is how a bounce for a forwarded address still names the address we used
+            // (the bounce processor only acts on addresses in the domain it sent to). No NOTIFY: ORCPT alone changes nothing about what is reported.
+            line.AppendLiteral(" ORCPT=rfc822;");
+            line.AppendFormatted(Mta.Smtp.Protocol.Sasl.EncodeXtext(recipient.LocalPart + "@" + recipient.Domain));
+        }
+
         WriteLine(line.Text);
         line.Clear();
     }
+
+    private static bool IsAscii(EmailAddress address) => System.Text.Ascii.IsValid(address.LocalPart) && System.Text.Ascii.IsValid(address.Domain);
 
     private static void AppendPath(ref DefaultInterpolatedStringHandler line, EmailAddress address)
     {
@@ -543,7 +566,7 @@ public sealed class SmtpClientConnection : IAsyncDisposable
             WriteMailFrom(envelope, caps, message.Length);
             for (int i = 0; i < envelope.Recipients.Count; i++)   // by index: enumerating the interface allocates
             {
-                WriteRcptTo(envelope.Recipients[i]);
+                WriteRcptTo(envelope.Recipients[i], caps);
             }
 
             // DATA/BDAT cannot be pipelined blindly with BDAT; with DATA we may send it right behind the last RCPT.
@@ -554,13 +577,29 @@ public sealed class SmtpClientConnection : IAsyncDisposable
 
             await FlushAsync(SmtpStage.MailFrom, cancellationToken).ConfigureAwait(false);
             mailReply = await ReadReplyAsync(SmtpStage.MailFrom, _options.CommandTimeout, cancellationToken).ConfigureAwait(false);
+            if (mailReply.Code == ServiceNotAvailable)
+            {
+                // The server is closing the channel (RFC 5321 4.2.2): the replies to the rest of the pipeline will never come. Keep the 421 itself, it is the reason.
+                _broken = true;
+                return new SmtpSendResult { Stage = SmtpStage.MailFrom, SenderRejection = mailReply };
+            }
+
             for (int i = 0; i < envelope.Recipients.Count; i++)
             {
                 var r = await ReadReplyAsync(SmtpStage.RcptTo, _options.CommandTimeout, cancellationToken).ConfigureAwait(false);
                 results.Add(new SmtpRecipientResult { Address = envelope.Recipients[i], Reply = r });
+                if (r.Code == ServiceNotAvailable)
+                {
+                    return ChannelClosing(results, r);
+                }
             }
 
             SmtpReply? dataReply = chunking ? null : await ReadReplyAsync(SmtpStage.Data, _options.DataInitiationTimeout, cancellationToken).ConfigureAwait(false);
+            if (dataReply is { Code: ServiceNotAvailable })
+            {
+                return ChannelClosing(results, dataReply);
+            }
+
             if (!mailReply.IsPositiveCompletion)
             {
                 // Server rejected the sender; the pipelined RCPT/DATA were answered 503. Resynchronized, nothing to reset.
@@ -600,15 +639,20 @@ public sealed class SmtpClientConnection : IAsyncDisposable
         mailReply = await FlushAndReadReplyAsync(SmtpStage.MailFrom, _options.CommandTimeout, cancellationToken).ConfigureAwait(false);
         if (!mailReply.IsPositiveCompletion)
         {
+            _broken |= mailReply.Code == ServiceNotAvailable;
             return new SmtpSendResult { Stage = SmtpStage.MailFrom, SenderRejection = mailReply };
         }
 
         for (int i = 0; i < envelope.Recipients.Count; i++)
         {
             var rcpt = envelope.Recipients[i];
-            WriteRcptTo(rcpt);
+            WriteRcptTo(rcpt, caps);
             var r = await FlushAndReadReplyAsync(SmtpStage.RcptTo, _options.CommandTimeout, cancellationToken).ConfigureAwait(false);
             results.Add(new SmtpRecipientResult { Address = rcpt, Reply = r });
+            if (r.Code == ServiceNotAvailable)
+            {
+                return ChannelClosing(results, r);
+            }
         }
 
         if (!AnyAccepted(results))
@@ -625,6 +669,7 @@ public sealed class SmtpClientConnection : IAsyncDisposable
         var data = await CommandAsync(SmtpStage.Data, "DATA", _options.DataInitiationTimeout, cancellationToken).ConfigureAwait(false);
         if (!data.IsIntermediate)
         {
+            _broken |= data.Code == ServiceNotAvailable;
             return new SmtpSendResult { Stage = SmtpStage.Data, Recipients = results, DataRejection = data };
         }
 
@@ -684,9 +729,23 @@ public sealed class SmtpClientConnection : IAsyncDisposable
             throw new SmtpConnectionException(ex.Stage, ex.Message, ex.InnerException, endOfDataSent: true, ex.TimedOut);
         }
 
+        _broken |= final.Code == ServiceNotAvailable;
         TransactionsCompleted++;
         LastUsedAt = _clock.UtcNow;
         return new SmtpSendResult { Stage = SmtpStage.EndOfData, Recipients = results, FinalReply = final, EndOfDataSent = true };
+    }
+
+    /// <summary>The reply that makes a server close the channel (RFC 5321 4.2.2: 421, service not available).</summary>
+    private const int ServiceNotAvailable = 421;
+
+    /// <summary>
+    /// A 421 during the envelope: the server closes the connection, so the answers that are still owed (the other recipients, DATA) will not come and nothing can be reset.
+    /// The 421 is reported as the verdict for every recipient that has no answer of its own (it is why the delivery is deferred and how the retry is scheduled), and the connection is dropped.
+    /// </summary>
+    private SmtpSendResult ChannelClosing(List<SmtpRecipientResult> results, SmtpReply closing)
+    {
+        _broken = true;
+        return new SmtpSendResult { Stage = SmtpStage.RcptTo, Recipients = results, DataRejection = closing };
     }
 
     [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]

@@ -150,6 +150,7 @@ internal static class Cli
                 Sqlite = options.Sqlite,
                 Content = options.Content,
                 Queue = options.Queue,
+                Inbound = options.Inbound,
                 Postgres = new PostgresOptions
                 {
                     OwnerConnectionString = options.Postgres.OwnerConnectionString,
@@ -201,6 +202,12 @@ internal static class Cli
         var startupLog = new MtaLogAdapter(startupLogs.Factory);
         var clock = SystemClock.Instance;
 
+        if (loaded.Config.Storage.Backend == StorageBackend.Sqlite && StartupChecks.DataDirectoryProblem(loaded.Config.Storage.Sqlite.DataDirectory) is { } dataProblem)
+        {
+            Console.Error.WriteLine("configuration error: " + dataProblem);
+            return 2;
+        }
+
         // One process owns a SQLite data directory (the offline migrate-storage commands take the same lock).
         using DataDirectoryLock? directoryLock = loaded.Config.Storage.Backend == StorageBackend.Sqlite ? DataDirectoryLock.Acquire(loaded.Config.Storage.Sqlite.DataDirectory) : null;
         var storage = StorageFactory.Create(loaded.Config.Storage, clock, startupLog);
@@ -213,7 +220,7 @@ internal static class Cli
         EggMailRuntime createdRuntime;
         try
         {
-            createdRuntime = await EggMailRuntime.CreateAsync(config, storage, clock, startupLog, CancellationToken.None).ConfigureAwait(false);
+            createdRuntime = await EggMailRuntime.CreateAsync(config, storage, clock, startupLog, CancellationToken.None, hostnameConfigured: StartupChecks.HostnameConfigured(config, Environment.GetEnvironmentVariable)).ConfigureAwait(false);
         }
         catch (Mta.Host.Secrets.SecretsConfigurationException ex)
         {
@@ -223,11 +230,30 @@ internal static class Cli
         }
 
         await using var runtime = createdRuntime;
-        await ApiHosting.EnsureBootstrapAdminAsync(config, storage, clock, startupLog, CancellationToken.None).ConfigureAwait(false);
+        FirstAdministratorResult admin = await ApiHosting.EnsureFirstAdministratorAsync(config, storage, clock, startupLog, CancellationToken.None).ConfigureAwait(false);
+        if (admin.Outcome == FirstAdministratorOutcome.Problem)
+        {
+            Console.Error.WriteLine("configuration error: " + admin.Problem);
+            return 2;
+        }
+
+        if (admin.GeneratedPassword is { } generatedPassword)
+        {
+            FirstAdministrator.WriteGeneratedPasswordNotice(Console.Out, admin.UserName, generatedPassword, config.Dashboard.HttpsPort);
+        }
+
+        if (gate.Mode == StartupMode.Normal && await RelayBootstrap.ApplyAsync(config, storage.Config, runtime.Secrets, startupLog, CancellationToken.None).ConfigureAwait(false) is { } relayProblem)
+        {
+            Console.Error.WriteLine("configuration error: " + relayProblem);
+            return 2;
+        }
+
         if (gate.Mode == StartupMode.Normal && config.Domains.Bootstrap.Count > 0)
         {
-            await DomainBootstrap.RunAsync(config, storage, runtime.Secrets, clock, startupLog, CancellationToken.None).ConfigureAwait(false);   // Domains:Bootstrap
+            await DomainBootstrap.RunAsync(config, storage, runtime.Secrets, clock, startupLog, CancellationToken.None).ConfigureAwait(false);   // Domains:Bootstrap (EGGMAIL_DOMAINS)
         }
+
+        StartupChecks.LogAdvice(config, startupLog, source: loaded.Source);
 
         builder.Services.AddSingleton(loaded);
         builder.Services.AddSingleton(config);

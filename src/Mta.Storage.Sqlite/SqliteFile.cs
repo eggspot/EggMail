@@ -62,6 +62,9 @@ internal sealed class SqliteFile
         }.ToString();
     }
 
+    /// <summary>Tests only: a cap on the pages of a file (<c>PRAGMA max_page_count</c>, by the file's full path) that provokes SQLITE_FULL without a full disk. Empty in production.</summary>
+    internal static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> PageLimitsForTests = new(StringComparer.Ordinal);
+
     public SqliteFileKind Kind { get; }
 
     /// <summary>Open read connections with prepared statements for the reads on the delivery path (not used for the in-memory queue, whose reads run on its writer).</summary>
@@ -119,6 +122,11 @@ internal sealed class SqliteFile
             Execute(connection, "PRAGMA busy_timeout=" + ((long)_options.BusyTimeout.TotalMilliseconds).ToString(CultureInfo.InvariantCulture));
             Execute(connection, "PRAGMA journal_size_limit=" + _options.JournalSizeLimitBytes.ToString(CultureInfo.InvariantCulture));
             Execute(connection, "PRAGMA cache_size=-16384");
+            if (Path is not null && PageLimitsForTests.TryGetValue(Path, out int maxPages))
+            {
+                Execute(connection, "PRAGMA max_page_count=" + maxPages.ToString(CultureInfo.InvariantCulture));
+            }
+
             EnsureSchema(connection);
             return connection;
         }
@@ -192,7 +200,12 @@ internal sealed class SqliteFile
                 UpgradeFromV4(connection);
             }
 
-            UpgradeFromV5(connection);
+            if (version <= 6)
+            {
+                UpgradeFromV5(connection);
+            }
+
+            UpgradeFromV7(connection);
             return;
         }
 
@@ -407,6 +420,51 @@ internal sealed class SqliteFile
             using var create = connection.CreateCommand();
             create.Transaction = tx;
             create.CommandText = index;
+            create.ExecuteNonQuery();
+        }
+
+        using var cmd = connection.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = "PRAGMA user_version=7";
+        cmd.ExecuteNonQuery();
+        tx.Commit();
+    }
+
+    /// <summary>
+    /// Version 8 added inbound mail (decision 95): <c>inbound_domain_settings</c> and <c>inbound_route</c> in config.db, <c>inbound_message</c> and
+    /// <c>inbound_message_raw</c> in queue.db, with their indexes. The statements come from the generated schema script so they cannot drift from the model,
+    /// and each is skipped when its table or index already exists (a file taken back to an older version by hand). The other files just move to the new version.
+    /// </summary>
+    private void UpgradeFromV7(SqliteConnection connection)
+    {
+        string script = ApplyWithoutRowId(_createScript(), WithoutRowIdTables);
+        var statements = new List<string>();
+        string[] tables = Kind switch
+        {
+            SqliteFileKind.Config => ["inbound_domain_settings", "inbound_route"],
+            SqliteFileKind.Queue => ["inbound_message", "inbound_message_raw"],
+            _ => [],
+        };
+        foreach (string table in tables)
+        {
+            statements.Add(IfNotExists(Regex.Match(script, "CREATE TABLE \"" + table + "\" \\(.*?\\r?\\n\\)(?: WITHOUT ROWID)?;", RegexOptions.Singleline).Value));
+            foreach (Match index in Regex.Matches(script, "CREATE (?:UNIQUE )?INDEX \"[^\"]+\" ON \"" + table + "\" [^;]*;"))
+            {
+                statements.Add(IfNotExists(index.Value));
+            }
+        }
+
+        if (statements.Any(string.IsNullOrEmpty))
+        {
+            throw new InvalidOperationException($"Could not derive the version 8 upgrade of {FileName} from the generated schema script.");
+        }
+
+        using var tx = connection.BeginTransaction();
+        foreach (string statement in statements)
+        {
+            using var create = connection.CreateCommand();
+            create.Transaction = tx;
+            create.CommandText = statement;
             create.ExecuteNonQuery();
         }
 

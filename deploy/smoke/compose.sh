@@ -2,12 +2,14 @@
 # Smoke test of the shipped Compose files (deploy/compose) against a published image. Linux with Docker Compose v2 (the host address for the
 # DNS stub is found with `ip route`; set SMOKE_HOST_IP to override).
 #
-#   deploy/smoke/compose.sh postgres <image reference>   compose.postgres.yaml: PostgreSQL 17 + EggMail, full end-to-end smoke test
-#   deploy/smoke/compose.sh sqlite   <image reference>   compose.yaml: starts, becomes healthy, bootstrap administrator signs in
+#   deploy/smoke/compose.sh postgres <image reference>   compose.postgres.yaml: PostgreSQL 17 + EggMail, full end-to-end smoke test; the administrator
+#                                                          password is given in EGGMAIL_ADMIN_PASSWORD (the chosen-password path)
+#   deploy/smoke/compose.sh sqlite   <image reference>   compose.yaml: starts, becomes healthy, signs in with the GENERATED administrator password
+#                                                          taken from the log (the one-time notice must be there exactly once)
 #   deploy/smoke/compose.sh unbound  <image reference>   compose.yaml + compose.unbound.yaml: the resolver validates DNSSEC (AD bit)
 #
 # Only the postgres variant runs the full end-to-end test (it needs the test-only override that points the instance at the DNS stub
-# and the sink); the other two prove that the file starts healthy and that the bootstrap administrator can sign in.
+# and the sink); the other two prove that the file starts healthy and that the administrator can sign in.
 #
 # Safety: every compose command runs with `-p eggmail-smoke-<pid>` (the -p flag beats the `name:` of the files), so `down -v` at the end can
 # only remove this run's own containers, network and volumes, never those of a real deployment of the same files. The published ports
@@ -34,9 +36,8 @@ if [ -z "$SMOKE_HOST_IP" ]; then
 fi
 export SMOKE_HOST_IP
 admin_password=$(openssl rand -hex 12)Aa1
-mkdir -p "$work/secrets"
-printf '%s' "$admin_password" > "$work/secrets/admin_password.txt"
-chmod 644 "$work/secrets/admin_password.txt"
+# Only the postgres variant chooses the administrator password; the other two leave EGGMAIL_ADMIN_PASSWORD empty, so the server generates one.
+if [ "$variant" = postgres ]; then export EGGMAIL_ADMIN_PASSWORD=$admin_password; fi
 
 case "$variant" in
   postgres) files=(-f compose.postgres.yaml -f compose.smoke.yaml) ;;
@@ -84,10 +85,12 @@ case "$variant" in
     python3 "$here/smoke.py" --admin-user admin --admin-password "$admin_password" --expect-backend postgres --smtp-port 587 --host-ip "$SMOKE_HOST_IP" --timeout 90
     ;;
   sqlite)
-    python3 "$here/smoke.py" --admin-user admin --admin-password "$admin_password" --expect-backend sqlite --stop-after signin
+    generated=$(dc logs --no-color eggmail | python3 "$here/smoke.py" --print-generated-password)
+    python3 "$here/smoke.py" --admin-user admin --admin-password "$generated" --expect-backend sqlite --stop-after signin
     ;;
   unbound)
-    python3 "$here/smoke.py" --admin-user admin --admin-password "$admin_password" --expect-backend sqlite --stop-after signin
+    generated=$(dc logs --no-color eggmail | python3 "$here/smoke.py" --print-generated-password)
+    python3 "$here/smoke.py" --admin-user admin --admin-password "$generated" --expect-backend sqlite --stop-after signin
     echo "-- EggMail runs with the resolver settings of the override (the environment of the running container)"
     container_env=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$(dc ps -q eggmail)")
     echo "$container_env" | grep -qx 'Dns__TrustAuthenticatedData=true' || { echo "::error::the running container lacks Dns__TrustAuthenticatedData=true"; exit 1; }

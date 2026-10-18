@@ -21,7 +21,7 @@ public static class DashboardAccounts
     public static string? UserNameProblem(string? userName)
     {
         string name = userName?.Trim() ?? "";
-        return name.Length is 0 or > MaximumUserNameLength || name.Any(char.IsControl)
+        return name.Length is 0 or > MaximumUserNameLength || ApiText.HasUnsafeCharacter(name)
             ? $"A user name of 1 to {MaximumUserNameLength} characters without control characters is required."
             : null;
     }
@@ -42,7 +42,7 @@ public static class DashboardAccounts
     public static string HashPassword(string password, int? hashIterations = null) => Hash(password, hashIterations);
 
     public static async ValueTask<DashboardUser> CreateAsync(
-        IConfigStore config, IClock clock, string userName, string password, DashboardRole role, Guid? tenantId, CancellationToken ct, int? hashIterations = null)
+        IConfigStore config, IClock clock, string userName, string password, DashboardRole role, Guid? tenantId, CancellationToken ct, int? hashIterations = null, bool mustChangePassword = false)
     {
         if (UserNameProblem(userName) is { } nameProblem)
         {
@@ -61,20 +61,21 @@ public static class DashboardAccounts
             throw new ArgumentException("An admin does not belong to a tenant.", nameof(tenantId));
         }
 
-        var user = new DashboardUser(Ids.New(clock.UtcNow), name, Hash(password, hashIterations), role, tenantId, true, clock.UtcNow);
+        string hash = Hash(password, hashIterations);
+        var user = new DashboardUser(Ids.New(clock.UtcNow), name, mustChangePassword ? PasswordHasher.MarkMustChange(hash) : hash, role, tenantId, true, clock.UtcNow);
         await config.UpsertDashboardUserAsync(user, ct).ConfigureAwait(false); // StorageConflictException when the name is taken
         return user;
     }
 
     /// <summary>Creates the first admin if no admin exists yet. Returns true when it was created.</summary>
-    public static async ValueTask<bool> EnsureAdminAsync(IConfigStore config, IClock clock, string userName, string password, CancellationToken ct, int? hashIterations = null)
+    public static async ValueTask<bool> EnsureAdminAsync(IConfigStore config, IClock clock, string userName, string password, CancellationToken ct, int? hashIterations = null, bool mustChangePassword = false)
     {
         if ((await config.GetDashboardUsersAsync(ct).ConfigureAwait(false)).Any(u => u.Role == DashboardRole.Admin))
         {
             return false;
         }
 
-        await CreateAsync(config, clock, userName, password, DashboardRole.Admin, null, ct, hashIterations).ConfigureAwait(false);
+        await CreateAsync(config, clock, userName, password, DashboardRole.Admin, null, ct, hashIterations, mustChangePassword).ConfigureAwait(false);
         return true;
     }
 

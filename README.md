@@ -39,14 +39,75 @@ Backend **characteristics** (not missing features): SQLite is single node and on
 
 ## Quick start
 
-One Docker image runs out of the box on the SQLite backend with one volume at `/data`; PostgreSQL is selected by configuration in the same image. There is no stable release yet, so there is no `latest` or version tag: use `nightly` (the daily build of `main`; the first scheduled build has not completed yet, manual runs publish `nightly-<short sha>`) and pin a digest, or a version tag once releases exist.
+One Docker image, one command, **no configuration**: it starts on SQLite with everything it needs and is usable at once. There is no stable release yet, so there is no `latest` or version tag: use `nightly` (the daily build of `main`; manual runs publish `nightly-<short sha>`) and pin a digest, or a version tag once releases exist.
 
 ```sh
-docker volume create eggmail-data
-# The first administrator (with SQLite the server must not be running while you do this; see docs/operations.md for the alternatives):
-docker run --rm -v eggmail-data:/data -e MTA_ADMIN_PASSWORD='a-long-password' ghcr.io/eggspot/eggmail:nightly admin create --user admin
 docker run -d --name eggmail -p 587:5587 -p 465:4465 -p 2525:2525 -p 8443:8443 \
   -v eggmail-data:/data ghcr.io/eggspot/eggmail:nightly
+docker logs eggmail    # the dashboard administrator password, printed ONCE, between two marker lines
+```
+
+Open `https://localhost:8443` (the certificate is self-signed until you set up a real one, and the dashboard says so), sign in as `admin` with the printed password and choose your own when the dashboard asks (the printed one is temporary, and it stays readable in the container log until you do). SMTP submission with AUTH works on 587 (STARTTLS), 465 (implicit TLS) and 2525. The first start creates the data directory and SQLite files, the key ring, the VERP key, the administrator and the certificate; a DKIM key is generated for every sending domain you add.
+
+Then, in the dashboard: add your sending domain (it shows the DNS records to publish; the domain is usable once its DKIM record verifies), create an **SMTP credential** or an **API key** under Credentials, and point your application at port 587 (or `POST /api/v1/messages`).
+
+**For a real server** add three or four variables (the complete list, with what each one maps to, is [The simple environment variables](docs/operations.md#the-simple-environment-variables); the long configuration keys keep working and win):
+
+```sh
+docker run -d --name eggmail-prod \
+  -p 587:5587 -p 465:4465 -p 2525:2525 -p 8443:8443 -p 80:80 -v eggmail-prod-data:/data \
+  -e EGGMAIL_HOSTNAME=mail.example.com \
+  -e EGGMAIL_ACME_EMAIL=admin@example.com \
+  -e EGGMAIL_DOMAINS=example.com \
+  ghcr.io/eggspot/eggmail:nightly
+```
+
+`EGGMAIL_HOSTNAME` is the name in SMTP greetings, the certificate and the dashboard; together with `EGGMAIL_ACME_EMAIL` it turns on a free, automatically renewed certificate, proved over HTTP-01 on port 80 (the `-p 80:80`: the certificate authority must reach that port of your host name; the built-in listener answers the challenge path and nothing else). `EGGMAIL_DOMAINS` registers your sending domains at the start, `CLOUDFLARE_API_TOKEN` selects the DNS-01 challenge instead (no port 80, wildcards possible), `EGGMAIL_ADMIN_PASSWORD_FILE` lets you choose the administrator password instead of having one generated, `EGGMAIL_RELAY=host:port` adds a smarthost fallback. What you must still do outside the container (DNS records, reverse DNS, outbound port 25, firewall) is [listed in the operations guide](docs/operations.md#what-only-you-can-do-outside-the-container); port 25 is not a submission port ([ports](docs/operations.md#ports)).
+
+**Lost the administrator password?** (Use your own container and volume names.) Create another administrator (SQLite: the server container must be stopped; PostgreSQL: it can run, add your `-e EGGMAIL_DATABASE=...`), then reset or delete the old account in the dashboard:
+
+```sh
+docker stop eggmail
+docker run --rm -v eggmail-data:/data -e MTA_ADMIN_PASSWORD='a-new-password-1' ghcr.io/eggspot/eggmail:nightly admin create --user rescue
+docker start eggmail
+```
+
+**With Docker Compose** (the tested file is [`deploy/compose/compose.yaml`](deploy/compose/compose.yaml)):
+
+```yaml
+services:
+  eggmail:
+    image: ghcr.io/eggspot/eggmail:nightly
+    environment:
+      EGGMAIL_HOSTNAME: mail.example.com
+      EGGMAIL_ACME_EMAIL: admin@example.com
+    ports: ["587:5587", "465:4465", "2525:2525", "8443:8443", "80:80"]   # 80: the certificate authority, HTTP-01
+    volumes: ["eggmail-data:/data"]
+volumes:
+  eggmail-data:
+```
+
+**With PostgreSQL**: the same, plus **one** variable, `EGGMAIL_DATABASE` (the tested file is [`deploy/compose/compose.postgres.yaml`](deploy/compose/compose.postgres.yaml)):
+
+```yaml
+services:
+  eggmail:
+    image: ghcr.io/eggspot/eggmail:nightly
+    depends_on: { postgres: { condition: service_healthy } }
+    environment:
+      EGGMAIL_HOSTNAME: mail.example.com
+      EGGMAIL_ACME_EMAIL: admin@example.com
+      EGGMAIL_DATABASE: "Host=postgres;Database=eggmail;Username=eggmail;Password=change-me"   # the only difference
+    ports: ["587:5587", "465:4465", "2525:2525", "8443:8443", "80:80"]   # 80: the certificate authority, HTTP-01
+    volumes: ["eggmail-data:/data"]
+  postgres:
+    image: postgres:17
+    environment: { POSTGRES_USER: eggmail, POSTGRES_PASSWORD: change-me, POSTGRES_DB: eggmail }
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U eggmail -d eggmail"], interval: 5s, retries: 10 }
+volumes:
+  eggmail-data:
+  pgdata:
 ```
 
 Ready-made, tested deployment files live in [`deploy/`](deploy/):
@@ -71,6 +132,7 @@ The container healthcheck is `["CMD", "/app/mta", "--healthcheck"]`: the chisele
 | [docs/decisions.md](docs/decisions.md) | The decisions record (owner and design decisions A–T and items 1–52) |
 | [docs/plan.md](docs/plan.md) | Components with engineer-week estimates, phases, cut order, risks, calendar |
 | [docs/benchmarks.md](docs/benchmarks.md) | How performance is measured and compared, per mode; the allocation regression gate; the Postfix/KumoMTA comparison setup; trend numbers from CI |
+| [docs/soak.md](docs/soak.md) | The soak test: hours of load against the real host with kill -9 and restore drills, the PASS/FAIL criteria, how to run it locally and in Actions |
 | [docs/release.md](docs/release.md) | Release and packaging: the single Docker image, `ghcr.io/eggspot/eggmail`, the GitHub Actions release workflow and its smoke tests, release assets, compose and Kubernetes files |
 | [CHANGELOG.md](CHANGELOG.md) | What changed in each release (Keep a Changelog, Semantic Versioning); the source of the GitHub Release notes |
 | [docs/funding.md](docs/funding.md) | Sponsorship and funding policy draft, platform options, the owner's setup steps |

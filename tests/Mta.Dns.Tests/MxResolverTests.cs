@@ -291,14 +291,99 @@ public class MxResolverTests
         var dns = new StaticDnsResolver().AddMx("example.com", 10, "evil.example.com").AddMx("example.com", 20, "good.example.com")
             .AddA("evil.example.com", "127.0.0.1").AddA("evil.example.com", "0.0.0.0").AddA("evil.example.com", "224.0.0.1").AddA("evil.example.com", "255.255.255.255")
             .AddAaaa("evil.example.com", "::1").AddAaaa("evil.example.com", "::").AddAaaa("evil.example.com", "ff02::1")
-            .AddA("good.example.com", "10.1.2.3");
+            .AddA("good.example.com", "93.184.216.34");
         var result = await Resolver(dns).ResolveAsync("example.com");
         var mx = Assert.Single(result.Exchangers);
         Assert.Equal("good.example.com", mx.Host);
-        Assert.Equal([IPAddress.Parse("10.1.2.3")], mx.Addresses);   // private ranges are the delivery policy's business
+        Assert.Equal([IPAddress.Parse("93.184.216.34")], mx.Addresses);
 
         var permissive = await Resolver(dns, new MxResolverOptions { ExcludeSpecialAddresses = false }).ResolveAsync("example.com");
         Assert.Equal(2, permissive.Exchangers.Count);
+    }
+
+    [Theory]
+    [InlineData("10.1.2.3")]
+    [InlineData("172.16.0.9")]
+    [InlineData("192.168.1.1")]
+    [InlineData("169.254.169.254")]
+    [InlineData("100.64.0.1")]
+    [InlineData("fd00::1")]
+    [InlineData("fe80::1")]
+    [InlineData("fec0::1")]
+    [InlineData("64:ff9b::a00:1")]
+    [InlineData("2002:0a00:0001::")]
+    [InlineData("198.18.0.1")]            // benchmarking
+    [InlineData("198.19.255.254")]
+    [InlineData("192.88.99.1")]
+    [InlineData("100.100.100.200")]
+    [InlineData("::ffff:10.0.0.1")]
+    [InlineData("::8.8.8.8")]             // the deprecated IPv4-compatible form is never a destination
+    [InlineData("::ffff:0:10.0.0.1")]
+    [InlineData("64:ff9b:1::1")]          // the local-use NAT64 prefix
+    [InlineData("2001::1")]               // Teredo
+    [InlineData("100::1")]
+    public async Task A_recipient_domain_cannot_point_its_mail_exchanger_into_an_internal_network(string address)
+    {
+        var dns = new StaticDnsResolver().AddMx("evil.example", 10, "mx.evil.example").AddMx("evil.example", 20, "mx2.evil.example")
+            .AddA("mx2.evil.example", "93.184.216.35");
+        if (address.Contains(':', StringComparison.Ordinal)) { dns.AddAaaa("mx.evil.example", address); } else { dns.AddA("mx.evil.example", address); }
+        var result = await Resolver(dns).ResolveAsync("evil.example");
+
+        // The internal host is dropped as if it had no address; the public one stays.
+        Assert.Equal(["mx2.evil.example"], result.Exchangers.Select(e => e.Host));
+
+        // A domain with no MX uses its own address: the same rule.
+        var implicitMx = new StaticDnsResolver();
+        if (address.Contains(':', StringComparison.Ordinal)) { implicitMx.AddAaaa("own.example", address); } else { implicitMx.AddA("own.example", address); }
+        Assert.Empty((await Resolver(implicitMx).ResolveAsync("own.example")).Exchangers);
+
+        // Turning the exclusion off (Delivery:AllowPrivateMxAddresses) is the way to deliver to an internal mail server.
+        var permissive = await Resolver(dns, new MxResolverOptions { ExcludeSpecialAddresses = false }).ResolveAsync("evil.example");
+        Assert.Equal(2, permissive.Exchangers.Count);
+    }
+
+    [Theory]
+    [InlineData("192.0.2.1")]
+    [InlineData("198.51.100.7")]
+    [InlineData("203.0.113.9")]
+    [InlineData("2001:db8::1")]
+    public async Task The_documentation_ranges_are_kept_on_purpose_they_are_never_routed_and_are_what_documentation_and_tests_use_for_a_public_mail_server(string address)
+    {
+        var dns = new StaticDnsResolver().AddMx("doc.example", 10, "mx.doc.example");
+        if (address.Contains(':', StringComparison.Ordinal)) { dns.AddAaaa("mx.doc.example", address); } else { dns.AddA("mx.doc.example", address); }
+
+        var result = await Resolver(dns).ResolveAsync("doc.example");
+
+        Assert.Equal(MxResolutionStatus.Ok, result.Status);
+        Assert.Equal([IPAddress.Parse(address)], Assert.Single(result.Exchangers).Addresses);
+    }
+
+    [Fact]
+    public async Task When_policy_leaves_no_address_the_status_says_so_and_is_not_no_mail_host()
+    {
+        // A domain that really has no address is permanent; one whose addresses we refuse is the operator's policy and must stay a temporary matter.
+        var dns = new StaticDnsResolver().AddMx("refused.example", 10, "a.refused.example").AddMx("refused.example", 20, "b.refused.example")
+            .AddA("a.refused.example", "10.0.0.1").AddA("b.refused.example", "127.0.0.1")
+            .AddMx("empty.example", 10, "a.empty.example")
+            .AddMx("mixed.example", 10, "a.mixed.example").AddMx("mixed.example", 20, "b.mixed.example").AddA("a.mixed.example", "10.0.0.1")   // b has no address record
+            .AddMx("temp.example", 10, "a.temp.example").AddMx("temp.example", 20, "b.temp.example").AddA("a.temp.example", "10.0.0.1").Fail("b.temp.example", DnsRecordType.A)
+            .AddA("own.example", "10.9.9.9");
+        var resolver = Resolver(dns);
+
+        Assert.Equal(MxResolutionStatus.AddressesRefused, (await resolver.ResolveAsync("refused.example")).Status);
+        Assert.Equal(MxResolutionStatus.NoMailHost, (await resolver.ResolveAsync("empty.example")).Status);
+        Assert.Equal(MxResolutionStatus.AddressesRefused, (await resolver.ResolveAsync("mixed.example")).Status);
+        Assert.Equal(MxResolutionStatus.TempFail, (await resolver.ResolveAsync("temp.example")).Status);          // a failed lookup may still turn up a public address
+        Assert.Equal(MxResolutionStatus.AddressesRefused, (await resolver.ResolveAsync("own.example")).Status);   // no MX: the domain's own address
+        Assert.Equal(MxResolutionStatus.Ok, (await Resolver(dns, new MxResolverOptions { ExcludeSpecialAddresses = false }).ResolveAsync("refused.example")).Status);
+    }
+
+    [Fact]
+    public async Task A_host_the_operator_chose_as_relay_may_be_internal()
+    {
+        var dns = new StaticDnsResolver().AddA("relay.corp.example", "10.1.2.3").AddA("relay.corp.example", "127.0.0.1");
+        var host = await Resolver(dns).ResolveHostAsync("relay.corp.example");
+        Assert.Equal([IPAddress.Parse("10.1.2.3")], host.Addresses);   // loopback is dropped, the operator's private network is not
     }
 
     [Fact]

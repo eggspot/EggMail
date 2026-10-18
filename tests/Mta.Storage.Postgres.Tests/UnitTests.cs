@@ -8,6 +8,33 @@ namespace Mta.Storage.Postgres.Tests;
 public class UnitTests
 {
     [Fact]
+    public void Text_written_to_PostgreSQL_is_cleaned_and_text_in_a_filter_is_never_touched()
+    {
+        string lone = ((char)0xD800).ToString();
+        var write = new NpgsqlCommand();
+        write.Parameters.Text("a\0b" + lone).TextArray(["ok", "x\0y", null]).Text(null);
+        Assert.Equal("a" + (char)0xFFFD + "b" + (char)0xFFFD, write.Parameters[0].Value);
+        Assert.Equal(new string?[] { "ok", "x" + (char)0xFFFD + "y", null }, (string?[])write.Parameters[1].Value!);
+        Assert.Equal(DBNull.Value, write.Parameters[2].Value);
+
+        // A filter is passed as it is: cleaning it would let a search for "a<NUL>b" find the stored text "a<U+FFFD>b" (callers refuse unstorable filters first).
+        var filter = new NpgsqlCommand();
+        filter.Parameters.TextExact("a\0b");
+        Assert.Equal("a\0b", filter.Parameters[0].Value);
+    }
+
+    [Fact]
+    public void An_array_of_text_that_can_all_be_stored_is_passed_on_without_a_copy()
+    {
+        string?[] clean = ["a", "b", null, "\u00fc\u7528"];
+        Assert.Same(clean, NpgsqlParameterExtensions.CleanedIfNeeded(clean));
+        string?[] dirty = ["a", "b\0"];
+        Assert.NotSame(dirty, NpgsqlParameterExtensions.CleanedIfNeeded(dirty));
+        Assert.Equal("b" + (char)0xFFFD, NpgsqlParameterExtensions.CleanedIfNeeded(dirty)[1]);
+        Assert.Equal("b\0", dirty[1]);   // the caller's array is not changed
+    }
+
+    [Fact]
     public void Network_failures_are_availability_failures()
     {
         Assert.True(PostgresErrors.IsUnavailable(new SocketException()));
@@ -70,7 +97,7 @@ public class UnitTests
         Assert.Contains("ALTER DEFAULT PRIVILEGES", script, StringComparison.Ordinal);
         Assert.Single(script.Split("DO $eggmail_migrate$", StringSplitOptions.None).Skip(1));
         Assert.DoesNotContain("GRANT", PostgresMigrator.GenerateScript(null), StringComparison.Ordinal);
-        Assert.Equal(7, PostgresMigrator.CurrentVersion);
+        Assert.Equal(8, PostgresMigrator.CurrentVersion);
     }
 
     [Fact]

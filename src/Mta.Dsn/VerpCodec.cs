@@ -3,21 +3,46 @@ using Mta.Core;
 
 namespace Mta.Dsn;
 
-/// <summary>What a bounce address proves about the original message (stateless, decision 13).</summary>
-public readonly record struct VerpToken(Guid TenantId, ulong DomainIdPrefix, DateTimeOffset IssuedAt, int KeyId);
+/// <summary>
+/// What a bounce address proves about the original message (stateless, decision 13). A version 2 token is also bound to the destination
+/// domain the message was sent to (<see cref="BoundToDestination"/>); a version 1 token (issued before that existed) is not.
+/// </summary>
+public readonly record struct VerpToken(Guid TenantId, ulong DomainIdPrefix, DateTimeOffset IssuedAt, int KeyId, bool BoundToDestination = false, uint DestinationTag = 0);
+
+/// <summary>How a recipient address compares with the destination domain a bounce address was issued for.</summary>
+public enum VerpDestinationCheck
+{
+    /// <summary>The token carries no destination (version 1): nothing can be said.</summary>
+    Unbound,
+
+    /// <summary>The address is in the destination domain the token was issued for.</summary>
+    Match,
+
+    /// <summary>The address is in another domain: a report that names it is not about mail this address was issued for.</summary>
+    Mismatch,
+}
 
 /// <summary>
 /// Stateless signed VERP bounce addresses: <c>b+&lt;token&gt;@bounce-domain</c>. The token carries the tenant id, an 8-byte prefix
 /// of the sending domain's id (unique within a tenant), an hour-resolution timestamp, a key id and a truncated HMAC-SHA-256,
-/// encoded as lower-case base32 so that mail systems that fold case cannot corrupt it. 36 bytes become 58 characters, which
-/// together with <c>b+</c> fits the 64-octet local-part limit. No per-message state is needed to correlate a bounce
+/// encoded as lower-case base32 so that mail systems that fold case cannot corrupt it. No per-message state is needed to correlate a bounce
 /// (the recipient to suppress comes from the DSN's Final-Recipient).
+/// <para>Version 2 (what is issued when the destination domain is known) adds a 4-byte keyed tag of the domain the message was sent to and
+/// shortens the MAC to 6 bytes: 38 bytes become 61 characters, which with <c>b+</c> is 63 and fits the 64-octet local-part limit. The tag is
+/// what stops a stranger who merely <em>received</em> one message (the address is in its Return-Path) from sending a forged report that
+/// names somebody else's address and gets it suppressed: a report is acted on only for addresses in the domain the token was issued for.
+/// A message group has one envelope sender and all its recipients share a destination domain, so the tag is per domain, not per address.
+/// Version 1 (36 bytes, 58 characters, 8-byte MAC) is still accepted for tokens that were already in flight (at most the 14 days of the maximum age).</para>
 /// </summary>
 public sealed class VerpCodec
 {
     public const string Prefix = "b+";
-    private const int PayloadLength = 28;   // version/key (1) + tenant (16) + domain prefix (8) + timestamp (3)
-    private const int MacLength = 8;
+    private const int PayloadLengthV1 = 28;   // version/key (1) + tenant (16) + domain prefix (8) + timestamp (3)
+    private const int MacLengthV1 = 8;
+    private const int PayloadLengthV2 = 32;   // the same + destination tag (4)
+    private const int MacLengthV2 = 6;
+    private const int CharsV1 = ((PayloadLengthV1 + MacLengthV1) * 8 + 4) / 5;   // 58
+    private const int CharsV2 = ((PayloadLengthV2 + MacLengthV2) * 8 + 4) / 5;   // 61
     private static readonly DateTimeOffset Epoch = new(2024, 1, 1, 0, 0, 0, TimeSpan.Zero);
     private const string Alphabet = "abcdefghijklmnopqrstuvwxyz234567";
 
@@ -42,16 +67,22 @@ public sealed class VerpCodec
     public static byte[] GenerateKey() => RandomNumberGenerator.GetBytes(32);
 
     /// <summary>
-    /// The hour (counted from the codec's epoch) a token made at <paramref name="now"/> carries. Everything else in an address is fixed for a tenant and sending domain, so
-    /// the address is the same for every message of the same hour: a caller may keep it per (tenant, domain, hour stamp) instead of signing again for every message.
+    /// The hour (counted from the codec's epoch) a token made at <paramref name="now"/> carries. Everything else in an address is fixed for a tenant, sending domain, return-path host and destination domain, so
+    /// the address is the same for every message of the same hour: a caller may keep it per (tenant, domain, host, destination, hour stamp) instead of signing again for every message.
     /// </summary>
     public static long HourStamp(DateTimeOffset now) => (long)(now - Epoch).TotalHours;
 
-    /// <summary>Returns the local part, for example <c>b+abc…</c>.</summary>
-    public string CreateLocalPart(Guid tenantId, Guid domainId, DateTimeOffset now)
+    /// <summary>
+    /// Returns the local part, for example <c>b+abc...</c>. With <paramref name="destinationDomain"/> (the domain the message is sent to) the token is
+    /// version 2 and bound to it; without, version 1.
+    /// </summary>
+    public string CreateLocalPart(Guid tenantId, Guid domainId, DateTimeOffset now, string? destinationDomain = null)
     {
-        Span<byte> data = stackalloc byte[PayloadLength + MacLength];
-        data[0] = (byte)((1 << 4) | _activeKeyId);   // version 1 in the high nibble
+        bool bound = !string.IsNullOrWhiteSpace(destinationDomain);
+        int payloadLength = bound ? PayloadLengthV2 : PayloadLengthV1;
+        int macLength = bound ? MacLengthV2 : MacLengthV1;
+        Span<byte> data = stackalloc byte[payloadLength + macLength];
+        data[0] = (byte)(((bound ? 2 : 1) << 4) | _activeKeyId);   // version in the high nibble
         tenantId.TryWriteBytes(data[1..17], bigEndian: true, out _);
         Span<byte> dom = stackalloc byte[16];
         domainId.TryWriteBytes(dom, bigEndian: true, out _);
@@ -60,15 +91,23 @@ public sealed class VerpCodec
         data[25] = (byte)(hours >> 16);
         data[26] = (byte)(hours >> 8);
         data[27] = (byte)hours;
+        if (bound)
+        {
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(data[28..32], DestinationTag(_keys[_activeKeyId], destinationDomain!));
+        }
+
         Span<byte> mac = stackalloc byte[32];
-        HMACSHA256.HashData(_keys[_activeKeyId], data[..PayloadLength], mac);
-        mac[..MacLength].CopyTo(data[PayloadLength..]);
+        HMACSHA256.HashData(_keys[_activeKeyId], data[..payloadLength], mac);
+        mac[..macLength].CopyTo(data[payloadLength..]);
         return Prefix + Base32Encode(data);
     }
 
+    /// <summary>Length of the longest bounce address this codec issues at <paramref name="host"/>: <c>b+</c>, a 61 character token, <c>@</c> and the host.</summary>
+    public static int AddressLengthAt(string host) => Prefix.Length + CharsV2 + 1 + host.Length;
+
     /// <summary>The full bounce address for a domain: <c>b+token@domain</c>.</summary>
-    public string CreateAddress(Guid tenantId, Guid domainId, string bounceDomain, DateTimeOffset now) =>
-        CreateLocalPart(tenantId, domainId, now) + "@" + bounceDomain;
+    public string CreateAddress(Guid tenantId, Guid domainId, string bounceDomain, DateTimeOffset now, string? destinationDomain = null) =>
+        CreateLocalPart(tenantId, domainId, now, destinationDomain) + "@" + bounceDomain;
 
     /// <summary>
     /// Verifies and decodes a local part. Tokens older than <paramref name="maxAge"/> or issued more than an hour in the future
@@ -82,13 +121,22 @@ public sealed class VerpCodec
             return false;
         }
 
-        Span<byte> data = stackalloc byte[PayloadLength + MacLength];
-        if (!Base32Decode(localPart.AsSpan(Prefix.Length), data))
+        ReadOnlySpan<char> text = localPart.AsSpan(Prefix.Length);
+        int version = text.Length switch { CharsV1 => 1, CharsV2 => 2, _ => 0 };
+        if (version == 0)
         {
             return false;
         }
 
-        if ((data[0] >> 4) != 1)
+        int payloadLength = version == 2 ? PayloadLengthV2 : PayloadLengthV1;
+        int macLength = version == 2 ? MacLengthV2 : MacLengthV1;
+        Span<byte> data = stackalloc byte[payloadLength + macLength];
+        if (!Base32Decode(text, data))
+        {
+            return false;
+        }
+
+        if ((data[0] >> 4) != version)
         {
             return false;
         }
@@ -100,8 +148,8 @@ public sealed class VerpCodec
         }
 
         Span<byte> expected = stackalloc byte[32];
-        HMACSHA256.HashData(key, data[..PayloadLength], expected);
-        if (!CryptographicOperations.FixedTimeEquals(expected[..MacLength], data[PayloadLength..]))
+        HMACSHA256.HashData(key, data[..payloadLength], expected);
+        if (!CryptographicOperations.FixedTimeEquals(expected[..macLength], data[payloadLength..]))
         {
             return false;
         }
@@ -115,8 +163,54 @@ public sealed class VerpCodec
 
         var tenant = new Guid(data[1..17], bigEndian: true);
         ulong prefix = System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(data[17..25]);
-        token = new VerpToken(tenant, prefix, issued, keyId);
+        token = version == 2
+            ? new VerpToken(tenant, prefix, issued, keyId, BoundToDestination: true, System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(data[28..32]))
+            : new VerpToken(tenant, prefix, issued, keyId);
         return true;
+    }
+
+    /// <summary>
+    /// Compares the domain of an address a report names with the destination domain the token was issued for. Fails safe: a name that cannot be
+    /// normalised does not match.
+    /// </summary>
+    public VerpDestinationCheck CheckDestination(in VerpToken token, string recipientDomain)
+    {
+        if (!token.BoundToDestination)
+        {
+            return VerpDestinationCheck.Unbound;
+        }
+
+        return _keys.TryGetValue(token.KeyId, out var key) && DestinationTag(key, recipientDomain) == token.DestinationTag
+            ? VerpDestinationCheck.Match
+            : VerpDestinationCheck.Mismatch;
+    }
+
+    /// <summary>The first four bytes of HMAC-SHA-256(key, "dst" + NUL + normalised domain): keyed, so the tag of a domain cannot be computed from a token of another.</summary>
+    private static uint DestinationTag(byte[] key, string domain)
+    {
+        byte[] name = System.Text.Encoding.ASCII.GetBytes("dst\0" + NormalizeDomain(domain));
+        Span<byte> mac = stackalloc byte[32];
+        HMACSHA256.HashData(key, name, mac);
+        return System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(mac);
+    }
+
+    /// <summary>Lower case, no trailing dot, A-label form (an invalid internationalised name stays as it is and so matches nothing real).</summary>
+    private static string NormalizeDomain(string domain)
+    {
+        string d = domain.Trim().TrimEnd('.').ToLowerInvariant();
+        if (d.All(char.IsAscii))
+        {
+            return d;
+        }
+
+        try
+        {
+            return new System.Globalization.IdnMapping().GetAscii(d).ToLowerInvariant();
+        }
+        catch (ArgumentException)
+        {
+            return d;
+        }
     }
 
     /// <summary>True if <paramref name="domainId"/> is the domain the token was issued for.</summary>

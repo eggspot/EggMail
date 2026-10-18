@@ -22,7 +22,7 @@ public partial class MetricsDocumentationTests
     /// <summary>Every production meter. A new meter must be added here, and its instruments to the table.</summary>
     private static readonly string[] ProductionMeters =
     [
-        "Mta.Smtp.Server", "Mta.Smtp.Client", "Mta.Delivery", "Mta.Webhooks", "Mta.Storage.Sqlite", "Mta.Tls", "Mta.Backup",
+        "Mta.Smtp.Server", "Mta.Smtp.Client", "Mta.Delivery", "Mta.Webhooks", "Mta.Storage.Sqlite", "Mta.Tls", "Mta.Backup", "Mta.Process", "Mta.Bounce",
     ];
 
     /// <summary>The Npgsql instruments the guide lists (pinned against a live server in the PostgreSQL tests).</summary>
@@ -69,7 +69,7 @@ public partial class MetricsDocumentationTests
     /// <summary>The instruments of the production meters, found the way an exporter finds them.</summary>
     private static List<Instrument> ProductionInstruments(IEnumerable<string> meterNames)
     {
-        foreach (Type t in new[] { typeof(SmtpMetrics), typeof(SmtpClientMetrics), typeof(DeliveryMetrics), typeof(WebhookMetrics), typeof(SqliteMetrics), typeof(TlsMetrics), typeof(BackupMetrics) })
+        foreach (Type t in new[] { typeof(SmtpMetrics), typeof(SmtpClientMetrics), typeof(DeliveryMetrics), typeof(WebhookMetrics), typeof(SqliteMetrics), typeof(TlsMetrics), typeof(BackupMetrics), typeof(Mta.Host.Hosting.ProcessMetrics), typeof(Mta.Host.Ingest.BounceMetrics) })
         {
             RuntimeHelpers.RunClassConstructor(t.TypeHandle);   // a meter's instruments exist once its static class has been touched
         }
@@ -148,6 +148,22 @@ public partial class MetricsDocumentationTests
         foreach (Instrument i in instruments)
         {
             Assert.True(documented[PrometheusTextExporter.NameFor(i)] == PrometheusTextExporter.TypeFor(i), $"{i.Name} type");
+        }
+    }
+
+    [Fact]
+    public void The_documented_runtime_metrics_are_exported_by_the_default_exporter_with_the_documented_type()
+    {
+        var documented = DocumentedMetrics().Where(r => r.Key.StartsWith("dotnet_", StringComparison.Ordinal)).ToDictionary(r => r.Key, r => r.Value);
+        Assert.NotEmpty(documented);
+
+        using var exporter = new PrometheusTextExporter();
+        GC.Collect();   // the garbage collection counters need one collection to have happened
+        try { throw new InvalidOperationException("one exception, so the runtime has a type to count"); } catch (InvalidOperationException) { }
+        string text = exporter.Render();
+        foreach ((string name, string type) in documented)
+        {
+            Assert.True(text.Contains($"# TYPE {name} {type}\n", StringComparison.Ordinal), $"{name} ({type}) is documented but the default exporter does not render it as that type");
         }
     }
 

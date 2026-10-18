@@ -46,13 +46,16 @@ public sealed class TableChecksum
 
     public long Rows { get; private set; }
 
+    /// <summary>The rows of the table that a switch holds (all of them unless the table's hold names a condition).</summary>
+    public long HeldRows { get; set; }
+
     public string Checksum => _rows.Hex;
 
     public string? SecretDigest => _hasSecrets ? _secrets.Hex : null;
 
-    public static TableChecksum Resume(long rows, string checksum, string? secretDigest)
+    public static TableChecksum Resume(long rows, string checksum, string? secretDigest, long? heldRows = null)
     {
-        var t = new TableChecksum { Rows = rows, _rows = HashSum.Parse(checksum) };
+        var t = new TableChecksum { Rows = rows, HeldRows = heldRows ?? rows, _rows = HashSum.Parse(checksum) };
         if (secretDigest is not null)
         {
             t._secrets = HashSum.Parse(secretDigest);
@@ -82,5 +85,5 @@ public sealed class TableChecksum
         _hasSecrets = true;
     }
 
-    public BundleTable ToManifest(string name, string part) => new() { Name = name, Part = part, Rows = Rows, Checksum = Checksum, SecretDigest = SecretDigest };
+    public BundleTable ToManifest(string name, string part) => new() { Name = name, Part = part, Rows = Rows, HeldRows = HeldRows, Checksum = Checksum, SecretDigest = SecretDigest };
 }

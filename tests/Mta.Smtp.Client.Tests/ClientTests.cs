@@ -130,6 +130,51 @@ public class ClientTests
         Assert.Empty(server.Handler.Messages);
     }
 
+    private static async Task<List<string>> RcptLinesAsync(string ehloCapabilities, params string[] recipients)
+    {
+        var lines = new List<string>();
+        await using var peer = new ScriptedServer(async c =>
+        {
+            await c.SendAsync("220 x ESMTP\r\n");
+            await c.ReadLineAsync();
+            await c.SendAsync("250-x\r\n250 " + ehloCapabilities + "\r\n");
+            await c.ReadLineAsync();   // MAIL FROM
+            await c.SendAsync("250 ok\r\n");
+            for (int i = 0; i < recipients.Length; i++)
+            {
+                lines.Add(await c.ReadLineAsync());
+                await c.SendAsync("250 ok\r\n");
+            }
+
+            await c.ReadLineAsync();   // DATA
+            await c.SendAsync("354 go\r\n");
+            await c.ReadDataAsync();
+            await c.SendAsync("250 queued\r\n");
+            await c.HoldOpenAsync(100);
+        });
+        await using var conn = await SmtpClientConnection.ConnectAsync(peer.Target(SmtpTlsPolicy.Disabled), Options);
+        var result = await conn.SendAsync(new SmtpEnvelope(EmailAddress.Parse("s@example.org"), recipients.Select(r => EmailAddress.Parse(r)).ToArray(), false, false), Msg("hi\r\n"));
+        Assert.True(result.Delivered);
+        return lines;
+    }
+
+    [Fact]
+    public async Task The_original_recipient_is_declared_when_the_server_offers_dsn_so_a_forwarded_bounce_still_names_it()
+    {
+        var lines = await RcptLinesAsync("DSN", "alice@dest.example", "o'brien+tag=x@dest.example");
+
+        Assert.Equal("RCPT TO:<alice@dest.example> ORCPT=rfc822;alice@dest.example", lines[0]);
+        Assert.Equal("RCPT TO:<o'brien+tag=x@dest.example> ORCPT=rfc822;o'brien+2Btag+3Dx@dest.example", lines[1]);   // xtext: + and = are escaped
+    }
+
+    [Fact]
+    public async Task No_orcpt_is_sent_to_a_server_that_does_not_offer_dsn()
+    {
+        var lines = await RcptLinesAsync("SIZE 1000", "alice@dest.example");
+
+        Assert.Equal("RCPT TO:<alice@dest.example>", lines[0]);
+    }
+
     [Fact]
     public async Task Stripped_starttls_is_detected_when_required_and_recorded_when_opportunistic()
     {
@@ -215,6 +260,68 @@ public class ClientTests
         await using var conn = await SmtpClientConnection.ConnectAsync(peer.Target(SmtpTlsPolicy.Disabled), options);
         var ex = await Assert.ThrowsAsync<SmtpConnectionException>(async () => await conn.SendAsync(Env("r@dest.example"), Msg()));
         Assert.True(ex.EndOfDataSent);
+        Assert.False(conn.IsReusable);
+    }
+
+    /// <summary>A 421 closes the channel (RFC 5321 4.2.2): the reply is the reason for the deferral and must survive the connection loss that follows it.</summary>
+    [Theory]
+    [InlineData(false, "mail")]
+    [InlineData(false, "rcpt")]
+    [InlineData(false, "data")]
+    [InlineData(true, "mail")]
+    [InlineData(true, "rcpt")]
+    [InlineData(true, "data")]
+    public async Task A_421_during_the_envelope_is_reported_as_the_reason_and_the_connection_is_not_reused(bool pipelining, string where)
+    {
+        const string Closing = "421 4.7.28 Our system has detected an unusual rate of mail from your IP, closing\r\n";
+        await using var peer = new ScriptedServer(async c =>
+        {
+            await c.SendAsync("220 x ESMTP\r\n");
+            await c.ReadLineAsync();
+            await c.SendAsync("250-x\r\n250 PIPELINING\r\n");
+            await c.ReadLineAsync();   // MAIL
+            if (pipelining)
+            {
+                await c.ReadLineAsync();   // RCPT and DATA are already on the way: take them all so that closing does not reset the connection and destroy the reply
+                await c.ReadLineAsync();
+            }
+
+            if (where == "mail")
+            {
+                await c.SendAsync(Closing);
+                return;
+            }
+
+            await c.SendAsync("250 ok\r\n");
+            if (!pipelining)
+            {
+                await c.ReadLineAsync();   // RCPT
+            }
+
+            if (where == "rcpt")
+            {
+                await c.SendAsync(Closing);
+                return;
+            }
+
+            await c.SendAsync("250 ok\r\n");
+            if (!pipelining)
+            {
+                await c.ReadLineAsync();   // DATA
+            }
+
+            await c.SendAsync(Closing);
+        });
+        var options = new SmtpClientOptions { HeloName = "c.test", Pipelining = pipelining };
+        await using var conn = await SmtpClientConnection.ConnectAsync(peer.Target(SmtpTlsPolicy.Disabled), options);
+
+        var result = await conn.SendAsync(Env("r@dest.example"), Msg());
+
+        Assert.False(result.Delivered);
+        Assert.False(result.EndOfDataSent);
+        var reply = result.SenderRejection ?? result.DataRejection ?? result.Recipients.Select(r => r.Reply).First(r => !r.IsPositiveCompletion);
+        Assert.Equal(421, reply.Code);
+        Assert.Contains("unusual rate", reply.Lines[0]);
         Assert.False(conn.IsReusable);
     }
 
@@ -421,6 +528,7 @@ public class ClientTests
             await cts.CancelAsync();
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => send);
             Assert.False(conn.EndOfDataStarted);
+            Assert.False(conn.IsReusable);   // out of step with the peer: never pooled again, never asked to QUIT (which would wait for a reply that is not coming)
         }
 
         // Cancelled while waiting for the final reply: the server may have accepted the message.
@@ -434,6 +542,7 @@ public class ClientTests
             await cts.CancelAsync();
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => send);
             Assert.True(conn.EndOfDataStarted);
+            Assert.False(conn.IsReusable);
         }
     }
 

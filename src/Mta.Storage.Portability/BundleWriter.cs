@@ -18,7 +18,7 @@ public sealed class BundleWriter : IDisposable
 
     public BundleWriter(string rootDirectory, BundleManifest manifest)
     {
-        _root = Path.GetFullPath(rootDirectory);
+        _root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootDirectory));
         _manifest = manifest;
         Directory.CreateDirectory(_root);
         if (Directory.EnumerateFileSystemEntries(_root).Any())
@@ -41,7 +41,7 @@ public sealed class BundleWriter : IDisposable
     /// </summary>
     public static async Task<BundleWriter> OpenForAppendAsync(string rootDirectory, CancellationToken ct)
     {
-        string root = Path.GetFullPath(rootDirectory);
+        string root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootDirectory));
         string manifestPath = Path.Combine(root, "manifest.json");
         if (!File.Exists(manifestPath))
         {
