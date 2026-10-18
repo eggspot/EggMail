@@ -556,7 +556,7 @@ public sealed partial class RoutingAdminApi(
             return;
         }
 
-        if (userName!.Length > 255 || userName.Any(char.IsControl))
+        if (userName!.Length > 255 || ApiText.HasUnsafeCharacter(userName))
         {
             errors.Add("userName", "Use at most 255 characters without control characters.");
         }

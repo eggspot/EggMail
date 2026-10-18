@@ -222,7 +222,7 @@ public sealed partial class AdminApi(
     private static string ValidTenantName(string? name)
     {
         string trimmed = name?.Trim() ?? "";
-        if (trimmed.Length is 0 or > 80 || trimmed.Any(char.IsControl))
+        if (trimmed.Length is 0 or > 80 || ApiText.HasUnsafeCharacter(trimmed))
         {
             throw ApiException.Validation("name", "A name of 1 to 80 characters is required.");
         }

@@ -1,3 +1,4 @@
+using Mta.Core;
 using System.Net;
 using System.Net.Sockets;
 
@@ -20,6 +21,13 @@ public enum MxResolutionStatus
 
     /// <summary>The domain does not exist (NXDOMAIN) or is not a valid DNS name. Permanent.</summary>
     NonExistentDomain,
+
+    /// <summary>
+    /// The mail hosts have addresses, but every one of them was refused by <see cref="MxResolverOptions.ExcludeSpecialAddresses"/> (loopback, reserved, or an
+    /// internal network). That is the operator's policy and not a fact about the domain, so it must not be taken for "this domain has no mail host": the
+    /// failure is temporary, and a changed policy (or a changed record) lets the mail through.
+    /// </summary>
+    AddressesRefused,
 }
 
 /// <summary>Which address families to return and in which order.</summary>
@@ -86,8 +94,13 @@ public sealed record MxResolverOptions
     /// <summary>
     /// Drop addresses that can never be a mail server on the public internet and would aim the SMTP client at
     /// the sender's own machine or a network-internal service: unspecified (0.0.0.0, ::), loopback, multicast, and
-    /// IPv4 addresses from 224.0.0.0 up (multicast, reserved, broadcast). Private ranges (10/8, 192.168/16, fc00::/7, ...) are kept because internal relays are legitimate;
-    /// the delivery policy decides about those. Default true.
+    /// IPv4 addresses from 224.0.0.0 up (multicast, reserved, broadcast). For the hosts a <em>recipient domain</em> names (its MX records, or its own address
+    /// when it has none) every address that is not public is dropped as well (<see cref="NetworkAddresses.IsForbiddenMailTarget"/>): private (10/8, 172.16/12,
+    /// 192.168/16, fc00::/7), link-local (including the cloud metadata address 169.254.169.254), carrier-grade NAT, benchmarking, Teredo, and the IPv6 forms that
+    /// embed any of them; the documentation ranges are left alone. Whoever controls a domain controls its MX records, and an MX that points into the sender's own
+    /// network would make the SMTP client a way to reach internal mail servers. If that leaves a domain without an address the status is
+    /// <see cref="MxResolutionStatus.AddressesRefused"/>, a temporary failure. Host names the operator chose (relay
+    /// routes, through <see cref="MxResolver.ResolveHostAsync"/>) may be internal: they are the operator's own. Default true.
     /// </summary>
     public bool ExcludeSpecialAddresses { get; init; } = true;
 }
@@ -157,11 +170,12 @@ public sealed class MxResolver
         }
 
         var selected = SortByPreference(real).Take(_options.MaxMxHosts).ToList();
-        var lookups = selected.Select(r => ResolveHostAsync(r.Exchange, cancellationToken)).ToList();
+        var lookups = selected.Select(r => ResolveHostCoreAsync(r.Exchange, recipientControlled: true, cancellationToken)).ToList();
         var results = await Task.WhenAll(lookups).ConfigureAwait(false);
 
         var exchangers = new List<MailExchanger>(selected.Count);
         bool anyTemporary = false;
+        bool anyRefused = false;
         for (int i = 0; i < selected.Count; i++)
         {
             var r = results[i];
@@ -173,6 +187,10 @@ public sealed class MxResolver
             {
                 anyTemporary = true;
             }
+            else if (r.Status == MxResolutionStatus.AddressesRefused)
+            {
+                anyRefused = true;
+            }
         }
 
         if (exchangers.Count > 0)
@@ -180,13 +198,24 @@ public sealed class MxResolver
             return new MxResolution(MxResolutionStatus.Ok, exchangers) { MxAuthenticated = mx.AuthenticatedData };
         }
 
-        return anyTemporary
-            ? Fail(MxResolutionStatus.TempFail, $"no MX host of {name} could be resolved right now")
+        if (anyTemporary)
+        {
+            return Fail(MxResolutionStatus.TempFail, $"no MX host of {name} could be resolved right now");
+        }
+
+        return anyRefused
+            ? Fail(MxResolutionStatus.AddressesRefused, $"every MX host of {name} resolves only to addresses in a network the server may not deliver to")
             : Fail(MxResolutionStatus.NoMailHost, $"none of the MX hosts of {name} has an address");
     }
 
-    /// <summary>Resolves A and AAAA for one host name (queried concurrently), applying the address filter, order and limit from the options.</summary>
-    public async Task<HostAddresses> ResolveHostAsync(string host, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// Resolves A and AAAA for one host name an operator chose (queried concurrently), applying the address filter, order and limit from the options.
+    /// Internal-network addresses are kept (see <see cref="MxResolverOptions.ExcludeSpecialAddresses"/>); the hosts of recipient domains are resolved by <see cref="ResolveAsync"/>.
+    /// </summary>
+    public Task<HostAddresses> ResolveHostAsync(string host, CancellationToken cancellationToken = default) =>
+        ResolveHostCoreAsync(host, recipientControlled: false, cancellationToken);
+
+    private async Task<HostAddresses> ResolveHostCoreAsync(string host, bool recipientControlled, CancellationToken cancellationToken)
     {
         if (!DnsName.TryNormalize(host, out var name) || name.Length == 0)
         {
@@ -243,6 +272,7 @@ public sealed class MxResolver
         CollectAddresses(v6, v6Target);
 
         var all = new List<IPAddress>(first.Count + second.Count);
+        bool refusedByPolicy = false;
         foreach (var address in first.Concat(second))
         {
             if (all.Count >= _options.MaxAddressesPerHost)
@@ -250,7 +280,11 @@ public sealed class MxResolver
                 break;
             }
 
-            if (!all.Contains(address) && !(_options.ExcludeSpecialAddresses && IsSpecial(address)))
+            if (_options.ExcludeSpecialAddresses && (IsSpecial(address) || (recipientControlled && NetworkAddresses.IsForbiddenMailTarget(address))))
+            {
+                refusedByPolicy = true;
+            }
+            else if (!all.Contains(address))
             {
                 all.Add(address);
             }
@@ -266,16 +300,22 @@ public sealed class MxResolver
             return new HostAddresses(MxResolutionStatus.TempFail, []) { ResolvedViaCname = viaCname };
         }
 
+        if (refusedByPolicy)
+        {
+            return new HostAddresses(MxResolutionStatus.AddressesRefused, []) { ResolvedViaCname = viaCname };
+        }
+
         return new HostAddresses(nxDomain ? MxResolutionStatus.NonExistentDomain : MxResolutionStatus.NoMailHost, []) { ResolvedViaCname = viaCname };
     }
 
     private async Task<MxResolution> ResolveImplicitMxAsync(string name, CancellationToken cancellationToken)
     {
-        var host = await ResolveHostAsync(name, cancellationToken).ConfigureAwait(false);
+        var host = await ResolveHostCoreAsync(name, recipientControlled: true, cancellationToken).ConfigureAwait(false);
         return host.Status switch
         {
             MxResolutionStatus.Ok => new MxResolution(MxResolutionStatus.Ok, [new MailExchanger(name, 0, host.Addresses) { ResolvedViaCname = host.ResolvedViaCname }]) { UsedImplicitMx = true },
             MxResolutionStatus.TempFail => Fail(MxResolutionStatus.TempFail, $"address lookup for {name} (implicit MX) failed temporarily"),
+            MxResolutionStatus.AddressesRefused => Fail(MxResolutionStatus.AddressesRefused, $"the address of {name} (implicit MX) is in a network the server may not deliver to"),
             _ => Fail(MxResolutionStatus.NoMailHost, $"domain {name} has no MX record and no usable address record"),
         };
     }

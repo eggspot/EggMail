@@ -133,7 +133,7 @@ public static class MessageComposer
 
             for (int i = 0; i < tags.Count; i++)
             {
-                if (string.IsNullOrWhiteSpace(tags[i]) || tags[i].Length > 64 || tags[i].Any(char.IsControl))
+                if (string.IsNullOrWhiteSpace(tags[i]) || tags[i].Length > 64 || ApiText.HasUnsafeCharacter(tags[i]))
                 {
                     errors.Add($"tags[{i}]", "A tag is 1 to 64 characters without control characters.");
                 }
@@ -203,6 +203,11 @@ public static class MessageComposer
                     {
                         errors.Add(at + ".filename", "A file name of 1 to 255 characters is required.");
                     }
+                    else if (ApiText.HasUnsafeCharacter(a.Filename))
+                    {
+                        // Control characters end a header line, and a right-to-left override makes "gnp.exe" read as "exe.png" in a mail client.
+                        errors.Add(at + ".filename", "A file name without control characters or text direction overrides is required.");
+                    }
 
                     if (a.Content is null || a.Content.Length == 0)
                     {
@@ -214,7 +219,7 @@ public static class MessageComposer
                         errors.Add(at + ".content_id", "A Content-ID without spaces or angle brackets.");
                     }
 
-                    if (string.IsNullOrWhiteSpace(a.Filename) || a.Content is null || a.Content.Length == 0 || a.Filename.Length > 255)
+                    if (string.IsNullOrWhiteSpace(a.Filename) || a.Content is null || a.Content.Length == 0 || a.Filename.Length > 255 || ApiText.HasUnsafeCharacter(a.Filename))
                     {
                         continue;
                     }
