@@ -125,6 +125,9 @@ internal sealed class InboundActionHarness : IAsyncDisposable
     public RecordingPublisher Publisher { get; } = new();
     public FakeForwarder Forwarder { get; } = new();
     public bool InboundEnabled { get; set; } = true;
+
+    /// <summary>What tells the tenant that an endpoint was switched off (none by default).</summary>
+    public IWebhookNotifier? Notifier { get; set; }
     public bool KeysDown { get => _protector.Down; set => _protector.Down = value; }
     public Guid TenantId { get; } = Ids.New();
     public DomainRecord Domain { get; private set; } = null!;
@@ -165,7 +168,7 @@ internal sealed class InboundActionHarness : IAsyncDisposable
             _options = options;
         }
 
-        var health = new WebhookEndpointHealth(Storage.Config, new WebhookOptions(), null, null);
+        var health = new WebhookEndpointHealth(Storage.Config, new WebhookOptions(), null, Notifier);
         return new InboundActionRunner(Storage, Transport, health, _protector, _options, Clock, NullMtaLog.Instance, () => InboundEnabled, Publisher, withForwarder ? Forwarder : null);
     }
 

@@ -104,11 +104,38 @@ public class WebhookEndpointHealthTests
         Assert.Single(told);
     }
 
+    [Fact]
+    public async Task Attempts_that_all_decide_at_once_to_disable_the_endpoint_tell_the_tenant_exactly_once()
+    {
+        (InMemoryStorage storage, WebhookEndpointRecord endpoint) = await StartAsync();
+        var told = new List<string>();
+        var health = new WebhookEndpointHealth(storage.Config, new WebhookOptions(), null, new Notifier(told));
+        const int attempts = 32;
+        using var start = new ManualResetEventSlim(false);
+
+        Task[] running = [.. Enumerable.Range(0, attempts).Select(i => Task.Run(async () =>
+        {
+            start.Wait();
+            await health.DisableAsync(endpoint, "reason " + i, Now, default);
+        }))];
+        start.Set();
+        await Task.WhenAll(running);
+
+        string reason = Assert.Single(told);
+        WebhookEndpointRecord stored = (await storage.Config.GetWebhookEndpointAsync(endpoint.Id, default))!;
+        Assert.False(stored.Enabled);
+        Assert.Equal(reason, stored.DisabledReason);   // the one that told is the one whose reason is stored
+    }
+
     private sealed class Notifier(List<string> told) : IWebhookNotifier
     {
         public ValueTask EndpointDisabledAsync(WebhookEndpointRecord endpoint, string reason, CancellationToken cancellationToken)
         {
-            told.Add(reason);
+            lock (told)
+            {
+                told.Add(reason);
+            }
+
             return ValueTask.CompletedTask;
         }
     }

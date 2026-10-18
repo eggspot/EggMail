@@ -53,6 +53,42 @@ public class InboundPostgresTests : PgTestBase
     }
 
     [Fact]
+    public async Task Replicas_claim_disjoint_actions_with_a_per_tenant_cap_and_a_claim_that_races_still_gets_rows()
+    {
+        PostgresStorage second = await OpenReplicaAsync();
+        (DomainRecord domainA, Guid route) = await DomainAsync(Storage);
+        await Storage.Config.UpsertTenantAsync(new Tenant(TenantB, "B", "b", true, Clock.UtcNow, false), default);
+        var domainB = new DomainRecord(Ids.New(), TenantB, "b.example", DomainStatus.Verified, null, false, Clock.UtcNow, null, null, 0, null, false, null);
+        await Storage.Config.UpsertDomainAsync(domainB, default);
+        const int perTenant = 40;
+        for (int i = 0; i < perTenant; i++)
+        {
+            await Storage.Inbound.AcceptAsync([Draft(domainA, route, InboundActionKind.Webhook, Clock.UtcNow.AddSeconds(-2 * perTenant + i), 100 + i), Draft(domainB, route, InboundActionKind.Webhook, Clock.UtcNow.AddSeconds(-2 * perTenant + i), 100 + i)], default);
+        }
+
+        async Task<List<(Guid Id, Guid Tenant)>> Worker(IStorage replica, string owner)
+        {
+            var mine = new List<(Guid, Guid)>();
+            while (true)
+            {
+                var batch = await replica.Inbound.ClaimActionsAsync(owner, 6, Clock.UtcNow, TimeSpan.FromMinutes(5), default, new InboundClaimLimits(3));
+                if (batch.Count == 0)
+                {
+                    return mine;
+                }
+
+                Assert.True(batch.Count(b => b.Message.TenantId == TenantA) <= 3 && batch.Count(b => b.Message.TenantId == TenantB) <= 3);   // the cap holds in every claim
+                mine.AddRange(batch.Select(b => (b.Message.Id, b.Message.TenantId)));
+            }
+        }
+
+        var results = await Task.WhenAll(Worker(Storage, "a-1"), Worker(second, "b-1"), Worker(Storage, "a-2"), Worker(second, "b-2"));
+        var all = results.SelectMany(r => r).ToList();
+        Assert.Equal(2 * perTenant, all.Count);   // a claim that raced another replica did not come back empty while rows were left
+        Assert.Equal(2 * perTenant, all.Select(a => a.Id).Distinct().Count());
+    }
+
+    [Fact]
     public async Task Retention_deletes_in_batches_until_nothing_old_is_left_and_leaves_other_rows_alone()
     {
         await OpenAsync(WithInbound(Opts(), 1));

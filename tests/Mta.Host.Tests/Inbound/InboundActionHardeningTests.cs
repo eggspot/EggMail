@@ -4,6 +4,7 @@ using System.Text.Json;
 using Mta.Core;
 using Mta.Host.Inbound;
 using Mta.Storage;
+using Mta.Webhooks;
 
 namespace Mta.Host.Tests.Inbound;
 
@@ -87,6 +88,46 @@ public class InboundActionHardeningTests
         Assert.Equal(0, stored.ActionAttempts);   // the attempt was not made to the end: it is not used up
         Assert.True(stored.ActionNextAttemptAt <= h.Clock.UtcNow);   // due at once
         never.SetResult();
+    }
+
+    [Fact]
+    public async Task The_result_of_an_attempt_that_finished_is_recorded_with_its_own_limit_even_when_the_host_is_stopping()
+    {
+        await using var h = await new InboundActionHarness(new InboundActionOptions { PollInterval = TimeSpan.FromMilliseconds(20) }).InitializeAsync(InboundActionKind.Forward, withForwarder: true);
+        using var cts = new CancellationTokenSource();
+        h.Forwarder.Handler = (_, _, _) =>
+        {
+            cts.Cancel();   // the host is told to stop while the forward is being queued; the forward itself completes
+            return InboundActionResult.Done(forwardMessageId: Guid.NewGuid(), freeBody: true);
+        };
+        InboundMessageDraft draft = await h.ReceiveAsync();
+
+        await h.Runner.RunAsync(cts.Token).WaitAsync(TimeSpan.FromSeconds(30));
+
+        InboundMessage stored = await h.GetAsync(draft.Id);
+        Assert.Equal(InboundActionState.Done, stored.ActionState);   // recorded: the message is not forwarded a second time by the next runner
+        Assert.Equal(1, stored.ActionAttempts);
+    }
+
+    [Fact]
+    public async Task A_notice_to_the_tenant_that_cannot_be_delivered_does_not_turn_a_410_into_an_internal_error()
+    {
+        await using var h = await new InboundActionHarness().InitializeAsync();
+        h.Notifier = new ThrowingNotifier();
+        h.Receiver.Respond(HttpStatusCode.Gone);
+        InboundMessageDraft draft = await h.ReceiveAsync();
+
+        await h.CreateRunner().RunOnceAsync(default);
+
+        InboundMessage stored = await h.GetAsync(draft.Id);
+        Assert.Equal(InboundActionState.Pending, stored.ActionState);
+        Assert.Equal("webhook_gone", stored.ActionLastError);   // what the receiver said, not the failure of the bookkeeping after it
+        Assert.False((await h.Storage.Config.GetWebhookEndpointAsync(h.Endpoint.Id, default))!.Enabled);
+    }
+
+    private sealed class ThrowingNotifier : IWebhookNotifier
+    {
+        public ValueTask EndpointDisabledAsync(WebhookEndpointRecord endpoint, string reason, CancellationToken cancellationToken) => throw new InvalidOperationException("the notice could not be queued");
     }
 
     [Fact]
