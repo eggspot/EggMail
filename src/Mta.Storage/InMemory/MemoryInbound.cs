@@ -199,7 +199,15 @@ internal sealed class MemoryInbound(MemoryState s) : IInboundMessageStore
         }
     }
 
-    public ValueTask<IReadOnlyList<ClaimedInboundAction>> ClaimActionsAsync(string owner, int max, DateTimeOffset now, TimeSpan lease, CancellationToken cancellationToken)
+    public ValueTask<long> CountActionsAsync(InboundActionState state, CancellationToken cancellationToken)
+    {
+        lock (s.Gate)
+        {
+            return R((long)s.InboundMessages.Values.Count(x => x.ActionState == state));
+        }
+    }
+
+    public ValueTask<IReadOnlyList<ClaimedInboundAction>> ClaimActionsAsync(string owner, int max, DateTimeOffset now, TimeSpan lease, CancellationToken cancellationToken, InboundClaimLimits? limits = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(owner);
         if (max <= 0 || s.Fence.IsClosed)
@@ -211,9 +219,26 @@ internal sealed class MemoryInbound(MemoryState s) : IInboundMessageStore
         DateTimeOffset until = StorageTime.Normalize(now + lease);
         lock (s.Gate)
         {
-            List<InboundMessageEntity> due = s.InboundMessages.Values
-                .Where(x => x.TransferSwitchId is null && x.ActionState == InboundActionState.Pending && x.ActionNextAttemptAt <= at && x.LeaseUntil <= at)
-                .OrderBy(x => x.ActionNextAttemptAt).ThenBy(x => InboundMapping.IdText(x.Id), StringComparer.Ordinal).Take(max).ToList();
+            IEnumerable<InboundMessageEntity> eligible = s.InboundMessages.Values
+                .Where(x => x.TransferSwitchId is null && x.ActionState == InboundActionState.Pending && x.ActionNextAttemptAt <= at && x.LeaseUntil <= at);
+            if (limits?.ExcludeTenants is { Count: > 0 } excluded)
+            {
+                eligible = eligible.Where(x => !excluded.Contains(x.TenantId));
+            }
+
+            IEnumerable<InboundMessageEntity> ordered = eligible.OrderBy(x => x.ActionNextAttemptAt).ThenBy(x => InboundMapping.IdText(x.Id), StringComparer.Ordinal);
+            if (limits is { MaxPerTenant: > 0 } capped)
+            {
+                var perTenant = new Dictionary<Guid, int>();
+                ordered = ordered.Where(x =>
+                {
+                    int seen = perTenant.GetValueOrDefault(x.TenantId) + 1;
+                    perTenant[x.TenantId] = seen;
+                    return seen <= capped.MaxPerTenant;
+                });
+            }
+
+            List<InboundMessageEntity> due = ordered.Take(max).ToList();
             var claimed = new List<ClaimedInboundAction>(due.Count);
             foreach (InboundMessageEntity e in due)
             {

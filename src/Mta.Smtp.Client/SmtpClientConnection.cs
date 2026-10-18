@@ -565,13 +565,29 @@ public sealed class SmtpClientConnection : IAsyncDisposable
 
             await FlushAsync(SmtpStage.MailFrom, cancellationToken).ConfigureAwait(false);
             mailReply = await ReadReplyAsync(SmtpStage.MailFrom, _options.CommandTimeout, cancellationToken).ConfigureAwait(false);
+            if (mailReply.Code == ServiceNotAvailable)
+            {
+                // The server is closing the channel (RFC 5321 4.2.2): the replies to the rest of the pipeline will never come. Keep the 421 itself, it is the reason.
+                _broken = true;
+                return new SmtpSendResult { Stage = SmtpStage.MailFrom, SenderRejection = mailReply };
+            }
+
             for (int i = 0; i < envelope.Recipients.Count; i++)
             {
                 var r = await ReadReplyAsync(SmtpStage.RcptTo, _options.CommandTimeout, cancellationToken).ConfigureAwait(false);
                 results.Add(new SmtpRecipientResult { Address = envelope.Recipients[i], Reply = r });
+                if (r.Code == ServiceNotAvailable)
+                {
+                    return ChannelClosing(results, r);
+                }
             }
 
             SmtpReply? dataReply = chunking ? null : await ReadReplyAsync(SmtpStage.Data, _options.DataInitiationTimeout, cancellationToken).ConfigureAwait(false);
+            if (dataReply is { Code: ServiceNotAvailable })
+            {
+                return ChannelClosing(results, dataReply);
+            }
+
             if (!mailReply.IsPositiveCompletion)
             {
                 // Server rejected the sender; the pipelined RCPT/DATA were answered 503. Resynchronized, nothing to reset.
@@ -611,6 +627,7 @@ public sealed class SmtpClientConnection : IAsyncDisposable
         mailReply = await FlushAndReadReplyAsync(SmtpStage.MailFrom, _options.CommandTimeout, cancellationToken).ConfigureAwait(false);
         if (!mailReply.IsPositiveCompletion)
         {
+            _broken |= mailReply.Code == ServiceNotAvailable;
             return new SmtpSendResult { Stage = SmtpStage.MailFrom, SenderRejection = mailReply };
         }
 
@@ -620,6 +637,10 @@ public sealed class SmtpClientConnection : IAsyncDisposable
             WriteRcptTo(rcpt, caps);
             var r = await FlushAndReadReplyAsync(SmtpStage.RcptTo, _options.CommandTimeout, cancellationToken).ConfigureAwait(false);
             results.Add(new SmtpRecipientResult { Address = rcpt, Reply = r });
+            if (r.Code == ServiceNotAvailable)
+            {
+                return ChannelClosing(results, r);
+            }
         }
 
         if (!AnyAccepted(results))
@@ -636,6 +657,7 @@ public sealed class SmtpClientConnection : IAsyncDisposable
         var data = await CommandAsync(SmtpStage.Data, "DATA", _options.DataInitiationTimeout, cancellationToken).ConfigureAwait(false);
         if (!data.IsIntermediate)
         {
+            _broken |= data.Code == ServiceNotAvailable;
             return new SmtpSendResult { Stage = SmtpStage.Data, Recipients = results, DataRejection = data };
         }
 
@@ -695,9 +717,23 @@ public sealed class SmtpClientConnection : IAsyncDisposable
             throw new SmtpConnectionException(ex.Stage, ex.Message, ex.InnerException, endOfDataSent: true, ex.TimedOut);
         }
 
+        _broken |= final.Code == ServiceNotAvailable;
         TransactionsCompleted++;
         LastUsedAt = _clock.UtcNow;
         return new SmtpSendResult { Stage = SmtpStage.EndOfData, Recipients = results, FinalReply = final, EndOfDataSent = true };
+    }
+
+    /// <summary>The reply that makes a server close the channel (RFC 5321 4.2.2: 421, service not available).</summary>
+    private const int ServiceNotAvailable = 421;
+
+    /// <summary>
+    /// A 421 during the envelope: the server closes the connection, so the answers that are still owed (the other recipients, DATA) will not come and nothing can be reset.
+    /// The 421 is reported as the verdict for every recipient that has no answer of its own (it is why the delivery is deferred and how the retry is scheduled), and the connection is dropped.
+    /// </summary>
+    private SmtpSendResult ChannelClosing(List<SmtpRecipientResult> results, SmtpReply closing)
+    {
+        _broken = true;
+        return new SmtpSendResult { Stage = SmtpStage.RcptTo, Recipients = results, DataRejection = closing };
     }
 
     [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]

@@ -121,7 +121,8 @@ public class InboundActionRunnerTests
 
         // The route became a store route while the messages waited: nothing is delivered, nothing is deleted.
         await h.Storage.Inbound.UpsertRouteAsync(h.Route with { ActionKind = InboundActionKind.Store, WebhookEndpointId = null, UpdatedAt = h.Clock.UtcNow }, default);
-        Assert.Equal(3, await h.RunAsync());
+        Assert.Equal(2, await h.RunAsync());   // a tenant's share of one pass
+        Assert.Equal(1, await h.RunAsync());
         InboundMessage stored = await h.GetAsync(toStore.Id);
         Assert.Equal(InboundActionState.Done, stored.ActionState);
         Assert.Equal("route_is_now_store", stored.ActionNote);
@@ -211,31 +212,64 @@ public class InboundActionRunnerTests
     }
 
     [Fact]
-    public async Task One_tenant_cannot_take_more_than_its_share_of_the_pool()
+    public async Task One_tenants_backlog_does_not_starve_the_others_and_nothing_waits_while_holding_a_claim()
     {
         var options = new InboundActionOptions { Concurrency = 4, MaxConcurrencyPerTenant = 2 };
         await using var h = await new InboundActionHarness(options).InitializeAsync();
         var release = new TaskCompletionSource();
         h.Receiver.Gate = () => release.Task;
-        for (int i = 0; i < 4; i++)
+        for (int i = 0; i < 6; i++)
+        {
+            await h.ReceiveAsync();   // the old backlog of tenant one, whose receiver is slow
+            h.Clock.Advance(TimeSpan.FromSeconds(1));
+        }
+
+        var other = await h.AddTenantAsync("other.example", "https://other.example.test/hook");
+        InboundMessageDraft late = await h.ReceiveForAsync(other);
+
+        Task<int> run = h.Runner.RunOnceAsync(default);
+        await WaitUntilAsync(() => Task.FromResult(h.Receiver.Requests.Count >= 3));
+        Assert.Equal(3, h.Receiver.Requests.Count);   // two of the first tenant (its share) and the other tenant's, which is the youngest of all
+        release.SetResult();
+        Assert.Equal(3, await run);
+
+        Assert.Equal(InboundActionState.Done, (await h.Storage.Inbound.GetAsync(other.TenantId, late.Id, default))!.ActionState);
+        Assert.Equal(3, h.Receiver.Requests.Count);
+        // Only the claimed rows counted an attempt: the first tenant's other four were never touched.
+        var rest = await h.Storage.Inbound.SearchAsync(new InboundMessageQuery(h.TenantId, ActionState: InboundActionState.Pending), default);
+        Assert.Equal(4, rest.Items.Count);
+        Assert.All(rest.Items, m => Assert.Equal(0, m.ActionAttempts));
+    }
+
+    [Fact]
+    public async Task The_pool_does_not_claim_more_of_a_tenant_that_has_attempts_in_flight()
+    {
+        var options = new InboundActionOptions { Concurrency = 4, MaxConcurrencyPerTenant = 2, PollInterval = TimeSpan.FromMilliseconds(20) };
+        await using var h = await new InboundActionHarness(options).InitializeAsync();
+        var release = new TaskCompletionSource();
+        h.Receiver.Gate = () => release.Task;
+        for (int i = 0; i < 5; i++)
         {
             await h.ReceiveAsync();
         }
 
-        Task<int> run = h.Runner.RunOnceAsync(default);
+        using var cts = new CancellationTokenSource();
+        Task loop = h.Runner.RunAsync(cts.Token);
         await WaitUntilAsync(() => Task.FromResult(h.Receiver.Requests.Count >= 2));
-
-        // Two are in flight and the other two wait for the tenant's slots: a slow receiver of one tenant never takes the whole pool.
-        // (The maximum below can only be too low when the runner is slow, never too high, so a loaded machine cannot make this fail.)
-        for (int i = 0; i < 200; i++)
+        for (int i = 0; i < 300; i++)
         {
-            await Task.Yield();
+            await Task.Yield();   // a runner that was going to take more would have done it by now; the check below can only be too low on a slow machine, never too high
         }
 
+        Assert.Equal(2, h.Receiver.Requests.Count);
+        var inFlight = await h.Storage.Inbound.SearchAsync(new InboundMessageQuery(h.TenantId, ActionState: InboundActionState.Pending), default);
+        Assert.Equal(2, inFlight.Items.Count(m => m.ActionAttempts == 1));   // exactly its share is claimed: the others are not leased and burn no attempt
+
         release.SetResult();
-        Assert.Equal(4, await run);
+        await WaitUntilAsync(async () => (await h.Storage.Inbound.SearchAsync(new InboundMessageQuery(h.TenantId, ActionState: InboundActionState.Done), default)).Items.Count == 5);
         Assert.Equal(2, h.Receiver.MaxConcurrent);
-        Assert.Equal(4, h.Receiver.Requests.Count);
+        await cts.CancelAsync();
+        await loop.WaitAsync(TimeSpan.FromSeconds(30));
     }
 
     [Fact]

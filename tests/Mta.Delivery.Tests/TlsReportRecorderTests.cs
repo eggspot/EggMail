@@ -60,4 +60,27 @@ public class TlsReportRecorderTests
         Assert.Equal("evil.example", d.ReceivingMxHostname);
         Assert.Equal("MX not in policy", d.AdditionalInformation);
     }
+
+    [Fact]
+    public void A_certificate_failure_that_the_policy_tolerates_is_still_reported_as_a_failure_for_the_domain_owner()
+    {
+        // MTA-STS testing mode: the platform validator accepts (the policy does not enforce) but remembers what was wrong; the whole point of the mode is that this is reported.
+        var c = new TlsRptCollector();
+        var tolerated = new CertificateValidationOutcome(true, false, TlsResultType.CertificateExpired, System.Net.Security.SslPolicyErrors.RemoteCertificateChainErrors, []);
+        TlsReportRecorder.RecordSession(c, Decision(TlsPolicyType.Sts), "192.0.2.1", null, null, tolerated, tlsUsed: true);
+        var p = Single(c);
+        Assert.Equal((0, 1), (p.SuccessCount, p.FailureCount));
+        Assert.Equal(TlsResultType.CertificateExpired, Assert.Single(p.FailureDetails).ResultType);
+    }
+
+    [Fact]
+    public void An_mx_the_testing_policy_does_not_list_is_reported_as_a_validation_failure_not_as_a_success()
+    {
+        var c = new TlsRptCollector();
+        var decision = new TlsPolicyDecision { RecipientDomain = "example.net", MxHost = "mx.example.net", PolicyType = TlsPolicyType.Sts, ToleratedFailure = TlsResultType.ValidationFailure };
+        TlsReportRecorder.RecordSession(c, decision, "192.0.2.1", null, null, new CertificateValidationOutcome(true, true, null, System.Net.Security.SslPolicyErrors.None, []), tlsUsed: true);
+        var p = Single(c);
+        Assert.Equal((0, 1), (p.SuccessCount, p.FailureCount));
+        Assert.Equal(TlsResultType.ValidationFailure, Assert.Single(p.FailureDetails).ResultType);
+    }
 }

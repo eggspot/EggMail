@@ -94,15 +94,43 @@ internal sealed class SqliteInboundAccess(SqliteRuntime rt, IStorageModelHooks h
     }
 
     // One writer, one transaction: the single-process claim needs no row locks.
-    public IReadOnlyList<Guid> ClaimIds(QueueDbContext context, string owner, int max, DateTimeOffset now, DateTimeOffset until)
+    public IReadOnlyList<Guid> ClaimIds(QueueDbContext context, string owner, int max, DateTimeOffset now, DateTimeOffset until, InboundClaimLimits? limits)
     {
         DbConnection connection = context.Database.GetDbConnection();
         using DbCommand cmd = connection.CreateCommand();
         cmd.Transaction = context.Database.CurrentTransaction?.GetDbTransaction();
-        cmd.CommandText =
-            "UPDATE inbound_message SET lease_owner = @owner, lease_until = @until, action_attempts = action_attempts + 1, claim_sequence = claim_sequence + 1 WHERE id IN (" +
-            "SELECT id FROM inbound_message WHERE transfer_switch_id IS NULL AND action_state = 0 AND action_next_attempt_at <= @now AND lease_until <= @now ORDER BY action_next_attempt_at, id LIMIT @max) " +
-            "RETURNING id";
+        const string Eligible = "transfer_switch_id IS NULL AND action_state = 0 AND action_next_attempt_at <= @now AND lease_until <= @now";
+        if (limits is null)
+        {
+            cmd.CommandText =
+                "UPDATE inbound_message SET lease_owner = @owner, lease_until = @until, action_attempts = action_attempts + 1, claim_sequence = claim_sequence + 1 WHERE id IN (" +
+                "SELECT id FROM inbound_message WHERE " + Eligible + " ORDER BY action_next_attempt_at, id LIMIT @max) " +
+                "RETURNING id";
+        }
+        else
+        {
+            // At most MaxPerTenant rows of a tenant (its oldest due ones), tenants in ExcludeTenants left out, then the oldest due first among what is left. One writer: nothing else claims meanwhile.
+            string exclusion = string.Empty;
+            if (limits.ExcludeTenants is { Count: > 0 } excluded)
+            {
+                var names = new List<string>();
+                foreach (Guid tenant in excluded)
+                {
+                    string name = "@x" + names.Count.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                    names.Add(name);
+                    Add(cmd, name, tenant.ToString("D").ToUpperInvariant());
+                }
+
+                exclusion = " AND tenant_id NOT IN (" + string.Join(',', names) + ")";
+            }
+
+            cmd.CommandText =
+                "UPDATE inbound_message SET lease_owner = @owner, lease_until = @until, action_attempts = action_attempts + 1, claim_sequence = claim_sequence + 1 WHERE id IN (" +
+                "SELECT id FROM (SELECT id, action_next_attempt_at AS due, ROW_NUMBER() OVER (PARTITION BY tenant_id ORDER BY action_next_attempt_at, id) AS rn FROM inbound_message WHERE " + Eligible + exclusion + ") " +
+                "WHERE rn <= @cap ORDER BY due, id LIMIT @max) RETURNING id";
+            Add(cmd, "@cap", limits.MaxPerTenant > 0 ? (long)limits.MaxPerTenant : long.MaxValue);
+        }
+
         Add(cmd, "@owner", owner);
         Add(cmd, "@until", StorageTime.ToUnixMs(until));
         Add(cmd, "@now", StorageTime.ToUnixMs(now));

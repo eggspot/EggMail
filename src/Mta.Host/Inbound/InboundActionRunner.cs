@@ -75,6 +75,7 @@ public sealed record InboundActionOptions
 
     public int WebhookMaxTextBytes { get; init; } = 256 * 1024;
 
+    /// <summary>The largest message sent as <c>raw_mime</c>. The call has the one <c>Webhooks:Timeout</c> (15 s by default) for the whole upload, so 10 MiB needs a receiver on a decent link.</summary>
     public long WebhookMaxRawMessageBytes { get; init; } = 10L * 1024 * 1024;
 
     public string? ApiBaseUrl { get; init; }
@@ -103,13 +104,17 @@ public sealed class InboundActionRunner
     private readonly Func<bool> _inboundEnabled;
     private readonly IInboundForwarder? _forwarder;
     private readonly IWebhookPublisher _publisher;
-    private readonly string _owner = $"inbound-{Ids.ToCompact(Ids.New())[..12]}";
-    private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _tenantGates = new();
+    // A whole GUID: the owner name is what separates the claims of replicas (a lease is released, extended and completed by its owner), so two runners must never share one. (The first twelve digits of a
+    // time-ordered id are its millisecond, which two replicas started together do share.)
+    private readonly string _owner = "inbound-" + Guid.NewGuid().ToString("N");
+    private readonly ConcurrentDictionary<Guid, int> _tenantInFlight = new();
     private readonly SemaphoreSlim _wake = new(0);
     private readonly ConcurrentDictionary<Task, byte> _running = new();
     private volatile bool _paused;
-    private long _lastSampleTimestamp;
-    private InboundUsage? _latestUsage;
+    private readonly ConcurrentDictionary<(Guid Tenant, Guid Route), (long Timestamp, int Suppressed)> _failureNotices = new();
+    private long _lastPendingSample;
+    private long _lastFailedSample;
+    private ActionCounts? _latestCounts;
 
     public InboundActionRunner(
         IStorage storage, WebhookTransport transport, WebhookEndpointHealth health, ISecretProtector secrets, InboundActionOptions options, IClock clock, IMtaLog log,
@@ -128,7 +133,9 @@ public sealed class InboundActionRunner
     }
 
     /// <summary>The last sample of the pending and failed counts (null before the first), for the gauge.</summary>
-    internal InboundUsage? LatestUsage => Volatile.Read(ref _latestUsage);
+    internal ActionCounts? LatestCounts => Volatile.Read(ref _latestCounts);
+
+    internal sealed record ActionCounts(long Pending, long Failed);
 
     /// <summary>The lease owner name of this runner (a test claims with it to simulate a crash).</summary>
     public string Owner => _owner;
@@ -154,15 +161,16 @@ public sealed class InboundActionRunner
                 int claimedNow = 0;
                 try
                 {
-                    await SampleUsageAsync(cancellationToken).ConfigureAwait(false);
+                    await SampleCountsAsync(cancellationToken).ConfigureAwait(false);
                     int free = _options.Concurrency - running.Count;
                     if (free > 0 && !_paused)
                     {
-                        IReadOnlyList<ClaimedInboundAction> claimed = await _storage.Inbound.ClaimActionsAsync(_owner, free, _clock.UtcNow, _options.Lease, cancellationToken).ConfigureAwait(false);
+                        IReadOnlyList<ClaimedInboundAction> claimed = await _storage.Inbound.ClaimActionsAsync(_owner, free, _clock.UtcNow, _options.Lease, cancellationToken, FairnessLimits()).ConfigureAwait(false);
                         claimedNow = claimed.Count;
                         foreach (ClaimedInboundAction claim in claimed)
                         {
-                            Task task = Task.Run(() => ProcessGuardedAsync(claim, cancellationToken), CancellationToken.None);
+                            _tenantInFlight.AddOrUpdate(claim.Message.TenantId, 1, static (_, n) => n + 1);
+                            Task task = Task.Run(() => ProcessGuardedAsync(claim, cancellationToken, trackTenant: true), CancellationToken.None);
                             running[task] = 0;
                             _ = task.ContinueWith(t => { running.TryRemove(t, out _); Wake(); }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
                         }
@@ -243,31 +251,65 @@ public sealed class InboundActionRunner
     /// <summary>Claims up to <see cref="InboundActionOptions.Concurrency"/> due actions and carries them out; returns how many were claimed. The loop of <see cref="RunAsync"/> is the same work, continuously.</summary>
     public async Task<int> RunOnceAsync(CancellationToken cancellationToken)
     {
-        IReadOnlyList<ClaimedInboundAction> claimed = await _storage.Inbound.ClaimActionsAsync(_owner, _options.Concurrency, _clock.UtcNow, _options.Lease, cancellationToken).ConfigureAwait(false);
-        await Task.WhenAll(claimed.Select(c => ProcessGuardedAsync(c, cancellationToken))).ConfigureAwait(false);
+        IReadOnlyList<ClaimedInboundAction> claimed = await _storage.Inbound.ClaimActionsAsync(_owner, _options.Concurrency, _clock.UtcNow, _options.Lease, cancellationToken, FairnessLimits()).ConfigureAwait(false);
+        await Task.WhenAll(claimed.Select(c => ProcessGuardedAsync(c, cancellationToken, trackTenant: false))).ConfigureAwait(false);
         return claimed.Count;
     }
 
-    private async Task SampleUsageAsync(CancellationToken ct)
+    /// <summary>
+    /// One tenant never takes every worker of a replica (design section 11.7): a claim returns at most <see cref="InboundActionOptions.MaxConcurrencyPerTenant"/> rows of a tenant and nothing
+    /// of a tenant that has attempts in flight here, so a slow receiver and a large backlog of one tenant leave the other tenants' actions to be claimed. Nothing waits for a slot while holding
+    /// a claim: an over-share row is simply not claimed.
+    /// </summary>
+    private InboundClaimLimits FairnessLimits()
     {
-        long now = _clock.Timestamp;
-        if (_lastSampleTimestamp != 0 && _clock.GetElapsedTime(_lastSampleTimestamp) < TimeSpan.FromSeconds(15))
+        Guid[] busy = [.. _tenantInFlight.Where(t => t.Value > 0).Select(t => t.Key)];
+        return new InboundClaimLimits(_options.MaxConcurrencyPerTenant, busy);
+    }
+
+    /// <summary>
+    /// Samples the numbers of the gauge with indexed counts, and only while inbound mail is on: the pending count (the claim's partial index) every 15 seconds, the failed count (no index of its own)
+    /// every five minutes.
+    /// </summary>
+    private async Task SampleCountsAsync(CancellationToken ct)
+    {
+        if (!_inboundEnabled())
         {
             return;
         }
 
-        _lastSampleTimestamp = now;
+        long now = _clock.Timestamp;
         try
         {
-            Volatile.Write(ref _latestUsage, await _storage.Inbound.GetUsageAsync(null, null, ct).ConfigureAwait(false));
+            long pending = LatestCounts?.Pending ?? 0;
+            long failed = LatestCounts?.Failed ?? 0;
+            bool changed = false;
+            if (_lastPendingSample == 0 || _clock.GetElapsedTime(_lastPendingSample) >= TimeSpan.FromSeconds(15))
+            {
+                _lastPendingSample = now;
+                pending = await _storage.Inbound.CountActionsAsync(InboundActionState.Pending, ct).ConfigureAwait(false);
+                changed = true;
+            }
+
+            if (_lastFailedSample == 0 || _clock.GetElapsedTime(_lastFailedSample) >= TimeSpan.FromMinutes(5))
+            {
+                _lastFailedSample = now;
+                failed = await _storage.Inbound.CountActionsAsync(InboundActionState.Failed, ct).ConfigureAwait(false);
+                changed = true;
+            }
+
+            if (changed)
+            {
+                Volatile.Write(ref _latestCounts, new ActionCounts(pending, failed));
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _log.Write(MtaLogLevel.Warning, "inbound", "could not sample the pending and failed route actions for the metrics", ex);
+            _log.Write(MtaLogLevel.Warning, "inbound", "could not count the pending and failed route actions for the metrics", ex);
         }
     }
 
-    private async Task ProcessGuardedAsync(ClaimedInboundAction claim, CancellationToken ct)
+    private async Task ProcessGuardedAsync(ClaimedInboundAction claim, CancellationToken ct, bool trackTenant)
     {
         try
         {
@@ -277,15 +319,26 @@ public sealed class InboundActionRunner
         {
             // Stopping: the lease is released with the others at the end of RunAsync.
         }
-        catch (LeaseLostException)
-        {
-            // Another replica took the action over while this one waited for a slot: its attempt decides, this one makes none.
-            _log.Write(MtaLogLevel.Debug, "inbound", $"route action of inbound message {claim.Message.Id:N} was taken over before it started");
-        }
         catch (Exception ex)
         {
-            // Not recorded: the lease runs out and the next claim counts the attempt again, so a message that makes the runner fail every time reaches the end of the ladder.
-            _log.Write(MtaLogLevel.Error, "inbound", $"route action of inbound message {claim.Message.Id:N} failed unexpectedly; it is retried when its lease runs out", ex);
+            // Something the attempt did not expect (a storage hiccup, a bug on a hostile message): it is one failed attempt on the ladder, so a message that breaks the runner every time ends
+            // `failed` (internal_error) instead of being claimed again and again. If even that cannot be recorded the lease runs out and the claim counts the attempt anyway.
+            _log.Write(MtaLogLevel.Error, "inbound", $"route action of inbound message {claim.Message.Id:N} failed unexpectedly", ex);
+            try
+            {
+                await RecordAsync(claim, null, InboundNames.Of(claim.Message.ActionKind), InboundActionResult.Retry("internal_error"), _clock.Timestamp).ConfigureAwait(false);
+            }
+            catch (Exception recordFailure)
+            {
+                _log.Write(MtaLogLevel.Warning, "inbound", $"could not record the failure of inbound message {claim.Message.Id:N}; it is retried when its lease runs out", recordFailure);
+            }
+        }
+        finally
+        {
+            if (trackTenant)
+            {
+                _tenantInFlight.AddOrUpdate(claim.Message.TenantId, 0, static (_, n) => Math.Max(0, n - 1));
+            }
         }
     }
 
@@ -325,7 +378,7 @@ public sealed class InboundActionRunner
             result = await RunRouteActionAsync(claim, route, ct).ConfigureAwait(false);
         }
 
-        await RecordAsync(claim, route, kind, result, started, ct).ConfigureAwait(false);
+        await RecordAsync(claim, route, kind, result, started).ConfigureAwait(false);
     }
 
     private async ValueTask<InboundActionResult> RunRouteActionAsync(ClaimedInboundAction claim, InboundRouteRecord route, CancellationToken ct)
@@ -343,36 +396,12 @@ public sealed class InboundActionRunner
             return InboundActionResult.Failed("body_missing");
         }
 
-        SemaphoreSlim gate = _tenantGates.GetOrAdd(claim.Message.TenantId, _ => new SemaphoreSlim(_options.MaxConcurrencyPerTenant));
-        await AcquireKeepingLeaseAsync(gate, claim.Message.Id, ct).ConfigureAwait(false);
-        try
-        {
-            return route.ActionKind == InboundActionKind.Forward
-                ? _forwarder is null
-                    ? InboundActionResult.Retry("forward_unavailable")
-                    : await _forwarder.ForwardAsync(claim.Message, route, raw, ct).ConfigureAwait(false)
-                : await RunWebhookAsync(claim.Message, route, raw, ct).ConfigureAwait(false);
-        }
-        finally
-        {
-            gate.Release();
-        }
+        return route.ActionKind == InboundActionKind.Forward
+            ? _forwarder is null
+                ? InboundActionResult.Retry("forward_unavailable")
+                : await _forwarder.ForwardAsync(claim.Message, route, raw, ct).ConfigureAwait(false)
+            : await RunWebhookAsync(claim.Message, route, raw, ct).ConfigureAwait(false);
     }
-
-    /// <summary>Waits for a tenant slot without letting the claimed action's lease run out (another replica would take it over and the attempt would be made twice).</summary>
-    private async Task AcquireKeepingLeaseAsync(SemaphoreSlim gate, Guid messageId, CancellationToken ct)
-    {
-        TimeSpan step = TimeSpan.FromTicks(Math.Max(TimeSpan.FromSeconds(1).Ticks, _options.Lease.Ticks / 3));
-        while (!await gate.WaitAsync(step, ct).ConfigureAwait(false))
-        {
-            if (!await _storage.Inbound.ExtendActionLeaseAsync(messageId, _owner, _clock.UtcNow + _options.Lease, ct).ConfigureAwait(false))
-            {
-                throw new LeaseLostException();
-            }
-        }
-    }
-
-    private sealed class LeaseLostException : Exception;
 
     private async ValueTask<InboundActionResult> RunWebhookAsync(InboundMessage message, InboundRouteRecord route, byte[] raw, CancellationToken ct)
     {
@@ -407,10 +436,21 @@ public sealed class InboundActionRunner
                 StandardWebhooksSigner.ParseSecret(secret);   // a stored secret that is not base64 would otherwise throw while signing, on every attempt
             }
         }
-        catch (Exception ex) when (ex is System.Security.Cryptography.CryptographicException or FormatException)
+        catch (FormatException ex)
         {
-            _log.Write(MtaLogLevel.Error, "inbound", $"webhook endpoint {endpoint.Id:N}: the secret cannot be unprotected", ex);
+            _log.Write(MtaLogLevel.Error, "inbound", $"webhook endpoint {endpoint.Id:N}: the stored secret is not valid", ex);
             return InboundActionResult.Failed("secret_unreadable");
+        }
+        catch (System.Security.Cryptography.CryptographicException ex)
+        {
+            // The key ring could not open it (a key provider that is down, a key not there yet): that can pass, so the message keeps its ladder.
+            _log.Write(MtaLogLevel.Error, "inbound", $"webhook endpoint {endpoint.Id:N}: the secret cannot be unprotected", ex);
+            return InboundActionResult.Retry("secret_unreadable");
+        }
+
+        if (secrets.Length == 0)
+        {
+            return InboundActionResult.Failed("secret_unreadable");   // never a request without a signature
         }
 
         string webhookId = InboundWebhookPayload.WebhookId(message.Id, message.RetryGeneration);
@@ -419,7 +459,7 @@ public sealed class InboundActionRunner
             ? await _transport.SendAsync(endpoint, webhookId, raw, "message/rfc822", secrets, now, InboundWebhookPayload.RawHeaders(message), ct).ConfigureAwait(false)
             : await _transport.SendAsync(
                 endpoint, webhookId,
-                InboundWebhookPayload.BuildJson(message, raw, webhookId, new InboundWebhookLimits(_options.WebhookMaxTextBytes, _options.WebhookMaxRawMessageBytes, _options.ApiBaseUrl)),
+                InboundWebhookPayload.BuildJson(message, raw, webhookId, new InboundWebhookLimits(_options.WebhookMaxTextBytes, _options.ApiBaseUrl)),
                 "application/json; charset=utf-8", secrets, now, null, ct).ConfigureAwait(false);
 
         WebhookMetrics.DeliveryDuration.Record(sent.Duration.TotalSeconds);
@@ -442,8 +482,14 @@ public sealed class InboundActionRunner
         return InboundActionResult.Retry("webhook_" + errorClass, errorClass == "throttled" ? _options.ThrottleExtraDelay : TimeSpan.Zero);
     }
 
-    private async Task RecordAsync(ClaimedInboundAction claim, InboundRouteRecord? route, string kind, InboundActionResult result, long started, CancellationToken ct)
+    /// <summary>
+    /// Records the result of an attempt. It uses its own short time limit, not the runner's token: an attempt that really finished (a webhook the receiver accepted) must be recorded even when the
+    /// host is stopping, or the message would be sent again.
+    /// </summary>
+    private async Task RecordAsync(ClaimedInboundAction claim, InboundRouteRecord? route, string kind, InboundActionResult result, long started)
     {
+        using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        CancellationToken ct = limit.Token;
         InboundMessage message = claim.Message;
         DateTimeOffset now = _clock.UtcNow;
         int attempt = message.ActionAttempts;
@@ -484,11 +530,34 @@ public sealed class InboundActionRunner
         }
     }
 
+    /// <summary>
+    /// Tells the tenant's endpoints that an action gave up. A dead receiver makes every message of a route fail within the same hour, so the notices of one route are coalesced: one per minute, the
+    /// next one says how many were left out (<c>suppressed</c> in the event). The state of every message is recorded and visible either way.
+    /// </summary>
     private async Task PublishFailureAsync(InboundMessage message, InboundRouteRecord? route, string kind, string error, int attempts, DateTimeOffset now, CancellationToken ct)
     {
+        var key = (message.TenantId, route?.Id ?? message.RouteId ?? Guid.Empty);
+        long stamp = _clock.Timestamp;
+        int suppressed = 0;
+        lock (_failureNotices)
+        {
+            if (_failureNotices.TryGetValue(key, out var last) && _clock.GetElapsedTime(last.Timestamp) < TimeSpan.FromMinutes(1))
+            {
+                _failureNotices[key] = (last.Timestamp, last.Suppressed + 1);
+                return;
+            }
+
+            suppressed = _failureNotices.TryGetValue(key, out var previous) ? previous.Suppressed : 0;
+            _failureNotices[key] = (stamp, 0);
+            if (_failureNotices.Count > 10_000)
+            {
+                _failureNotices.Clear();   // bounded memory: a forgotten key only means one more notice
+            }
+        }
+
         try
         {
-            await _publisher.PublishAsync(message.TenantId, WebhookEventFactory.InboundActionFailedEvent(message.Id, route?.Id ?? message.RouteId, kind, error, attempts, now), now, ct).ConfigureAwait(false);
+            await _publisher.PublishAsync(message.TenantId, WebhookEventFactory.InboundActionFailedEvent(message.Id, route?.Id ?? message.RouteId, kind, error, attempts, now, suppressed), now, ct).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

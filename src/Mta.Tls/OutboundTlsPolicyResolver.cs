@@ -208,6 +208,7 @@ public sealed class OutboundTlsPolicyResolver
                 FailureMustDefer = require,
                 ExpectedHostname = mx,
                 StsPolicy = policy,
+                ToleratedFailure = mxAllowed ? null : TlsResultType.ValidationFailure,
                 Reasons = reasons,
             };
         }
