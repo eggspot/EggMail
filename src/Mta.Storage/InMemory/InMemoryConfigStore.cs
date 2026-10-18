@@ -593,19 +593,20 @@ internal sealed partial class InMemoryConfigStore : IConfigStore
         return default;
     }
 
-    public ValueTask DisableWebhookEndpointAsync(Guid id, string reason, DateTimeOffset at, CancellationToken ct)
+    public ValueTask<bool> DisableWebhookEndpointAsync(Guid id, string reason, DateTimeOffset at, CancellationToken ct)
     {
         lock (_gate)
         {
-            if (_endpoints.TryGetValue(id, out var w))
+            if (_endpoints.TryGetValue(id, out var w) && w.Enabled)
             {
                 w.Enabled = false;
                 w.DisabledReason = reason;
                 w.DisabledAt = StorageTime.Normalize(at);
+                return ValueTask.FromResult(true);
             }
         }
 
-        return default;
+        return ValueTask.FromResult(false);
     }
 
     /// <summary>Enabled endpoints of a tenant that subscribe to an event type (used by webhook fan-out).</summary>

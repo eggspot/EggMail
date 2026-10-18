@@ -37,7 +37,7 @@ docker logs eggmail          # the generated dashboard password, printed once (s
 That is a working mail server: SMTP submission with AUTH on 587 (STARTTLS), 465 (implicit TLS) and 2525, the API and dashboard on `https://<host>:8443`, SQLite in the volume. The first start creates everything it needs by itself and says what it did in the log:
 
 - the data directory and the SQLite files in `/data` (a data directory that cannot be written stops the start with the reason: in Docker use a named volume, or `chown 1654:1654` a bind-mounted directory);
-- the Data Protection key ring and the VERP key, kept in the config database (the key ring is unprotected until you set `Secrets:KeyProtection`; the log says so);
+- the Data Protection key ring and the VERP key, kept in the config database (the key ring is unprotected until you set `Secrets:KeyProtection`; the log says so). Replicas that start together on an empty database share one VERP key: the first creates it under a lease and the others read it;
 - the **first dashboard administrator** `admin` with a **generated password**, printed once in a block delimited by `==== EGGMAIL FIRST START: DASHBOARD ADMINISTRATOR ====` and `==== END OF THE ONE-TIME PASSWORD (it is never shown again) ====`. It goes to the console only (never into the structured log that an OTLP exporter might ship), only the first time, and only if no administrator exists. It is a **temporary** password: the dashboard accepts nothing but a new password at the first sign-in (the API answers `403 password_change_required` to everything else), and the generated one stops working with that. Until someone signs in, **it is as readable as the container log**: Docker's log files and drivers, a Kubernetes log shipper or a collector all keep the console output, and the password has no expiry and stays valid until it is changed, so sign in right after the first start (or choose the password yourself, below, and nothing is printed). To choose the password yourself set `EGGMAIL_ADMIN_PASSWORD_FILE` (a mounted secret, preferred) or `EGGMAIL_ADMIN_PASSWORD` before the first start: then nothing is printed and the password you set is the one that stays. **If you lose the password** see [Lost password](#lost-password);
 - a **self-signed certificate** for `Hostname`, used by STARTTLS, implicit TLS and the dashboard. Every start says so in the log (`Serving a SELF-SIGNED certificate ...`), the API reports the warning `self_signed_certificate`, and the dashboard shows a persistent banner on every page, including the sign-in page. Clients that verify certificates (browsers, most mail clients) will complain until you set up a real one (`EGGMAIL_HOSTNAME` with `EGGMAIL_ACME_EMAIL`, or upload one). Mail servers that receive your mail do not require a trusted certificate from a sender;
 - a **DKIM key per sending domain**, generated when the domain is added (dashboard, API, or `EGGMAIL_DOMAINS`); the dashboard then shows the DNS records to publish.
@@ -206,7 +206,7 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | `Dns:Servers` | system resolvers | Resolvers (IP with optional port) |
 | `Dns:RequestDnssec` | true | Ask for DNSSEC records (needed for DANE) |
 | `Dns:TrustAuthenticatedData` | false | Trust the AD bit; only behind a local validating resolver. With the default DANE never applies. `deploy/compose/compose.unbound.yaml` (Compose) and `deploy/kubernetes/components/unbound` (Kubernetes) add an Unbound sidecar and set `Dns:Servers`, `Dns:RequestDnssec` and this key together |
-| `Sending:GlobalPerHour` | 0 | Most messages the server sends per UTC hour (0 = unlimited). Counters are in memory: a restart starts the hour at zero |
+| `Sending:GlobalPerHour` | 0 | Most messages the server sends per UTC hour (0 = unlimited). Counters are written behind to the database: a restart resumes the hour (a crash loses the last 10 s of counting) |
 | `Sending:GlobalPerDay` | 0 | The same per UTC day |
 | `Sending:TenantPerHour` | 0 | Default cap per tenant and hour; a tenant setting `Sending:PerHour` overrides it |
 | `Sending:TenantPerDay` | 0 | Default cap per tenant and day; tenant setting `Sending:PerDay` |
@@ -319,7 +319,7 @@ The receive path ([Inbound mail](#inbound-mail), design section 11). The limits 
 | `Webhooks:BatchSize` | 64 | Deliveries claimed at once |
 | `Webhooks:PollInterval` | `00:00:00.500` | |
 | `Webhooks:Lease` | `00:02:00` | |
-| `Webhooks:DisableAfter` | `5.00:00:00` | An endpoint failing for this long is disabled and the tenant notified |
+| `Webhooks:DisableAfter` | `5.00:00:00` | An endpoint failing for this long is disabled and the tenant notified (once: `IConfigStore.DisableWebhookEndpointAsync` reports whether the call switched it off, so attempts that fail side by side or on several replicas send one `webhook.endpoint.disabled` event) |
 | `Webhooks:RetrySchedule` | 5 s, 5 m, 30 m, 2 h, 5 h, 10 h, 10 h | Delays after attempt 1, 2, ... |
 | `Webhooks:ThrottleExtraDelay` | `00:01:00` | Extra delay when the receiver answers 429/502/504 |
 | `Webhooks:MaxResponseSnippetBytes` | 1024 | Response bytes kept in the attempt log |
@@ -539,7 +539,7 @@ Checklist for the first real-CA run, HTTP-01: a public host name whose A/AAAA re
 
 ## Backups and restore (SQLite)
 
-Backups run while the server runs (`VACUUM INTO` per file) every `Backup:IntervalHours` into `<data>/backups/eggmail-backup-<UTC>/`; the newest `Backup:Keep` are kept. Put `Backup:Directory` on another disk when possible and copy backups off the host.
+Backups run while the server runs (`VACUUM INTO` per file) every `Backup:IntervalHours` into `<data>/backups/eggmail-backup-<UTC>/` (written as `….partial` and renamed when complete; leftovers of an interrupted backup are removed at the next check; a directory dated later than the clock is ignored and never deleted); the newest `Backup:Keep` are kept. Put `Backup:Directory` on another disk when possible and copy backups off the host.
 
 To restore: stop EggMail, copy the files of one backup directory over the data directory (replace `config.db`, `queue.db`, `stats.db`, `history.db` together), start. The state returns to the moment of the backup; mail accepted since is lost. If a file is found corrupt at start (possible after power loss with `Sqlite:SyncMode=Off`) it is moved aside (quarantined), the instance starts with a fresh file, and a warning is shown. If `config.db` is quarantined the instance starts without tenants and keys: restore it from a backup. PostgreSQL: use `pg_dump` or your platform's backups.
 

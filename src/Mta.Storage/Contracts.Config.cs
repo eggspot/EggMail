@@ -309,7 +309,11 @@ public interface IConfigStore : IRuntimeStateStore, IInboundConfigStore
     ValueTask UpsertWebhookEndpointAsync(WebhookEndpointRecord endpoint, CancellationToken ct);
     /// <summary>Deletes an endpoint of the tenant. Raises <see cref="StorageConflictException"/> (nothing deleted) while an inbound route still targets it: the check and the delete are one write on every backend.</summary>
     ValueTask DeleteWebhookEndpointAsync(Guid tenantId, Guid id, CancellationToken ct);
-    ValueTask DisableWebhookEndpointAsync(Guid id, string reason, DateTimeOffset at, CancellationToken ct);
+    /// <summary>
+    /// Disables the endpoint. True when this call changed it from enabled to disabled; false when it was already disabled (the first reason and instant are kept) or does not exist. Several attempts that
+    /// fail at once, or several replicas, each decide the endpoint must go: only the call that returns true tells the tenant.
+    /// </summary>
+    ValueTask<bool> DisableWebhookEndpointAsync(Guid id, string reason, DateTimeOffset at, CancellationToken ct);
 
     // Settings, policies, routes
     ValueTask<IReadOnlyList<SettingRecord>> GetSettingsAsync(Guid? tenantId, CancellationToken ct);

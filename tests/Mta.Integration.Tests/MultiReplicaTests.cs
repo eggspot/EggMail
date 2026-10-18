@@ -22,23 +22,6 @@ using Npgsql;
 namespace Mta.Integration.Tests;
 
 /// <summary>
-/// A <c>[Fact]</c> that needs a PostgreSQL server: reported as skipped when there is none (locally, without installed binaries or <c>EGGMAIL_TEST_POSTGRES</c>), but never when the
-/// environment promises one: under CI (<c>CI</c> is set) or with <c>EGGMAIL_TEST_POSTGRES</c> set the test runs and fails if the server is not there, so a broken CI service cannot
-/// turn the proof into a pass.
-/// </summary>
-public sealed class PostgresFactAttribute : FactAttribute
-{
-    private static bool ServerPromised =>
-        !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CI")) || !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("EGGMAIL_TEST_POSTGRES"));
-
-    public override string Skip
-    {
-        get => base.Skip ?? (ServerPromised ? null : PostgresTestServer.UnavailableReason)!;
-        set => base.Skip = value;
-    }
-}
-
-/// <summary>
 /// Several replicas of EggMail (separate <see cref="EggMailRuntime"/> instances, each with its own storage object and connection pool) on one PostgreSQL database. The tests need a
 /// server (<c>EGGMAIL_TEST_POSTGRES</c> in CI, or locally installed binaries) and return at once without one, like the other PostgreSQL pipeline tests.
 /// </summary>
