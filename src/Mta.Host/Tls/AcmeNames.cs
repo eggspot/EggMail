@@ -53,6 +53,26 @@ public static class AcmeNames
         return wildcard ? "*." + ascii : ascii;
     }
 
+    /// <summary>
+    /// Does a certificate that carries <paramref name="certificateNames"/> (its DNS subject alternative names) cover <paramref name="ordered"/>? An exact name matches itself
+    /// (case-insensitive); an ordinary name is also covered by a wildcard name for its parent (<c>*.example.com</c> covers <c>mx.example.com</c>, not <c>example.com</c> or
+    /// <c>a.b.example.com</c>); an ordered wildcard needs the identical wildcard name.
+    /// </summary>
+    public static bool IsCovered(IEnumerable<string> certificateNames, string ordered)
+    {
+        string wanted = ordered.Trim().TrimEnd('.').ToLowerInvariant();
+        foreach (string name in certificateNames)
+        {
+            string have = name.Trim().TrimEnd('.').ToLowerInvariant();
+            if (have == wanted || (!IsWildcard(wanted) && IsWildcard(have) && CertificateMaterial.Matches(have, wanted)))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>Every name normalized (see <see cref="TryNormalize"/>), duplicates removed, order kept; throws <see cref="AcmeException"/> for the first unusable name.</summary>
     public static List<string> NormalizeAll(IEnumerable<string> names)
     {

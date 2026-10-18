@@ -68,7 +68,7 @@ The last two rows are both **temporary failures** for a caller such as SPF (`tem
 | `MaxCnameDepth` | 8 | CNAMEs followed per question. |
 | `AllowPublicResolverFallback` | false | With nothing configured, use 127.0.0.1 only; true adds 1.1.1.1 and 8.8.8.8. |
 
-`MxResolverOptions`: `MaxMxHosts` 10, `MaxAddressesPerHost` 8, `AddressPreference` (`Ipv4First` default, `Ipv6First`, `Ipv4Only`, `Ipv6Only`), `AllowCnameExchanger` true (flagged via `MailExchanger.ResolvedViaCname`), `ExcludeSpecialAddresses` true (drops unspecified, loopback, multicast/reserved 224.0.0.0+ and broadcast; for the hosts a recipient domain names, `ResolveAsync`, internal-network addresses are dropped too: private, link-local including 169.254.169.254, CGNAT, unique-local and the IPv6 forms that embed them, by `Mta.Core.NetworkAddresses`, decision 97; a host the operator chose, `ResolveHostAsync` for a relay, may be private).
+`MxResolverOptions`: `MaxMxHosts` 10, `MaxAddressesPerHost` 8, `AddressPreference` (`Ipv4First` default, `Ipv6First`, `Ipv4Only`, `Ipv6Only`), `AllowCnameExchanger` true (flagged via `MailExchanger.ResolvedViaCname`), `ExcludeSpecialAddresses` true (drops unspecified, loopback, multicast/reserved 224.0.0.0+ and broadcast; for the hosts a recipient domain names, `ResolveAsync`, internal-network addresses are dropped too: private, link-local including 169.254.169.254, CGNAT, unique-local and the IPv6 forms that embed them, by `Mta.Core.NetworkAddresses`, decision 100; a host the operator chose, `ResolveHostAsync` for a relay, may be private).
 
 ## Security properties
 

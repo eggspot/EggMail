@@ -35,7 +35,8 @@ public sealed class WebhookDispatcher : IAsyncDisposable
     private readonly ConcurrentDictionary<string, HttpClient> _clients = new();
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _endpointGates = new();
     private readonly SemaphoreSlim _global;
-    private readonly string _owner = $"webhooks-{Ids.ToCompact(Ids.New())[..12]}";
+    // Random: the first 12 hex digits of a version 7 id are its millisecond timestamp, so two dispatchers created in the same millisecond would share an owner name.
+    private readonly string _owner = $"webhooks-{Guid.NewGuid().ToString("N")[..16]}";
 
     public WebhookDispatcher(
         IWebhookOutbox outbox,

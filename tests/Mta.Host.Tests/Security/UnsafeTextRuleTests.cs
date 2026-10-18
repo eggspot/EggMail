@@ -5,7 +5,7 @@ using Mta.Host.Tests.Api;
 namespace Mta.Host.Tests.Security;
 
 /// <summary>
-/// The rule for text a caller may put into a name, a tag, a file name or a filter (<see cref="ApiText"/>, decision 97), tested in both directions: what it refuses,
+/// The rule for text a caller may put into a name, a tag, a file name or a filter (<see cref="ApiText"/>, decision 100), tested in both directions: what it refuses,
 /// edge by edge, and the real-world text it must accept (every script, joiners, direction marks, emoji). Explicit embedding controls and isolates
 /// (LRE, RLE, PDF, LRO, RLO, LRI, RLI, FSI, PDI) are refused as a set: no name in any language needs them, and they are how a file name or a user name is made to
 /// read differently from what it is; the plain direction marks (LRM, RLM, ALM) and the joiners are what real text uses and stay.
