@@ -28,6 +28,9 @@ public enum DomainRecordPurpose
 
     /// <summary>Reverse DNS of the sending IP: advice only, it is set at whoever owns the IP address, not in the domain's zone.</summary>
     Ptr,
+
+    /// <summary>MX of the domain itself, pointing at this server: how senders reach it with mail for the domain. Advice, listed only while inbound mail is enabled for the domain (design section 11.3).</summary>
+    InboundMx,
 }
 
 /// <summary>Result of looking one expected record up in DNS (the API <c>status</c> field).</summary>
@@ -206,6 +209,7 @@ public static class DomainRecordPurposes
         DomainRecordPurpose.TlsRpt => "tls_rpt",
         DomainRecordPurpose.MtaSts => "mta_sts",
         DomainRecordPurpose.MtaStsHost => "mta_sts_host",
+        DomainRecordPurpose.InboundMx => "inbound_mx",
         _ => "ptr",
     };
 
@@ -220,6 +224,7 @@ public static class DomainRecordPurposes
         DomainRecordPurpose.TlsRpt => "TLS-RPT",
         DomainRecordPurpose.MtaSts => "MTA-STS",
         DomainRecordPurpose.MtaStsHost => "MTA-STS host",
+        DomainRecordPurpose.InboundMx => "Inbound MX",
         _ => "Reverse DNS",
     };
 }
@@ -230,7 +235,11 @@ public static class DomainRecordPlanner
     public static string ReturnPathHost(string domain, DomainRecordOptions options) =>
         options.ReturnPathLabel + "." + Normalize(domain);
 
-    public static IReadOnlyList<ExpectedDomainRecord> Plan(string domain, IEnumerable<DomainDkimKey> dkimKeys, DomainRecordOptions options)
+    /// <param name="inboundEnabled">Inbound mail is enabled for the domain: the MX record that makes senders deliver the domain's mail here is added to the list (advice, never required).</param>
+    /// <summary>The preference number of the MX records this server suggests (the inbound MX and the bounce MX); the dashboard and the API show it as the advice.</summary>
+    public const int MxPreference = 10;
+
+    public static IReadOnlyList<ExpectedDomainRecord> Plan(string domain, IEnumerable<DomainDkimKey> dkimKeys, DomainRecordOptions options, bool inboundEnabled = false)
     {
         ArgumentNullException.ThrowIfNull(dkimKeys);
         ArgumentNullException.ThrowIfNull(options);
@@ -268,9 +277,15 @@ public static class DomainRecordPlanner
                 $"Must lead to this server ({server}) so it can serve the policy over HTTPS; its certificate has to cover mta-sts.{name}."));
         }
 
+        if (inboundEnabled && options.ServerHostname is { } inboundHost)
+        {
+            records.Add(new ExpectedDomainRecord("MX", name, MxPreference + " " + inboundHost, options.Ttl, DomainRecordPurpose.InboundMx, false,
+                $"Makes senders deliver mail for {name} to this server. Replace the domain's existing MX records (or keep this one at the lowest preference number to make it the first choice); {inboundHost} needs an A or AAAA record, and port 25 must be reachable from the Internet. With MTA-STS the mx: line of the policy has to name {inboundHost} too."));
+        }
+
         if (bounceDomain is not null && options.ServerHostname is { } mailHost)
         {
-            records.Add(new ExpectedDomainRecord("MX", bounceDomain, "10 " + mailHost, options.Ttl, DomainRecordPurpose.BounceMx, false,
+            records.Add(new ExpectedDomainRecord("MX", bounceDomain, MxPreference + " " + mailHost, options.Ttl, DomainRecordPurpose.BounceMx, false,
                 "Published once by the operator for all domains: delivers bounces for the bounce domain to this server (port 25 reaches the bounce listener)."));
         }
 
@@ -353,7 +368,7 @@ public static class ZoneFile
         var text = new StringBuilder();
         text.Append("; DNS records for ").Append(DomainRecordPlanner.Normalize(domain)).Append('\n');
         text.Append("; Required records decide whether the domain can send; recommended ones improve delivery and give you reports.\n");
-        text.Append("; SPF and DMARC are shown as comments: add them only if the domain has none, otherwise merge them into the record that exists (two SPF records break SPF).\n");
+        text.Append("; SPF, DMARC and the inbound MX are shown as comments: add them only if the domain has none, otherwise merge them into the record that exists (two SPF records break SPF, and a second set of MX records splits the domain's mail between two providers).\n");
         foreach (ExpectedDomainRecord record in records)
         {
             text.Append('\n');
@@ -399,6 +414,9 @@ public static class ZoneFile
                 return $"{Fqdn(record.Host)} {record.Ttl} IN TXT {QuotedStrings(record.Value)}";
             case "CNAME":
                 return $"{Fqdn(record.Host)} {record.Ttl} IN CNAME {Fqdn(record.Value)}";
+            case "MX" when record.Purpose == DomainRecordPurpose.InboundMx:
+                // A comment, like SPF and DMARC: the domain has mail hosts already, and importing a second MX set blindly would split its mail between two providers. The customer decides.
+                return $"; {Fqdn(record.Host)} {record.Ttl} IN MX {record.Value[..record.Value.IndexOf(' ', StringComparison.Ordinal)]} {Fqdn(record.Value[(record.Value.IndexOf(' ', StringComparison.Ordinal) + 1)..])}";
             case "MX" when !BelongsInZone(record, zoneDomain):
                 return $"; MX {record.Host} -> {record.Value} (published once by whoever runs EggMail, not in this zone)";
             case "MX":

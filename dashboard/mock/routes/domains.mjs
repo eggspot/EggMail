@@ -47,7 +47,7 @@ function makeRecords(name, selector, key, statuses = {}) {
   ];
 }
 
-const PURPOSE_LABEL = { dkim: 'DKIM', return_path: 'Return-path', spf: 'SPF', dmarc: 'DMARC', bounce_mx: 'Bounce MX', tls_rpt: 'TLS-RPT', mta_sts: 'MTA-STS', mta_sts_host: 'MTA-STS host', ptr: 'Reverse DNS' };
+const PURPOSE_LABEL = { dkim: 'DKIM', return_path: 'Return-path', spf: 'SPF', dmarc: 'DMARC', bounce_mx: 'Bounce MX', tls_rpt: 'TLS-RPT', mta_sts: 'MTA-STS', mta_sts_host: 'MTA-STS host', ptr: 'Reverse DNS', inbound_mx: 'Inbound MX' };
 const fqdn = (n) => (n.endsWith('.') ? n : `${n}.`);
 const quoted = (v) =>
   v

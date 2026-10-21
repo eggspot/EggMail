@@ -95,7 +95,7 @@ public sealed class DomainsApi(ApiAuthenticator auth, IStorage storage, ISecretP
         CancellationToken ct = context.RequestAborted;
         DomainRecord domain = await FindOwnAsync(caller, id, ct).ConfigureAwait(false);
         var keys = await Config.GetDkimKeysAsync(domain.Id, ct).ConfigureAwait(false);
-        var plan = verification.PlanRecords(domain, keys, clock.UtcNow);
+        var plan = await verification.PlanRecordsAsync(domain, keys, clock.UtcNow, ct).ConfigureAwait(false);
         string zone = ZoneFile.Render(domain.Name, plan);
         if (string.Equals(context.Request.Query["format"], "zone", StringComparison.OrdinalIgnoreCase))
         {
@@ -276,7 +276,7 @@ public sealed class DomainsApi(ApiAuthenticator auth, IStorage storage, ISecretP
     {
         var keys = await Config.GetDkimKeysAsync(domain.Id, ct).ConfigureAwait(false);
         DateTimeOffset now = clock.UtcNow;
-        var plan = verification.PlanRecords(domain, keys, now);
+        var plan = await verification.PlanRecordsAsync(domain, keys, now, ct).ConfigureAwait(false);
         DomainCheckSnapshot? snapshot = await verification.GetSnapshotAsync(domain.Id, ct).ConfigureAwait(false);
         var records = plan.Select(r => ToRecordResponse(domain, r, snapshot)).ToList();
 

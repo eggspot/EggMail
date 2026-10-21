@@ -114,7 +114,7 @@ public static class DomainsCommand
 
         var keys = await storage.Config.GetDkimKeysAsync(domain.Id, CancellationToken.None).ConfigureAwait(false);
         DomainRecordOptions recordOptions = EggMailApiExtensions.DomainRecordOptionsFrom(loaded.Config);
-        var plan = DomainVerificationService.PlanRecords(domain, keys, SystemClock.Instance.UtcNow, recordOptions, new ApiOptions().DkimRetirementGrace);
+        var plan = DomainVerificationService.PlanRecords(domain, keys, SystemClock.Instance.UtcNow, recordOptions, new ApiOptions().DkimRetirementGrace, inboundEnabled: false);   // the command lists what every domain needs; the inbound MX is advice for domains with inbound mail, shown by the API and the dashboard
         if (verb == "records")
         {
             output.Write(DomainRecordsReport.Render(name, plan));

@@ -22,6 +22,7 @@ export const PURPOSE_LABEL: Record<string, string> = {
   mta_sts: 'MTA-STS',
   mta_sts_host: 'MTA-STS host',
   ptr: 'Reverse DNS',
+  inbound_mx: 'Inbound MX',
 };
 
 export function RecordStatusChip({ status }: { status: RecordStatus }) {

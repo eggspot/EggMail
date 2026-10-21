@@ -166,6 +166,28 @@ export const http = {
   del: <T>(path: string) => request<T>('DELETE', path),
 };
 
+/**
+ * Downloads a file the API serves as an attachment (a received message, an attachment). A plain link would not carry the tenant an administrator acts on
+ * (the X-Tenant-Id header), so the bytes are fetched here and handed to the browser as a Blob. Nothing is rendered: the caller saves it.
+ */
+export async function download(path: string, signal?: AbortSignal): Promise<Blob> {
+  const headers: Record<string, string> = {};
+  if (state.tenantId) headers['X-Tenant-Id'] = state.tenantId;
+  let res: Response;
+  try {
+    res = await fetch(buildUrl(path), { method: 'GET', headers, credentials: 'same-origin', cache: 'no-store', signal });
+  } catch (e) {
+    if (e instanceof DOMException && e.name === 'AbortError') throw e;
+    throw new ApiError({ status: 0, code: 'network_error', title: 'Network error', detail: String(e) });
+  }
+  if (!res.ok) {
+    const err = await parseProblem(res);
+    if (err.status === 401) state.onUnauthorized?.();
+    throw err;
+  }
+  return res.blob();
+}
+
 /** Operational endpoints live outside /api/v1; this reads /readyz without the problem handling. */
 export async function probeReady(): Promise<{ ready: boolean; warnings?: unknown }> {
   try {
