@@ -30,13 +30,40 @@ export function buildSrcDoc(html: string): string {
  * Removes every <meta>, <base> and <link> tag from the message HTML, however it is written: attribute values may contain `>` inside quotes, and an unterminated tag is neutralized
  * by turning its `<` into a character reference, so no HTML parser sees a tag start there. (A meta refresh or a base inside the body would still be honored by a browser; the sandbox
  * and the policies above do not rely on it being gone, this is the layer that makes it gone.)
+ *
+ * One left-to-right scan, linear in the input: a regex that looks for the closing `>` from every tag start reads to the end of the input for each unterminated one, and hostile
+ * mail full of `<meta ` froze the tab for seconds. Once a tag runs to the end of the input, it and every later tag start are neutralized instead of removed.
  */
 export function removeHeadTags(html: string): string {
-  const tag = /<\s*(?:meta|base|link)(?![A-Za-z0-9-])(?:[^>"']|"[^"]*"|'[^']*')*>/gi;
-  let out = html.replace(tag, '');
-  // What is left of such a tag (an unterminated quote, a nested start) cannot be matched safely: make its `<` plain text.
-  out = out.replace(/<(?=\s*(?:meta|base|link)(?![A-Za-z0-9-]))/gi, '&lt;');
-  return out;
+  const start = /<\s*(?:meta|base|link)(?![A-Za-z0-9-])/gi;
+  let out = '';
+  let from = 0;
+  for (let m = start.exec(html); m !== null; m = start.exec(html)) {
+    const end = tagEnd(html, m.index + m[0].length);
+    if (end < 0) break;
+    out += html.slice(from, m.index);
+    from = end;
+    start.lastIndex = end;
+  }
+  out += html.slice(from);
+  // What is left of such a tag (an unterminated quote, a start that removing a tag joined together) cannot be matched safely: make its `<` plain text.
+  return out.replace(/<(?=\s*(?:meta|base|link)(?![A-Za-z0-9-]))/gi, '&lt;');
+}
+
+/** The index just after the `>` that closes a tag whose attributes start at `i` (a `>` inside a quoted value does not close it), or -1 when the input ends first. */
+function tagEnd(html: string, i: number): number {
+  let quote = '';
+  for (; i < html.length; i++) {
+    const c = html[i];
+    if (quote !== '') {
+      if (c === quote) quote = '';
+    } else if (c === '"' || c === "'") {
+      quote = c;
+    } else if (c === '>') {
+      return i + 1;
+    }
+  }
+  return -1;
 }
 
 export function MessageHtmlFrame({ html, title = 'Message HTML (sandboxed)' }: { html: string; title?: string }) {

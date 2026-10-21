@@ -45,6 +45,12 @@ describe('route form parity with the server', () => {
     expect(validateRoute({ ...catchAll, name: 'Rechnungen über 100' })).toEqual({});
   });
 
+  it('accepts an internationalized local part in a match, like the server', () => {
+    expect(validateRoute({ ...emptyRouteForm, matchKind: 'address' as const, localPart: 'josé' }).localPart).toBeUndefined();
+    expect(validateRoute({ ...emptyRouteForm, matchKind: 'wildcard' as const, localPart: 'rechnung-*-ü' }).localPart).toBeUndefined();
+    expect(validateRoute({ ...emptyRouteForm, matchKind: 'address' as const, localPart: 'a b' }).localPart).toBeTruthy();
+  });
+
   it('accepts internationalized forward addresses', () => {
     const forward = { ...emptyRouteForm, matchKind: 'catch_all' as const, actionKind: 'forward' as const };
     expect(validateRoute({ ...forward, forwardTo: 'jürgen@bücher.example' })).toEqual({});
@@ -78,5 +84,21 @@ describe('the sandboxed frame gets no head tags from the message', () => {
     const doc = buildSrcDoc('<p>hello</p><metadata>x</metadata>');
     expect(doc.indexOf('Content-Security-Policy')).toBeLessThan(doc.indexOf('<p>hello</p>'));
     expect(removeHeadTags('<p>a</p><metadata>x</metadata>')).toBe('<p>a</p><metadata>x</metadata>');   // other tags that merely start with the letters stay
+  });
+
+  it('stays linear on hostile input: 256 KiB of unterminated tags (the most the server returns)', () => {
+    for (const unit of ['<meta ', '<base "', "<link a='x' "]) {
+      const html = unit.repeat(Math.ceil((256 * 1024) / unit.length));
+      const started = performance.now();
+      const out = removeHeadTags(html);
+      expect(performance.now() - started).toBeLessThan(500);   // the per-start regex took about 10 s here
+      expect(out).not.toMatch(/<\s*(meta|base|link)(?![A-Za-z0-9-])/i);
+    }
+  });
+
+  it('removes closed tags and neutralizes a tag that never closes, and every start after it', () => {
+    expect(removeHeadTags('a<meta x="1>2">b<base href=y>c')).toBe('abc');
+    expect(removeHeadTags('a<meta x="never closed <link rel=x> b')).toBe('a&lt;meta x="never closed &lt;link rel=x> b');
+    expect(removeHeadTags('<<meta>meta http-equiv=refresh>')).toBe('&lt;meta http-equiv=refresh>');   // removing one tag cannot assemble another
   });
 });

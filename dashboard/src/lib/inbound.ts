@@ -277,7 +277,8 @@ export function splitAddresses(text: string): string[] {
     .filter(Boolean);
 }
 
-const ATOM = /^[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]+$/;
+// Like InboundRules.ValidateRoute: ASCII letters, digits and the RFC 5322 specials, and any character from U+0080 up (internationalized local parts).
+const ATOM = /^[A-Za-z0-9!#$%&'*+/=?^_`{|}~.\u0080-\uffff-]+$/;
 // The server accepts internationalized addresses (UTF-8 local part, IDN domain): letters and digits of any script are fine here, the server decides the rest.
 const EMAIL = /^[^\s@,;<>()"]{1,64}@(?:[\p{L}\p{N}](?:[\p{L}\p{N}-]*[\p{L}\p{N}])?\.)+[\p{L}\p{N}][\p{L}\p{N}-]*[\p{L}\p{N}]$/u;
 // Control characters (the server refuses them in a name), the same test as InboundRules.ContainsControl.

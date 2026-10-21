@@ -358,16 +358,26 @@ function RoutesCard({ domainId, enabled }: { domainId: string; enabled: boolean 
   const hooks = useApi(() => api.webhooks(), []);
   const [editing, setEditing] = useState<InboundRoute | 'new' | null>(null);
   const [deleting, setDeleting] = useState<InboundRoute | null>(null);
-  const [warnings, setWarnings] = useState<{ route: string; code: string; message: string }[]>([]);
+  const [warnings, setWarnings] = useState<{ routeId: string; route: string; code: string; message: string }[]>([]);
   const remove = useAction(async (r: InboundRoute) => {
     await api.deleteInboundRoute(domainId, r.id);
+    setWarnings((w) => w.filter((x) => x.routeId !== r.id));
     setDeleting(null);
     routes.reload();
   });
+  const [togglingId, setTogglingId] = useState<string | null>(null);
   const toggle = useAction(async (r: InboundRoute) => {
     await api.updateInboundRoute(domainId, r.id, { enabled: !r.enabled });
     routes.reload();
   });
+  const runToggle = (r: InboundRoute) => {
+    setTogglingId(r.id);
+    void toggle.run(r);
+  };
+  const cancelDelete = () => {
+    remove.clearError();
+    setDeleting(null);
+  };
   const endpointUrl = (id?: string | null) => hooks.data?.find((w) => w.id === id)?.url;
   const list = routes.data ? [...routes.data].sort((a, b) => a.order - b.order || a.createdAt.localeCompare(b.createdAt)) : [];
 
@@ -389,7 +399,7 @@ function RoutesCard({ domainId, enabled }: { domainId: string; enabled: boolean 
       {routes.error !== undefined && <ErrorNotice error={routes.error} onRetry={routes.reload} />}
       {toggle.error !== undefined && <ErrorNotice error={toggle.error} />}
       {warnings.map((w) => (
-        <Notice key={`${w.route}-${w.code}`} tone="warn" title={`Route ${w.route}`}>
+        <Notice key={`${w.routeId}-${w.code}`} tone="warn" title={`Route ${w.route}`}>
           {w.message}
         </Notice>
       ))}
@@ -431,7 +441,7 @@ function RoutesCard({ domainId, enabled }: { domainId: string; enabled: boolean 
                       <Button class="btn-small" onClick={() => setEditing(r)} aria-label={`Edit route ${r.name || describeMatch(r)}`}>
                         Edit
                       </Button>
-                      <Button class="btn-small" onClick={() => void toggle.run(r)} busy={toggle.busy} aria-label={`${r.enabled ? 'Disable' : 'Enable'} route ${r.name || describeMatch(r)}`}>
+                      <Button class="btn-small" onClick={() => runToggle(r)} busy={toggle.busy && togglingId === r.id} aria-label={`${r.enabled ? 'Disable' : 'Enable'} route ${r.name || describeMatch(r)}`}>
                         {r.enabled ? 'Disable' : 'Enable'}
                       </Button>
                       <Button class="btn-small" variant="danger" onClick={() => setDeleting(r)} aria-label={`Delete route ${r.name || describeMatch(r)}`}>
@@ -453,13 +463,13 @@ function RoutesCard({ domainId, enabled }: { domainId: string; enabled: boolean 
           onClose={() => setEditing(null)}
           onSaved={(r) => {
             setEditing(null);
-            setWarnings((w) => [...w.filter((x) => x.route !== (r.name || r.id)), ...(r.warnings ?? []).map((x) => ({ route: r.name || describeMatch(r), ...x }))]);
+            setWarnings((w) => [...w.filter((x) => x.routeId !== r.id), ...(r.warnings ?? []).map((x) => ({ routeId: r.id, route: r.name || describeMatch(r), ...x }))]);
             routes.reload();
           }}
         />
       )}
       {deleting && (
-        <ConfirmDialog title="Delete this route?" confirmLabel="Delete route" busy={remove.busy} error={remove.error} onCancel={() => setDeleting(null)} onConfirm={() => void remove.run(deleting)}>
+        <ConfirmDialog title="Delete this route?" confirmLabel="Delete route" busy={remove.busy} error={remove.error} onCancel={cancelDelete} onConfirm={() => void remove.run(deleting)}>
           <p>
             Mail for <code>{describeMatch(deleting)}</code> is refused from now on unless another route matches. Messages already received for it keep waiting, but their action fails.
           </p>
