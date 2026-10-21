@@ -100,10 +100,13 @@ public abstract class InboundOperationsTests(LabBackend backend)
         Assert.Equal(id, Assert.Single(probe).Message.Id);   // it is free for whoever holds the rows next (the switch's hold, or the target after activation)
         await lab.Storage.Inbound.ReleaseOwnedActionLeasesAsync("another-replica", default);
 
-        // The late answer of the receiver changes nothing: the lease is gone, so the result is not recorded.
+        // The late answer of the receiver changes nothing: the lease is gone, so the result is not recorded. Asserted once the receiver has answered and the runner is done with the answer (the
+        // runner is paused, so waiting for its attempts in flight waits for exactly this one and claims nothing new).
         hold.SetResult();
-        await Task.Delay(300);
-        Assert.Equal((InboundActionState.Pending, 0), ((await lab.Storage.Inbound.GetAsync(InboundLab.Acme, id, default))!.ActionState, (await lab.Storage.Inbound.GetAsync(InboundLab.Acme, id, default))!.ActionAttempts));
+        await receiver.WaitForAnswersAsync(1);
+        await lab.Runtime.InboundActions.QuiesceAsync(TimeSpan.FromSeconds(30), default);
+        InboundMessage afterLateAnswer = (await lab.Storage.Inbound.GetAsync(InboundLab.Acme, id, default))!;
+        Assert.Equal((InboundActionState.Pending, 0), (afterLateAnswer.ActionState, afterLateAnswer.ActionAttempts));
 
         // The switch is called off: dispatch resumes and the action runs again. The receiver sees the same webhook-id twice, as it must be ready for (at-least-once).
         receiver.Gate = null;

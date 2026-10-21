@@ -30,7 +30,7 @@ internal sealed class WebhookReceiver : IAsyncDisposable
     private readonly Queue<int> _script = new();
     private readonly SemaphoreSlim _arrivals = new(0);
     private int _last = 200;
-    private int _active, _maxActive;
+    private int _active, _maxActive, _answered;
 
     private WebhookReceiver(WebApplication app, int port)
     {
@@ -94,6 +94,21 @@ internal sealed class WebhookReceiver : IAsyncDisposable
         }
     }
 
+    /// <summary>Completes when <paramref name="count"/> requests have been answered in all (the response written and completed, not only the request read).</summary>
+    public async Task WaitForAnswersAsync(int count, TimeSpan? timeout = null)
+    {
+        DateTime deadline = DateTime.UtcNow + (timeout ?? TimeSpan.FromSeconds(30));
+        while (Volatile.Read(ref _answered) < count)
+        {
+            if (DateTime.UtcNow > deadline)
+            {
+                throw new TimeoutException($"{Volatile.Read(ref _answered)} of {count} webhook requests were answered");
+            }
+
+            await _arrivals.WaitAsync(TimeSpan.FromMilliseconds(50));
+        }
+    }
+
     private async Task HandleAsync(HttpContext context)
     {
         int active = Interlocked.Increment(ref _active);
@@ -127,6 +142,9 @@ internal sealed class WebhookReceiver : IAsyncDisposable
 
             context.Response.StatusCode = status;
             await context.Response.WriteAsync("ok");
+            await context.Response.CompleteAsync();
+            Interlocked.Increment(ref _answered);
+            _arrivals.Release();
         }
         finally
         {
