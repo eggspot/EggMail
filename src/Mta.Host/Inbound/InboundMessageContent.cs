@@ -180,30 +180,36 @@ public static class InboundContentReader
         return sb.ToString().Trim();
     }
 
+    /// <summary>
+    /// Removes format characters (Unicode category Cf: direction overrides and isolates, zero-width space, word joiner, BOM, the invisible tag characters
+    /// U+E0000 to U+E007F) and the line and paragraph separators. Read per code point, so the tag characters, which are surrogate pairs, are caught. The
+    /// joiners ZWNJ and ZWJ and the soft hyphen are kept: Persian and Indic text and emoji sequences need them, and they cannot reorder or hide text.
+    /// A lone surrogate is kept as it is (storage cleans it).
+    /// </summary>
     internal static string StripInvisible(string value)
     {
-        foreach (char c in value)
+        StringBuilder? sb = null;
+        for (int i = 0; i < value.Length;)
         {
-            if (IsInvisibleFormatting(c))
+            bool decoded = Rune.DecodeFromUtf16(value.AsSpan(i), out Rune rune, out int length) == System.Buffers.OperationStatus.Done;
+            if (decoded && IsInvisibleFormatting(rune))
             {
-                var sb = new StringBuilder(value.Length);
-                foreach (char d in value)
-                {
-                    if (!IsInvisibleFormatting(d))
-                    {
-                        sb.Append(d);
-                    }
-                }
-
-                return sb.ToString();
+                sb ??= new StringBuilder(value.Length).Append(value, 0, i);
             }
+            else
+            {
+                sb?.Append(value, i, length);
+            }
+
+            i += length;
         }
 
-        return value;
+        return sb?.ToString() ?? value;
     }
 
-    private static bool IsInvisibleFormatting(char c) =>
-        char.GetUnicodeCategory(c) is System.Globalization.UnicodeCategory.Format or System.Globalization.UnicodeCategory.LineSeparator or System.Globalization.UnicodeCategory.ParagraphSeparator;
+    private static bool IsInvisibleFormatting(Rune rune) =>
+        rune.Value is not (0x00AD or 0x200C or 0x200D)
+        && Rune.GetUnicodeCategory(rune) is System.Globalization.UnicodeCategory.Format or System.Globalization.UnicodeCategory.LineSeparator or System.Globalization.UnicodeCategory.ParagraphSeparator;
 
     /// <summary>
     /// A file name that is safe as the <c>filename</c> parameter of a <c>Content-Disposition</c> header: ASCII letters, digits and <c>. _ - ( ) space</c>,

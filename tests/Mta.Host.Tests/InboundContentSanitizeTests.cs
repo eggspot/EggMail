@@ -14,7 +14,8 @@ public class InboundContentSanitizeTests
         { [0x202E], "ab" },
         { [0x202A, 0x202B, 0x202C, 0x202D], "ab" },
         { [0x2066, 0x2067, 0x2068, 0x2069], "ab" },
-        { [0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF], "ab" },
+        { [0x200B, 0x2060, 0xFEFF], "ab" },
+        { [0xE0001, 0xE0068, 0xE0069, 0xE007F], "ab" },   // invisible tag characters (surrogate pairs) spelling hidden text
         { [0x200E, 0x200F, 0x061C], "ab" },
         { [0x2028, 0x2029], "ab" },
     };
@@ -47,6 +48,18 @@ public class InboundContentSanitizeTests
     public void Ordinary_text_in_any_script_is_kept()
     {
         string value = "plain " + Chars(0x00FC, 0x4E2D, 0x05D0, 0x0627);   // u with diaeresis, a Han character, Hebrew alef, Arabic alef: letters, not formatting
+        InboundMessageContent content = Read("From: a@sender.test\r\nX-Test: " + value + "\r\n\r\nbody\r\n");
+
+        Assert.Equal(value, content.Headers.Single(h => h.Name == "X-Test").Value);
+    }
+
+    [Fact]
+    public void Joiners_and_the_soft_hyphen_are_kept_because_scripts_and_emoji_need_them()
+    {
+        string value = Chars(0x0645, 0x06CC, 0x200C, 0x0634, 0x0648, 0x062F)   // Persian "mishavad" needs the ZWNJ
+            + " " + Chars(0x0915, 0x094D, 0x200D, 0x0937)                        // Devanagari conjunct with ZWJ
+            + " " + Chars(0x1F468, 0x200D, 0x1F469, 0x200D, 0x1F467)             // family emoji: ZWJ sequence
+            + " hy" + Chars(0x00AD) + "phen";
         InboundMessageContent content = Read("From: a@sender.test\r\nX-Test: " + value + "\r\n\r\nbody\r\n");
 
         Assert.Equal(value, content.Headers.Single(h => h.Name == "X-Test").Value);
