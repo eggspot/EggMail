@@ -1,4 +1,4 @@
-import { http, itemsOf, setCsrfToken, request } from './client';
+import { download, http, itemsOf, setCsrfToken, request } from './client';
 import type {
   AcmeRenewal,
   AdminStatus,
@@ -9,6 +9,15 @@ import type {
   CreateUserRequest,
   DashboardUser,
   DeliveryEvent,
+  InboundMessageDetail,
+  InboundMessageQuery,
+  InboundMessageSummary,
+  InboundRoute,
+  InboundRouteInput,
+  InboundRouteProbe,
+  InboundSettings,
+  InboundSettingsPatch,
+  InboundUsage,
   Domain,
   DomainRecords,
   MaintenanceState,
@@ -86,6 +95,27 @@ export const api = {
   verifyDomain: (id: string) => http.post<Domain>(`/api/v1/domains/${enc(id)}/verify`),
   rotateDkim: (id: string) => http.post<Domain>(`/api/v1/domains/${enc(id)}/dkim/rotate`),
   cancelDkimRotation: (id: string) => http.del<Domain>(`/api/v1/domains/${enc(id)}/dkim/rotate`),
+
+  // ---- inbound mail ----
+  inboundSettings: (domainId: string) => http.get<InboundSettings>(`/api/v1/domains/${enc(domainId)}/inbound`),
+  updateInboundSettings: (domainId: string, patch: InboundSettingsPatch) => http.patch<InboundSettings>(`/api/v1/domains/${enc(domainId)}/inbound`, patch),
+  inboundRoutes: async (domainId: string) => itemsOf(await http.get<InboundRoute[] | Page<InboundRoute>>(`/api/v1/domains/${enc(domainId)}/inbound/routes`)),
+  createInboundRoute: (domainId: string, body: InboundRouteInput) => http.post<InboundRoute>(`/api/v1/domains/${enc(domainId)}/inbound/routes`, body),
+  updateInboundRoute: (domainId: string, routeId: string, body: InboundRouteInput) => http.patch<InboundRoute>(`/api/v1/domains/${enc(domainId)}/inbound/routes/${enc(routeId)}`, body),
+  deleteInboundRoute: (domainId: string, routeId: string) => http.del<void>(`/api/v1/domains/${enc(domainId)}/inbound/routes/${enc(routeId)}`),
+  probeInboundRoute: (domainId: string, address: string) => http.get<InboundRouteProbe>(`/api/v1/domains/${enc(domainId)}/inbound/routes/match`, { address }),
+  inboundMessages: (q: InboundMessageQuery) => http.get<Page<InboundMessageSummary>>('/api/v1/inbound/messages', { ...q }),
+  inboundMessage: (id: string) => http.get<InboundMessageDetail>(`/api/v1/inbound/messages/${enc(id)}`),
+  deleteInboundMessage: (id: string) => http.del<void>(`/api/v1/inbound/messages/${enc(id)}`),
+  /** Erasure by filter: the server requires at least one filter besides the tenant. */
+  async eraseInboundMessages(q: InboundMessageQuery): Promise<{ deleted: number }> {
+    const { limit: _limit, cursor: _cursor, ...filters } = q;
+    return request<{ deleted: number }>('DELETE', '/api/v1/inbound/messages', { query: { ...filters } });
+  },
+  retryInboundMessage: (id: string) => http.post<{ id: string; action: InboundMessageSummary['action'] }>(`/api/v1/inbound/messages/${enc(id)}/retry`),
+  inboundUsage: (domainId?: string) => http.get<InboundUsage>('/api/v1/inbound/usage', { domainId }),
+  downloadInboundRaw: (id: string) => download(`/api/v1/inbound/messages/${enc(id)}/raw`),
+  downloadInboundAttachment: (id: string, index: number) => download(`/api/v1/inbound/messages/${enc(id)}/attachments/${index}`),
 
   // ---- suppressions ----
   suppressions: (cursor?: string, limit = 50) => http.get<Page<Suppression>>('/api/v1/suppressions', { cursor, limit }),

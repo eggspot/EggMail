@@ -15,6 +15,9 @@ const MessageDetail = lazy(() => import('./pages/MessageDetail'));
 const Send = lazy(() => import('./pages/Send'));
 const Domains = lazy(() => import('./pages/Domains'));
 const DomainDetail = lazy(() => import('./pages/DomainDetail'));
+const InboundMessages = lazy(() => import('./pages/InboundMessages'));
+const InboundMessageDetail = lazy(() => import('./pages/InboundMessageDetail'));
+const DomainInbound = lazy(() => import('./pages/DomainInbound'));
 const Webhooks = lazy(() => import('./pages/Webhooks'));
 const Suppressions = lazy(() => import('./pages/Suppressions'));
 const Credentials = lazy(() => import('./pages/Credentials'));
@@ -85,6 +88,9 @@ const MessageDetailPage = tenantRoute(MessageDetail);
 const SendPage = tenantRoute(Send);
 const DomainsPage = tenantRoute(Domains);
 const DomainDetailPage = tenantRoute(DomainDetail);
+const InboundMessagesPage = tenantRoute(InboundMessages);
+const InboundMessageDetailPage = tenantRoute(InboundMessageDetail);
+const DomainInboundPage = tenantRoute(DomainInbound);
 const WebhooksPage = tenantRoute(Webhooks);
 const SuppressionsPage = tenantRoute(Suppressions);
 const CredentialsPage = tenantRoute(Credentials);
@@ -122,6 +128,9 @@ function Routes() {
             <Route path="/send" component={SendPage} />
             <Route path="/domains" component={DomainsPage} />
             <Route path="/domains/:id" component={DomainDetailPage} />
+            <Route path="/domains/:id/inbound" component={DomainInboundPage} />
+            <Route path="/inbound" component={InboundMessagesPage} />
+            <Route path="/inbound/messages/:id" component={InboundMessageDetailPage} />
             <Route path="/webhooks" component={WebhooksPage} />
             <Route path="/suppressions" component={SuppressionsPage} />
             <Route path="/credentials" component={CredentialsPage} />

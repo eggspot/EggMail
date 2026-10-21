@@ -42,7 +42,7 @@ public sealed record InboundWarningResponse(string Code, string Message);
 
 public sealed record InboundEffectiveResponse(long MaxMessageBytes, int MaxMessagesPerMinute, int MaxMessagesPerMinutePerRemote, long MaxStoredBytes, int RetentionDays);
 
-public sealed record InboundMxAdviceResponse(string? Host, int Priority);
+public sealed record InboundMxAdviceResponse(string? Host, int Priority, [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Status = null);
 
 public sealed record InboundSettingsResponse(
     Guid DomainId,
@@ -252,7 +252,7 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
 
         return new InboundSettingsResponse(
             s.DomainId, s.Enabled, InboundNames.Of(s.DmarcAction), s.MaxMessageBytes, s.MaxMessagesPerMinute, s.MaxMessagesPerMinutePerRemote, s.MaxStoredBytes, s.RetentionDays,
-            stored ? s.UpdatedAt : null, effective, new InboundMxAdviceResponse(options.DomainRecords?.ServerHostname, 10), all.Count == 0 ? null : all);
+            stored ? s.UpdatedAt : null, effective, new InboundMxAdviceResponse(options.DomainRecords?.ServerHostname, DomainRecordPlanner.MxPreference), all.Count == 0 ? null : all);
     }
 
     private async Task<IResult> GetSettingsAsync(HttpContext context, string id)
@@ -261,7 +261,23 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
         CancellationToken ct = context.RequestAborted;
         DomainRecord domain = await FindOwnDomainAsync(caller, id, ct).ConfigureAwait(false);
         InboundDomainSettings? stored = await Inbound.GetSettingsAsync(domain.Id, ct).ConfigureAwait(false);
-        return ApiResults.Ok(ToResponse(stored ?? InboundDomainSettings.Disabled(domain.Id, domain.TenantId, clock.UtcNow), stored is not null));
+        return ApiResults.Ok(await WithMxStatusAsync(ToResponse(stored ?? InboundDomainSettings.Disabled(domain.Id, domain.TenantId, clock.UtcNow), stored is not null), domain, ct).ConfigureAwait(false));
+    }
+
+    /// <summary>
+    /// The last check of the inbound MX record (<c>ok</c>, <c>missing</c>, <c>invalid</c>, <c>mismatch</c>, <c>pending</c>), the words of every record; only while inbound is enabled for the domain and the server has a host name to suggest
+    /// (otherwise the record is not planned).
+    /// </summary>
+    private async Task<InboundSettingsResponse> WithMxStatusAsync(InboundSettingsResponse response, DomainRecord domain, CancellationToken ct)
+    {
+        if (!response.Enabled || response.Mx.Host is null)
+        {
+            return response;
+        }
+
+        DomainCheckSnapshot? snapshot = await verification.GetSnapshotAsync(domain.Id, ct).ConfigureAwait(false);
+        string status = snapshot is not null && snapshot.Records.TryGetValue(DomainCheckSnapshot.KeyOf("MX", domain.Name), out RecordCheckSnapshot? seen) ? DomainVerificationService.StatusWord(seen.Status) : "pending";
+        return response with { Mx = response.Mx with { Status = status } };
     }
 
     private async Task<IResult> UpdateSettingsAsync(HttpContext context, string id)
@@ -321,7 +337,7 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
             throw ApiException.NotFound("Domain not found.");   // deleted while the request ran
         }
 
-        return ApiResults.Ok(ToResponse(updated, stored: true));
+        return ApiResults.Ok(await WithMxStatusAsync(ToResponse(updated, stored: true), domain, ct).ConfigureAwait(false));
     }
 
     // The members the request names: only these are held to the operator's ceilings, so a stored value that a lowered ceiling now exceeds never blocks an unrelated change (such as turning the domain off).
@@ -603,7 +619,7 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
         }
 
         var keys = await Config.GetDkimKeysAsync(domain.Id, ct).ConfigureAwait(false);
-        ExpectedDomainRecord? spf = verification.PlanRecords(domain, keys, clock.UtcNow).FirstOrDefault(r => r.Purpose == DomainRecordPurpose.Spf);
+        ExpectedDomainRecord? spf = verification.PlanRecords(domain, keys, clock.UtcNow, inboundEnabled: false).FirstOrDefault(r => r.Purpose == DomainRecordPurpose.Spf);
         if (spf is null)
         {
             return [];

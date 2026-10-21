@@ -106,6 +106,7 @@ export async function startStack({ name = 'main', tenantUsers = [], switchConnec
     '--Backup:Enabled=false',
     '--Observability:MetricsEndpointEnabled=false',
     '--Tls:ReportingEnabled=false',
+    '--Inbound:Enabled=true',
   ];
   for (const [listener, port] of Object.entries(smtpPorts)) {
     configArgs.push(`--Smtp:Listeners:${listener}:Port=${port}`, `--Smtp:Listeners:${listener}:BindAddress=127.0.0.1`);
