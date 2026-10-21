@@ -20,6 +20,8 @@ Status: implemented, not production-ready. `docs/progress.md` says what is verif
 - Design decisions are numbered in docs/decisions.md; cite/add one for any non-obvious choice.
 - Every behaviour-changing PR adds a line under `Unreleased` in CHANGELOG.md. Version lives in
   Directory.Build.props (first release 0.1.0); release flow in docs/release.md.
-- Dashboard uses Eggspot's dark-mode style; keep CSP clean (`npm run check-csp`).
+- Dashboard has light and dark themes (system preference or a user-forced `data-theme`): keep the three color
+  token blocks in `dashboard/src/styles/app.css` in sync (`dashboard/tests/contrast.test.mjs` checks them). No inline
+  styles; keep CSP clean (`npm run check-csp`).
 - Security-relevant changes: update docs/security-test-map.md with a regression test.
 - Go-live tracking: docs/go-live-checklist.md + docs/progress.md (not a separate readiness file).
