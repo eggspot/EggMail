@@ -132,7 +132,7 @@ A **lab** (`InboundLab`) starts the real `EggMailRuntime` on SQLite files or a P
 
 ### Real defects these tests found and fixed
 
-* A `From` field that another parser reads differently (`ceo@victim.test <x@evil.test`, an encoded word holding an angle address, a second address after the first, an unclosed quote) was evaluated for the attacker's domain and recorded as `dmarc=pass`. Found by comparing 1,460 hostile values with Python's `email.policy`; such a field is now unusable and its verdict is `permerror`.
+* A `From` field that another parser reads differently (`ceo@victim.test <x@evil.test`, a Q-encoded word with a literal `@` in it, a second address after the first, an unclosed quote) was evaluated for the attacker's domain and recorded as `dmarc=pass`. Found by comparing 1,460 hostile values with Python's `email.policy`; such a field is now unusable and its verdict is `permerror`.
 * A per-minute rate limit was a look followed by a count with a wait for DNS and storage in between: connections that asked at the same moment all passed. The count is one step now.
 * The budget of uncached `bounce.<name>` lookups reset its window with two separate steps and could lose counts at the turn of a second; its table behaviour when full was not pinned. It is one object with one lock now.
 * The route test of the API answered `550 5.1.1` for `postmaster`, which the receive path accepts.

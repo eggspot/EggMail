@@ -77,6 +77,7 @@ workflow refuses a stable tag without a non-empty section for that exact version
 ### Fixed
 
 - Inbound mail: a `From` field that two parsers read as different addresses is unusable and its DMARC verdict is `permerror` (it was evaluated, and shown as `pass`, for the domain the strict parser chose); a per-minute rate limit is counted in one step with its check (simultaneous connections all passed it); the lookup budget of the bounce listener loses no count at the turn of a second; the route test of the API says `250` for `postmaster`.
+- Inbound mail: two shapes of `From` slipped past the unusable-field check and were evaluated for the domain in the angle brackets while Python's `email.policy` reads another: a backslash before an `@` outside quotes (`ceo\@victim.test <x@evil.test>`) and text after `<@` that is not a source route (`<@evil.test,ceo@victim.test:x@evil.test>`); both are unusable now.
 - The envelope sender (and so SPF) uses the sending domain's own `bounce.<domain>` host once its return-path CNAME is verified; before, the record was required and verified but never used, and the bounce listener now accepts bounces addressed to it.
 
 ### Fixed

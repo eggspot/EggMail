@@ -250,8 +250,8 @@ internal sealed class InboundHeaderAnalysis
             }
         }
 
-        // Another parser may read this field differently (display names with an "@" in them, an angle bracket that is never closed, a second address after the first, an encoded word that
-        // hides one, text after the address): every domain that stands after an unquoted "@" must be one that was evaluated. A field in which a domain appears that was not taken as the identity
+        // Another parser may read this field differently (display names with an "@" in them, an angle bracket that is never closed, a second address after the first, a Q-encoded word with
+        // a literal "@" in it, text after the address): every domain that stands after an unquoted "@" must be one that was evaluated. A field in which a domain appears that was not taken as the identity
         // has no identity we can vouch for, so it is unusable (design section 11.5, parser differential with Python's email.policy). Several mailboxes naming their own domains are fine: each is evaluated.
         foreach (string candidate in FromAmbiguity.CandidateDomains(value))
         {
@@ -356,9 +356,14 @@ internal static class FromAmbiguity
 {
     private const int MaxCandidates = 64;
 
+    // What may stand inside the brackets of a domain literal in a route (an IPv4 or IPv6 address, "IPv6:" and its colons); anything else is not skipped as a literal.
+    private static readonly System.Buffers.SearchValues<char> DomainLiteralCharacters = System.Buffers.SearchValues.Create("0123456789abcdefABCDEFIPv6:.");
+
     /// <summary>
     /// The distinct domains (lower-case, A-label form when the text is a valid domain, otherwise the text prefixed with <c>?</c>; <c>?unterminated</c> when a quoted string or comment never ends) after each "@" of <paramref name="field"/> that is outside quotes and
-    /// comments. An obsolete source route at the start of an angle address (<c>&lt;@a.example,@b.example:user@host&gt;</c>) is not an address and is skipped. At most 64 are collected.
+    /// comments. An obsolete source route at the start of an angle address (<c>&lt;@a.example,@b.example:user@host&gt;</c>) is not an address and is skipped, but only when it is one: every "@" in it
+    /// comes right after the "&lt;" or a ",". A backslash quotes the next character only inside a quoted string or a comment; outside them it is text (<c>ceo\@victim.example</c> names victim.example to
+    /// Python's <c>email.policy</c>). At most 64 are collected.
     /// </summary>
     public static IEnumerable<string> CandidateDomains(string field)
     {
@@ -369,9 +374,9 @@ internal static class FromAmbiguity
         for (int i = 0; i < field.Length && result.Count < MaxCandidates; i++)
         {
             char c = field[i];
-            if (c == '\\' && (quoted || commentDepth > 0 || i + 1 < field.Length))
+            if (c == '\\' && (quoted || commentDepth > 0))
             {
-                i++;   // a quoted pair (also the obsolete one outside quotes): the next character is text
+                i++;   // a quoted pair: the next character is text. Outside quotes and comments a backslash is an ordinary character and the "@" after it still starts a domain.
                 continue;
             }
 
@@ -478,23 +483,46 @@ internal static class FromAmbiguity
         return i;
     }
 
-    // After "<": an obsolete route ("@a.example,@b.example:") is skipped up to its colon; anything else is not touched.
+    // After "<": an obsolete route ("@a.example, @b.example:", RFC 5322 4.4) is skipped up to its colon; anything else is not touched. It is a route only when every "@" in it comes right after the
+    // "<" or a "," (white space and comments between them allowed): "<@evil.example,ceo@victim.example:x@evil.example>" is not one, and Python reads ceo@victim.example in it.
     private static int SkipRoute(string field, int position)
     {
-        int i = position;
-        while (i < field.Length && field[i] is ' ' or '\t')
+        int i = SkipCfws(field, position);
+        if (i >= field.Length || field[i] != '@')
         {
-            i++;
+            return position;
         }
 
-        if (i < field.Length && field[i] == '@')
+        char previous = '<';
+        while (i < field.Length)
         {
-            int colon = field.IndexOf(':', i);
-            int close = field.IndexOf('>', i);
-            if (colon >= 0 && (close < 0 || colon < close))
+            char c = field[i];
+            if (c is ' ' or '\t' or '\r' or '\n' or '(')
             {
-                return colon + 1;
+                i = SkipCfws(field, i);
+                continue;
             }
+
+            if (c == ':')
+            {
+                return i + 1;
+            }
+
+            if (c == '[' && previous == '@' && field.IndexOf(']', i) is var close and >= 0
+                && field.AsSpan(i + 1, close - i - 1).IndexOfAnyExcept(DomainLiteralCharacters) < 0)
+            {
+                previous = ']';
+                i = close + 1;   // a domain literal, which may hold colons ("@[IPv6:2001:db8::1]")
+                continue;
+            }
+
+            if ((c == '@' && previous is not ('<' or ',')) || c is '<' or '>' or '"' or '\\' or ';')
+            {
+                return position;   // not a route: every "@" from here on is read as an address
+            }
+
+            previous = c;
+            i++;
         }
 
         return position;

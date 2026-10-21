@@ -31,7 +31,7 @@ public class InboundFromAmbiguityTests
     [InlineData("<ceo@victim.test><x@evil.test>")]
     [InlineData("Bob <ceo@victim.test>x@evil.test")]
     [InlineData("x <ceo@victim.test> <y@z.example>")]
-    // An encoded word that holds an angle address: a parser that does not decode words before it reads the structure sees a different address.
+    // A Q-encoded word with a literal "@" in its text: a parser that reads the structure before it decodes words sees an address there. (A base64 word has no "@" in its text and decodes to display text only.)
     [InlineData("=?utf-8?q?Bob_<x@evil.test>?= <ceo@victim.test>")]
     // Several at signs that lead to different domains.
     [InlineData("x@evil.test@victim.test")]
@@ -48,6 +48,19 @@ public class InboundFromAmbiguityTests
     [InlineData("ceo@victim.test (comment")]
     // An obsolete route outside the angle brackets is an address to a parser that does not know it.
     [InlineData("@evil.test:ceo@victim.test")]
+    // A backslash outside quotes and comments is text, not a quoted pair: Python reads the "@" after it as the start of the domain (ceo\@victim.test), this parser used to skip that "@".
+    [InlineData("ceo\\@victim.test <x@evil.test>")]
+    [InlineData("ceo\\@victim.test<x@evil.test>")]
+    [InlineData("Bob ceo\\@victim.test <x@evil.test>")]
+    [InlineData("x\\@evil.test <ceo@victim.test>")]
+    [InlineData("<ceo\\@victim.test x@evil.test>")]
+    [InlineData("a\\@b@victim.test")]                                   // Python reads no address at all here
+    // Text after "<@" that is not a route (an "@" in it that does not follow the "<" or a ","): Python reads ceo@victim.test in it, this parser used to skip it up to the colon.
+    [InlineData("<@evil.test,ceo@victim.test:x@evil.test>")]
+    [InlineData("Bob <@evil.test,ceo@victim.test:x@evil.test>")]
+    [InlineData("<@evil.test ceo@victim.test:x@evil.test>")]
+    [InlineData("<@evil.test,@ceo@victim.test:x@evil.test>")]
+    [InlineData("<@evil.test,(c)ceo@victim.test:x@evil.test>")]
     public void A_from_field_that_another_parser_reads_as_a_different_identity_is_unusable(string value)
     {
         Assert.True(Analyze(value).FromUnusable, value);
@@ -64,13 +77,18 @@ public class InboundFromAmbiguityTests
     [InlineData("Bob \"<x@evil.test>\" <ceo@victim.test>", "victim.test")]
     [InlineData("=?utf-8?q?ceo=40victim.test?= <x@evil.test>", "evil.test")]       // an encoded "@" is a character of the name
     [InlineData("=?utf-8?q?Bob?= <ceo@victim.test>", "victim.test")]
+    [InlineData("=?utf-8?b?Qm9iIDx4QGV2aWwudGVzdD4=?= <ceo@victim.test>", "victim.test")]  // base64 of "Bob <x@evil.test>": display text once decoded, no "@" before (Python agrees)
     [InlineData("Doe, John <ceo@victim.test>", "victim.test")]                     // Outlook's unquoted comma
     [InlineData("\"Doe, John\" <ceo@victim.test>", "victim.test")]
     [InlineData("Group: ceo@victim.test, x@evil.test;", "victim.test,evil.test")]  // each mailbox is its own identity and is evaluated
     [InlineData("ceo@victim.test, x@evil.test", "victim.test,evil.test")]
     [InlineData("<@evil.test,@evil2.test:ceo@victim.test>", "victim.test")]         // the route of an angle address is not an address
+    [InlineData("< @evil.test , (c) @evil2.test : ceo@victim.test>", "victim.test")]  // white space and comments inside the route
+    [InlineData("<@[192.0.2.1]:ceo@victim.test>", "victim.test")]
+    [InlineData("<@[IPv6:2001:db8::1]:ceo@victim.test>", "victim.test")]           // a domain literal in the route holds colons
     [InlineData("\"a@b\"@victim.test", "victim.test")]                             // a quoted local part
-    [InlineData("a\\@b@victim.test", "victim.test")]
+    [InlineData("\"a\\@b\"@victim.test", "victim.test")]                           // a quoted pair inside the quotes
+    [InlineData("Bob (x\\@evil.test) <ceo@victim.test>", "victim.test")]          // and inside a comment
     [InlineData("ceo(comment)@victim.test", "victim.test")]
     [InlineData("ceo@(comment)victim.test", "victim.test")]                        // white space and comments around the "@" are legal
     [InlineData("ceo @ victim.test", "victim.test")]
@@ -111,7 +129,11 @@ public class InboundFromAmbiguityTests
         f.PublishDmarc("evil.test", "none");
         f.PublishDmarc("victim.test", "reject");
 
-        foreach (string from in new[] { "ceo@victim.test <x@evil.test", "ceo@victim.test <x@evil.test>", "=?utf-8?q?Bob_<x@evil.test>?= <ceo@victim.test>", "x@evil.test <ceo@victim.test>" })
+        foreach (string from in new[]
+                 {
+                     "ceo@victim.test <x@evil.test", "ceo@victim.test <x@evil.test>", "=?utf-8?q?Bob_<x@evil.test>?= <ceo@victim.test>", "x@evil.test <ceo@victim.test>",
+                     "ceo\\@victim.test <x@evil.test>", "<@evil.test,ceo@victim.test:x@evil.test>",
+                 })
         {
             string message = f.DkimSign(InboundFixture.Message(from: from), "evil.test");
             await using FakeMta mta = await f.ConnectedAsync();
