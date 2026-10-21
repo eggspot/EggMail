@@ -216,8 +216,8 @@ Legend: **yes** implemented and wired; **partial** implemented with the gap name
 | `MaxMessagesPerConnection` documented as working | documented as reserved | 91 |
 | The `changed-code.sh` self-test failed on `main` because `GITHUB_EVENT_NAME=push` leaked into every case | the self-test is hermetic (clean environment per case, isolated repository configuration) and CI runs it a second time under the push environment | 101 |
 | CI flakes seen on the way: the replica-liveness test used a 100 ms window, the outage test a 3 s connect timeout, ARI tests raced Pebble's order index | windows of seconds; 30 s timeout; PR 97 fixes the Pebble race at its source | 89, 91, 97 |
-| G11: webhook attempts API returned `eventType` null | read from the outbox item when the log is listed (decision 106), conformance test on all backends | this PR |
-| G15: `docs/api.md` not compared with the mapped routes | Route index in api.md checked in both directions by `ApiDocumentationTests`; three shorthand entries named routes that do not exist | this PR |
+| G11: webhook attempts API returned `eventType` null | read from the outbox item when the log is listed (decision 106), conformance test on all backends | 116 |
+| G15: `docs/api.md` not compared with the mapped routes | Route index in api.md checked in both directions by `ApiDocumentationTests`; three shorthand entries named routes that do not exist | 116 |
 
 ### What remains
 
