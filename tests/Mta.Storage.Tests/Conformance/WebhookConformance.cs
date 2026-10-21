@@ -274,6 +274,33 @@ public abstract class WebhookConformance : StorageTestBase
     }
 
     [Fact]
+    public async Task Attempt_log_carries_the_event_type_of_each_item_while_the_item_is_kept()
+    {
+        // The event type is read from the outbox when the log is listed (G11), so it goes when retention deletes the item and the attempts stay.
+        await OpenAsync(Opts(retention: new RetentionOptions { WebhookOutboxDays = 1, WebhookAttemptLogDays = 5 }));
+        _endpoint = await AddEndpointAsync(TenantA, true, "*");
+        await SeedAsync(1);
+        Guid? test = await Storage.Webhooks.EnqueueForEndpointAsync(TenantA, _endpoint, Draft("webhook.test", "{}"), Clock.UtcNow, CancellationToken.None);
+        var items = await ClaimDueAsync();
+        Assert.Equal(2, items.Count);
+        foreach (var item in items)
+        {
+            await Storage.Webhooks.CompleteAsync(item.Id, AttemptOf(item, Clock.UtcNow), WebhookOutboxState.Delivered, null, CancellationToken.None);
+        }
+
+        var log = await Storage.Webhooks.GetAttemptsAsync(TenantA, _endpoint, 10, CancellationToken.None);
+        Assert.Equal(2, log.Count);
+        Assert.Equal("webhook.test", log.Single(a => a.OutboxId == test).EventType);
+        Assert.Equal("message.delivered", log.Single(a => a.OutboxId != test).EventType);
+
+        Clock.Advance(TimeSpan.FromDays(2));
+        await Storage.Maintenance.RunAsync(Clock.UtcNow, CancellationToken.None);
+        log = await Storage.Webhooks.GetAttemptsAsync(TenantA, _endpoint, 10, CancellationToken.None);
+        Assert.Equal(2, log.Count);
+        Assert.All(log, a => Assert.Null(a.EventType));
+    }
+
+    [Fact]
     public async Task Zero_retention_keeps_finished_items_and_attempts_forever()
     {
         await OpenAsync(Opts(retention: new RetentionOptions { WebhookOutboxDays = 0, WebhookAttemptLogDays = 0 }));
