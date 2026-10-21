@@ -19,5 +19,6 @@
     <ProjectReference Include="..\..\src\Mta.Tls\Mta.Tls.csproj" />
     <ProjectReference Include="..\..\src\Mta.Smtp.Protocol\Mta.Smtp.Protocol.csproj" />
     <ProjectReference Include="..\..\src\Mta.Smtp.Server\Mta.Smtp.Server.csproj" />
+    <ProjectReference Include="..\..\src\Mta.Smtp.Client\Mta.Smtp.Client.csproj" />
   </ItemGroup>
 </Project>

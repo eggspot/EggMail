@@ -79,7 +79,23 @@ public static class EightBitDowngrader
         private int OffsetOf(ReadOnlyMemory<byte> slice) =>
             (int)Unsafe.ByteOffset(ref MemoryMarshal.GetReference(root.Span), ref MemoryMarshal.GetReference(slice.Span));
 
-        private static string Describe(MimePart part) => part.Depth == 0 ? "the message" : "a nested " + part.ContentType.MimeType + " part";
+        private static string Describe(MimePart part) => part.Depth == 0 ? "the message" : "a nested " + Printable(part.ContentType.MimeType) + " part";
+
+        /// <summary>
+        /// A media type from the message as it may appear in the reason, which ends up in a bounce and in the delivery record: control and
+        /// bidirectional formatting characters become '?', and the text is cut at 64 characters (found by the eightbit-downgrade fuzz target).
+        /// </summary>
+        private static string Printable(string value)
+        {
+            int length = value.Length <= 64 ? value.Length : char.IsHighSurrogate(value[63]) ? 63 : 64;   // never cut a surrogate pair in half
+            var sb = new StringBuilder(length + 3);
+            foreach (char c in value.AsSpan(0, length))
+            {
+                sb.Append(char.IsControl(c) || c is '\u061C' or '\u200E' or '\u200F' or (>= '\u202A' and <= '\u202E') or (>= '\u2066' and <= '\u2069') ? '?' : c);
+            }
+
+            return length < value.Length ? sb.Append("...").ToString() : sb.ToString();
+        }
 
         public bool EmitPart(MimePart part, bool isRoot)
         {
@@ -181,7 +197,7 @@ public static class EightBitDowngrader
             {
                 if (type.MediaSubtype != "global" && !type.MediaSubtype.StartsWith("global-", StringComparison.Ordinal))
                 {
-                    return Fail(what + " is 8-bit and a message/" + type.MediaSubtype + " entity cannot be re-encoded");
+                    return Fail(what + " is 8-bit and a message/" + Printable(type.MediaSubtype) + " entity cannot be re-encoded");
                 }
 
                 textual = true;

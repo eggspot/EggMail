@@ -76,6 +76,8 @@ workflow refuses a stable tag without a non-empty section for that exact version
 
 ### Fixed
 
+- Found by the new fuzz targets (gap G8): a TLSA record holding a bare key on a curve the platform does not know made DANE verification throw, so the next DANE-TA record of the set was never tried (fail-closed, but mail to such an MX was deferred); the 8BITMIME downgrade's failure reason, which goes into the bounce and the delivery record, carried the part's media type with control and direction-override characters (now `?`, cut at 64 characters); with UTF-8 headers a subject that looked like an encoded word (`=?utf-8?q?...?=`) was written as it was, so every reader showed other text; a display name with a control character other than CR, LF and NUL (for example ESC or a vertical tab) went out inside an encoded word and is now refused like in any other header value (`POST /send` answers `400 validation_failed`).
+
 - The envelope sender (and so SPF) uses the sending domain's own `bounce.<domain>` host once its return-path CNAME is verified; before, the record was required and verified but never used, and the bounce listener now accepts bounces addressed to it.
 
 ### Fixed
@@ -97,6 +99,7 @@ workflow refuses a stable tag without a non-empty section for that exact version
 
 ### Added
 
+- Fuzz targets for the VERP bounce address decoder (`verp`), DANE verification (`dane`), the 8BITMIME downgrade (`eightbit-downgrade`), the message builder behind `POST /send` (`message-builder`) and the outbound SMTP client against a hostile server (`smtp-client`); `fuzz.yml` instruments `Mta.Smtp.Client` too and runs 16 targets for 200 seconds each by default (the same weekly budget as 11 targets for 300 seconds).
 - Offline tests for ACME and Cloudflare (a scriptable mock CA and a fake Cloudflare in `tests/Mta.Host.Tests/Acme`) and [docs/testing-offline-coverage.md](docs/testing-offline-coverage.md), which says what they prove and what they do not.
 
 ### Security

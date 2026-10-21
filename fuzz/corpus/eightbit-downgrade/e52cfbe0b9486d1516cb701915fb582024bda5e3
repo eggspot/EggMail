@@ -1,0 +1,12 @@
+From: a@example.com
+Content-Type: multipart/mixed; boundary=x
+
+--x
+Content-Type: message/rfc822
+
+From: n@example.com
+Content-Type: text/plain
+Content-Transfer-Encoding: 8bit
+
+nested é
+--x--

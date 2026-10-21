@@ -87,11 +87,4 @@ internal static class DkimTarget
         public ValueTask<DnsResponse> QueryAsync(string name, DnsRecordType type, CancellationToken cancellationToken = default) =>
             new StaticDnsResolver().AddTxt(name, keyTxt).QueryAsync(name, type, cancellationToken);
     }
-
-    private sealed class FixedClock(DateTimeOffset now) : IClock
-    {
-        public DateTimeOffset UtcNow => now;
-
-        public long Timestamp => now.Ticks;
-    }
 }

@@ -1,0 +1,12 @@
+220 mx ESMTP
+250-mx
+250-CHUNKING
+250 PIPELINING
+250 OK
+250 OK
+250 OK
+250 2.0.0 chunk
+250 2.0.0 chunk
+250 2.0.0 chunk
+250 2.0.0 chunk
+250 2.0.0 done
