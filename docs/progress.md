@@ -211,7 +211,7 @@ Legend: **yes** implemented and wired; **partial** implemented with the gap name
 | Forged DSN or complaint suppressed any address for a tenant | VERP v2 bound to the destination domain (decision 92) | 90 |
 | Per-domain return path required but unused on the wire | `SelectReturnPath` used by delivery; bounce listener accepts the verified host | 90 |
 | BDAT bypassed the bare CR/LF/NUL rule | `LineEndingValidator` | 91 |
-| G8: no fuzz target for `VerpCodec`, `DaneVerifier`, `EightBitDowngrader`, `MessageBuilder`; client assembly not instrumented | five targets (`verp`, `dane`, `eightbit-downgrade`, `message-builder`, `smtp-client`) with invariants, `Mta.Smtp.Client` instrumented; they found four defects, fixed with unit tests and regression inputs ([security.md](security.md#fuzzing)) | this PR |
+| G8: no fuzz target for `VerpCodec`, `DaneVerifier`, `EightBitDowngrader`, `MessageBuilder`; client assembly not instrumented | five targets (`verp`, `dane`, `eightbit-downgrade`, `message-builder`, `smtp-client`) with invariants, `Mta.Smtp.Client` instrumented; they found four defects, fixed with unit tests and regression inputs ([security.md](security.md#fuzzing)) | 117 |
 | Disk full answered `451` | `452 4.3.1` through `StorageFullException` | 91 |
 | Webhook SSRF guard bypassable through a proxy environment | `UseProxy = false` | 91 |
 | `MaxMessagesPerConnection` documented as working | documented as reserved | 91 |
