@@ -125,9 +125,14 @@ public static class InboundContentReader
         return body;
     }
 
-    /// <summary>Control characters become a space, the length is bounded: a value shown or put in a header is a single line.</summary>
+    /// <summary>
+    /// Control characters become a space, the length is bounded: a value shown or put in a header is a single line. Characters that change how text is displayed without being visible are removed:
+    /// the bidirectional controls (U+202A to U+202E, U+2066 to U+2069, the marks U+200E, U+200F, U+061C), zero-width characters (U+200B to U+200D, U+2060, U+FEFF) and the line and paragraph
+    /// separators U+2028 and U+2029 (every <c>Cf</c>, <c>Zl</c> and <c>Zp</c> character). A right-to-left override in an attachment name turns <c>invoice\u202Egpj.exe</c> into <c>invoiceexe.jpg</c> on screen.
+    /// </summary>
     private static string Clean(string value, int max)
     {
+        value = StripInvisible(value);
         if (value.Length > max)
         {
             value = value[..max];
@@ -174,6 +179,37 @@ public static class InboundContentReader
 
         return sb.ToString().Trim();
     }
+
+    /// <summary>
+    /// Removes format characters (Unicode category Cf: direction overrides and isolates, zero-width space, word joiner, BOM, the invisible tag characters
+    /// U+E0000 to U+E007F) and the line and paragraph separators. Read per code point, so the tag characters, which are surrogate pairs, are caught. The
+    /// joiners ZWNJ and ZWJ and the soft hyphen are kept: Persian and Indic text and emoji sequences need them, and they cannot reorder or hide text.
+    /// A lone surrogate is kept as it is (storage cleans it).
+    /// </summary>
+    internal static string StripInvisible(string value)
+    {
+        StringBuilder? sb = null;
+        for (int i = 0; i < value.Length;)
+        {
+            bool decoded = Rune.DecodeFromUtf16(value.AsSpan(i), out Rune rune, out int length) == System.Buffers.OperationStatus.Done;
+            if (decoded && IsInvisibleFormatting(rune))
+            {
+                sb ??= new StringBuilder(value.Length).Append(value, 0, i);
+            }
+            else
+            {
+                sb?.Append(value, i, length);
+            }
+
+            i += length;
+        }
+
+        return sb?.ToString() ?? value;
+    }
+
+    private static bool IsInvisibleFormatting(Rune rune) =>
+        rune.Value is not (0x00AD or 0x200C or 0x200D)
+        && Rune.GetUnicodeCategory(rune) is System.Globalization.UnicodeCategory.Format or System.Globalization.UnicodeCategory.LineSeparator or System.Globalization.UnicodeCategory.ParagraphSeparator;
 
     /// <summary>
     /// A file name that is safe as the <c>filename</c> parameter of a <c>Content-Disposition</c> header: ASCII letters, digits and <c>. _ - ( ) space</c>,

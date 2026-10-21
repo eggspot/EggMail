@@ -192,7 +192,7 @@ export interface CancelMessageResponse {
 // ---- domains ----
 
 export type DomainStatus = 'pending' | 'verifying' | 'verified' | 'temporary_failure' | 'failed';
-export type RecordPurpose = 'dkim' | 'return_path' | 'spf' | 'dmarc' | 'bounce_mx' | 'tls_rpt' | 'mta_sts' | 'mta_sts_host' | 'ptr';
+export type RecordPurpose = 'dkim' | 'return_path' | 'spf' | 'dmarc' | 'bounce_mx' | 'tls_rpt' | 'mta_sts' | 'mta_sts_host' | 'ptr' | 'inbound_mx';
 /**
  * `missing`: nothing of that kind at the name. `invalid`: a record exists but is malformed or there are several where one is allowed.
  * `mismatch`: a well-formed record exists with another value than expected. `pending`: not looked up yet.
@@ -610,4 +610,190 @@ export interface TlsPolicyPatch {
   level?: TlsPolicyLevel;
   /** Required by the server when the update makes the policy level none for "*". */
   acknowledgeInsecure?: boolean;
+}
+
+
+// ---- inbound mail (docs/api.md, "Inbound mail", design section 11) ----
+
+export type InboundVerdictWord = 'none' | 'pass' | 'fail' | 'softfail' | 'neutral' | 'temperror' | 'permerror' | 'policy';
+export type DmarcActionWord = 'record_only' | 'flag' | 'reject';
+export type InboundActionKindWord = 'webhook' | 'forward' | 'store' | 'discard';
+export type InboundActionStateWord = 'pending' | 'done' | 'failed';
+export type InboundMatchKindWord = 'catch_all' | 'address' | 'wildcard';
+export type InboundWebhookFormatWord = 'json' | 'raw_mime';
+
+export interface InboundWarning {
+  code: string;
+  message: string;
+}
+
+/** The limits that apply to a domain after the operator's ceilings (0 means unlimited for `maxStoredBytes`, forever for `retentionDays`). */
+export interface InboundEffective {
+  maxMessageBytes: number;
+  maxMessagesPerMinute: number;
+  maxMessagesPerMinutePerRemote: number;
+  maxStoredBytes: number;
+  retentionDays: number;
+}
+
+export interface InboundSettings {
+  domainId: string;
+  enabled: boolean;
+  dmarcAction: DmarcActionWord;
+  /** null means the server value (see `effective`). */
+  maxMessageBytes: number | null;
+  maxMessagesPerMinute: number | null;
+  maxMessagesPerMinutePerRemote: number | null;
+  maxStoredBytes: number | null;
+  retentionDays: number | null;
+  updatedAt: string | null;
+  effective: InboundEffective;
+  mx: { host: string | null; priority: number; status?: RecordStatus };
+  warnings?: InboundWarning[];
+}
+
+/** PATCH body: absent members are unchanged, null resets a limit to the server value. */
+export interface InboundSettingsPatch {
+  enabled?: boolean;
+  dmarcAction?: DmarcActionWord;
+  maxMessageBytes?: number | null;
+  maxMessagesPerMinute?: number | null;
+  maxMessagesPerMinutePerRemote?: number | null;
+  maxStoredBytes?: number | null;
+  retentionDays?: number | null;
+}
+
+export interface InboundRouteMatch {
+  kind: InboundMatchKindWord;
+  localPart?: string | null;
+  plusAddressing?: boolean;
+}
+
+export interface InboundRouteAction {
+  kind: InboundActionKindWord;
+  webhookEndpointId?: string | null;
+  webhookFormat?: InboundWebhookFormatWord | null;
+  forwardTo?: string[];
+}
+
+export interface InboundRoute {
+  id: string;
+  domainId: string;
+  name: string;
+  order: number;
+  enabled: boolean;
+  match: InboundRouteMatch;
+  action: InboundRouteAction;
+  createdAt: string;
+  updatedAt: string;
+  warnings?: InboundWarning[];
+}
+
+export interface InboundRouteInput {
+  name?: string;
+  order?: number;
+  enabled?: boolean;
+  match?: InboundRouteMatch;
+  action?: InboundRouteAction;
+}
+
+/** What the receive path would answer for a recipient (`GET /domains/{id}/inbound/routes/match`). */
+export interface InboundRouteProbe {
+  address: string;
+  domainEnabled: boolean;
+  route: InboundRoute | null;
+  reply: string;
+}
+
+export interface InboundVerdict {
+  result: InboundVerdictWord;
+  domain?: string | null;
+  policy?: string | null;
+}
+
+export interface InboundAuth {
+  spf: InboundVerdict;
+  spfHelo: InboundVerdict;
+  dkim: InboundVerdict;
+  dmarc: InboundVerdict;
+  arc: InboundVerdict;
+}
+
+export interface InboundAction {
+  /** The action the message was given when it was received; the action that runs is its route's current one (`currentKind`, detail only). */
+  kind: InboundActionKindWord;
+  state: InboundActionStateWord;
+  attempts: number;
+  retryGeneration: number;
+  nextAttemptAt: string | null;
+  finishedAt: string | null;
+  lastError: string | null;
+  forwardMessageId: string | null;
+  note?: string | null;
+  currentKind?: InboundActionKindWord | null;
+}
+
+export interface InboundMessageSummary {
+  id: string;
+  domainId: string;
+  domain: string;
+  receivedAt: string;
+  remoteIp: string;
+  helo: string | null;
+  tls: boolean;
+  from: string;
+  to: string;
+  subject: string | null;
+  size: number;
+  auth: InboundAuth;
+  dmarcFlagged: boolean;
+  routeId: string | null;
+  action: InboundAction;
+  hasRaw: boolean;
+}
+
+export interface InboundAttachment {
+  index: number;
+  filename: string | null;
+  content_type: string;
+  size: number;
+  content_id: string | null;
+  disposition: string;
+}
+
+export interface InboundContent {
+  state: 'available' | 'no_body';
+  headers: { name: string; value: string }[];
+  text?: string | null;
+  html?: string | null;
+  truncated: boolean;
+  attachments: InboundAttachment[];
+}
+
+export interface InboundMessageDetail extends InboundMessageSummary {
+  content: InboundContent;
+}
+
+export interface InboundMessageQuery {
+  domainId?: string;
+  recipient?: string;
+  sender?: string;
+  subject?: string;
+  route?: string;
+  action?: InboundActionKindWord;
+  state?: InboundActionStateWord;
+  dmarc?: InboundVerdictWord;
+  dmarcFlagged?: boolean;
+  from?: string;
+  to?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface InboundUsage {
+  messages: number;
+  bodyBytes: number;
+  pending: number;
+  failed: number;
+  oldestPendingAt: string | null;
 }

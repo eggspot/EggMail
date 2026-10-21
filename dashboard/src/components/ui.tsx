@@ -201,6 +201,25 @@ export function Button({
   );
 }
 
+/** A checkbox with its label and an optional hint (read by screen readers as the description, not as part of the name). */
+export function CheckField({ label, hint, checked, onChange }: { label: ComponentChildren; hint?: ComponentChildren; checked: boolean; onChange: (checked: boolean) => void }) {
+  const id = useId();
+  const hintId = `${id}-hint`;
+  return (
+    <div class="check">
+      <input id={id} type="checkbox" checked={checked} aria-describedby={hint ? hintId : undefined} onChange={(e) => onChange((e.currentTarget as HTMLInputElement).checked)} />
+      <div>
+        <label for={id}>{label}</label>
+        {hint && (
+          <div class="hint" id={hintId}>
+            {hint}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /* ---------- Clipboard ---------- */
 
 export async function copyText(text: string): Promise<boolean> {
