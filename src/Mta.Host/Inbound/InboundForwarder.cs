@@ -137,6 +137,8 @@ public sealed record InboundForwarderOptions
 /// <item>The envelope sender is an SRS0 address at the route's domain, or the null reverse-path when the message arrived with one.</item>
 /// <item>The copy is the stored message with headers added on top only (hop marker, ARC set), so the original DKIM signatures stay valid. The ARC set is sealed with the route domain's key; <c>cv=fail</c> when the chain does not validate, <c>cv=none</c> without a chain, <c>cv=pass</c> with a valid one. No key: unsealed.</item>
 /// <item>A message from a domain of the route's own organization that did not pass DMARC is not forwarded (<c>unauthenticated_local_sender</c>): the SRS envelope and our signature would otherwise make a spoof of the tenant's own domain pass SPF and DMARC at the final receiver.</item>
+/// <item>A message whose From the receive path judged unusable (none, empty, a mailbox that does not parse, or a field another parser reads as another address: design section 11.5) is not forwarded
+/// (<c>unusable_from</c>): which domain it claims cannot be told, so it cannot be shown not to be the tenant's own.</item>
 /// <item>The idempotency key is <c>inbound:&lt;id&gt;</c>, remembered 30 days with no request fingerprint, so a retry after a crash (or after the targets were edited) returns the copy that exists. The prefix is reserved: the public API refuses it, and a key that already belongs to something else is a failure (<c>forward_key_conflict</c>), never a silent success.</item>
 /// <item>What a tenant may have waiting in the outbound queue is capped (<c>Inbound:Forward:*</c>): over a cap the forward waits on its ladder as <c>forward_backlog_full</c> and the message stays in the inbound store, where the inbound quotas keep applying.</item>
 /// <item>Our own internal headers (<c>X-EggMail-Dmarc</c>, <c>X-EggMail-Reputation</c>) are not passed on.</item>
@@ -210,6 +212,8 @@ public sealed class InboundForwarder : IInboundForwarder
         {
             case SenderCheck.Refused:
                 return Refused("unauthenticated_local_sender");
+            case SenderCheck.UnusableFrom:
+                return Refused("unusable_from");
             case SenderCheck.Unsettled:
                 // DMARC could not be settled at receipt (a DNS error): the message is not shown to be foreign, and not shown to be a spoof either. The verdict is the one stored at receipt and is not
                 // evaluated again here, so waiting does not change it: the action runs its ladder (about 27 hours) and ends failed with dmarc_unsettled. It is a retry, not a refusal, only so that the
@@ -425,14 +429,28 @@ public sealed class InboundForwarder : IInboundForwarder
 
         /// <summary>The same, but DMARC could not be settled at receipt (a temporary error): not a verdict, so not a permanent refusal.</summary>
         Unsettled,
+
+        /// <summary>The receive path found no identity in the From field it could vouch for (the stored DMARC verdict is <c>permerror</c>).</summary>
+        UnusableFrom,
     }
 
-    /// <summary>Whether the message may be forwarded: a From in the route's own organizational domain needs a DMARC pass (the SRS envelope and our signature would otherwise launder a spoof of it).</summary>
+    /// <summary>
+    /// Whether the message may be forwarded: a From the receive path judged unusable never is, and a From in the route's own organizational domain needs a DMARC pass (the SRS envelope and our signature
+    /// would otherwise launder a spoof of it).
+    /// </summary>
     private static SenderCheck CheckSender(InboundMessage message, byte[] raw)
     {
         if (message.Auth.Dmarc == InboundVerdict.Pass)
         {
             return SenderCheck.Allowed;
+        }
+
+        // The stored verdict is permerror exactly when the receive path found no From identity it could vouch for (InboundVerifier: an unusable From is recorded as permerror, and a usable one names
+        // a valid domain, for which DMARC never answers permerror). The decision is the one made at receipt, by the same analysis that decided the verdict; the parse below is more lenient and would
+        // take "ceo@tenant.example <x@evil.test>" as a foreign sender although another reader of the copy sees the tenant's own address.
+        if (message.Auth.Dmarc == InboundVerdict.PermError)
+        {
+            return SenderCheck.UnusableFrom;
         }
 
         SenderCheck refusal = message.Auth.Dmarc == InboundVerdict.TempError ? SenderCheck.Unsettled : SenderCheck.Refused;
