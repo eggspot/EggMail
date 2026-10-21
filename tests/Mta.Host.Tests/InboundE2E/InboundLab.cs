@@ -504,12 +504,16 @@ internal sealed class InboundLab : IAsyncDisposable
 
     /// <summary>
     /// The backscatter oracle: nothing at all was created on the outbound side. No delivery can be claimed, and the webhook outbox holds nothing (a bounce, a notice and an event would each show here).
+    /// Asked at two instants: a minute from now (what was queued is due at once, and a claim far in the future does not see a delivery whose queue lifetime, 5 days by default, is over by then) and
+    /// 30 days from now (anything scheduled for later).
     /// </summary>
     public async Task AssertNothingWasSentAsync()
     {
-        DateTimeOffset later = Clock.UtcNow.AddDays(30);
-        Assert.Empty(await Storage.Deliveries.ClaimAsync("oracle", 100, later, TimeSpan.FromMinutes(1), default));
-        Assert.Empty(await Storage.Webhooks.ClaimDueAsync("oracle", 100, later, TimeSpan.FromMinutes(1), default));
+        foreach (DateTimeOffset at in new[] { Clock.UtcNow.AddMinutes(1), Clock.UtcNow.AddDays(30) })
+        {
+            Assert.Empty(await Storage.Deliveries.ClaimAsync("oracle", 100, at, TimeSpan.FromMinutes(1), default));
+            Assert.Empty(await Storage.Webhooks.ClaimDueAsync("oracle", 100, at, TimeSpan.FromMinutes(1), default));
+        }
     }
 
     /// <summary>Whatever the runtime logged as an error while the test ran is a failure the sender may not have seen (a 451 for a reason that is the server's own, an exception in a background task).</summary>
