@@ -483,6 +483,15 @@ public sealed class SendingApi(ApiAuthenticator auth, SubmissionService submissi
             throw ApiException.Validation("Idempotency-Key", "1 to 255 printable ASCII characters without spaces.");
         }
 
+        // The server's own keys (the forward of an inbound message is "inbound:<id>", a bounce notice "eggmail-dsn:<hash>") live in the same table: a caller must not be able to register one first
+        // and so swallow the message the server was going to queue under it.
+        if (ReservedKeyPrefixes.Any(prefix => key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
+        {
+            throw ApiException.Validation("Idempotency-Key", "Keys starting with \"inbound:\" or \"eggmail-\" are reserved for the server.");
+        }
+
         return key;
     }
+
+    private static readonly string[] ReservedKeyPrefixes = ["inbound:", "eggmail-"];
 }
