@@ -5,6 +5,8 @@ using System.Net.Security;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
+using Certes;
+using Certes.Acme;
 using Mta.Core;
 using Mta.Host.Tls;
 using Xunit.Sdk;
@@ -112,6 +114,19 @@ internal static class Pebble
     public static string Window(DateTimeOffset start, DateTimeOffset end) =>
         $"{{\"suggestedWindow\":{{\"start\":\"{start.UtcDateTime:yyyy-MM-dd'T'HH:mm:ss'Z'}\",\"end\":\"{end.UtcDateTime:yyyy-MM-dd'T'HH:mm:ss'Z'}\"}}}}";
 
+    /// <summary>
+    /// Pebble 2.10.1 cannot honour <c>replaces</c> for roughly one certificate in 250. It files the order of an issued certificate under the hex of the serial without
+    /// leading zero bytes, but looks the certificate id of a <c>replaces</c> up under the hex of the DER INTEGER content (RFC 9773: <i>with</i> the 00 byte that keeps a
+    /// serial with the high bit set positive). For such a certificate its answer is always a 500 ("could not find order resulting in the given certificate serial number"),
+    /// not just in the moment after issuing. The client is right (Certes encodes the serial as the RFC says); tests that need the CA to accept the link must not use
+    /// such a certificate.
+    /// </summary>
+    public static bool HasPaddedSerial(string chainPem)
+    {
+        string serial = new CertificateChain(chainPem).GetRenewalInfoCertificateId().Split('.')[1].Replace('-', '+').Replace('_', '/');
+        return Convert.FromBase64String(serial.PadRight(serial.Length + (4 - serial.Length % 4) % 4, '='))[0] == 0;
+    }
+
     /// <summary>The certificate Pebble issues from (its current root; Pebble generates new ones at every start).</summary>
     public static async Task<X509Certificate2Collection> FetchRootsAsync()
     {
@@ -216,11 +231,13 @@ internal sealed class RecordingHandler(HttpMessageHandler inner) : DelegatingHan
         }
 
         var response = await base.SendAsync(request, cancellationToken);
-        // A request the CA bounced with badNonce is repeated by the client with a fresh nonce; it is one request, not two.
-        if (response.StatusCode == HttpStatusCode.BadRequest)
+        // A request the CA bounced with badNonce is repeated by the client with a fresh nonce; it is one request, not two. The same for an order that names a
+        // certificate whose serial Pebble cannot look up (see HasPaddedSerial): the client repeats it as a plain order, which is the request that counts.
+        if (response.StatusCode is HttpStatusCode.BadRequest or HttpStatusCode.InternalServerError)
         {
             await response.Content.LoadIntoBufferAsync(cancellationToken);
-            if ((await response.Content.ReadAsStringAsync(cancellationToken)).Contains(":badNonce", StringComparison.Ordinal))
+            string body = await response.Content.ReadAsStringAsync(cancellationToken);
+            if (body.Contains(":badNonce", StringComparison.Ordinal) || body.Contains("could not find order resulting in the given certificate serial number", StringComparison.Ordinal))
             {
                 return response;
             }
