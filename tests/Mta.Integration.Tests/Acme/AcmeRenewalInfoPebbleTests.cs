@@ -32,7 +32,7 @@ public abstract class AcmeRenewalInfoPebbleTests : IAsyncLifetime
 
     /// <summary>
     /// Orders the first certificate for a fresh name (the one order of the recorded transport), one that Pebble can look up when it is named in <c>replaces</c>: a certificate
-    /// with a padded serial (<see cref="Pebble.HasPaddedSerial"/>, about 1 in 128) is replaced by another one first, through a transport that is not recorded. The service
+    /// with a padded serial (<see cref="Pebble.HasPaddedSerial"/>, about 1 in 250) is replaced by another one first, through a transport that is not recorded. The service
     /// always picks the start of a suggested window (random number 0).
     /// </summary>
     private async Task<(AcmeRenewalService Service, string Host, CertificateRecord Cert)> IssueAsync()

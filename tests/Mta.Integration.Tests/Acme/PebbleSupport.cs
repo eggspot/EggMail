@@ -1,12 +1,12 @@
 using System.Collections.Concurrent;
-using Certes;
-using Certes.Acme;
 using System.Net;
 using System.Net.Http.Json;
 using System.Net.Security;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
+using Certes;
+using Certes.Acme;
 using Mta.Core;
 using Mta.Host.Tls;
 using Xunit.Sdk;
@@ -115,7 +115,7 @@ internal static class Pebble
         $"{{\"suggestedWindow\":{{\"start\":\"{start.UtcDateTime:yyyy-MM-dd'T'HH:mm:ss'Z'}\",\"end\":\"{end.UtcDateTime:yyyy-MM-dd'T'HH:mm:ss'Z'}\"}}}}";
 
     /// <summary>
-    /// Pebble 2.10.1 cannot honour <c>replaces</c> for roughly one certificate in 128. It files the order of an issued certificate under the hex of the serial without
+    /// Pebble 2.10.1 cannot honour <c>replaces</c> for roughly one certificate in 250. It files the order of an issued certificate under the hex of the serial without
     /// leading zero bytes, but looks the certificate id of a <c>replaces</c> up under the hex of the DER INTEGER content (RFC 9773: <i>with</i> the 00 byte that keeps a
     /// serial with the high bit set positive). For such a certificate its answer is always a 500 ("could not find order resulting in the given certificate serial number"),
     /// not just in the moment after issuing. The client is right (Certes encodes the serial as the RFC says); tests that need the CA to accept the link must not use
