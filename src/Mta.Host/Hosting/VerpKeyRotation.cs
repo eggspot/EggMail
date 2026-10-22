@@ -40,6 +40,7 @@ public sealed class VerpKeyRotation
     private readonly IMtaLog? _log;
     private readonly TimeSpan _period;
     private readonly TimeSpan _retention;
+    private readonly SemaphoreSlim _pass = new(1, 1);   // one pass at a time: a pass that read the table before a rotation at once must not load its keys after it
     private string? _loaded;
 
     /// <param name="rotationDays"><c>Secrets:VerpKeyRotationDays</c>; 0 turns the rotation off (retired keys are still pruned and changes made by hand still reloaded).</param>
@@ -114,6 +115,19 @@ public sealed class VerpKeyRotation
     /// <summary>One pass: add a key when the period is up, retire the keys a newer key replaced, delete the expired ones, and give the codec what the table holds.</summary>
     public async Task RunOnceAsync(CancellationToken ct)
     {
+        await _pass.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await PassAsync(ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            _pass.Release();
+        }
+    }
+
+    private async Task PassAsync(CancellationToken ct)
+    {
         DateTimeOffset now = _clock.UtcNow;
         IReadOnlyList<VerpKeyRecord> keys = await _config.GetVerpKeysAsync(ct).ConfigureAwait(false);
         if (_period > TimeSpan.Zero && NeedsNewKey(keys, now))
@@ -155,6 +169,90 @@ public sealed class VerpKeyRotation
         }
 
         Load(keys, signing);
+    }
+
+    /// <summary>
+    /// The operator's rotation at once, after a leak (decision 111): under the <c>verp-keys</c> lease, a new key with a fresh id signs from now on, a key that was waiting is deleted
+    /// (it signed nothing), and the other keys are retired (they still verify what they signed) or, with <paramref name="revokeOldKeys"/>, deleted (they verify nothing more, so
+    /// a leaked key stops working for forgery). This replica's codec is reloaded at once; the others follow at their next reload, within <see cref="ReloadInterval"/>.
+    /// Null when another replica holds the lease for longer than a few seconds; <paramref name="ct"/> only stops that wait.
+    /// </summary>
+    /// <exception cref="VerpKeyIdsExhaustedException">Every key id is held by a key that is kept.</exception>
+    public async Task<VerpKeyRotateNowResult?> RotateNowAsync(bool revokeOldKeys, CancellationToken ct)
+    {
+        string owner = "verp-rotate-now-" + Guid.NewGuid().ToString("N");
+        for (int attempt = 0; await _config.TryAcquireLeaseAsync(LeaseName, owner, TimeSpan.FromSeconds(30), _clock.UtcNow, ct).ConfigureAwait(false) is null; attempt++)
+        {
+            if (attempt >= 50)
+            {
+                return null;
+            }
+
+            await Task.Delay(100, ct).ConfigureAwait(false);   // an automatic pass holds it for milliseconds
+        }
+
+        // Once the lease is held the rotation is finished whatever the caller does: a client that hangs up must not leave the keys half replaced or this replica unreloaded.
+        ct = CancellationToken.None;
+        try
+        {
+            DateTimeOffset now = _clock.UtcNow;
+            IReadOnlyList<VerpKeyRecord> keys = await _config.GetVerpKeysAsync(ct).ConfigureAwait(false);
+            // An id no key holds: the delivery engine keeps a bounce address per signing key id for the hour, and another replica's pass that read the table before this
+            // rotation deletes an expired retired key by its id. Only when every id is held, and the old keys are revoked, does the new key take the id of a retired one.
+            int signingId = VerpKeyStore.SigningKey(keys, now)?.KeyId ?? 0;
+            int? id = NextFreeId(keys, signingId) ?? (revokeOldKeys ? NextFreeId(keys.Where(k => k.RetiredAt is null).ToList(), signingId) : null);
+            if (id is null)
+            {
+                throw new VerpKeyIdsExhaustedException($"No free VERP key id: all {KeyIdCount} are held by keys that are kept. Revoke the old keys instead of retiring them.");
+            }
+
+            // In an order that leaves a key that signs whenever it stops: the retired keys go first when revoked (one may hold the new id), then the new key is added, then the
+            // others are retired or deleted.
+            var retired = new List<int>();
+            var deleted = new List<int>();
+            foreach (VerpKeyRecord old in keys.Where(k => revokeOldKeys && k.RetiredAt is not null))
+            {
+                if (await _config.DeleteVerpKeyAsync(old.KeyId, ct).ConfigureAwait(false))
+                {
+                    deleted.Add(old.KeyId);
+                }
+            }
+
+            byte[] key = VerpCodec.GenerateKey();
+            try
+            {
+                await _config.AddVerpKeysAsync([new VerpKeyRecord(id.Value, _secrets.Protect(key, SecretPurposes.VerpKey), now, now, null)], ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(key);
+            }
+
+            foreach (VerpKeyRecord old in keys.Where(k => k.RetiredAt is null))
+            {
+                bool waiting = old.ActivatesAt > now;   // signed nothing; kept, it would take over when it activates
+                if (waiting || revokeOldKeys)
+                {
+                    if (await _config.DeleteVerpKeyAsync(old.KeyId, ct).ConfigureAwait(false))
+                    {
+                        deleted.Add(old.KeyId);
+                    }
+                }
+                else if (await _config.RetireVerpKeyAsync(old.KeyId, now, ct).ConfigureAwait(false))
+                {
+                    retired.Add(old.KeyId);
+                }
+            }
+
+            _log?.Write(MtaLogLevel.Warning, "verp",
+                $"VERP keys rotated at once by an operator: key {id} signs from now on; retired: [{string.Join(",", retired)}] (they still verify what they signed); deleted: [{string.Join(",", deleted)}]. Other replicas load the change within {ReloadInterval.TotalMinutes} minutes");
+            await RunOnceAsync(ct).ConfigureAwait(false);   // this replica signs with the new key at once
+            return new VerpKeyRotateNowResult(id.Value, now, retired, deleted, now + ReloadInterval);
+        }
+        finally
+        {
+            await _config.ReleaseLeaseAsync(LeaseName, owner, CancellationToken.None).ConfigureAwait(false);
+        }
     }
 
     /// <summary>True when the key that signs has signed for the whole period and no newer key is waiting to replace it.</summary>
@@ -261,3 +359,9 @@ public sealed class VerpKeyRotation
         }
     }
 }
+
+/// <summary>What <see cref="VerpKeyRotation.RotateNowAsync"/> did: the key that signs now, the keys retired and deleted, and when every replica has loaded the change at the latest.</summary>
+public sealed record VerpKeyRotateNowResult(int KeyId, DateTimeOffset SignsFrom, IReadOnlyList<int> Retired, IReadOnlyList<int> Deleted, DateTimeOffset AllReplicasBy);
+
+/// <summary>A key is needed but each of the 16 ids a bounce address can name is held by a key that must be kept.</summary>
+public sealed class VerpKeyIdsExhaustedException(string message) : InvalidOperationException(message);

@@ -169,6 +169,16 @@ public sealed class AcmeCertificateRequester(ILogger<AcmeCertificateRequester> l
     }
 }
 
+/// <summary>The VERP key ring as the admin API sees it (decision 111): implemented over <c>Hosting.VerpKeyRotation</c> by the process that runs it; absent elsewhere.</summary>
+public interface IVerpKeyRing
+{
+    /// <summary>The keys in <c>verp_key</c>, without their key material, with their state now.</summary>
+    Task<IReadOnlyList<VerpKeyResponse>> ListAsync(CancellationToken ct);
+
+    /// <summary>A new key that signs at once; the old keys deleted (<paramref name="revokeOldKeys"/>) or retired. Null when another replica holds the key lease; <c>409</c> when no key id is free.</summary>
+    Task<VerpKeyRotationResponse?> RotateNowAsync(bool revokeOldKeys, CancellationToken ct);
+}
+
 /// <summary>Storage-pressure indicators for the advisory hint on the dashboard (decision C). Optional: only backends that can measure it register one.</summary>
 public interface IStoragePressureSource
 {
