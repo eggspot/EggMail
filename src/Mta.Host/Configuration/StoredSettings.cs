@@ -8,7 +8,7 @@ namespace Mta.Host.Configuration;
 /// The global settings kept in the configuration store (edited through <c>/admin/settings</c>) as a configuration layer. A stored value
 /// is the lowest layer: command line, environment, mounted files and the bootstrap file all win over it, and those keys are shown as
 /// locked in the dashboard. Only rows that look like configuration keys (<c>Section:Name</c>) are used; the store also holds internal
-/// rows (Data Protection key ring, VERP keys) that must never become configuration.
+/// rows (Data Protection key ring, the marker left where the VERP keys were) that must never become configuration.
 /// </summary>
 public static partial class StoredSettings
 {
