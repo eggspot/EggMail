@@ -191,4 +191,15 @@ public sealed class PostgresOptions
 
     /// <summary>Maximum Npgsql pool size of the read-only connections (design: about 8 for the dashboard).</summary>
     public int ReadOnlyMaxPoolSize { get; init; } = 8;
+
+    // Advisory storage-pressure indicator (decision 109; provisional defaults, calibrate with benchmarks):
+
+    /// <summary>How far back the runtime pool's samples are judged.</summary>
+    public TimeSpan PressureWindow { get; init; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>How often the runtime pool is sampled (waiting callers, connections in use, the limit).</summary>
+    public TimeSpan PressureSampleInterval { get; init; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>Share of the samples in <see cref="PressureWindow"/> that found a caller waiting for a connection, 1 to 100, above which the indicator turns advisory.</summary>
+    public int PressureWaitingPercent { get; init; } = 50;
 }

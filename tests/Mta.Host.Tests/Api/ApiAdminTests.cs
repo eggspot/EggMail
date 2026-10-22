@@ -153,6 +153,7 @@ public class ApiAdminTests : IAsyncLifetime
             Assert.Equal(1000, p.GetProperty("queueDepthThreshold").GetInt64()); // the configured thresholds, for the dashboard's labels
             Assert.Equal(300, p.GetProperty("queueThresholdSeconds").GetInt64());
             Assert.Equal(100, p.GetProperty("commitP99ThresholdMs").GetDouble());
+            Assert.False(p.TryGetProperty("poolPendingRequests", out _)); // the PostgreSQL figures are left out on SQLite
         }
         finally
         {
@@ -161,13 +162,51 @@ public class ApiAdminTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Only_the_sqlite_backend_has_a_pressure_source()
+    public async Task Each_backend_but_memory_has_its_own_pressure_source()
     {
         await using var memory = new Mta.Storage.InMemory.InMemoryStorage(new StorageOptions());
         Assert.Null(SqliteStoragePressureSource.For(memory));
-        var pg = new PostgresOptions { RuntimeConnectionString = "Host=127.0.0.1;Port=1;Database=none;Username=none" };
+        Assert.Null(PostgresStoragePressureSource.For(memory));
+        var pg = new PostgresOptions { RuntimeConnectionString = "Host=127.0.0.1;Port=1;Database=none;Username=none", PressureWindow = TimeSpan.FromMinutes(10), PressureWaitingPercent = 30 };
         await using var postgres = Mta.Storage.Postgres.PostgresStorage.Create(new StorageOptions { Backend = StorageBackend.Postgres, Postgres = pg });
-        Assert.Null(SqliteStoragePressureSource.For(postgres)); // no single writer to measure: status leaves pressure out (decision 108)
+        Assert.Null(SqliteStoragePressureSource.For(postgres));
+        IStoragePressureSource source = Assert.IsType<PostgresStoragePressureSource>(PostgresStoragePressureSource.For(postgres));
+
+        // Not initialized (no sampler yet): an empty window with the configured thresholds, never the writer fields of SQLite (decision 109).
+        StoragePressure p = source.Get();
+        Assert.Null(p.WriterQueueDepth);
+        Assert.Null(p.CommitP99Ms);
+        Assert.Equal(0, p.PoolSamples);
+        Assert.Equal(600, p.PoolWindowSeconds);
+        Assert.Equal(30, p.PoolWaitingPercentThreshold);
+        Assert.False(p.Advisory);
+    }
+
+    private sealed class FixedPoolPressure : IStoragePressureSource
+    {
+        public StoragePressure Get() => new(null, null, null, true)
+        {
+            PoolPendingRequests = 6, PoolConnectionsInUse = 32, PoolMaxSize = 32, PoolWaitingPercent = 72.5, PoolSamples = 60, PoolTimeouts = 2, PoolWindowSeconds = 300, PoolWaitingPercentThreshold = 50,
+        };
+    }
+
+    [Fact]
+    public async Task Status_carries_the_pool_figures_of_postgresql_without_the_writer_fields()
+    {
+        await using ApiFixture f = await ApiFixture.StartAsync(new ApiFixtureOptions { ConfigureServices = s => s.AddSingleton<IStoragePressureSource>(new FixedPoolPressure()) });
+        ApiClient admin = await f.SignedInAsync("root");
+        JsonElement p = (await admin.GetAsync("/api/v1/admin/status"))["pressure"];
+        Assert.Equal(6, p.GetProperty("poolPendingRequests").GetInt64());
+        Assert.Equal(32, p.GetProperty("poolConnectionsInUse").GetInt64());
+        Assert.Equal(32, p.GetProperty("poolMaxSize").GetInt64());
+        Assert.Equal(72.5, p.GetProperty("poolWaitingPercent").GetDouble());
+        Assert.Equal(60, p.GetProperty("poolSamples").GetInt32());
+        Assert.Equal(2, p.GetProperty("poolTimeouts").GetInt64());
+        Assert.Equal(300, p.GetProperty("poolWindowSeconds").GetInt64());
+        Assert.Equal(50, p.GetProperty("poolWaitingPercentThreshold").GetInt32());
+        Assert.True(p.GetProperty("advisory").GetBoolean());
+        Assert.False(p.TryGetProperty("writerQueueDepth", out _)); // the SQLite figures are left out, not reported as zero
+        Assert.False(p.TryGetProperty("commitP99Ms", out _));
     }
 
     // Global settings

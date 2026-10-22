@@ -2,6 +2,7 @@ import { useMemo, useState } from 'preact/hooks';
 import { api } from '../api/endpoints';
 import type { AdminStatus, RecentEvent } from '../api/types';
 import { StackedBarChart } from '../components/charts/StackedBarChart';
+import { isPoolPressure } from '../components/PressureIndicators';
 import { Card, Chip, ErrorNotice, KeyValue, Loading, Notice, PageHeader, StatusChip } from '../components/ui';
 import { formatDateTime, formatNumber, formatPercent, formatRelative } from '../lib/format';
 import { useApi, useDocumentTitle, usePolling } from '../lib/hooks';
@@ -101,19 +102,39 @@ function AdminPanel() {
           {s.pressure && (
             <div class="pressure" aria-label="Storage pressure indicators (advisory)">
               <h3>Storage pressure (advisory only)</h3>
-              <KeyValue
-                items={[
-                  ['Writer queue depth', formatNumber(s.pressure.writerQueueDepth)],
-                  ['Seconds over the queue threshold', formatNumber(s.pressure.writerQueueOverThresholdSeconds)],
-                  ['Commit latency p99', `${s.pressure.commitP99Ms} ms`],
-                ]}
-              />
-              <p class="muted small">
-                {s.pressure.advisory
-                  ? 'The advisory thresholds are exceeded. This is a hint that the storage backend may be becoming a constraint. '
-                  : 'Below the advisory thresholds. '}
-                EggMail never switches storage by itself; switching is always a manual, explicit action on the Storage switch page.
-              </p>
+              {isPoolPressure(s.pressure) ? (
+                <>
+                  <KeyValue
+                    items={[
+                      ['Samples with callers waiting for a connection', `${formatNumber(s.pressure.poolWaitingPercent ?? 0)}%`],
+                      ['Connections in use', `${formatNumber(s.pressure.poolConnectionsInUse ?? 0)} / ${formatNumber(s.pressure.poolMaxSize ?? 0)}`],
+                      ['Connection requests timed out', formatNumber(s.pressure.poolTimeouts ?? 0)],
+                    ]}
+                  />
+                  <p class="muted small">
+                    {s.pressure.advisory
+                      ? 'The advisory thresholds are exceeded: requests are waiting for a free database connection. Consider a larger connection pool or more database capacity. '
+                      : 'Below the advisory thresholds. '}
+                    EggMail changes nothing by itself.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <KeyValue
+                    items={[
+                      ['Writer queue depth', formatNumber(s.pressure.writerQueueDepth ?? 0)],
+                      ['Seconds over the queue threshold', formatNumber(s.pressure.writerQueueOverThresholdSeconds ?? 0)],
+                      ['Commit latency p99', `${s.pressure.commitP99Ms ?? 0} ms`],
+                    ]}
+                  />
+                  <p class="muted small">
+                    {s.pressure.advisory
+                      ? 'The advisory thresholds are exceeded. This is a hint that the storage backend may be becoming a constraint. '
+                      : 'Below the advisory thresholds. '}
+                    EggMail never switches storage by itself; switching is always a manual, explicit action on the Storage switch page.
+                  </p>
+                </>
+              )}
             </div>
           )}
         </>

@@ -324,7 +324,8 @@ public class ConfigBindingTests : IDisposable
             ("Storage:Postgres:RetentionDeletePause", "00:00:00.100"), ("Storage:Postgres:CommandTimeoutSeconds", "60"), ("Storage:Postgres:MaxPoolSize", "12"),
             ("Sqlite:StatsFlushInterval", "00:00:20"), ("Sqlite:RetentionDeleteBatchSize", "2000"), ("Sqlite:RetentionDeletePause", "00:00:00.050"),
             ("Sqlite:PressureQueueDepth", "250"), ("Sqlite:PressureQueueDuration", "00:01:00"), ("Sqlite:PressureCommitP99", "00:00:00.040"),
-            ("Sqlite:PressureWindow", "00:10:00")).Config.Storage;
+            ("Sqlite:PressureWindow", "00:10:00"), ("Storage:Postgres:PressureWindow", "00:15:00"), ("Storage:Postgres:PressureSampleInterval", "00:00:10"),
+            ("Storage:Postgres:PressureWaitingPercent", "25")).Config.Storage;
 
         Assert.Equal(14, s.Postgres.PartitionsAheadDays);
         Assert.Equal(TimeSpan.FromSeconds(5), s.Postgres.StatsFlushInterval);
@@ -339,6 +340,9 @@ public class ConfigBindingTests : IDisposable
         Assert.Equal(TimeSpan.FromMinutes(1), s.Sqlite.PressureQueueDuration);
         Assert.Equal(TimeSpan.FromMilliseconds(40), s.Sqlite.PressureCommitP99);
         Assert.Equal(TimeSpan.FromMinutes(10), s.Sqlite.PressureWindow);
+        Assert.Equal(TimeSpan.FromMinutes(15), s.Postgres.PressureWindow);
+        Assert.Equal(TimeSpan.FromSeconds(10), s.Postgres.PressureSampleInterval);
+        Assert.Equal(25, s.Postgres.PressureWaitingPercent);
     }
 
     [Fact]
@@ -357,6 +361,9 @@ public class ConfigBindingTests : IDisposable
         Assert.Equal(TimeSpan.FromMinutes(5), s.Sqlite.PressureQueueDuration);
         Assert.Equal(TimeSpan.FromMilliseconds(100), s.Sqlite.PressureCommitP99);
         Assert.Equal(TimeSpan.FromMinutes(5), s.Sqlite.PressureWindow);
+        Assert.Equal(TimeSpan.FromMinutes(5), s.Postgres.PressureWindow); // decision 109: callers waited in half of 5 minutes of 5-second samples
+        Assert.Equal(TimeSpan.FromSeconds(5), s.Postgres.PressureSampleInterval);
+        Assert.Equal(50, s.Postgres.PressureWaitingPercent);
     }
 
     [Theory]
@@ -372,6 +379,10 @@ public class ConfigBindingTests : IDisposable
     [InlineData("Sqlite:PressureQueueDuration", "-00:00:01")]
     [InlineData("Sqlite:PressureCommitP99", "00:00:00")]
     [InlineData("Sqlite:PressureWindow", "00:00:00")]
+    [InlineData("Storage:Postgres:PressureSampleInterval", "00:00:00.500")]
+    [InlineData("Storage:Postgres:PressureWindow", "00:00:01")]
+    [InlineData("Storage:Postgres:PressureWaitingPercent", "0")]
+    [InlineData("Storage:Postgres:PressureWaitingPercent", "101")]
     public void Out_of_range_tuning_knobs_are_reported_at_start_not_when_the_storage_is_created(string key, string value)
     {
         Assert.Contains(Load((key, value)).Errors, e => e.Contains(key, StringComparison.Ordinal));

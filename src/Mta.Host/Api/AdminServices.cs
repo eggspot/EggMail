@@ -169,23 +169,33 @@ public sealed class AcmeCertificateRequester(ILogger<AcmeCertificateRequester> l
     }
 }
 
-/// <summary>Storage write-pressure indicators for the advisory "consider switching backend" hint (decision C). Optional: only backends that can measure it register one.</summary>
+/// <summary>Storage-pressure indicators for the advisory hint on the dashboard (decision C). Optional: only backends that can measure it register one.</summary>
 public interface IStoragePressureSource
 {
     StoragePressure Get();
 }
 
-/// <summary>The figures and the thresholds they are judged against (so the dashboard shows the configured ones, not the defaults).</summary>
-public sealed record StoragePressure(long WriterQueueDepth, long WriterQueueOverThresholdSeconds, double CommitP99Ms, bool Advisory,
-    long? QueueDepthThreshold = null, long? QueueThresholdSeconds = null, double? CommitP99ThresholdMs = null);
-
 /// <summary>
-/// The pressure source of the SQLite backend (decision 108). PostgreSQL has no single writer to measure and registers none, so its
-/// <c>/admin/status</c> leaves <c>pressure</c> out (gap G16 in open-questions.md).
+/// The figures and the thresholds they are judged against (so the dashboard shows the configured ones, not the defaults). SQLite fills the writer
+/// fields (decision 108), PostgreSQL the pool fields (decision 109); the other backend's fields stay null.
 /// </summary>
+public sealed record StoragePressure(long? WriterQueueDepth, long? WriterQueueOverThresholdSeconds, double? CommitP99Ms, bool Advisory,
+    long? QueueDepthThreshold = null, long? QueueThresholdSeconds = null, double? CommitP99ThresholdMs = null)
+{
+    public long? PoolPendingRequests { get; init; }
+    public long? PoolConnectionsInUse { get; init; }
+    public long? PoolMaxSize { get; init; }
+    public double? PoolWaitingPercent { get; init; }
+    public int? PoolSamples { get; init; }
+    public long? PoolTimeouts { get; init; }
+    public long? PoolWindowSeconds { get; init; }
+    public int? PoolWaitingPercentThreshold { get; init; }
+}
+
+/// <summary>The pressure source of the SQLite backend (decision 108): the writer queues and commit latency.</summary>
 public sealed class SqliteStoragePressureSource(Mta.Storage.Sqlite.SqliteStorage storage, Mta.Storage.SqliteOptions options) : IStoragePressureSource
 {
-    /// <summary>The source for <paramref name="storage"/>, or null when its backend does not measure pressure.</summary>
+    /// <summary>The source for <paramref name="storage"/>, or null when it is not a SQLite storage.</summary>
     public static IStoragePressureSource? For(IStorage storage) => storage is Mta.Storage.Sqlite.SqliteStorage sqlite ? new SqliteStoragePressureSource(sqlite, sqlite.Options.Sqlite) : null;
 
     public StoragePressure Get()
@@ -193,6 +203,30 @@ public sealed class SqliteStoragePressureSource(Mta.Storage.Sqlite.SqliteStorage
         Mta.Storage.Sqlite.SqliteStoragePressure p = storage.GetPressure();
         return new StoragePressure(p.WriterQueueDepth, (long)p.WriterQueueOverThreshold.TotalSeconds, Math.Round(p.CommitP99.TotalMilliseconds, 1), p.Advisory,
             options.PressureQueueDepth, (long)options.PressureQueueDuration.TotalSeconds, options.PressureCommitP99.TotalMilliseconds);
+    }
+}
+
+/// <summary>The pressure source of the PostgreSQL backend (decision 109): how often callers waited for the runtime connection pool.</summary>
+public sealed class PostgresStoragePressureSource(Mta.Storage.Postgres.PostgresStorage storage, Mta.Storage.PostgresOptions options) : IStoragePressureSource
+{
+    /// <summary>The source for <paramref name="storage"/>, or null when it is not a PostgreSQL storage.</summary>
+    public static IStoragePressureSource? For(IStorage storage) => storage is Mta.Storage.Postgres.PostgresStorage pg ? new PostgresStoragePressureSource(pg, pg.Options.Postgres) : null;
+
+    public StoragePressure Get()
+    {
+        // Before InitializeAsync there is no sampler yet: report an empty window rather than nothing, so the card does not come and go.
+        Mta.Storage.Postgres.PostgresStoragePressure p = storage.GetPressure() ?? new(0, 0, 0, 0, 0, 0, false);
+        return new StoragePressure(null, null, null, p.Advisory)
+        {
+            PoolPendingRequests = p.PendingRequests,
+            PoolConnectionsInUse = p.ConnectionsInUse,
+            PoolMaxSize = p.MaxPoolSize,
+            PoolWaitingPercent = p.WaitingPercent,
+            PoolSamples = p.Samples,
+            PoolTimeouts = p.Timeouts,
+            PoolWindowSeconds = (long)options.PressureWindow.TotalSeconds,
+            PoolWaitingPercentThreshold = options.PressureWaitingPercent,
+        };
     }
 }
 
