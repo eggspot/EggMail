@@ -94,7 +94,7 @@ public sealed class VerpKeyRotation
                 {
                     await RunOnceAsync(ct).ConfigureAwait(false);
                 }
-                catch (InvalidOperationException ex)
+                catch (CryptographicException ex)
                 {
                     // A key this replica cannot open: it keeps signing with a key the others may delete, so its bounce addresses would stop verifying there.
                     _log?.Write(MtaLogLevel.Error, "verp", "the VERP keys could not be reloaded; this replica keeps the keys it has, check its Data Protection key ring", ex);
@@ -248,7 +248,7 @@ public sealed class VerpKeyRotation
             catch (CryptographicException ex)
             {
                 // The codec keeps its keys and the next pass tries again.
-                throw new InvalidOperationException($"The VERP key {key.KeyId} cannot be unprotected with this Data Protection key ring ({ex.Message}); the keys in use are kept.", ex);
+                throw new CryptographicException($"The VERP key {key.KeyId} cannot be unprotected with this Data Protection key ring ({ex.Message}); the keys in use are kept.", ex);
             }
         }
 

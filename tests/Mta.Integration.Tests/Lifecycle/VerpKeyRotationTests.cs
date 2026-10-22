@@ -243,7 +243,7 @@ public class VerpKeyRotationTests
         string before = Address(codec, clock);
         await config.AddVerpKeysAsync([new VerpKeyRecord(4, [1, 2, 3], clock.UtcNow, clock.UtcNow, null)], default);   // protected by another ring
 
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => Rotation(backend, codec, clock).RunOnceAsync(default));
+        var ex = await Assert.ThrowsAsync<CryptographicException>(() => Rotation(backend, codec, clock).RunOnceAsync(default));
         Assert.Contains("VERP key 4", ex.Message, StringComparison.Ordinal);
         Assert.Equal(1, codec.ActiveKeyId);
         Assert.Equal([1], codec.KeyIds);
