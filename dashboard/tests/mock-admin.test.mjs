@@ -80,7 +80,7 @@ describe('status, settings, certificates', () => {
     expect(s.switch.state).toBe('none');
     await mock.post('/__mock/config', { backend: 'postgres', warnings: [] });
     const p = (await mock.get('/api/v1/admin/status')).data;
-    expect(p.pressure.advisory).toBe(false);
+    expect(p.pressure).toBeUndefined();
     expect(p.storage.warnings).toEqual([]);
   });
 

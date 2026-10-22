@@ -52,6 +52,11 @@ public static class StorageOptionsValidation
         {
             throw new ArgumentException("Sqlite writer batch/queue options must be positive.");
         }
+
+        if (s.PressureQueueDepth < 1 || s.PressureQueueDuration < TimeSpan.Zero || s.PressureCommitP99 <= TimeSpan.Zero || s.PressureWindow <= TimeSpan.Zero)
+        {
+            throw new ArgumentException("Sqlite pressure thresholds must be positive (Sqlite:PressureQueueDuration may be zero).");
+        }
     }
 
     private static void NonNegative(int value, string name)

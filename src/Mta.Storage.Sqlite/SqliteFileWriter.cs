@@ -65,8 +65,18 @@ public sealed class WriterMetrics
     private long _totalCommitTicks;
     private long _maxCommitTicks;
     private int _queueDepth;
+    private long _deepSince;
+    private long _commitSamples;
+    private readonly long[] _commitAt = new long[CommitSampleCapacity];
+    private readonly long[] _commitTicks = new long[CommitSampleCapacity];
+
+    /// <summary>Commits the latency ring keeps (the p99 of the pressure indicator is over at most this many recent commits).</summary>
+    internal const int CommitSampleCapacity = 1024;
 
     public string File { get; init; } = "";
+
+    /// <summary>Sampled queue depth at or over which the queue counts as deep (<see cref="SqliteOptions.PressureQueueDepth"/>).</summary>
+    public int DeepQueueDepth { get; init; } = int.MaxValue;
 
     /// <summary>Committed transactions.</summary>
     public long Batches => Interlocked.Read(ref _batches);
@@ -90,10 +100,48 @@ public sealed class WriterMetrics
     /// <summary>Commands waiting for the writer (sampled).</summary>
     public int QueueDepth => Volatile.Read(ref _queueDepth);
 
-    internal void SetQueueDepth(int depth) => Volatile.Write(ref _queueDepth, depth);
-
-    internal void RecordBatch(int size, long commitTicks)
+    /// <summary>Records the sampled depth and when the queue became deep (reads the clock only on that transition).</summary>
+    internal void SetQueueDepth(int depth)
     {
+        if (depth < DeepQueueDepth || Volatile.Read(ref _deepSince) != 0)
+        {
+            SetQueueDepth(depth, 0);
+            return;
+        }
+
+        SetQueueDepth(depth, Stopwatch.GetTimestamp());
+    }
+
+    /// <summary>Records the sampled depth; <paramref name="now"/> (a <see cref="Stopwatch"/> timestamp) is when a queue that was not deep became deep.</summary>
+    internal void SetQueueDepth(int depth, long now)
+    {
+        Volatile.Write(ref _queueDepth, depth);
+        if (depth < DeepQueueDepth)
+        {
+            if (Volatile.Read(ref _deepSince) != 0)
+            {
+                Volatile.Write(ref _deepSince, 0);
+            }
+        }
+        else if (Volatile.Read(ref _deepSince) == 0)
+        {
+            Volatile.Write(ref _deepSince, now);
+        }
+    }
+
+    /// <summary>Since when the sampled queue has been deep without a break (<see cref="Stopwatch"/> timestamp), or 0.</summary>
+    internal long DeepSince => Volatile.Read(ref _deepSince);
+
+    internal void RecordBatch(int size, long commitTicks) => RecordBatch(size, commitTicks, Stopwatch.GetTimestamp());
+
+    internal void RecordBatch(int size, long commitTicks, long now)
+    {
+        // The ring has one writer (this file's writer thread); a reader may see a slot mid-update, which only blurs one sample of an advisory figure.
+        long n = Interlocked.Read(ref _commitSamples);
+        int slot = (int)(n % CommitSampleCapacity);
+        Volatile.Write(ref _commitTicks[slot], commitTicks);
+        Volatile.Write(ref _commitAt[slot], now);
+        Interlocked.Exchange(ref _commitSamples, n + 1);
         SqliteMetrics.CommitDuration.Record((double)commitTicks / Stopwatch.Frequency, new KeyValuePair<string, object?>("file", File));
         SqliteMetrics.WriterBatchSize.Record(size, new KeyValuePair<string, object?>("file", File));
         Interlocked.Increment(ref _batches);
@@ -118,6 +166,23 @@ public sealed class WriterMetrics
     }
 
     internal void RecordIndividual() => Interlocked.Increment(ref _commands);
+
+    /// <summary>Adds the commit durations (in <see cref="Stopwatch"/> ticks) recorded at or after <paramref name="since"/> to <paramref name="into"/>.</summary>
+    internal void CopyCommitsSince(long since, List<long> into)
+    {
+        long n = Interlocked.Read(ref _commitSamples);
+        int count = (int)Math.Min(n, CommitSampleCapacity);
+        for (int i = 0; i < count; i++)
+        {
+            int slot = (int)((n - 1 - i) % CommitSampleCapacity);
+            if (Volatile.Read(ref _commitAt[slot]) < since)
+            {
+                break; // newest first: everything older is outside the window too
+            }
+
+            into.Add(Volatile.Read(ref _commitTicks[slot]));
+        }
+    }
 }
 
 /// <summary>The statements that open and end a batch, run through the native API like the commands themselves (no driver transaction object per batch).</summary>
@@ -273,7 +338,7 @@ internal sealed class SqliteFileWriter : IAsyncDisposable
         _options = options;
         _onRollback = onRollback;
         _linger = file.Sync == SqliteSyncMode.Full && options.WriterBatchWindow > TimeSpan.Zero;
-        Metrics = new WriterMetrics { File = file.FileName };
+        Metrics = new WriterMetrics { File = file.FileName, DeepQueueDepth = options.PressureQueueDepth };
         _channel = Channel.CreateBounded<WriterCommand>(new BoundedChannelOptions(options.WriterQueueCapacity)
         {
             FullMode = BoundedChannelFullMode.Wait,
@@ -469,7 +534,7 @@ internal sealed class SqliteFileWriter : IAsyncDisposable
 
         if (!failed)
         {
-            Metrics.RecordBatch(batch.Count, commitTicks);
+            Metrics.RecordBatch(batch.Count, commitTicks, commitStart + commitTicks);
             foreach (WriterCommand c in batch)
             {
                 c.Succeed();

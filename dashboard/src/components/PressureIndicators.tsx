@@ -8,8 +8,13 @@ import { Chip, Notice } from './ui';
  */
 export function PressureIndicators({ pressure, showLink = true }: { pressure?: Pressure; showLink?: boolean }) {
   if (!pressure) return null;
-  const queueOver = pressure.writerQueueDepth > 1000;
-  const commitOver = pressure.commitP99Ms > 100;
+  const depth = pressure.queueDepthThreshold ?? 1000;
+  const seconds = pressure.queueThresholdSeconds ?? 300;
+  const p99 = pressure.commitP99ThresholdMs ?? 100;
+  const queueOver = pressure.writerQueueDepth >= depth;
+  const commitOver = pressure.commitP99Ms > p99;
+  const duration =
+    seconds % 60 !== 0 ? `${formatNumber(seconds)} seconds` : seconds === 60 ? '1 minute' : `${formatNumber(seconds / 60)} minutes`;
   return (
     <section class="card" aria-labelledby="pressure-title" data-testid="pressure">
       <div class="card-head">
@@ -20,16 +25,18 @@ export function PressureIndicators({ pressure, showLink = true }: { pressure?: P
         <div class="stat">
           <div class="stat-value">{formatNumber(pressure.writerQueueDepth)}</div>
           <div class="stat-label">
-            Writer queue depth {queueOver ? <Chip tone="warn">above 1,000</Chip> : <Chip tone="ok">below 1,000</Chip>}
+            Writer queue depth {queueOver ? <Chip tone="warn">at or above {formatNumber(depth)}</Chip> : <Chip tone="ok">below {formatNumber(depth)}</Chip>}
           </div>
-          <div class="hint">Threshold: over 1,000 for 5 minutes. Seconds over threshold: {formatNumber(pressure.writerQueueOverThresholdSeconds)}.</div>
+          <div class="hint">
+            Threshold: {formatNumber(depth)} or more for {duration}. Seconds over threshold: {formatNumber(pressure.writerQueueOverThresholdSeconds)}.
+          </div>
         </div>
         <div class="stat">
           <div class="stat-value">{formatNumber(pressure.commitP99Ms)} ms</div>
           <div class="stat-label">
-            Commit p99 {commitOver ? <Chip tone="warn">above 100 ms</Chip> : <Chip tone="ok">below 100 ms</Chip>}
+            Commit p99 {commitOver ? <Chip tone="warn">above {formatNumber(p99)} ms</Chip> : <Chip tone="ok">at or below {formatNumber(p99)} ms</Chip>}
           </div>
-          <div class="hint">Threshold: about 100 ms.</div>
+          <div class="hint">Threshold: {formatNumber(p99)} ms.</div>
         </div>
       </div>
       <p class="muted small">

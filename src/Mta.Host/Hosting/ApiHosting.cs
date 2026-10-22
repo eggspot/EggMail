@@ -29,6 +29,11 @@ public static class ApiHosting
         }
 
         services.AddSingleton<IRoutingConfigNotifier>(new DeliveryEngineRoutingNotifier(runtime.Delivery));
+        if (SqliteStoragePressureSource.For(runtime.Storage) is { } pressure)
+        {
+            services.AddSingleton(pressure);
+        }
+
         AddSwitchService(services, loaded, runtime);
         services.AddEggMailApi(loaded);
     }

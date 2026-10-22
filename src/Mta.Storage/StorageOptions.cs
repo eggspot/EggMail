@@ -132,6 +132,20 @@ public sealed class SqliteOptions
 
     /// <summary>How often the statistics aggregate is flushed to stats.db (design §4.5: about 10 s).</summary>
     public TimeSpan StatsFlushInterval { get; init; } = TimeSpan.FromSeconds(10);
+
+    // Advisory storage-pressure indicator (decision C, decision 108; provisional defaults, calibrate with benchmarks):
+
+    /// <summary>Writer queue depth (commands waiting for one file's writer) that counts as "deep".</summary>
+    public int PressureQueueDepth { get; init; } = 1000;
+
+    /// <summary>How long the queue must stay at or over <see cref="PressureQueueDepth"/> before the indicator turns advisory.</summary>
+    public TimeSpan PressureQueueDuration { get; init; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>p99 commit latency over <see cref="PressureWindow"/> above which the indicator turns advisory.</summary>
+    public TimeSpan PressureCommitP99 { get; init; } = TimeSpan.FromMilliseconds(100);
+
+    /// <summary>How far back the commit latency p99 looks.</summary>
+    public TimeSpan PressureWindow { get; init; } = TimeSpan.FromMinutes(5);
 }
 
 public sealed class PostgresOptions

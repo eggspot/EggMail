@@ -61,6 +61,10 @@ public sealed class SqliteOptionsBuilder(SqliteOptions s)
     public int RetentionDeleteBatchSize { get; set; } = s.RetentionDeleteBatchSize;
     public TimeSpan RetentionDeletePause { get; set; } = TimeSpan.FromMilliseconds(1);
     public TimeSpan StatsFlushInterval { get; set; } = TimeSpan.Zero;
+    public int PressureQueueDepth { get; set; } = s.PressureQueueDepth;
+    public TimeSpan PressureQueueDuration { get; set; } = s.PressureQueueDuration;
+    public TimeSpan PressureCommitP99 { get; set; } = s.PressureCommitP99;
+    public TimeSpan PressureWindow { get; set; } = s.PressureWindow;
 
     public SqliteOptions Build() => new()
     {
@@ -75,5 +79,9 @@ public sealed class SqliteOptionsBuilder(SqliteOptions s)
         RetentionDeleteBatchSize = RetentionDeleteBatchSize,
         RetentionDeletePause = RetentionDeletePause,
         StatsFlushInterval = StatsFlushInterval,
+        PressureQueueDepth = PressureQueueDepth,
+        PressureQueueDuration = PressureQueueDuration,
+        PressureCommitP99 = PressureCommitP99,
+        PressureWindow = PressureWindow,
     };
 }
