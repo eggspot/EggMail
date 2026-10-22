@@ -15,6 +15,7 @@ internal sealed partial class InMemoryConfigStore : IConfigStore
     private readonly List<DashboardSessionEntity> _dashboardSessions = [];
     private readonly Dictionary<Guid, DomainEntity> _domains = [];
     private readonly Dictionary<Guid, DkimKeyEntity> _dkim = [];
+    private readonly SortedDictionary<int, VerpKeyEntity> _verpKeys = [];
     private readonly Dictionary<(Guid, string), SuppressionEntity> _suppressions = [];
     private readonly Dictionary<Guid, WebhookEndpointEntity> _endpoints = [];
     private readonly Dictionary<(Guid, string), SettingEntity> _settings = [];
@@ -460,6 +461,55 @@ internal sealed partial class InMemoryConfigStore : IConfigStore
         }
 
         return default;
+    }
+
+    public ValueTask<IReadOnlyList<VerpKeyRecord>> GetVerpKeysAsync(CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            return R<IReadOnlyList<VerpKeyRecord>>(_verpKeys.Values.Select(k => k.ToRecord()).ToList());
+        }
+    }
+
+    public ValueTask AddVerpKeysAsync(IReadOnlyList<VerpKeyRecord> keys, CancellationToken ct)
+    {
+        var entities = keys.Select(k => k.ToEntity()).ToList();
+        lock (_gate)
+        {
+            if (entities.Any(e => _verpKeys.ContainsKey(e.KeyId)) || entities.DistinctBy(e => e.KeyId).Count() != entities.Count)
+            {
+                throw Conflict("verp_key");
+            }
+
+            foreach (var e in entities)
+            {
+                _verpKeys.Add(e.KeyId, e);
+            }
+        }
+
+        return default;
+    }
+
+    public ValueTask<bool> RetireVerpKeyAsync(int keyId, DateTimeOffset at, CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            if (!_verpKeys.TryGetValue(keyId, out var k) || k.RetiredAt is not null)
+            {
+                return R(false);
+            }
+
+            k.RetiredAt = at;
+            return R(true);
+        }
+    }
+
+    public ValueTask<bool> DeleteVerpKeyAsync(int keyId, CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            return R(_verpKeys.Remove(keyId));
+        }
     }
 
     public ValueTask<bool> DeletePendingDkimKeyAsync(Guid domainId, Guid keyId, CancellationToken ct)
@@ -927,6 +977,7 @@ internal sealed partial class InMemoryConfigStore : IConfigStore
                 "dashboard_session" => Snapshot(_dashboardSessions.OrderBy(x => Convert.ToHexString(x.IdHash), StringComparer.Ordinal)),
                 "domain" => Snapshot(_domains.Values.OrderBy(x => x.Id)),
                 "dkim_key" => Snapshot(_dkim.Values.OrderBy(x => x.Id)),
+                "verp_key" => Snapshot(_verpKeys.Values),
                 "suppression" => Snapshot(_suppressions.Values.OrderBy(x => x.TenantId).ThenBy(x => x.Address, StringComparer.Ordinal)),
                 "webhook_endpoint" => Snapshot(_endpoints.Values.OrderBy(x => x.Id)),
                 "setting" => Snapshot(_settings.Values.Where(x => !x.Key.StartsWith(TransferTables.DataProtectionSettingPrefix, StringComparison.Ordinal)).OrderBy(x => x.TenantId).ThenBy(x => x.Key, StringComparer.Ordinal)),
@@ -964,6 +1015,7 @@ internal sealed partial class InMemoryConfigStore : IConfigStore
                         break;
                     case DomainEntity x: _domains[x.Id] = x; break;
                     case DkimKeyEntity x: _dkim[x.Id] = x; break;
+                    case VerpKeyEntity x: _verpKeys[x.KeyId] = x; break;
                     case SuppressionEntity x: _suppressions[(x.TenantId, x.Address)] = x; break;
                     case WebhookEndpointEntity x: _endpoints[x.Id] = x; break;
                     case SettingEntity x: _settings[(x.TenantId, x.Key)] = x; break;
@@ -998,6 +1050,7 @@ internal sealed partial class InMemoryConfigStore : IConfigStore
                 case "dashboard_session": _dashboardSessions.Clear(); break;
                 case "domain": _domains.Clear(); break;
                 case "dkim_key": _dkim.Clear(); break;
+                case "verp_key": _verpKeys.Clear(); break;
                 case "suppression": _suppressions.Clear(); break;
                 case "webhook_endpoint": _endpoints.Clear(); break;
                 case "setting":

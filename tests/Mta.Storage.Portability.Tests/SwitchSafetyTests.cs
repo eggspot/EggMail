@@ -248,6 +248,7 @@ public class SwitchSafetyTests : SwitchTestBase
             }
 
             Assert.DoesNotContain(Convert.ToBase64String(Seed.DkimPlain), text);
+            Assert.DoesNotContain(Convert.ToBase64String(Seed.VerpPlain), text);
         }
 
         await Assert.ThrowsAsync<BundleException>(() => engine.ImportAsync(new ImportRequest { BundlePath = BundleDir(), Passphrase = "not the right passphrase" }, null, default));
@@ -282,6 +283,7 @@ public class SwitchSafetyTests : SwitchTestBase
             (await ReadAsync<DkimKeyEntity>(source, TransferTables.DkimKeys))[0].PrivateKeyProtected,
             (await ReadAsync<DkimKeyEntity>(target, TransferTables.DkimKeys))[0].PrivateKeyProtected);
         Assert.Equal(Seed.DkimPlain, target.Protector.Unprotect((await ReadAsync<DkimKeyEntity>(target, TransferTables.DkimKeys))[0].PrivateKeyProtected, SecretPurposes.DkimKey));
+        Assert.Equal(Seed.VerpPlain, target.Protector.Unprotect((await ReadAsync<VerpKeyEntity>(target, TransferTables.VerpKeys))[0].KeyProtected, SecretPurposes.VerpKey));
         // The source's ring cannot open what the target holds, and vice versa: two independent rings.
         byte[] targetKey = (await ReadAsync<DkimKeyEntity>(target, TransferTables.DkimKeys))[0].PrivateKeyProtected;
         Assert.ThrowsAny<Exception>(() => source.Protector.Unprotect(targetKey, SecretPurposes.DkimKey));

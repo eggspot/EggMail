@@ -1,5 +1,4 @@
 using System.Reflection;
-using System.Text.Json.Nodes;
 using Mta.Core;
 using Mta.Dsn;
 using Mta.Host.Hosting;
@@ -12,13 +11,14 @@ namespace Mta.Integration.Tests.Lifecycle;
 /// <summary>
 /// VERP bounce-address keys over a virtual year and across restarts on both backends. A token carries its key id and the hour it was made; it is accepted for 14 days
 /// (<c>BounceProcessor</c>) with the key that made it, so a retired key has to stay in the key set for 14 days after its last token was made and may go after that. The key set
-/// lives in the config store (<c>bounce.verp.keys</c>), where every replica reads the same one. There is no automatic rotation: the operator adds a key and moves <c>Active</c>, which
-/// is what these tests do.
+/// lives in the config store (the <c>verp_key</c> table, protected, decision 107), where every replica reads the same one. There is no automatic rotation yet: a new key that
+/// activates now signs, the previous one is retired and keeps verifying, which is what these tests do.
 /// </summary>
 public class VerpKeysLifecycleTests
 {
     private static readonly Guid DomainId = Guid.Parse("d0000000-0000-7000-8000-000000000001");
     private static readonly TimeSpan MaxTokenAge = TimeSpan.FromDays(14);
+    private static readonly ISecretProtector Secrets = new LifecycleProtector();
 
     [Fact]
     public async Task Tokens_follow_the_fourteen_day_rule_through_a_year_of_rotations_on_sqlite()
@@ -58,8 +58,8 @@ public class VerpKeysLifecycleTests
         var rendezvous = new Rendezvous(2);
         IConfigStore a = RendezvousConfig.Wrap(backend.Storage.Config, rendezvous);
         IConfigStore b = RendezvousConfig.Wrap(backend.Storage.Config, rendezvous);
-        var first = VerpKeyStore.LoadOrCreateAsync(a, default);
-        var second = VerpKeyStore.LoadOrCreateAsync(b, default);
+        var first = VerpKeyStore.LoadOrCreateAsync(a, Secrets, default);
+        var second = VerpKeyStore.LoadOrCreateAsync(b, Secrets, default);
         VerpCodec[] codecs = await Task.WhenAll(first, second);
 
         DateTimeOffset now = new(2026, 10, 12, 12, 30, 0, TimeSpan.Zero);
@@ -69,7 +69,7 @@ public class VerpKeysLifecycleTests
         Assert.True(codecs[0].TryDecode(tokenFromB, now, MaxTokenAge, out _));
 
         // What a later start reads is the same key set again.
-        VerpCodec later = await VerpKeyStore.LoadOrCreateAsync(backend.Storage.Config, default);
+        VerpCodec later = await VerpKeyStore.LoadOrCreateAsync(backend.Storage.Config, Secrets, default);
         Assert.True(later.TryDecode(tokenFromA, now, MaxTokenAge, out _));
         Assert.True(later.TryDecode(tokenFromB, now, MaxTokenAge, out _));
     }
@@ -82,28 +82,20 @@ public class VerpKeysLifecycleTests
     private static BounceProcessor ProcessorFor(HostBackend backend, VerpCodec codec, IClock clock) =>
         new(codec, backend.Storage.Config, backend.Storage.Stats, new NoWebhooks(), clock);
 
-    private static async Task RotateAsync(IConfigStore config, DateTimeOffset now, bool dropRetiredOlderThanIds = false, int[]? drop = null)
+    private static async Task RotateAsync(IConfigStore config, DateTimeOffset now, int[]? drop = null)
     {
-        SettingRecord setting = (await config.GetSettingsAsync(null, default)).Single(s => s.Key == VerpKeyStore.SettingKey && s.TenantId is null);
-        JsonNode root = JsonNode.Parse(setting.ValueJson)!;
-        JsonObject keys = root["Keys"]!.AsObject();
-        int active = root["Active"]!.GetValue<int>();
-        int next = Enumerable.Range(0, 16).First(id => id != active && keys[id.ToString()] is null);   // ids are 0..15 and are reused once their key was removed
-        keys[next.ToString()] = Convert.ToBase64String(VerpCodec.GenerateKey());
-        root["Active"] = next;
+        IReadOnlyList<VerpKeyRecord> keys = await config.GetVerpKeysAsync(default);
+        VerpKeyRecord signing = VerpKeyStore.SigningKey(keys, now)!;
+        int next = Enumerable.Range(0, 16).First(id => keys.All(k => k.KeyId != id));   // ids are 0..15 and are reused once their key was removed
+        await config.AddVerpKeysAsync([new VerpKeyRecord(next, Secrets.Protect(VerpCodec.GenerateKey(), SecretPurposes.VerpKey), now, now, null)], default);
+        Assert.True(await config.RetireVerpKeyAsync(signing.KeyId, now, default));
         foreach (int id in drop ?? [])
         {
-            keys.Remove(id.ToString());
+            Assert.True(await config.DeleteVerpKeyAsync(id, default));
         }
-
-        await config.SetSettingAsync(setting with { ValueJson = root.ToJsonString(), UpdatedAt = now }, default);
     }
 
-    private static async Task<int[]> KeyIdsAsync(IConfigStore config)
-    {
-        SettingRecord setting = (await config.GetSettingsAsync(null, default)).Single(s => s.Key == VerpKeyStore.SettingKey && s.TenantId is null);
-        return [.. JsonNode.Parse(setting.ValueJson)!["Keys"]!.AsObject().Select(p => int.Parse(p.Key)).Order()];
-    }
+    private static async Task<int[]> KeyIdsAsync(IConfigStore config) => [.. (await config.GetVerpKeysAsync(default)).Select(k => k.KeyId)];
 
     private sealed record Minted(string Token, DateTimeOffset At, int KeyId);
 
@@ -113,7 +105,7 @@ public class VerpKeysLifecycleTests
         var random = new Random(seed);
         Guid tenant = Guid.Parse("a0000000-0000-7000-8000-000000000001");
         DateTimeOffset start = clock.UtcNow;
-        VerpCodec codec = await VerpKeyStore.LoadOrCreateAsync(backend.Storage.Config, default);
+        VerpCodec codec = await VerpKeyStore.LoadOrCreateAsync(backend.Storage.Config, Secrets, default, clock);
         Assert.Equal(1, codec.ActiveKeyId);
         await backend.Storage.Config.UpsertTenantAsync(new Tenant(tenant, "T", "t", true, start, false), default);
 
@@ -143,7 +135,7 @@ public class VerpKeysLifecycleTests
                 await backend.RestartAsync();
             }
 
-            codec = await VerpKeyStore.LoadOrCreateAsync(backend.Storage.Config, default);
+            codec = await VerpKeyStore.LoadOrCreateAsync(backend.Storage.Config, Secrets, default, clock);
             Assert.NotEqual(minted[^1].KeyId, codec.ActiveKeyId);
             int[] after = await KeyIdsAsync(backend.Storage.Config);
             keyCounts.Add(after.Length);
@@ -164,7 +156,7 @@ public class VerpKeysLifecycleTests
         clock.Set(last.At + TimeSpan.FromDays(1));
         Assert.True(ProcessorFor(backend, codec, clock).IsValidBounceAddress(last.Token));
         await RotateAsync(backend.Storage.Config, clock.UtcNow, drop: [last.KeyId]);
-        codec = await VerpKeyStore.LoadOrCreateAsync(backend.Storage.Config, default);
+        codec = await VerpKeyStore.LoadOrCreateAsync(backend.Storage.Config, Secrets, default, clock);
         Assert.False(ProcessorFor(backend, codec, clock).IsValidBounceAddress(last.Token), "removing a key early rejects the tokens it made");
     }
 
@@ -228,9 +220,9 @@ internal class RendezvousConfig : DispatchProxy
 
     protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
     {
-        if (targetMethod!.Name == nameof(IConfigStore.GetSettingsAsync) && Interlocked.Exchange(ref _firstRead, 1) == 0)
+        if (targetMethod!.Name == nameof(IConfigStore.GetVerpKeysAsync) && Interlocked.Exchange(ref _firstRead, 1) == 0)
         {
-            return ReadAfterRendezvousAsync((Guid?)args![0], (CancellationToken)args[1]!);
+            return ReadAfterRendezvousAsync((CancellationToken)args![0]!);
         }
 
         try
@@ -244,10 +236,10 @@ internal class RendezvousConfig : DispatchProxy
         }
     }
 
-    private async ValueTask<IReadOnlyList<SettingRecord>> ReadAfterRendezvousAsync(Guid? tenantId, CancellationToken ct)
+    private async ValueTask<IReadOnlyList<VerpKeyRecord>> ReadAfterRendezvousAsync(CancellationToken ct)
     {
-        var settings = await _inner.GetSettingsAsync(tenantId, ct);   // read first (an empty store), then let the other replica read too
+        var keys = await _inner.GetVerpKeysAsync(ct);   // read first (an empty store), then let the other replica read too
         await _rendezvous.ArriveAsync();
-        return settings;
+        return keys;
     }
 }
