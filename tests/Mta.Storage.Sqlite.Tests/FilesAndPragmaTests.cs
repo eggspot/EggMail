@@ -225,7 +225,7 @@ public class FilesAndPragmaTests : SqliteTestBase
         await ReopenAsync();
         Assert.Equal(SqliteFile.SchemaVersion, ScalarLong(PathOf("config.db"), "PRAGMA user_version"));
         Assert.Equal(SqliteFile.SchemaVersion, ScalarLong(PathOf("queue.db"), "PRAGMA user_version"));
-        Assert.Equal(10, SqliteFile.SchemaVersion);
+        Assert.Equal(11, SqliteFile.SchemaVersion);
         Assert.Equal(0, ScalarLong(PathOf("queue.db"), "SELECT count(*) FROM transfer_chunk_queue")); // the 1 to 2 to 3 path reached the switch tables too
         Assert.Equal(1, ScalarLong(PathOf("queue.db"), "SELECT count(*) FROM pragma_table_info('delivery_queue') WHERE name = 'headers_utf8'")); // and the version 5 column
 
@@ -308,11 +308,39 @@ public class FilesAndPragmaTests : SqliteTestBase
         }
 
         await ReopenAsync();
-        Assert.Equal(10, SqliteFile.SchemaVersion);
-        Assert.Equal(10, ScalarLong(PathOf("queue.db"), "PRAGMA user_version"));
+        Assert.Equal(11, SqliteFile.SchemaVersion);
+        Assert.Equal(11, ScalarLong(PathOf("queue.db"), "PRAGMA user_version"));
         Assert.Equal(1, ScalarLong(PathOf("queue.db"), "SELECT count(*) FROM delivery_queue WHERE headers_utf8 = 0"));
         var claimed = Assert.Single(await ClaimAsync());
         Assert.False(claimed.HeadersUtf8);
+    }
+
+    [Fact]
+    public async Task A_version_10_config_file_gets_the_verp_key_table_and_keeps_its_settings()
+    {
+        DateTimeOffset now = Clock.UtcNow;
+        await Storage.Config.SetSettingAsync(new SettingRecord("bounce.verp.keys", null, "{\"Active\":1,\"Keys\":{\"1\":\"AAAA\"}}", now), default);
+        await Storage.DisposeAsync();
+
+        foreach (string kind in new[] { "queue", "stats", "config", "history" })
+        {
+            using var c = new SqliteConnection($"Data Source={PathOf(kind + ".db")};Pooling=False");
+            c.Open();
+            using SqliteCommand cmd = c.CreateCommand();
+            cmd.CommandText = (kind == "config" ? "DROP TABLE verp_key;" : "") + "PRAGMA user_version = 10";
+            cmd.ExecuteNonQuery();
+        }
+
+        await ReopenAsync();
+        foreach (string kind in new[] { "queue", "stats", "config", "history" })
+        {
+            Assert.Equal(11, ScalarLong(PathOf(kind + ".db"), "PRAGMA user_version"));
+        }
+
+        Assert.Equal(1, ScalarLong(PathOf("config.db"), "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'verp_key'"));
+        Assert.Contains(await Storage.Config.GetSettingsAsync(null, default), s => s.Key == "bounce.verp.keys");   // the host moves the keys out of it at its next start
+        await Storage.Config.AddVerpKeysAsync([new VerpKeyRecord(1, [1, 2, 3], now, now, null)], default);
+        Assert.Equal([1], (await Storage.Config.GetVerpKeysAsync(default)).Select(k => k.KeyId));
     }
 
     [Fact]
@@ -335,7 +363,7 @@ public class FilesAndPragmaTests : SqliteTestBase
         await ReopenAsync();
         foreach (string kind in new[] { "queue", "stats", "config", "history" })
         {
-            Assert.Equal(10, ScalarLong(PathOf(kind + ".db"), "PRAGMA user_version"));
+            Assert.Equal(11, ScalarLong(PathOf(kind + ".db"), "PRAGMA user_version"));
         }
 
         Assert.Equal(1, ScalarLong(PathOf("queue.db"), indexCount));

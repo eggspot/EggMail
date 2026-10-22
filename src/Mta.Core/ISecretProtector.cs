@@ -1,7 +1,7 @@
 namespace Mta.Core;
 
 /// <summary>
-/// Protects secrets at rest (DKIM private keys, webhook secrets, ACME and TLS keys, relay passwords). The host implements it
+/// Protects secrets at rest (DKIM private keys, webhook secrets, ACME and TLS keys, relay passwords, VERP keys). The host implements it
 /// with ASP.NET Core Data Protection (decision H); purposes separate the key domains.
 /// </summary>
 public interface ISecretProtector
@@ -20,4 +20,5 @@ public static class SecretPurposes
     public const string AcmeAccountKey = "EggMail.Secrets.AcmeAccountKey.v1";
     public const string RelayPassword = "EggMail.Secrets.RelayPassword.v1";
     public const string AuthThrottleKey = "EggMail.Secrets.AuthThrottleKey.v1";
+    public const string VerpKey = "EggMail.Secrets.VerpKey.v1";
 }

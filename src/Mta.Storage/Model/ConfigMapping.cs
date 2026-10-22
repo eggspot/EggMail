@@ -105,6 +105,17 @@ public static class ConfigMapping
         e.Id, e.TenantId, e.Name, e.Status, e.ReturnPathHost, e.ReturnPathVerified, e.CreatedAt, e.LastCheckedAt, e.NextCheckAt,
         e.ConsecutiveFailures, e.TemporaryFailureSince, e.SendingPaused, e.LastError);
 
+    public static VerpKeyEntity ToEntity(this VerpKeyRecord k) => new()
+    {
+        KeyId = k.KeyId,
+        KeyProtected = k.KeyProtected,
+        CreatedAt = N(k.CreatedAt),
+        ActivatesAt = N(k.ActivatesAt),
+        RetiredAt = N(k.RetiredAt),
+    };
+
+    public static VerpKeyRecord ToRecord(this VerpKeyEntity e) => new(e.KeyId, e.KeyProtected, e.CreatedAt, e.ActivatesAt, e.RetiredAt);
+
     public static DkimKeyEntity ToEntity(this DkimKeyRecord k) => new()
     {
         Id = k.Id,

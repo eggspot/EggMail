@@ -149,6 +149,8 @@ public static class Seed
 
     public static readonly byte[] DkimPlain = Enumerable.Range(0, 64).Select(i => (byte)(i * 7 + 3)).ToArray();
 
+    public static readonly byte[] VerpPlain = Enumerable.Range(0, 32).Select(i => (byte)(i * 11 + 5)).ToArray();
+
     public sealed record Seeded(Guid DomainId, Guid[] QueuedMessageIds, Guid[] QueuedDeliveryIds, string IdempotencyKey, Guid IdempotencyMessageId);
 
     public const string CountedDomain = "example.com";
@@ -162,6 +164,7 @@ public static class Seed
         await c.UpsertTenantAsync(new Tenant(TenantB, "Beta", "beta", true, now, false), default);
         await c.UpsertDomainAsync(new DomainRecord(domainId, TenantA, "example.com", DomainStatus.Verified, "bounces.example.com", true, now, now, now.AddHours(1), 0, null, false, null), default);
         await c.AddDkimKeyAsync(new DkimKeyRecord(Ids.New(), domainId, "egg1", secrets.Protect(DkimPlain, SecretPurposes.DkimKey), "PUBLICKEYBASE64", now, true, null), default);
+        await c.AddVerpKeysAsync([new VerpKeyRecord(1, secrets.Protect(VerpPlain, SecretPurposes.VerpKey), now, now, null)], default);
         await c.AddApiKeyAsync(new ApiKeyRecord(Ids.New(), TenantA, "ci", "egg_ab12", SHA256.HashData("api-key"u8), "send,read", now, null, null), default);
         await c.UpsertSmtpCredentialAsync(new SmtpCredential(Ids.New(), TenantA, "acme-user", "pbkdf2$1000$salt$hash", true, now), default);
         for (int i = 0; i < 25; i++)

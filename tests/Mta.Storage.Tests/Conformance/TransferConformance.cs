@@ -47,6 +47,7 @@ public abstract class TransferConformance : StorageTestBase
         await c.UpsertTenantAsync(new Tenant(TenantB, "Beta", "beta", false, now, false), default);
         await c.UpsertDomainAsync(new DomainRecord(domainId, TenantA, "example.com", DomainStatus.Verified, "bounces.example.com", true, now, now, now.AddHours(1), 0, null, false, null), default);
         await c.AddDkimKeyAsync(new DkimKeyRecord(Ids.New(), domainId, "s1", [9, 8, 7, 6], "PUBLICKEY", now, true, null), default);
+        await c.AddVerpKeysAsync([new VerpKeyRecord(1, [3, 1, 4, 1], now, now, null)], default);
         Guid dashboardUser = Ids.New();
         await c.UpsertDashboardUserAsync(new DashboardUser(dashboardUser, "admin", "pbkdf2$hash", DashboardRole.Admin, null, true, now), default);
         await c.AddDashboardSessionAsync(new DashboardSession(SHA256.HashData("session"u8), dashboardUser, "csrf-token", now, now, now.AddHours(8)), default);

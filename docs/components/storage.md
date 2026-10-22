@@ -17,7 +17,7 @@ The model is four parts. On SQLite each part is its own context and its own file
 
 | Part (context, SQLite file) | Tables |
 |---|---|
-| config (`ConfigDbContext`, `config.db`) | `tenant`, `api_key`, `smtp_credential`, `dashboard_user`, `dashboard_session`, `domain`, `dkim_key`, `suppression`, `webhook_endpoint`, `setting`, `tls_policy`, `relay_route`, `certificate`, `acme_account`, `acme_renewal`, `domain_record_check`, `tls_rpt_bucket`, `sending_counter`, `lease`, `switch_state`, `data_protection_key` (`IDataProtectionKeyContext`) |
+| config (`ConfigDbContext`, `config.db`) | `tenant`, `api_key`, `smtp_credential`, `dashboard_user`, `dashboard_session`, `domain`, `dkim_key`, `verp_key`, `suppression`, `webhook_endpoint`, `setting`, `tls_policy`, `relay_route`, `certificate`, `acme_account`, `acme_renewal`, `domain_record_check`, `tls_rpt_bucket`, `sending_counter`, `lease`, `switch_state`, `data_protection_key` (`IDataProtectionKeyContext`) |
 | queue (`QueueDbContext`, `queue.db`) | `delivery_queue` (one row per recipient), `message_spool` (verbatim raw message, freed with the last recipient), `webhook_outbox`, `api_idempotency_key` |
 | stats (`StatsDbContext`, `stats.db`) | `stat_aggregate` (hourly and daily rows in one table, `WITHOUT ROWID`), `stat_meta` (rollup watermark), `recent_event` (the bounded ring), `webhook_attempt` |
 | history (`HistoryDbContext`, `history.db`, only with `History:Mode=Full`) | `message_index`, `message_recipient`, `message_event` (`WITHOUT ROWID`, keyed with a leading `day`), `message_content`, `message_raw_retained` |
