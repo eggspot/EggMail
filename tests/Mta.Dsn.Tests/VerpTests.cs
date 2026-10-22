@@ -128,9 +128,9 @@ public class VerpTests
     }
 
     [Theory]
-    [InlineData('k', '\u212A')] // Kelvin sign, lowercased to 'k' by char.ToLowerInvariant
-    [InlineData('i', '\u0130')] // capital I with dot above
-    [InlineData('s', '\u017F')] // long s, uppercased to 'S'
+    [InlineData('k', '\u212A')] // Kelvin sign: char.ToLowerInvariant maps it to 'k' (the fuzz finding)
+    [InlineData('i', '\u0130')] // capital I with dot above and long s: guards, folded to ASCII by some culture or upper-casing rules
+    [InlineData('s', '\u017F')]
     public void A_non_ascii_look_alike_of_a_base32_letter_is_not_another_spelling_of_the_token(char ascii, char lookAlike)
     {
         var codec = Codec();
