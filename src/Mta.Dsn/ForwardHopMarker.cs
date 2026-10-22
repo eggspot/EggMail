@@ -24,17 +24,12 @@ public sealed class ForwardHopMarker
     private const int SignatureLength = 16;
     private const int MaxCountDigits = 3;
 
-    private readonly Dictionary<int, byte[]> _keys = [];
-    private readonly int _activeKeyId;
+    private readonly DerivedRingKeys _keys;
 
     public ForwardHopMarker(VerpCodec ring)
     {
         ArgumentNullException.ThrowIfNull(ring);
-        _activeKeyId = ring.ActiveKeyId;
-        foreach (int id in ring.KeyIds)
-        {
-            _keys[id] = ring.DeriveKey(id, Purpose);
-        }
+        _keys = new DerivedRingKeys(ring, Purpose);
     }
 
     /// <summary>The SHA-256 of the body as lower-case hex: compute it once per message, it is the part of the check that costs.</summary>
@@ -42,7 +37,7 @@ public sealed class ForwardHopMarker
 
     /// <summary>The field value for a message with the body hash <paramref name="bodyHash"/> that has been forwarded <paramref name="hops"/> times (this hop included): <c>3; 0123456789abcdef</c>.</summary>
     public string CreateValue(int hops, string bodyHash) =>
-        hops.ToString(CultureInfo.InvariantCulture) + "; " + Sign(_keys[_activeKeyId], hops, bodyHash);
+        hops.ToString(CultureInfo.InvariantCulture) + "; " + Sign(_keys.Current.ActiveKey, hops, bodyHash);
 
     /// <summary>The value of the header for <paramref name="hops"/> hops on a message whose body is <paramref name="body"/>.</summary>
     public string CreateValue(int hops, ReadOnlySpan<byte> body) => CreateValue(hops, BodyHash(body));
@@ -71,7 +66,7 @@ public sealed class ForwardHopMarker
 
         byte[] given = Encoding.ASCII.GetBytes(signature);
         bool verified = false;
-        foreach (byte[] key in _keys.Values)
+        foreach (byte[] key in _keys.Current.Keys.Values)
         {
             verified |= CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(Sign(key, n, bodyHash)), given);
         }

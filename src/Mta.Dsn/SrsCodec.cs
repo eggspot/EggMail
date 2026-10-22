@@ -32,9 +32,8 @@ public sealed class SrsCodec
     public const int HashLength = 8;
     private const string Alphabet = "abcdefghijklmnopqrstuvwxyz234567";
 
-    private readonly VerpCodec _ring;
+    private readonly DerivedRingKeys _keys;
     private readonly int _maxAgeDays;
-    private readonly Dictionary<int, byte[]> _keys = [];
 
     /// <param name="ring">The bounce-token key ring the SRS key is derived from.</param>
     /// <param name="maxAgeDays">How many days an address stays valid for <see cref="TryVerify(string, DateTimeOffset)"/> (<c>Inbound:Srs:MaxAgeDays</c>).</param>
@@ -46,12 +45,8 @@ public sealed class SrsCodec
             throw new ArgumentOutOfRangeException(nameof(maxAgeDays), "The age must be between 1 and 500 days.");
         }
 
-        _ring = ring;
+        _keys = new DerivedRingKeys(ring, Purpose);
         _maxAgeDays = maxAgeDays;
-        foreach (int id in ring.KeyIds)
-        {
-            _keys[id] = ring.DeriveKey(id, Purpose);
-        }
     }
 
     /// <summary>True when the local part starts with <c>SRS0=</c> or <c>SRS1=</c> (any case): the receive path treats such a recipient as an SRS recipient (design section 11.4).</summary>
@@ -66,9 +61,10 @@ public sealed class SrsCodec
         string domain = originalDomain.Trim().TrimEnd('.').ToLowerInvariant();
         string local = originalLocalPart.ToLowerInvariant();
         string tt = EncodeDay(now);
+        byte[] key = _keys.Current.ActiveKey;
         if (IsPlain(domain, local))
         {
-            string longForm = Prefix + Hash(_ring.ActiveKeyId, tt, domain, local) + "=" + tt + "=" + domain + "=" + local;
+            string longForm = Prefix + Hash(key, tt, domain, local) + "=" + tt + "=" + domain + "=" + local;
             if (longForm.Length <= MaxLocalPartLength)   // plain means ASCII: characters are octets
             {
                 return longForm;
@@ -76,7 +72,7 @@ public sealed class SrsCodec
         }
 
         string digest = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(domain + "=" + local)))[..32];
-        return Prefix + Hash(_ring.ActiveKeyId, tt, "x", digest) + "=" + tt + "=x=" + digest;
+        return Prefix + Hash(key, tt, "x", digest) + "=" + tt + "=x=" + digest;
     }
 
     /// <summary>The full address at the forwarding domain.</summary>
@@ -110,7 +106,7 @@ public sealed class SrsCodec
 
         bool valid = false;
         string text = parts[2].ToLowerInvariant() + "=" + parts[3].ToLowerInvariant() + "=" + parts[4].ToLowerInvariant();
-        foreach (byte[] key in _keys.Values)
+        foreach (byte[] key in _keys.Current.Keys.Values)
         {
             // Every key is tried and every comparison runs: the time does not tell which key (or whether any) matched.
             valid |= CryptographicOperations.FixedTimeEquals(Mac(key, text).AsSpan(0, 5), presented);
@@ -119,7 +115,7 @@ public sealed class SrsCodec
         return valid;
     }
 
-    private string Hash(int keyId, string tt, string field3, string field4) => EncodeHash(Mac(_keys[keyId], tt + "=" + field3 + "=" + field4)[..5]);
+    private static string Hash(byte[] key, string tt, string field3, string field4) => EncodeHash(Mac(key, tt + "=" + field3 + "=" + field4)[..5]);
 
     private static byte[] Mac(byte[] key, string text) => HMACSHA256.HashData(key, Encoding.UTF8.GetBytes(text));
 

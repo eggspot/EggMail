@@ -536,6 +536,7 @@ public static class ConfigLoader
         }
 
         Secrets.SecretsConfigurationCheck.Validate(c.Secrets, errors);
+        Hosting.VerpKeyRotation.Validate(c.Secrets.VerpKeyRotationDays, c.Inbound.Srs.MaxAgeDays, errors);
 
         if (c.Delivery.Workers < 1)
         {

@@ -239,6 +239,41 @@ public class ConfigBindingTests : IDisposable
         }
     }
 
+    // VERP key rotation (decision 110)
+
+    [Fact]
+    public void Verp_key_rotation_is_on_every_90_days_by_default_and_0_turns_it_off()
+    {
+        Assert.Equal(90, Valid().Config.Secrets.VerpKeyRotationDays);
+        Assert.Equal(0, Valid(("Secrets:VerpKeyRotationDays", "0")).Config.Secrets.VerpKeyRotationDays);
+        Assert.Equal(30, Valid(("Secrets:VerpKeyRotationDays", "30"), ("Inbound:Srs:MaxAgeDays", "200")).Config.Secrets.VerpKeyRotationDays);
+        Valid(("Inbound:Srs:MaxAgeDays", "500"));   // the default period holds the keys of the longest SRS age in 16 ids
+    }
+
+    [Theory]
+    [InlineData("6", "21", "between 7 and 365")]
+    [InlineData("366", "21", "between 7 and 365")]
+    [InlineData("-1", "21", "between 7 and 365")]
+    [InlineData("7", "200", "too short for Inbound:Srs:MaxAgeDays (200)")]   // 201 days of retired keys: 29 periods + 2 = 31 ids
+    [InlineData("15", "215", "too short for Inbound:Srs:MaxAgeDays (215)")]  // 216 days: 15 + 2 = 17, one over
+    [InlineData("14", "500", "too short for Inbound:Srs:MaxAgeDays (500)")]
+    public void A_verp_key_rotation_period_out_of_range_or_with_more_keys_than_ids_is_refused(string days, string srsDays, string expectedInError)
+    {
+        LoadedConfig loaded = Load(("Secrets:VerpKeyRotationDays", days), ("Inbound:Srs:MaxAgeDays", srsDays));
+        Assert.Contains(loaded.Errors, e => e.Contains("Secrets:VerpKeyRotationDays", StringComparison.Ordinal) && e.Contains(expectedInError, StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(7, 21)]     // 22 days: 4 periods + 2 = 6 ids
+    [InlineData(14, 180)]   // 181 days: 13 + 2 = 15
+    [InlineData(15, 200)]   // 201 days: 14 + 2 = 16, the limit
+    public void Periods_whose_keys_fit_in_16_ids_are_accepted(int days, int srsDays)
+    {
+        var errors = new List<string>();
+        VerpKeyRotation.Validate(days, srsDays, errors);
+        Assert.Empty(errors);
+    }
+
     // Api
 
     [Fact]

@@ -291,6 +291,7 @@ internal static class Cli
             builder.Services.AddHostedService<InboundActionService>();
             builder.Services.AddHostedService<CertificateService>();
             builder.Services.AddHostedService<MaintenanceService>();
+            builder.Services.AddHostedService<VerpKeyRotationService>();
             builder.Services.AddHostedService<TlsReportService>();
             builder.Services.AddHostedService<BackupService>();
             builder.Services.AddHostedService<SendingLimitsService>();
