@@ -369,8 +369,11 @@ public sealed partial class EfConfigStore<TContext>(IConfigDbAccess<TContext> db
         }, ct).ConfigureAwait(false);
     }
 
-    public async ValueTask<bool> RetireVerpKeyAsync(int keyId, DateTimeOffset at, CancellationToken ct) =>
-        await Write(c => c.VerpKeys.Where(k => k.KeyId == keyId && k.RetiredAt == null).ExecuteUpdate(u => u.SetProperty(k => k.RetiredAt, (DateTimeOffset?)at)) > 0, ct).ConfigureAwait(false);
+    public async ValueTask<bool> RetireVerpKeyAsync(int keyId, DateTimeOffset at, CancellationToken ct)
+    {
+        DateTimeOffset? when = StorageTime.Normalize(at);
+        return await Write(c => c.VerpKeys.Where(k => k.KeyId == keyId && k.RetiredAt == null).ExecuteUpdate(u => u.SetProperty(k => k.RetiredAt, when)) > 0, ct).ConfigureAwait(false);
+    }
 
     public async ValueTask<bool> DeleteVerpKeyAsync(int keyId, CancellationToken ct) =>
         await Write(c => c.VerpKeys.Where(k => k.KeyId == keyId).ExecuteDelete() > 0, ct).ConfigureAwait(false);

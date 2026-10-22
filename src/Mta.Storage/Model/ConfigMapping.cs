@@ -109,9 +109,9 @@ public static class ConfigMapping
     {
         KeyId = k.KeyId,
         KeyProtected = k.KeyProtected,
-        CreatedAt = k.CreatedAt,
-        ActivatesAt = k.ActivatesAt,
-        RetiredAt = k.RetiredAt,
+        CreatedAt = N(k.CreatedAt),
+        ActivatesAt = N(k.ActivatesAt),
+        RetiredAt = N(k.RetiredAt),
     };
 
     public static VerpKeyRecord ToRecord(this VerpKeyEntity e) => new(e.KeyId, e.KeyProtected, e.CreatedAt, e.ActivatesAt, e.RetiredAt);

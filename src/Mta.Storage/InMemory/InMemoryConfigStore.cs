@@ -499,7 +499,7 @@ internal sealed partial class InMemoryConfigStore : IConfigStore
                 return R(false);
             }
 
-            k.RetiredAt = at;
+            k.RetiredAt = StorageTime.Normalize(at);
             return R(true);
         }
     }

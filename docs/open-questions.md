@@ -74,11 +74,9 @@ From the plan-coverage audit in [progress.md](progress.md#plan-coverage). Each i
 | G8 | Fuzz targets missing for `VerpCodec.TryDecode` (unauthenticated path), `DaneVerifier`, `EightBitDowngrader`, `MessageBuilder`; the client assembly is not instrumented in `fuzz.yml`; no recorded clean run | Phase 1 gate; hostile input on the bounce listener | S-M | No |
 | G9 | ASVS L2 checklist for API and dashboard with mapped tests, and stale "see the API PR" placeholders in `docs/security.md` | Phase 4 gate | M-L | No (the external audit covers it too) |
 | G10 | OS-crash and power-loss fault injection for SQLite `Off`/`Normal`/`Full` (only SIGKILL is tested) | Plan delta "corruption handling", risk 13 | M-L | No |
-| G11 | Webhook attempts API returns `eventType` null; the dashboard column never fills against a real server | Cosmetic but visible | S | No |
 | G12 | Ed25519 DKIM (cut item 1); List-Unsubscribe and one-click endpoint (not in the plan; Gmail and Yahoo require it from bulk senders); delayed DSN, NOTIFY/RET/ORCPT; operator hold/release/retry-now; RFC 6857 and REQUIRETLS | Features customers will ask for | M each | Yes: which are v1 |
 | G13 | Allocation budget: met for the SQLite ingest path since PR 98 (decision 89); not met for PostgreSQL (22 KB per message, no gate) or the delivery path ([benchmarks.md](benchmarks.md)) | Phase 2 gate | M-L | Whether the budget is binding for PostgreSQL |
 | G14 | Runtime: a DKIM key that cannot be read sends the message unsigned; the bounce and TLS-RPT mail is unsigned | DMARC failures on a key problem; reports may be refused by a strict receiver | S | Whether to defer instead of sending unsigned |
-| G15 | `docs/api.md` is not compared with the mapped routes by any test | Documentation drift | S | No |
 
 ## Questions still open in the sources
 
