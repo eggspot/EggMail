@@ -65,6 +65,30 @@ public class VerpKeyRotationTests
     [PostgresFact]
     public Task The_running_service_rotates_at_once_and_stops_when_cancelled_on_postgres() => OnPostgresAsync(ServiceAsync);
 
+    [Fact]
+    public Task Rotating_at_once_with_revoke_signs_with_a_new_key_and_stops_every_old_key_verifying_on_sqlite() => OnSqliteAsync(RotateNowRevokeAsync);
+
+    [PostgresFact]
+    public Task Rotating_at_once_with_revoke_signs_with_a_new_key_and_stops_every_old_key_verifying_on_postgres() => OnPostgresAsync(RotateNowRevokeAsync);
+
+    [Fact]
+    public Task Rotating_at_once_with_retire_keeps_the_old_keys_verifying_and_drops_a_waiting_key_on_sqlite() => OnSqliteAsync(RotateNowRetireAsync);
+
+    [PostgresFact]
+    public Task Rotating_at_once_with_retire_keeps_the_old_keys_verifying_and_drops_a_waiting_key_on_postgres() => OnPostgresAsync(RotateNowRetireAsync);
+
+    [Fact]
+    public Task Rotating_at_once_takes_an_id_no_kept_key_holds_on_sqlite() => OnSqliteAsync(RotateNowIdsAsync);
+
+    [PostgresFact]
+    public Task Rotating_at_once_takes_an_id_no_kept_key_holds_on_postgres() => OnPostgresAsync(RotateNowIdsAsync);
+
+    [Fact]
+    public Task Rotating_at_once_while_another_replica_holds_the_key_lease_gives_up_and_changes_nothing_on_sqlite() => OnSqliteAsync(RotateNowLeaseHeldAsync);
+
+    [PostgresFact]
+    public Task Rotating_at_once_while_another_replica_holds_the_key_lease_gives_up_and_changes_nothing_on_postgres() => OnPostgresAsync(RotateNowLeaseHeldAsync);
+
     private static async Task OnSqliteAsync(Func<HostBackend, VirtualClock, Task> test)
     {
         var clock = new VirtualClock();
@@ -248,5 +272,121 @@ public class VerpKeyRotationTests
         Assert.Equal(1, codec.ActiveKeyId);
         Assert.Equal([1], codec.KeyIds);
         Assert.Equal(before, Address(codec, clock));
+    }
+
+    private static async Task RotateNowRevokeAsync(HostBackend backend, VirtualClock clock)
+    {
+        IConfigStore config = backend.Storage.Config;
+        VerpCodec codec = await VerpKeyStore.LoadOrCreateAsync(config, Secrets, default, clock);
+        VerpCodec otherReplica = await VerpKeyStore.LoadOrCreateAsync(config, Secrets, default, clock);
+        VerpKeyRotation rotation = Rotation(backend, codec, clock);
+        clock.Advance(TimeSpan.FromDays(90));
+        await rotation.RunOnceAsync(default);   // key 2 waits for its hour
+        string fromKey1 = Address(codec, clock);
+        clock.Advance(TimeSpan.FromMinutes(5));
+
+        VerpKeyRotateNowResult? result = await rotation.RotateNowAsync(revokeOldKeys: true, default);
+
+        Assert.NotNull(result);
+        Assert.Equal(3, result.KeyId);   // not 2: the delivery engine may hold a bounce address for an id it saw this hour
+        Assert.Equal(clock.UtcNow, result.SignsFrom);
+        Assert.Empty(result.Retired);
+        Assert.Equal([1, 2], result.Deleted.Order());
+        Assert.Equal(clock.UtcNow + VerpKeyRotation.ReloadInterval, result.OtherReplicasBy);
+        VerpKeyRecord only = Assert.Single(await config.GetVerpKeysAsync(default));
+        Assert.Equal((3, clock.UtcNow, (DateTimeOffset?)null), (only.KeyId, only.ActivatesAt, only.RetiredAt));
+
+        // This replica signs with the new key at once and no longer accepts what the old one signed (a leaked key forges nothing more).
+        Assert.Equal(3, codec.ActiveKeyId);
+        Assert.Equal([3], codec.KeyIds);
+        Assert.False(codec.TryDecode(fromKey1, clock.UtcNow, MaxTokenAge, out _));
+        string fromKey3 = Address(codec, clock);
+        Assert.True(codec.TryDecode(fromKey3, clock.UtcNow, MaxTokenAge, out _));
+
+        // Another replica follows at its next reload.
+        Assert.False(otherReplica.TryDecode(fromKey3, clock.UtcNow, MaxTokenAge, out _));
+        await Rotation(backend, otherReplica, clock).RunOnceAsync(default);
+        Assert.Equal(3, otherReplica.ActiveKeyId);
+        Assert.True(otherReplica.TryDecode(fromKey3, clock.UtcNow, MaxTokenAge, out _));
+        Assert.False(otherReplica.TryDecode(fromKey1, clock.UtcNow, MaxTokenAge, out _));
+
+        // The automatic period counts from the new key: nothing is added until it has signed for 90 days.
+        clock.Advance(TimeSpan.FromDays(89));
+        await rotation.RunOnceAsync(default);
+        Assert.Single(await config.GetVerpKeysAsync(default));
+    }
+
+    private static async Task RotateNowRetireAsync(HostBackend backend, VirtualClock clock)
+    {
+        IConfigStore config = backend.Storage.Config;
+        VerpCodec codec = await VerpKeyStore.LoadOrCreateAsync(config, Secrets, default, clock);
+        VerpKeyRotation rotation = Rotation(backend, codec, clock);
+        clock.Advance(TimeSpan.FromDays(90));
+        await rotation.RunOnceAsync(default);   // key 2 waits for its hour
+        string fromKey1 = Address(codec, clock);
+
+        VerpKeyRotateNowResult? result = await rotation.RotateNowAsync(revokeOldKeys: false, default);
+
+        Assert.NotNull(result);
+        Assert.Equal(3, result.KeyId);
+        Assert.Equal([1], result.Retired);
+        Assert.Equal([2], result.Deleted);   // it signed nothing; kept, it would take over an hour later
+        IReadOnlyList<VerpKeyRecord> keys = await config.GetVerpKeysAsync(default);
+        Assert.Equal([1, 3], keys.Select(k => k.KeyId));
+        Assert.Equal(clock.UtcNow, keys[0].RetiredAt);
+        Assert.Equal(3, codec.ActiveKeyId);
+        Assert.True(codec.TryDecode(fromKey1, clock.UtcNow, MaxTokenAge, out _), "a retired key still verifies what it signed");
+
+        clock.Advance(VerpKeyRotation.PendingPeriod + TimeSpan.FromMinutes(1));
+        await rotation.RunOnceAsync(default);
+        Assert.Equal(3, codec.ActiveKeyId);   // key 2 is gone: nothing takes over
+
+        // Pruned like any retired key.
+        clock.Advance(VerpKeyRotation.RetentionFor(SrsMaxAgeDays));
+        await rotation.RunOnceAsync(default);
+        Assert.Equal([3], (await config.GetVerpKeysAsync(default)).Select(k => k.KeyId));
+    }
+
+    private static async Task RotateNowIdsAsync(HostBackend backend, VirtualClock clock)
+    {
+        IConfigStore config = backend.Storage.Config;
+        DateTimeOffset longAgo = clock.UtcNow - TimeSpan.FromDays(100);
+        // Key 15 signs; every other id is held by a retired key.
+        await config.AddVerpKeysAsync(
+            Enumerable.Range(0, 16).Select(id => new VerpKeyRecord(id, Secrets.Protect(VerpCodec.GenerateKey(), SecretPurposes.VerpKey), longAgo, id == 15 ? longAgo : DateTimeOffset.UnixEpoch, id == 15 ? null : clock.UtcNow)).ToList(),
+            default);
+        VerpCodec codec = await VerpKeyStore.LoadOrCreateAsync(config, Secrets, default, clock);
+        VerpKeyRotation rotation = Rotation(backend, codec, clock);
+
+        var ex = await Assert.ThrowsAsync<VerpKeyIdsExhaustedException>(() => rotation.RotateNowAsync(revokeOldKeys: false, default));
+        Assert.Contains("Revoke", ex.Message, StringComparison.Ordinal);
+        Assert.Equal(16, (await config.GetVerpKeysAsync(default)).Count);   // nothing changed
+        Assert.Equal(15, codec.ActiveKeyId);
+
+        // Revoked, with every id held, the retired keys go first and the id after the signing key's is taken again.
+        VerpKeyRotateNowResult? result = await rotation.RotateNowAsync(revokeOldKeys: true, default);
+        Assert.Equal(0, result!.KeyId);
+        Assert.Equal([0], (await config.GetVerpKeysAsync(default)).Select(k => k.KeyId));
+        Assert.Equal(16, result.Deleted.Count);
+        Assert.Equal(0, codec.ActiveKeyId);
+
+        // With an id free, a retired key's id is not taken even when it is revoked: another replica's pass may still delete it by that id.
+        Assert.Equal(1, (await rotation.RotateNowAsync(revokeOldKeys: false, default))!.KeyId);   // key 0 retired
+        result = await rotation.RotateNowAsync(revokeOldKeys: true, default);
+        Assert.Equal(2, result!.KeyId);
+        Assert.Equal([0, 1], result.Deleted.Order());
+        Assert.Equal([2], (await config.GetVerpKeysAsync(default)).Select(k => k.KeyId));
+    }
+
+    private static async Task RotateNowLeaseHeldAsync(HostBackend backend, VirtualClock clock)
+    {
+        IConfigStore config = backend.Storage.Config;
+        VerpCodec codec = await VerpKeyStore.LoadOrCreateAsync(config, Secrets, default, clock);
+        Assert.NotNull(await config.TryAcquireLeaseAsync("verp-keys", "another-replica", TimeSpan.FromMinutes(5), clock.UtcNow, default));
+
+        Assert.Null(await Rotation(backend, codec, clock).RotateNowAsync(revokeOldKeys: true, default));   // the API answers 409
+
+        Assert.Equal([1], (await config.GetVerpKeysAsync(default)).Select(k => k.KeyId));
+        Assert.Equal(1, codec.ActiveKeyId);
     }
 }

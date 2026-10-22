@@ -9,6 +9,7 @@ using Microsoft.AspNetCore.Routing;
 using Mta.Core;
 using Mta.Host.Tls;
 using Mta.Storage;
+using Mta.Storage.Transfer;
 
 namespace Mta.Host.Api;
 
@@ -106,11 +107,23 @@ public sealed record AdminStatusResponse(
 
 public sealed record MaintenanceStartResponse(string Status);
 
+public sealed class RotateVerpKeysRequest
+{
+    /// <summary><c>revoke</c> (default: the old keys are deleted and verify nothing more) or <c>retire</c> (they verify what they signed until it expires).</summary>
+    [JsonPropertyName("oldKeys")]
+    public string? OldKeys { get; set; }
+}
+
+/// <summary>A VERP signing key without its key material. <c>state</c>: <c>signing</c>, <c>pending</c> (signs from <c>activatesAt</c>), <c>replaced</c> (a newer key signs; retired an hour after it took over) or <c>retired</c>.</summary>
+public sealed record VerpKeyResponse(int KeyId, string State, DateTimeOffset CreatedAt, DateTimeOffset ActivatesAt, DateTimeOffset? RetiredAt);
+
+public sealed record VerpKeyRotationResponse(int KeyId, DateTimeOffset SignsFrom, IReadOnlyList<int> RetiredKeyIds, IReadOnlyList<int> DeletedKeyIds, DateTimeOffset OtherReplicasBy);
+
 public sealed record MaintenanceStateResponse(bool Running, DateTimeOffset? StartedAt, DateTimeOffset? FinishedAt, string? Error, IReadOnlyList<MaintenanceReportResponse> Reports);
 
 public sealed record MaintenanceReportResponse(string Job, long DurationMs, long RowsAffected, string? Detail);
 
-/// <summary>The admin surface (role <c>admin</c>): tenants, status, global settings, certificates, maintenance and the backend switch.</summary>
+/// <summary>The admin surface (role <c>admin</c>): tenants, status, global settings, certificates, maintenance, the VERP keys and the backend switch.</summary>
 public sealed partial class AdminApi(
     ApiAuthenticator auth,
     IStorage storage,
@@ -123,7 +136,8 @@ public sealed partial class AdminApi(
     IAcmeCertificateRequester acme,
     MaintenanceRunner maintenance,
     ApiRuntimeInfo runtime,
-    IStoragePressureSource? pressure = null)
+    IStoragePressureSource? pressure = null,
+    IVerpKeyAdmin? verpKeys = null)
 {
     private IConfigStore Config => storage.Config;
 
@@ -142,6 +156,8 @@ public sealed partial class AdminApi(
         admin.GetRoute("/certificates/acme", AcmeStatusAsync);
         admin.PostRoute("/maintenance/run", RunMaintenanceAsync);
         admin.GetRoute("/maintenance", MaintenanceStateAsync);
+        admin.GetRoute("/verp-keys", ListVerpKeysAsync);
+        admin.PostRoute("/verp-keys/rotate", RotateVerpKeysAsync);
 
         var sw = admin.MapGroup("/storage/switch");
         sw.PostRoute("/preflight", SwitchPreflightAsync);
@@ -535,6 +551,42 @@ public sealed partial class AdminApi(
         MaintenanceRunState s = maintenance.State;
         return ApiResults.Ok(new MaintenanceStateResponse(s.Running, s.StartedAt, s.FinishedAt, s.Error,
             s.Reports.Select(r => new MaintenanceReportResponse(r.Job, (long)r.Duration.TotalMilliseconds, r.RowsAffected, r.Detail)).ToList()));
+    }
+
+    // VERP keys (decision 111)
+
+    private async Task<IResult> ListVerpKeysAsync(HttpContext context)
+    {
+        await auth.RequireAdminAsync(context).ConfigureAwait(false);
+        return ApiResults.Ok(await VerpKeys.ListAsync(context.RequestAborted).ConfigureAwait(false));
+    }
+
+    private IVerpKeyAdmin VerpKeys => verpKeys ?? throw ApiException.NotReady("The VERP keys are not managed by this process.");
+
+    /// <summary>
+    /// A new VERP key that signs at once, after a leak: the old keys are deleted (<c>revoke</c>, the default: a leaked key stops verifying, and bounces and complaints to
+    /// addresses they signed are refused) or retired (<c>retire</c>). Refused while a backend switch holds this store, as the automatic rotation does not run then.
+    /// </summary>
+    private async Task<IResult> RotateVerpKeysAsync(HttpContext context)
+    {
+        await auth.RequireAdminAsync(context).ConfigureAwait(false);
+        RotateVerpKeysRequest body = await ApiJson.ReadBodyAsync<RotateVerpKeysRequest>(context, options.MaxBodyBytes).ConfigureAwait(false);
+        bool revoke = body.OldKeys switch
+        {
+            null or "revoke" => true,
+            "retire" => false,
+            _ => throw ApiException.Validation("oldKeys", "Use \"revoke\" or \"retire\"."),
+        };
+
+        CancellationToken ct = context.RequestAborted;
+        if (storage.Transfer is { } transfer && await transfer.GetStateAsync(ct).ConfigureAwait(false) is { } sw
+            && !(sw.State == SwitchStates.Active || sw is { Role: SwitchRoles.Source, State: SwitchStates.Draining }))
+        {
+            throw ApiException.Conflict($"Backend switch {sw.SwitchId} holds this store ({sw.Role.ToLowerInvariant()}, {sw.State.ToLowerInvariant()}): rotate the VERP keys on the store that handles mail, after the switch is activated or rolled back.");
+        }
+
+        return ApiResults.Ok(await VerpKeys.RotateNowAsync(revoke, ct).ConfigureAwait(false)
+            ?? throw ApiException.Conflict("Another replica is changing the VERP keys; try again in a few seconds."));
     }
 
     // Storage switch (thin layer over IStorageSwitchService)

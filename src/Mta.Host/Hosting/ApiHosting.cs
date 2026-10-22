@@ -13,6 +13,35 @@ internal sealed class DeliveryEngineRoutingNotifier(Mta.Delivery.DeliveryEngine 
     public void Changed() => engine.RequestConfigRefresh();
 }
 
+/// <summary>The admin API's view of the VERP keys (decision 111), over the rotation service of this process.</summary>
+internal sealed class VerpKeyAdmin(VerpKeyRotation rotation, IConfigStore config, IClock clock) : IVerpKeyAdmin
+{
+    public async Task<IReadOnlyList<VerpKeyResponse>> ListAsync(CancellationToken ct)
+    {
+        IReadOnlyList<VerpKeyRecord> keys = await config.GetVerpKeysAsync(ct).ConfigureAwait(false);
+        DateTimeOffset now = clock.UtcNow;
+        int? signing = VerpKeyStore.SigningKey(keys, now)?.KeyId;
+        return keys.Select(k => new VerpKeyResponse(k.KeyId, State(k, signing, now), k.CreatedAt, k.ActivatesAt, k.RetiredAt)).ToList();
+    }
+
+    public async Task<VerpKeyRotationResponse?> RotateNowAsync(bool revokeOldKeys, CancellationToken ct)
+    {
+        try
+        {
+            return await rotation.RotateNowAsync(revokeOldKeys, ct).ConfigureAwait(false) is { } r
+                ? new VerpKeyRotationResponse(r.KeyId, r.SignsFrom, r.Retired, r.Deleted, r.OtherReplicasBy)
+                : null;
+        }
+        catch (VerpKeyIdsExhaustedException ex)
+        {
+            throw ApiException.Conflict(ex.Message);
+        }
+    }
+
+    private static string State(VerpKeyRecord key, int? signing, DateTimeOffset now) =>
+        key.RetiredAt is not null ? "retired" : key.KeyId == signing ? "signing" : key.ActivatesAt > now ? "pending" : "replaced";
+}
+
 /// <summary>Connects the HTTP API (<c>Mta.Host/Api</c>) to the runtime: the services it needs from the process, the routes, and the first administrator.</summary>
 public static class ApiHosting
 {
@@ -29,6 +58,7 @@ public static class ApiHosting
         }
 
         services.AddSingleton<IRoutingConfigNotifier>(new DeliveryEngineRoutingNotifier(runtime.Delivery));
+        services.AddSingleton<IVerpKeyAdmin>(new VerpKeyAdmin(runtime.VerpKeyRotation, runtime.Storage.Config, runtime.Clock));
         if ((SqliteStoragePressureSource.For(runtime.Storage) ?? PostgresStoragePressureSource.For(runtime.Storage)) is { } pressure)
         {
             services.AddSingleton(pressure);
