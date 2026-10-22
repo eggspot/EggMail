@@ -49,6 +49,16 @@ public class PoolPressureMeasureTests
     }
 
     [Fact]
+    public void The_share_is_judged_before_it_is_rounded_for_display()
+    {
+        var at50 = new PostgresOptions { PressureWaitingPercent = 50 };
+        PoolSample[] ring = Enumerable.Range(0, 2001).Select(i => new PoolSample(SecondsAgo(0.1 * (2001 - i)), i < 1000 ? 1 : 0, 1, 1, 0)).ToArray(); // 49.975 %
+        PostgresStoragePressure p = PostgresStoragePressure.Measure(ring, 0, at50, Now);
+        Assert.Equal(50, p.WaitingPercent);
+        Assert.False(p.Advisory);
+    }
+
+    [Fact]
     public void One_timed_out_request_in_the_window_turns_the_indicator_on()
     {
         PostgresStoragePressure p = PostgresStoragePressure.Measure(Samples(3, _ => 0, timeouts: 1), 0, Defaults, Now);
@@ -78,6 +88,7 @@ public class PoolPressureMeasureTests
     [Theory]
     [InlineData(0.5, 300, 50)] // sample interval under 1 s
     [InlineData(10, 5, 50)] // window shorter than the interval
+    [InlineData(1, 4097, 50)] // more samples than the ring may hold
     [InlineData(5, 300, 0)]
     [InlineData(5, 300, 101)]
     public void Out_of_range_pressure_options_are_refused_when_the_storage_is_created(double intervalSeconds, double windowSeconds, int percent)
@@ -116,9 +127,12 @@ public class PoolPressureSamplerTests
     public async Task The_sampler_sees_a_caller_waiting_for_a_full_pool_and_a_request_that_timed_out()
     {
         string name = "eggmail-pressure-test-" + Guid.NewGuid().ToString("N");
-        string cs = new NpgsqlConnectionStringBuilder(PostgresTestServer.Instance.AdminConnectionString) { Pooling = true, MaxPoolSize = 1, Timeout = 2 }.ConnectionString;
-        await using NpgsqlDataSource pool = new NpgsqlDataSourceBuilder(cs) { Name = name }.Build();
-        await using NpgsqlDataSource other = new NpgsqlDataSourceBuilder(cs) { Name = name + "-other" }.Build();
+        string admin = PostgresTestServer.Instance.AdminConnectionString;
+        // The waiting phase gets a long pool timeout (a slow runner must not turn the wait into a timeout); the timeout phase a pool of its own with the same name.
+        string patient = new NpgsqlConnectionStringBuilder(admin) { Pooling = true, MaxPoolSize = 1, Timeout = 60 }.ConnectionString;
+        string impatient = new NpgsqlConnectionStringBuilder(admin) { Pooling = true, MaxPoolSize = 1, Timeout = 1 }.ConnectionString;
+        await using NpgsqlDataSource pool = new NpgsqlDataSourceBuilder(patient) { Name = name }.Build();
+        await using NpgsqlDataSource other = new NpgsqlDataSourceBuilder(patient) { Name = name + "-other" }.Build();
         using var sampler = new PostgresPoolSampler(name, new PostgresOptions(), startTimer: false);
 
         NpgsqlConnection held = await pool.OpenConnectionAsync();
@@ -146,9 +160,11 @@ public class PoolPressureSamplerTests
         Assert.Equal(0, p.ConnectionsInUse);
         Assert.Equal(0, p.Timeouts);
 
-        await using (NpgsqlConnection hold = await pool.OpenConnectionAsync())
+        await pool.DisposeAsync(); // from here on only the short-timeout pool carries the name
+        await using NpgsqlDataSource strict = new NpgsqlDataSourceBuilder(impatient) { Name = name }.Build();
+        await using (NpgsqlConnection hold = await strict.OpenConnectionAsync())
         {
-            await Assert.ThrowsAnyAsync<Exception>(() => pool.OpenConnectionAsync().AsTask()); // the pool's 2-second timeout
+            await Assert.ThrowsAnyAsync<Exception>(() => strict.OpenConnectionAsync().AsTask()); // the pool's 1-second timeout
         }
 
         sampler.Sample();
@@ -158,13 +174,41 @@ public class PoolPressureSamplerTests
         Assert.True(p.Advisory);
     }
 
-    private static async Task WaitUntilAsync(Func<bool> condition)
+    internal static async Task WaitUntilAsync(Func<bool> condition, TimeSpan? limit = null)
     {
         var deadline = Stopwatch.StartNew();
         while (!condition())
         {
-            Assert.True(deadline.Elapsed < TimeSpan.FromSeconds(10), "The pool's instruments did not report in time.");
+            Assert.True(deadline.Elapsed < (limit ?? TimeSpan.FromSeconds(10)), "The pool's instruments did not report in time.");
             await Task.Delay(10);
         }
+    }
+}
+
+/// <summary>The storage wiring: an initialized PostgreSQL storage samples its own runtime pool on the timer (decision 109).</summary>
+public class PostgresStoragePressureTests : PgTestBase
+{
+    [Fact]
+    public async Task An_initialized_storage_samples_its_runtime_pool()
+    {
+        PostgresStorage fast = await OpenReplicaAsync(o => new PostgresOptions
+        {
+            RuntimeConnectionString = o.RuntimeConnectionString,
+            StatsFlushInterval = TimeSpan.Zero,
+            PressureSampleInterval = TimeSpan.FromSeconds(1),
+            PressureWindow = TimeSpan.FromMinutes(1),
+        });
+        await PoolPressureSamplerTests.WaitUntilAsync(() => fast.GetPressure()!.Samples >= 1, TimeSpan.FromSeconds(30));
+        PostgresStoragePressure p = fast.GetPressure()!;
+        Assert.True(p.MaxPoolSize >= 1); // the eggmail-runtime pools of this process, read through Npgsql's meter
+        Assert.Equal(0, p.Timeouts);
+    }
+
+    [Fact]
+    public async Task A_storage_that_is_not_initialized_has_no_figures()
+    {
+        var pg = new PostgresOptions { RuntimeConnectionString = "Host=127.0.0.1;Port=1;Database=none;Username=none" };
+        await using PostgresStorage storage = PostgresStorage.Create(new StorageOptions { Backend = StorageBackend.Postgres, Postgres = pg });
+        Assert.Null(storage.GetPressure());
     }
 }

@@ -143,7 +143,7 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | `Storage:Postgres:ReadOnlyIdleInTransactionTimeoutSeconds` | 10 | `idle_in_transaction_session_timeout` of the read-only connections |
 | `Storage:Postgres:ReadOnlyMaxPoolSize` | 8 | Connection pool of the read-only role |
 | `Storage:Postgres:MaxPoolSize` | 32 | Connection pool of the runtime role (the owner role has a small pool of its own) |
-| `Storage:Postgres:PressureWindow` | `00:05:00` | How far back the advisory storage-pressure indicator judges the runtime pool's samples (decision 109) |
+| `Storage:Postgres:PressureWindow` | `00:05:00` | How far back the advisory storage-pressure indicator judges the runtime pool's samples (decision 109); between one and 4,096 sample intervals |
 | `Storage:Postgres:PressureSampleInterval` | `00:00:05` | How often the runtime pool is sampled (waiting callers, connections in use, the limit); at least 1 second |
 | `Storage:Postgres:PressureWaitingPercent` | 50 | Share of the samples in the window (1 to 100) that found a caller waiting for a connection, at or above which the indicator says the thresholds are exceeded (at least 20 samples, or half of what the window holds if that is fewer); any request that timed out waiting in the window says so too |
 | `Storage:Postgres:PartitionsAheadDays` | 7 | Day partitions of the history tables created ahead by maintenance |

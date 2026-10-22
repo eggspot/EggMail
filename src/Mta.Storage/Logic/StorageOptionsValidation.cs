@@ -59,9 +59,10 @@ public static class StorageOptionsValidation
         }
 
         PostgresOptions pg = options.Postgres;
-        if (pg.PressureSampleInterval < TimeSpan.FromSeconds(1) || pg.PressureWindow < pg.PressureSampleInterval || pg.PressureWaitingPercent is < 1 or > 100)
+        if (pg.PressureSampleInterval < TimeSpan.FromSeconds(1) || pg.PressureWindow < pg.PressureSampleInterval || pg.PressureWindow > pg.PressureSampleInterval * PostgresOptions.MaxPressureSamples
+            || pg.PressureWaitingPercent is < 1 or > 100)
         {
-            throw new ArgumentException("Postgres pressure options out of range (sample interval at least 1 s, window at least the interval, waiting percent 1 to 100).");
+            throw new ArgumentException($"Postgres pressure options out of range (sample interval at least 1 s, window between one and {PostgresOptions.MaxPressureSamples} intervals, waiting percent 1 to 100).");
         }
     }
 

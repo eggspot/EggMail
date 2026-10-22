@@ -45,9 +45,9 @@ public sealed record PostgresStoragePressure(long PendingRequests, long Connecti
             }
         }
 
-        double percent = count == 0 ? 0 : Math.Round(100.0 * waiting / count, 1);
+        double percent = count == 0 ? 0 : 100.0 * waiting / count;
         bool advisory = (count >= RequiredSamples(options) && percent >= options.PressureWaitingPercent) || timeouts > 0;
-        return new PostgresStoragePressure(Math.Max(0, pendingNow), latest.Used, latest.Max, percent, count, timeouts, advisory);
+        return new PostgresStoragePressure(Math.Max(0, pendingNow), latest.Used, latest.Max, Math.Round(percent, 1), count, timeouts, advisory);
     }
 
     /// <summary>Samples the waiting share needs: <see cref="MinSamples"/>, or half of what the window holds when that is fewer (timer jitter can push one sample out of a short window).</summary>
@@ -55,7 +55,7 @@ public sealed record PostgresStoragePressure(long PendingRequests, long Connecti
 
     /// <summary>How many samples one window holds at the configured interval.</summary>
     internal static int SamplesInWindow(PostgresOptions options) =>
-        (int)Math.Clamp(Math.Ceiling(options.PressureWindow.TotalSeconds / options.PressureSampleInterval.TotalSeconds), 1, PostgresPoolSampler.MaxRingSize);
+        (int)Math.Clamp(Math.Ceiling(options.PressureWindow.TotalSeconds / options.PressureSampleInterval.TotalSeconds), 1, PostgresOptions.MaxPressureSamples);
 }
 
 /// <summary>One sample of the pool: when (a <see cref="Stopwatch"/> timestamp), callers waiting, connections in use, the pool limit, and timeouts since the previous sample.</summary>
@@ -69,8 +69,6 @@ internal readonly record struct PoolSample(long At, long Pending, long Used, lon
 /// </summary>
 internal sealed class PostgresPoolSampler : IDisposable
 {
-    internal const int MaxRingSize = 4096;
-
     private const string PoolNameTag = "db.client.connection.pool.name";
     private const string StateTag = "db.client.connection.state";
 

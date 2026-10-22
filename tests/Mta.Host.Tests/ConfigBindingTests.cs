@@ -381,6 +381,7 @@ public class ConfigBindingTests : IDisposable
     [InlineData("Sqlite:PressureWindow", "00:00:00")]
     [InlineData("Storage:Postgres:PressureSampleInterval", "00:00:00.500")]
     [InlineData("Storage:Postgres:PressureWindow", "00:00:01")]
+    [InlineData("Storage:Postgres:PressureWindow", "06:00:00")] // more than 4,096 samples of 5 seconds
     [InlineData("Storage:Postgres:PressureWaitingPercent", "0")]
     [InlineData("Storage:Postgres:PressureWaitingPercent", "101")]
     public void Out_of_range_tuning_knobs_are_reported_at_start_not_when_the_storage_is_created(string key, string value)

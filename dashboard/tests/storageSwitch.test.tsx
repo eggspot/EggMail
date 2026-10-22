@@ -220,6 +220,16 @@ describe('explicit actions only', () => {
     expect(screen.getByText(/never switches storage by itself/i)).toBeTruthy();
   });
 
+  it('leaves out the connection pool card of postgresql: a busy pool is never a reason to switch', async () => {
+    const pool = { advisory: true, poolPendingRequests: 3, poolConnectionsInUse: 32, poolMaxSize: 32, poolWaitingPercent: 80, poolSamples: 60, poolTimeouts: 1 };
+    const { m } = setup(status('none'), { 'GET /api/v1/admin/status': () => ({ ...adminStatus(), backend: 'postgres', pressure: pool }) });
+    await render();
+    await waitFor(() => expect(m.calls.some((c) => c.path === '/api/v1/admin/status')).toBe(true));
+    await new Promise((r) => setTimeout(r, 0)); // let the status render
+    expect(screen.queryByTestId('pressure')).toBeNull();
+    expect(screen.queryByText(/Database connection pool/)).toBeNull();
+  });
+
   it('confirm, activate and finalize each need their own click', async () => {
     const { m, set } = setup(status('verified', { verifyReport: okReport }), {
       [`POST ${SW}/confirm`]: () => {

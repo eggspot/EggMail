@@ -194,7 +194,10 @@ public sealed class PostgresOptions
 
     // Advisory storage-pressure indicator (decision 109; provisional defaults, calibrate with benchmarks):
 
-    /// <summary>How far back the runtime pool's samples are judged.</summary>
+    /// <summary>Samples one <see cref="PressureWindow"/> may hold (the sampler's ring is allocated once at that size).</summary>
+    public const int MaxPressureSamples = 4096;
+
+    /// <summary>How far back the runtime pool's samples are judged: at most <see cref="MaxPressureSamples"/> times <see cref="PressureSampleInterval"/>.</summary>
     public TimeSpan PressureWindow { get; init; } = TimeSpan.FromMinutes(5);
 
     /// <summary>How often the runtime pool is sampled (waiting callers, connections in use, the limit).</summary>
