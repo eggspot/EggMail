@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Runtime.InteropServices;
 using Microsoft.Data.Sqlite;
 using Mta.Core;
@@ -755,7 +756,50 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
     }
 
     [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
-    public async ValueTask<IReadOnlyList<WebhookAttemptRecord>> GetAttemptsAsync(Guid tenantId, Guid endpointId, int max, CancellationToken cancellationToken) =>
+    public async ValueTask<IReadOnlyList<WebhookAttemptRecord>> GetAttemptsAsync(Guid tenantId, Guid endpointId, int max, CancellationToken cancellationToken)
+    {
+        List<WebhookAttemptRecord> attempts = await ReadAttemptLogAsync(tenantId, endpointId, max).ConfigureAwait(false);
+        if (attempts.Count == 0)
+        {
+            return attempts;
+        }
+
+        // The log is in stats.db and the outbox in the queue file, so the event types are a second read (one row per distinct item, at most the page size).
+        Dictionary<Guid, string> types = await ReadOutboxEventTypesAsync(tenantId, attempts.Select(a => a.OutboxId).Distinct().ToArray()).ConfigureAwait(false);
+        for (int i = 0; i < attempts.Count; i++)
+        {
+            attempts[i] = attempts[i] with { EventType = types.GetValueOrDefault(attempts[i].OutboxId) };
+        }
+
+        return attempts;
+    }
+
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
+    private async ValueTask<Dictionary<Guid, string>> ReadOutboxEventTypesAsync(Guid tenantId, Guid[] outboxIds) =>
+        await rt.ReadAsync(rt.Queue, rt.QueueWriter, (tenantId, outboxIds), static (c, s) =>
+        {
+            using SqliteCommand cmd = c.CreateCommand();
+            var names = new string[s.outboxIds.Length];
+            for (int i = 0; i < names.Length; i++)
+            {
+                names[i] = "@o" + i.ToString(CultureInfo.InvariantCulture);
+                cmd.Parameters.AddWithValue(names[i], s.outboxIds[i]);
+            }
+
+            cmd.CommandText = $"SELECT id, event_type FROM webhook_outbox WHERE tenant_id = @t AND id IN ({string.Join(", ", names)})";
+            cmd.Parameters.AddWithValue("@t", s.tenantId);
+            using SqliteDataReader r = cmd.ExecuteReader();
+            var types = new Dictionary<Guid, string>();
+            while (r.Read())
+            {
+                types[r.GetGuid(0)] = r.GetString(1);
+            }
+
+            return types;
+        }).ConfigureAwait(false);
+
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
+    private async ValueTask<List<WebhookAttemptRecord>> ReadAttemptLogAsync(Guid tenantId, Guid endpointId, int max) =>
         await rt.ReadAsync(rt.Stats, rt.StatsWriter, (tenantId, endpointId, max), static (c, s) =>
         {
             using SqliteCommand cmd = c.CreateCommand();
@@ -772,7 +816,7 @@ internal sealed class SqliteQueueStore(SqliteRuntime rt, SqliteHistoryStore hist
                 list.Add(new WebhookAttemptRecord(r.GetGuid(0), r.GetInstant(1), r.GetNullableInt(2), TimeSpan.FromMilliseconds(r.GetInt64(3)), r.GetNullableString(4), r.GetNullableString(5)));
             }
 
-            return (IReadOnlyList<WebhookAttemptRecord>)list;
+            return list;
         }).ConfigureAwait(false);
 
     [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]

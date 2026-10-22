@@ -24,6 +24,7 @@ public class PostgresDbContext : DbContext, IConfigDbSets, IQueueDbSets, IStatsD
     public DbSet<SmtpCredentialEntity> SmtpCredentials => Set<SmtpCredentialEntity>();
     public DbSet<DomainEntity> Domains => Set<DomainEntity>();
     public DbSet<DkimKeyEntity> DkimKeys => Set<DkimKeyEntity>();
+    public DbSet<VerpKeyEntity> VerpKeys => Set<VerpKeyEntity>();
     public DbSet<SuppressionEntity> Suppressions => Set<SuppressionEntity>();
     public DbSet<WebhookEndpointEntity> WebhookEndpoints => Set<WebhookEndpointEntity>();
     public DbSet<SettingEntity> Settings => Set<SettingEntity>();

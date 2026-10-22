@@ -205,7 +205,7 @@ internal sealed class SqliteFile
                 UpgradeFromV5(connection);
             }
 
-            UpgradeFromV7(connection);   // also takes a file at version 8 or 9 to 10: every statement is "if not exists" and comes from the generated script
+            UpgradeFromV7(connection);   // also takes a file at version 8, 9 or 10 to 11: every statement is "if not exists" and comes from the generated script
             return;
         }
 
@@ -441,7 +441,7 @@ internal sealed class SqliteFile
         var statements = new List<string>();
         string[] tables = Kind switch
         {
-            SqliteFileKind.Config => ["inbound_domain_settings", "inbound_route"],
+            SqliteFileKind.Config => ["inbound_domain_settings", "inbound_route", "verp_key"],   // verp_key: version 11 (decision 107)
             SqliteFileKind.Queue => ["inbound_message", "inbound_message_raw", "delivery_queue"],   // delivery_queue: only to add the partial index of version 10 (everything else in it exists)
             _ => [],
         };
@@ -456,7 +456,7 @@ internal sealed class SqliteFile
 
         if (statements.Any(string.IsNullOrEmpty))
         {
-            throw new InvalidOperationException($"Could not derive the inbound upgrade (versions 8 to 10) of {FileName} from the generated schema script.");
+            throw new InvalidOperationException($"Could not derive the upgrade to versions 8 to 11 of {FileName} from the generated schema script.");
         }
 
         using var tx = connection.BeginTransaction();

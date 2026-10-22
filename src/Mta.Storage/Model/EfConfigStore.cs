@@ -356,6 +356,28 @@ public sealed partial class EfConfigStore<TContext>(IConfigDbAccess<TContext> db
         }, ct).ConfigureAwait(false);
     }
 
+    public async ValueTask<IReadOnlyList<VerpKeyRecord>> GetVerpKeysAsync(CancellationToken ct) =>
+        await Read<IReadOnlyList<VerpKeyRecord>>(c => c.VerpKeys.AsNoTracking().OrderBy(k => k.KeyId).AsEnumerable().Select(k => k.ToRecord()).ToList()).ConfigureAwait(false);
+
+    public async ValueTask AddVerpKeysAsync(IReadOnlyList<VerpKeyRecord> keys, CancellationToken ct)
+    {
+        var entities = keys.Select(k => k.ToEntity()).ToList();
+        await Write(c =>
+        {
+            c.VerpKeys.AddRange(entities);
+            c.SaveChanges();
+        }, ct).ConfigureAwait(false);
+    }
+
+    public async ValueTask<bool> RetireVerpKeyAsync(int keyId, DateTimeOffset at, CancellationToken ct)
+    {
+        DateTimeOffset? when = StorageTime.Normalize(at);
+        return await Write(c => c.VerpKeys.Where(k => k.KeyId == keyId && k.RetiredAt == null).ExecuteUpdate(u => u.SetProperty(k => k.RetiredAt, when)) > 0, ct).ConfigureAwait(false);
+    }
+
+    public async ValueTask<bool> DeleteVerpKeyAsync(int keyId, CancellationToken ct) =>
+        await Write(c => c.VerpKeys.Where(k => k.KeyId == keyId).ExecuteDelete() > 0, ct).ConfigureAwait(false);
+
     public async ValueTask SetActiveDkimKeyAsync(Guid domainId, Guid keyId, DateTimeOffset at, CancellationToken ct)
     {
         DateTimeOffset when = StorageTime.Normalize(at);

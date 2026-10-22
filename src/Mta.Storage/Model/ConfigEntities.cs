@@ -99,6 +99,16 @@ public sealed class DkimKeyEntity
     public DateTimeOffset? RetiredAt { get; set; }
 }
 
+/// <summary>A VERP signing key (decision 107): the key bytes protected with Data Protection, the id is the 4-bit key id a bounce address carries.</summary>
+public sealed class VerpKeyEntity
+{
+    public int KeyId { get; set; }
+    public byte[] KeyProtected { get; set; } = [];
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset ActivatesAt { get; set; }
+    public DateTimeOffset? RetiredAt { get; set; }
+}
+
 public sealed class SuppressionEntity
 {
     public Guid TenantId { get; set; }

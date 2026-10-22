@@ -292,13 +292,19 @@ public sealed class WebhookOutboxItem
     public required DateTimeOffset CreatedAt { get; init; }
 }
 
+/// <summary>One webhook delivery attempt.</summary>
+/// <param name="EventType">
+/// The event type of the outbox item, filled in by <see cref="IWebhookOutbox.GetAttemptsAsync"/> (read from the outbox when the log is listed, not
+/// stored in the log; null once retention removed the item). Ignored by <see cref="IWebhookOutbox.CompleteAsync"/>.
+/// </param>
 public sealed record WebhookAttemptRecord(
     Guid OutboxId,
     DateTimeOffset At,
     int? StatusCode,
     TimeSpan Duration,
     string? ErrorClass,
-    string? ResponseSnippet);
+    string? ResponseSnippet,
+    string? EventType = null);
 
 public interface IWebhookOutbox
 {
@@ -307,6 +313,7 @@ public interface IWebhookOutbox
     /// <summary>Records the attempt and either schedules the next one, marks the item delivered, or marks it failed (state change in the same commit).</summary>
     ValueTask CompleteAsync(Guid outboxId, WebhookAttemptRecord attempt, WebhookOutboxState newState, DateTimeOffset? nextAttemptAt, CancellationToken cancellationToken);
 
+    /// <summary>The newest attempts of one endpoint of the tenant, newest first, each with the event type of its outbox item while the item is kept.</summary>
     ValueTask<IReadOnlyList<WebhookAttemptRecord>> GetAttemptsAsync(Guid tenantId, Guid endpointId, int max, CancellationToken cancellationToken);
 
     /// <summary>
