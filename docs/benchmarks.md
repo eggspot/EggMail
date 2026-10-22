@@ -365,3 +365,14 @@ dotnet bench/Mta.Bench.Pipeline/bin/Release/net10.0/Mta.Bench.Pipeline.dll --syn
 ```
 
 The type names come from the runtime's `TypeLoad` events (`ALLOCSTACKS_DEBUG=1` lists the events in a trace). A trace of a delivery run is large and takes minutes to aggregate.
+
+## Storage-pressure measurement on the writer path (2026-10-22, decision 108)
+
+The SQLite writer now writes one commit sample per committed transaction into a fixed ring and compares the sampled queue depth with the pressure threshold once per batch. Whole pipeline, `--sync off --history full --messages 20000 --connections 32 --size 2048 --deliver false`, four runs each, main and the branch alternated, Apple Silicon laptop (noisy, not publishable):
+
+| Build | Messages per second (4 runs) | p99 latency, ms | Server bytes per message | Server CPU ms per 1,000 messages |
+|---|---|---|---|---|
+| main (`266454a`) | 18,828 / 17,907 / 17,981 / 18,082 | 3.0 to 3.4 | 4,034 to 4,052 | 257 to 276 |
+| branch | 18,849 / 18,966 / 18,756 / 18,984 | 3.3 to 3.4 | 4,041 to 4,062 | 245 to 269 |
+
+No measurable change: the ring is allocated once per writer, and the commit timestamp is the end of the commit the writer already times. The pressure defaults (decision C's figures) are **not calibrated**; calibrate them with the quiet-host benchmarks.
