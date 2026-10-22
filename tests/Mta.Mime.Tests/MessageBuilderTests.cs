@@ -94,6 +94,20 @@ public class MessageBuilderTests
         Assert.True(MessageInspector.HasUtf8Headers(bytes));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void A_subject_that_looks_like_an_encoded_word_reads_back_unchanged(bool utf8Headers)
+    {
+        // Found by the message-builder fuzz target: in a UTF-8 header the text was written as it was, and every reader decoded it.
+        var b = NewBuilder(new MessageBuilderOptions { MessageIdDomain = "example.com", Clock = new FixedClock(Now), AllowUtf8Headers = utf8Headers });
+        b.Subject = "=?utf-8?q?not_encoded?= Grüße";
+        var (bytes, _) = b.Build();
+        var headers = HeaderList.Parse(bytes);
+        Assert.True(headers.TryGetFirst("Subject", out var h));
+        Assert.Equal(b.Subject, h.DecodedValue);
+    }
+
     [Fact]
     public void Text_and_html_make_multipart_alternative()
     {
@@ -354,6 +368,26 @@ public class MessageBuilderTests
             Assert.ThrowsAny<Exception>(() => new BuilderAttachment(evil, "image/png", default));
             Assert.ThrowsAny<Exception>(() => new BuilderAttachment("a.png", evil, default));
         }
+    }
+
+    [Theory]
+    [InlineData("Alice\u000bPNG")]
+    [InlineData("Alice\u001b[31m")]
+    [InlineData("Alice\u007f")]
+    [InlineData("Ali\u2028ce")]
+    public void A_display_name_with_a_control_character_is_refused_like_any_header_value(string name)
+    {
+        // Found by the message-builder fuzz target: only CR, LF and NUL were refused; the others went out inside an encoded word.
+        foreach (bool utf8 in new[] { false, true })
+        {
+            var b = NewBuilder(new MessageBuilderOptions { MessageIdDomain = "example.com", AllowUtf8Headers = utf8 });
+            b.From = Mailbox.Create(name, "alice@example.com");
+            Assert.Throws<HeaderInjectionException>(() => b.Build());
+        }
+
+        var tabbed = NewBuilder();
+        tabbed.From = Mailbox.Create("Alice\tSmith", "alice@example.com");
+        Assert.Contains("Alice\tSmith", Encoding.ASCII.GetString(tabbed.Build().Content), StringComparison.Ordinal);
     }
 
     [Fact]

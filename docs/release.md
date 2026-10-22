@@ -125,7 +125,7 @@ Billing comes first (one job per workflow on `ubuntu-latest`, tight timeouts, no
 | `bench-gate` | weekly (Monday 04:41 UTC, only when `main` changed) and manual | 20 min | allocation per message has not grown | about 1 min | [benchmarks.md](benchmarks.md#the-allocation-gate) |
 | `bench-throughput` | manual | 45 min | the throughput matrix: both backends, each durable and non-durable, ingest and delivery, reported in pairs ("noisy, not publishable"); JIT versus ReadyToRun | 25 to 40 min | [benchmarks.md](benchmarks.md#the-throughput-run) |
 | `soak` | manual; a monthly schedule that is **off** until the repository variable `SOAK_SCHEDULE_ENABLED` is `true` | 358 min (the 6 h hosted limit) | hours of load on the real host: no acknowledged message lost, no unflagged duplicate, memory and descriptor growth, kill -9 and backup/restore drills | its wall time (a 2 h run: about 130 min; 6 h: about 360) | [soak.md](soak.md) |
-| `fuzz` | weekly (Sunday 03:23 UTC) and manual | 90 min | coverage-guided fuzzing of the parsers | about 55 min a week | [security.md](security.md#fuzzing) |
+| `fuzz` | weekly (Sunday 03:23 UTC) and manual | 90 min | coverage-guided fuzzing of the parsers and the SMTP client (16 targets x 200 s) | about 55 min a week | [security.md](security.md#fuzzing) |
 
 ## Deployment files
 

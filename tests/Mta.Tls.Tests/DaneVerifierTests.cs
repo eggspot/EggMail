@@ -116,6 +116,24 @@ public class DaneVerifierTests
 
     // ---- DANE-TA (usage 2) ----
 
+    [Fact]
+    public void A_bare_key_on_an_unknown_curve_is_skipped_and_the_next_record_still_anchors()
+    {
+        // Found by the dane fuzz target: the key's curve identifier is damaged, ECDsa refuses it with PlatformNotSupportedException (on
+        // macOS; other platforms may say CryptographicException), and that escaped the verifier, so the record after it was never tried.
+        var pki = Pki.Shared;
+        byte[] spki = pki.Intermediate.Public.PublicKey.ExportSubjectPublicKeyInfo();
+        int curveOid = spki.AsSpan().IndexOf((ReadOnlySpan<byte>)[0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07]);
+        Assert.True(curveOid >= 0, "the test PKI is expected to use P-256");
+        spki[curveOid + 3] ^= 0xC5;
+        var hostile = new TlsaRecord("_25._tcp.mx.example.com", 300, 2, 1, 0, spki);
+
+        var result = Verify(pki, [hostile, Tlsa.For(pki.Intermediate.Public, 2, 1, 1)]);
+
+        Assert.True(result.Success, string.Join("; ", result.Notes));
+        Assert.Equal(1, result.Match!.MatchingType);
+    }
+
     [Theory]
     [MemberData(nameof(AllSelectorMatchingCombinations))]
     public void DaneTA_with_the_root_presented_in_the_chain(byte selector, byte matching)

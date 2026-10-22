@@ -321,6 +321,39 @@ public class EightBitDowngraderTests
         Assert.Contains("transfer encoding", result.Reason, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Theory]
+    [InlineData("From: a@example.com\nMIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=b\n\n--b\nContent-Type: text/x\u202Egnp.exe\u0085\nContent-Transfer-Encoding: 8bit\n\nGr\u00fc\u00dfe\n--b--\n")]
+    [InlineData("From: a@example.com\nMIME-Version: 1.0\nContent-Type: message/x\u0085\u2066y\n\nGr\u00fc\u00dfe\n")]
+    public void The_reason_never_carries_control_or_bidi_characters_from_the_message(string source)
+    {
+        // Found by the eightbit-downgrade fuzz target: the media type went into the reason (a bounce and the delivery record) as it was.
+        var (result, _) = Run(T.Crlf(source));
+        Assert.Equal(EightBitDowngradeStatus.Impossible, result.Status);
+        Assert.DoesNotContain(result.Reason!, c => char.IsControl(c) || c is '\u202E' or '\u2066');
+        Assert.Contains("?", result.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_long_media_type_is_cut_in_the_reason()
+    {
+        string source = "From: a@example.com\nMIME-Version: 1.0\nContent-Type: message/" + new string('x', 120) + "\n\nGr\u00fc\u00dfe\n";
+        var (result, _) = Run(T.Crlf(source));
+        Assert.Equal(EightBitDowngradeStatus.Impossible, result.Status);
+        Assert.DoesNotContain(new string('x', 65), result.Reason, StringComparison.Ordinal);
+        Assert.Contains("...", result.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void The_cut_never_splits_a_surrogate_pair()
+    {
+        string source = "From: a@example.com\nMIME-Version: 1.0\nContent-Type: message/" + new string('x', 63) + "\U0001F600yyyy\n\nGr\u00fc\u00dfe\n";
+        var (result, _) = Run(T.Crlf(source));
+        Assert.Equal(EightBitDowngradeStatus.Impossible, result.Status);
+        string reason = result.Reason!;
+        Assert.DoesNotContain(reason.Select((c, i) => (c, i)), p => char.IsHighSurrogate(p.c) && (p.i + 1 == reason.Length || !char.IsLowSurrogate(reason[p.i + 1])));
+        Assert.Contains(new string('x', 63) + "...", reason, StringComparison.Ordinal);   // the subtype's high surrogate is character 64: cut before it
+    }
+
     [Fact]
     public void An_8bit_preamble_cannot_be_downgraded()
     {

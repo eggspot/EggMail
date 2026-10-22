@@ -173,7 +173,9 @@ internal static class CertificateHelpers
                     return false;
             }
         }
-        catch (Exception ex) when (ex is CryptographicException or ArgumentException or FormatException)
+        // NotSupportedException: a key on a curve the platform does not know (PlatformNotSupportedException), for example a bare key in a
+        // TLSA record; found by the dane fuzz target. Such a key verifies nothing, and the other records must still be tried.
+        catch (Exception ex) when (ex is CryptographicException or ArgumentException or FormatException or NotSupportedException)
         {
             return false;
         }

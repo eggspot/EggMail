@@ -277,7 +277,8 @@ public sealed class MessageBuilder
         if (Subject is not null)
         {
             HeaderValidator.ValidateValue(HeaderNames.Subject, Subject, allowNonAscii: true);
-            string subject = utf8 ? Subject : Rfc2047.Encode(Subject);
+            // Text that looks like an encoded word is encoded even in a UTF-8 header, or every reader would decode it into something else.
+            string subject = utf8 && !Subject.Contains("=?", StringComparison.Ordinal) ? Subject : Rfc2047.Encode(Subject);
             HeaderFolder.AppendField(h, HeaderNames.Subject, subject, utf8);
         }
 

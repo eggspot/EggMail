@@ -1,0 +1,10 @@
+From: a@example.com
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary=b
+
+--b
+Content-Type: text/x‮gnp.exe
+Content-Transfer-Encoding: 8bit
+
+Grüße
+--b--

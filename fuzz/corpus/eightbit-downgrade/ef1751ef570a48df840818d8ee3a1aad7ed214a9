@@ -1,0 +1,9 @@
+From: a@example.com
+Content-Type: multipart/alternative; boundary=b1
+
+--b1
+Content-Type: text/plain; charset=iso-8859-1
+Content-Transfer-Encoding: 8bit
+
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx--b1é
+--b1--

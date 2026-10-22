@@ -7,8 +7,8 @@ name: fuzz
 # as artifacts and fail the run. The deterministic slice of the same fuzzers runs in every `dotnet test` (tests/Mta.Fuzz.Tests); this
 # workflow is the long, expensive search, so it is NOT a pull request check: it runs weekly and on demand.
 #
-# Billing: one job on the cheapest runner, tight timeout, weekly schedule only (about 11 targets x 5 minutes = 55 runner minutes a week
-# at the default; use the seconds_per_target input for a shorter manual run).
+# Billing: one job on the cheapest runner, tight timeout, weekly schedule only (16 targets x 200 seconds = about 53 runner minutes a week
+# at the default, the same budget as 11 targets x 300 seconds before; use the seconds_per_target input for a shorter manual run).
 
 on:
   schedule:
@@ -18,7 +18,7 @@ on:
       seconds_per_target:
         description: Fuzzing time per target in seconds
         required: false
-        default: '300'
+        default: '200'
       targets:
         description: Comma separated target names, or "all" (see `Mta.Fuzz.Harness list`)
         required: false
@@ -48,7 +48,7 @@ env:
 jobs:
   fuzz:
     runs-on: ubuntu-latest
-    # Build and instrumentation take a few minutes; the rest is the fuzzing budget (11 targets x 300 s by default) plus replay of findings.
+    # Build and instrumentation take a few minutes; the rest is the fuzzing budget (16 targets x 200 s by default) plus replay of findings.
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -78,7 +78,7 @@ jobs:
       - name: Publish the harness and instrument the protocol assemblies
         run: |
           dotnet publish fuzz/Mta.Fuzz.Harness -c Release -o "$RUNNER_TEMP/fuzz"
-          for dll in Mta.Core Mta.Dns Mta.Mime Mta.Dkim Mta.Auth Mta.Dsn Mta.Tls Mta.Smtp.Protocol Mta.Smtp.Server; do
+          for dll in Mta.Core Mta.Dns Mta.Mime Mta.Dkim Mta.Auth Mta.Dsn Mta.Tls Mta.Smtp.Protocol Mta.Smtp.Server Mta.Smtp.Client; do
             echo "instrumenting $dll"
             sharpfuzz "$RUNNER_TEMP/fuzz/$dll.dll"
           done
@@ -95,7 +95,7 @@ jobs:
       - name: Fuzz
         id: fuzz
         env:
-          SECONDS_PER_TARGET: ${{ github.event.inputs.seconds_per_target || '300' }}
+          SECONDS_PER_TARGET: ${{ github.event.inputs.seconds_per_target || '200' }}
           TARGETS: ${{ github.event.inputs.targets || 'all' }}
           SELFTEST: ${{ github.event.inputs.selftest || 'none' }}
         run: |

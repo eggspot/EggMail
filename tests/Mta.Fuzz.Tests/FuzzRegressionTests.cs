@@ -23,7 +23,7 @@ public class FuzzRegressionTests
     [Fact]
     public void The_required_parsers_are_all_covered()
     {
-        string[] required = ["smtp-protocol", "smtp-session", "mime", "dkim", "spf", "dns-message", "dsn-arf", "mta-sts", "tls-rpt"];
+        string[] required = ["smtp-protocol", "smtp-session", "smtp-client", "mime", "dkim", "spf", "dns-message", "dsn-arf", "mta-sts", "tls-rpt", "verp", "dane", "eightbit-downgrade", "message-builder"];
         foreach (string name in required)
         {
             Assert.Contains(FuzzTargets.All, t => t.Name == name);
@@ -46,6 +46,22 @@ public class FuzzRegressionTests
         string smuggled = System.Text.Encoding.Latin1.GetString(FuzzTargets.SmtpSessionTranscript(
             System.Text.Encoding.Latin1.GetBytes("\0EHLO x\r\nMAIL FROM:<a@b.example>\r\nRCPT TO:<c@d.example>\r\nDATA\r\nx\r\n.\n\r\nMAIL FROM:<smuggled@x.example>\r\n")));
         Assert.DoesNotContain("250 2.0.0 Queued", smuggled);
+    }
+
+    [Fact]
+    public void The_client_target_really_drives_the_client()
+    {
+        // Without this the client target could pass vacuously (a client that never gets past the banner also "runs clean").
+        var target = FuzzTargets.Get("smtp-client");
+        var (outcome, sent) = FuzzTargets.SmtpClientExchange(target.Seeds[0]);
+        string transcript = System.Text.Encoding.Latin1.GetString(sent);
+        Assert.Equal("delivered", outcome);
+        Assert.Contains("EHLO client.example.com\r\n", transcript);
+        Assert.Contains("RCPT TO:<c@example.net>", transcript);
+        Assert.Contains("\r\n..leading dot\r\n.\r\n", transcript);
+
+        // A server that refuses the greeting ends in the documented exception, not a crash.
+        Assert.Equal("SmtpGreetingRejectedException", FuzzTargets.SmtpClientExchange(System.Text.Encoding.Latin1.GetBytes("\u0000554 5.7.1 Go away\r\n")).Outcome);
     }
 
     [Theory]
