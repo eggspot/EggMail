@@ -89,11 +89,15 @@ public class VerpKeyStoreTests
         VerpKeyRecord stored = Assert.Single(await backend.Storage.Config.GetVerpKeysAsync(default));
         Assert.Equal(1, stored.KeyId);
         Assert.Null(stored.RetiredAt);
-        Assert.Equal(clock.UtcNow, stored.ActivatesAt);
+        Assert.Equal(DateTimeOffset.UnixEpoch, stored.ActivatesAt);   // signs at once on every replica, whatever its clock
         byte[] plain = Secrets.Unprotect(stored.KeyProtected, SecretPurposes.VerpKey);
         Assert.Equal(32, plain.Length);
         Assert.False(stored.KeyProtected.AsSpan().IndexOf(plain.AsSpan(0, 16)) >= 0, "the key is stored protected, not plain");
         Assert.DoesNotContain(await backend.Storage.Config.GetSettingsAsync(null, default), s => s.Key == VerpKeyStore.SettingKey);
+
+        // A replica whose clock is behind the creator's reads the same key and signs with it.
+        VerpCodec behind = await VerpKeyStore.LoadOrCreateAsync(backend.Storage.Config, Secrets, default, new VirtualClock(clock.UtcNow - TimeSpan.FromMinutes(1)));
+        Assert.Equal(1, behind.ActiveKeyId);
 
         // A restart reads the same key.
         string token = codec.CreateLocalPart(TenantId, DomainId, clock.UtcNow, "example.net");

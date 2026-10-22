@@ -24,6 +24,12 @@ public static class VerpKeyStore
 
     private const string LeaseName = "verp-keys";
 
+    /// <summary>
+    /// When the keys of the first key set start signing: the epoch, not the creator's clock. Another replica whose clock is a few seconds behind would otherwise find no key
+    /// active yet and refuse to start.
+    /// </summary>
+    private static readonly DateTimeOffset FirstKeysActivateAt = DateTimeOffset.UnixEpoch;
+
     private sealed record LegacyStored(int Active, Dictionary<int, string>? Keys);
 
     public static async Task<VerpCodec> LoadOrCreateAsync(IConfigStore config, ISecretProtector secrets, CancellationToken ct, IClock? clock = null)
@@ -114,7 +120,7 @@ public static class VerpKeyStore
                 byte[] key = Convert.FromBase64String(base64);
                 try
                 {
-                    records.Add(new VerpKeyRecord(id, secrets.Protect(key, SecretPurposes.VerpKey), now, now, id == legacy.Active ? null : now));
+                    records.Add(new VerpKeyRecord(id, secrets.Protect(key, SecretPurposes.VerpKey), now, FirstKeysActivateAt, id == legacy.Active ? null : now));
                 }
                 finally
                 {
@@ -127,7 +133,7 @@ public static class VerpKeyStore
             byte[] key = VerpCodec.GenerateKey();
             try
             {
-                records.Add(new VerpKeyRecord(1, secrets.Protect(key, SecretPurposes.VerpKey), now, now, null));
+                records.Add(new VerpKeyRecord(1, secrets.Protect(key, SecretPurposes.VerpKey), now, FirstKeysActivateAt, null));
             }
             finally
             {
