@@ -265,7 +265,8 @@ public sealed class VerpCodec
         int buffer = 0, bits = 0, n = 0;
         foreach (char raw in text)
         {
-            char c = char.ToLowerInvariant(raw);
+            // ASCII-only case folding: char.ToLowerInvariant maps the Kelvin sign (U+212A) to 'k', a second spelling of the token.
+            char c = raw is >= 'A' and <= 'Z' ? (char)(raw | 0x20) : raw;
             int v = c switch
             {
                 >= 'a' and <= 'z' => c - 'a',

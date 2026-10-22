@@ -127,6 +127,24 @@ public class VerpTests
         Assert.True(codec.TryDecode(local.ToUpperInvariant(), Now, TimeSpan.FromDays(1), out _));
     }
 
+    [Theory]
+    [InlineData('k', '\u212A')] // Kelvin sign, lowercased to 'k' by char.ToLowerInvariant
+    [InlineData('i', '\u0130')] // capital I with dot above
+    [InlineData('s', '\u017F')] // long s, uppercased to 'S'
+    public void A_non_ascii_look_alike_of_a_base32_letter_is_not_another_spelling_of_the_token(char ascii, char lookAlike)
+    {
+        var codec = Codec();
+        string local = Enumerable.Range(0, 200)
+            .Select(_ => codec.CreateLocalPart(Ids.New(), Ids.New(), Now))
+            .First(l => l.IndexOf(ascii, 2) >= 0);
+        int at = local.IndexOf(ascii, 2);
+        string spoofed = string.Concat(local.AsSpan(0, at), lookAlike.ToString(), local.AsSpan(at + 1));
+
+        Assert.True(codec.TryDecode(local, Now, TimeSpan.FromDays(1), out _));
+        Assert.False(codec.TryDecode(spoofed, Now, TimeSpan.FromDays(1), out var token));
+        Assert.Equal(default, token);
+    }
+
     [Fact]
     public void Tampering_expiry_and_foreign_keys_are_rejected()
     {
