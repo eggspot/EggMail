@@ -38,7 +38,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
     public required VerpCodec Verp { get; init; }
 
     /// <summary>Rotates the VERP keys and reloads them into <see cref="Verp"/> (decision 110).</summary>
-    public required VerpKeyRotation VerpKeys { get; init; }
+    public required VerpKeyRotation VerpKeyRotation { get; init; }
     public required SubmissionService Submission { get; init; }
     public required AuthThrottle AuthThrottle { get; init; }
     public required SmtpServer SmtpServer { get; init; }
@@ -105,7 +105,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
         var certificateMeters = Mta.Host.Tls.TlsMetrics.Attach(certificates, clock);
         System.Runtime.CompilerServices.RuntimeHelpers.RunClassConstructor(typeof(ProcessMetrics).TypeHandle);   // publishes the Mta.Process gauges (descriptors, threads) to the exporters
         var verp = await VerpKeyStore.LoadOrCreateAsync(storage.Config, secrets, ct, clock).ConfigureAwait(false);
-        var verpKeys = new VerpKeyRotation(storage.Config, secrets, verp, clock, config.Secrets.VerpKeyRotationDays, config.Inbound.Srs.MaxAgeDays, log);
+        var verpKeyRotation = new VerpKeyRotation(storage.Config, secrets, verp, clock, config.Secrets.VerpKeyRotationDays, config.Inbound.Srs.MaxAgeDays, log);
 
         var dns = dnsOverride ?? CreateDns(config);
         var storageOptions = config.Storage;
@@ -278,7 +278,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
         var runtime = new EggMailRuntime
         {
             KeysProtectedAtRest = Mta.Host.Secrets.SecretsFactory.KeysProtectedAtRest(config.Secrets, storage.Config),
-            Config = config, Storage = storage, Clock = clock, Log = log, Secrets = secrets, Certificates = certificates, Verp = verp, VerpKeys = verpKeys,
+            Config = config, Storage = storage, Clock = clock, Log = log, Secrets = secrets, Certificates = certificates, Verp = verp, VerpKeyRotation = verpKeyRotation,
             Submission = submission, AuthThrottle = throttle, SmtpServer = smtp, Delivery = delivery, Webhooks = webhooks, InboundActions = inboundActions, Dns = dns,
             Inbound = inbound, InboundConfiguration = inboundConfiguration,
             Pool = pool, Routes = routes, Limits = limits, Acme = acme, AcmeHttpListener = acmeHttpListener, TlsReports = reports, Health = routeHealth, DestinationThrottle = destinationThrottle, ReplicaCoordinator = replicaCoordinator,

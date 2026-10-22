@@ -130,7 +130,7 @@ internal sealed class CertificateService(EggMailRuntime runtime) : BackgroundSer
 /// <summary>Rotates the VERP signing keys and reloads the key set every few minutes (decision 110).</summary>
 internal sealed class VerpKeyRotationService(EggMailRuntime runtime) : BackgroundService
 {
-    protected override Task ExecuteAsync(CancellationToken stoppingToken) => runtime.VerpKeys.RunAsync(stoppingToken);
+    protected override Task ExecuteAsync(CancellationToken stoppingToken) => runtime.VerpKeyRotation.RunAsync(stoppingToken);
 }
 
 /// <summary>Retention, rollups and other upkeep of the storage backend, every few minutes.</summary>

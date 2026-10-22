@@ -59,6 +59,12 @@ public class VerpKeyRotationTests
     [PostgresFact]
     public Task A_key_this_ring_cannot_open_leaves_the_codec_as_it_was_on_postgres() => OnPostgresAsync(UnreadableAsync);
 
+    [Fact]
+    public Task The_running_service_rotates_at_once_and_stops_when_cancelled_on_sqlite() => OnSqliteAsync(ServiceAsync);
+
+    [PostgresFact]
+    public Task The_running_service_rotates_at_once_and_stops_when_cancelled_on_postgres() => OnPostgresAsync(ServiceAsync);
+
     private static async Task OnSqliteAsync(Func<HostBackend, VirtualClock, Task> test)
     {
         var clock = new VirtualClock();
@@ -208,6 +214,26 @@ public class VerpKeyRotationTests
 
         await Rotation(backend, codec, clock).RunOnceAsync(default);
         Assert.Equal([0, 1, 3, 15], (await config.GetVerpKeysAsync(default)).Select(k => k.KeyId));
+    }
+
+    private static async Task ServiceAsync(HostBackend backend, VirtualClock clock)
+    {
+        VerpCodec codec = await VerpKeyStore.LoadOrCreateAsync(backend.Storage.Config, Secrets, default, clock);
+        clock.Advance(TimeSpan.FromDays(91));
+        using var cts = new CancellationTokenSource();
+        Task running = Rotation(backend, codec, clock).RunAsync(cts.Token);
+
+        // The first pass does not wait for the interval (10 minutes of real time).
+        DateTime deadline = DateTime.UtcNow.AddSeconds(30);
+        while (codec.KeyIds.Count < 2)   // added and loaded
+        {
+            Assert.True(DateTime.UtcNow < deadline, "the service made no pass at start");
+            await Task.Delay(20);
+        }
+
+        cts.Cancel();
+        await running.WaitAsync(TimeSpan.FromSeconds(10));   // ends without throwing
+        Assert.Equal([1, 2], (await backend.Storage.Config.GetVerpKeysAsync(default)).Select(k => k.KeyId));
     }
 
     private static async Task UnreadableAsync(HostBackend backend, VirtualClock clock)

@@ -81,12 +81,13 @@ public sealed class VerpKeyRotation
         }
     }
 
+    /// <summary>A pass at once (a process restarted more often than the interval still rotates), then one every <see cref="ReloadInterval"/>.</summary>
     public async Task RunAsync(CancellationToken ct)
     {
         using var timer = new PeriodicTimer(ReloadInterval);
         try
         {
-            while (await timer.WaitForNextTickAsync(ct).ConfigureAwait(false))
+            do
             {
                 try
                 {
@@ -97,6 +98,7 @@ public sealed class VerpKeyRotation
                     _log?.Write(MtaLogLevel.Warning, "verp", "the VERP key rotation failed; the keys in use stay as they are and it is tried again in " + ReloadInterval.TotalMinutes + " minutes", ex);
                 }
             }
+            while (await timer.WaitForNextTickAsync(ct).ConfigureAwait(false));
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
