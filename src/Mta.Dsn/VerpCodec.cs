@@ -84,7 +84,7 @@ public sealed class VerpCodec
             throw new ArgumentException("The active key must exist, be at least 16 bytes and have an id in 0..15.");
         }
 
-        return new KeySet(keys, activeKeyId);
+        return new KeySet(new Dictionary<int, byte[]>(keys), activeKeyId);   // a copy: a caller that changes its dictionary later does not change the set in use
     }
 
     /// <summary>The ids of every key in the ring (the active key and the retired ones whose tokens may still be in flight): what a verifier of a derived secret (<see cref="DeriveKey"/>) tries in turn.</summary>

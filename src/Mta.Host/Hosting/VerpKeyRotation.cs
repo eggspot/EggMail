@@ -10,7 +10,8 @@ namespace Mta.Host.Hosting;
 /// Rotates the VERP signing keys in <c>verp_key</c> and keeps the running codec in step with the table (decision 110). Every <see cref="ReloadInterval"/>, on every replica:
 /// <list type="number">
 /// <item>when the key that signs is <c>Secrets:VerpKeyRotationDays</c> old and no newer key is waiting, one replica (under the lease the first key set is created under) adds a new key
-/// with the next free id that activates <see cref="PendingPeriod"/> later, so every replica has loaded it, and verifies with it, before any of them signs with it;</item>
+/// with the next free id that activates <see cref="PendingPeriod"/> later, so every replica has loaded it, and verifies with it, before any of them signs with it (as long as the
+/// reload interval plus the clock difference between replicas stays under the pending hour: about 50 minutes of skew);</item>
 /// <item>a key that a newer key has replaced for at least <see cref="PendingPeriod"/> is retired (the hour covers replicas whose clocks are behind: none of them finds the old key retired
 /// while the new one is not active yet for it);</item>
 /// <item>a key retired for longer than the retention (<see cref="RetentionFor"/>: the longest an address it signed is accepted, plus a day) is deleted, freeing its id;</item>
@@ -92,6 +93,11 @@ public sealed class VerpKeyRotation
                 try
                 {
                     await RunOnceAsync(ct).ConfigureAwait(false);
+                }
+                catch (InvalidOperationException ex)
+                {
+                    // A key this replica cannot open: it keeps signing with a key the others may delete, so its bounce addresses would stop verifying there.
+                    _log?.Write(MtaLogLevel.Error, "verp", "the VERP keys could not be reloaded; this replica keeps the keys it has, check its Data Protection key ring", ex);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
