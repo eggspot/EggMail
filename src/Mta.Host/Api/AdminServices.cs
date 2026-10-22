@@ -169,8 +169,8 @@ public sealed class AcmeCertificateRequester(ILogger<AcmeCertificateRequester> l
     }
 }
 
-/// <summary>The VERP key ring as the admin API sees it (decision 111): implemented over <c>Hosting.VerpKeyRotation</c> by the process that runs it; absent elsewhere.</summary>
-public interface IVerpKeyRing
+/// <summary>The VERP signing keys as the admin API manages them (decision 111): implemented over <c>Hosting.VerpKeyRotation</c> by the process that runs it; absent elsewhere.</summary>
+public interface IVerpKeyAdmin
 {
     /// <summary>The keys in <c>verp_key</c>, without their key material, with their state now.</summary>
     Task<IReadOnlyList<VerpKeyResponse>> ListAsync(CancellationToken ct);

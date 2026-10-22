@@ -23,13 +23,13 @@ public class ApiVerpKeyTests : IAsyncLifetime
         _f = await ApiFixture.StartAsync(new ApiFixtureOptions
         {
             Sqlite = true,   // a store with a switch state
-            ConfigureServices = services => services.AddSingleton<IVerpKeyRing>(sp =>
+            ConfigureServices = services => services.AddSingleton<IVerpKeyAdmin>(sp =>
             {
                 IStorage storage = sp.GetRequiredService<IStorage>();
                 IClock clock = sp.GetRequiredService<IClock>();
                 ISecretProtector secrets = sp.GetRequiredService<ISecretProtector>();
                 _codec = VerpKeyStore.LoadOrCreateAsync(storage.Config, secrets, default, clock).GetAwaiter().GetResult();
-                return new VerpKeyRing(new VerpKeyRotation(storage.Config, secrets, _codec, clock, 90, 14), storage.Config, clock);
+                return new VerpKeyAdmin(new VerpKeyRotation(storage.Config, secrets, _codec, clock, 90, 14), storage.Config, clock);
             }),
         });
         _admin = await _f.SignedInAsync("root");

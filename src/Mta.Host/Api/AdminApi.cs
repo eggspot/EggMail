@@ -137,7 +137,7 @@ public sealed partial class AdminApi(
     MaintenanceRunner maintenance,
     ApiRuntimeInfo runtime,
     IStoragePressureSource? pressure = null,
-    IVerpKeyRing? verpKeys = null)
+    IVerpKeyAdmin? verpKeys = null)
 {
     private IConfigStore Config => storage.Config;
 
@@ -561,7 +561,7 @@ public sealed partial class AdminApi(
         return ApiResults.Ok(await VerpKeys.ListAsync(context.RequestAborted).ConfigureAwait(false));
     }
 
-    private IVerpKeyRing VerpKeys => verpKeys ?? throw ApiException.NotReady("The VERP keys are not managed by this process.");
+    private IVerpKeyAdmin VerpKeys => verpKeys ?? throw ApiException.NotReady("The VERP keys are not managed by this process.");
 
     /// <summary>
     /// A new VERP key that signs at once, after a leak: the old keys are deleted (<c>revoke</c>, the default: a leaked key stops verifying, and bounces and complaints to

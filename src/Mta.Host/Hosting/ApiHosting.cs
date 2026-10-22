@@ -14,7 +14,7 @@ internal sealed class DeliveryEngineRoutingNotifier(Mta.Delivery.DeliveryEngine 
 }
 
 /// <summary>The admin API's view of the VERP keys (decision 111), over the rotation service of this process.</summary>
-internal sealed class VerpKeyRing(VerpKeyRotation rotation, IConfigStore config, IClock clock) : IVerpKeyRing
+internal sealed class VerpKeyAdmin(VerpKeyRotation rotation, IConfigStore config, IClock clock) : IVerpKeyAdmin
 {
     public async Task<IReadOnlyList<VerpKeyResponse>> ListAsync(CancellationToken ct)
     {
@@ -29,7 +29,7 @@ internal sealed class VerpKeyRing(VerpKeyRotation rotation, IConfigStore config,
         try
         {
             return await rotation.RotateNowAsync(revokeOldKeys, ct).ConfigureAwait(false) is { } r
-                ? new VerpKeyRotationResponse(r.KeyId, r.SignsFrom, r.Retired, r.Deleted, r.AllReplicasBy)
+                ? new VerpKeyRotationResponse(r.KeyId, r.SignsFrom, r.Retired, r.Deleted, r.OtherReplicasBy)
                 : null;
         }
         catch (VerpKeyIdsExhaustedException ex)
@@ -58,7 +58,7 @@ public static class ApiHosting
         }
 
         services.AddSingleton<IRoutingConfigNotifier>(new DeliveryEngineRoutingNotifier(runtime.Delivery));
-        services.AddSingleton<IVerpKeyRing>(new VerpKeyRing(runtime.VerpKeyRotation, runtime.Storage.Config, runtime.Clock));
+        services.AddSingleton<IVerpKeyAdmin>(new VerpKeyAdmin(runtime.VerpKeyRotation, runtime.Storage.Config, runtime.Clock));
         if ((SqliteStoragePressureSource.For(runtime.Storage) ?? PostgresStoragePressureSource.For(runtime.Storage)) is { } pressure)
         {
             services.AddSingleton(pressure);

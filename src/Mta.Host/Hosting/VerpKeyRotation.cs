@@ -206,11 +206,11 @@ public sealed class VerpKeyRotation
                 throw new VerpKeyIdsExhaustedException($"No free VERP key id: all {KeyIdCount} are held by keys that are kept. Revoke the old keys instead of retiring them.");
             }
 
-            // In an order that leaves a key that signs whenever it stops: the retired keys go first when revoked (one may hold the new id), then the new key is added, then the
-            // others are retired or deleted.
+            // In an order that leaves a key that signs whenever it stops: first a waiting key (it signed nothing, and kept it would take over when it activates) and, when revoked,
+            // the retired keys (one may hold the new id); then the new key is added; then the keys that signed are retired or deleted.
             var retired = new List<int>();
             var deleted = new List<int>();
-            foreach (VerpKeyRecord old in keys.Where(k => revokeOldKeys && k.RetiredAt is not null))
+            foreach (VerpKeyRecord old in keys.Where(k => (revokeOldKeys && k.RetiredAt is not null) || (k.RetiredAt is null && k.ActivatesAt > now)))
             {
                 if (await _config.DeleteVerpKeyAsync(old.KeyId, ct).ConfigureAwait(false))
                 {
@@ -228,10 +228,9 @@ public sealed class VerpKeyRotation
                 CryptographicOperations.ZeroMemory(key);
             }
 
-            foreach (VerpKeyRecord old in keys.Where(k => k.RetiredAt is null))
+            foreach (VerpKeyRecord old in keys.Where(k => k.RetiredAt is null && k.ActivatesAt <= now))
             {
-                bool waiting = old.ActivatesAt > now;   // signed nothing; kept, it would take over when it activates
-                if (waiting || revokeOldKeys)
+                if (revokeOldKeys)
                 {
                     if (await _config.DeleteVerpKeyAsync(old.KeyId, ct).ConfigureAwait(false))
                     {
@@ -361,7 +360,7 @@ public sealed class VerpKeyRotation
 }
 
 /// <summary>What <see cref="VerpKeyRotation.RotateNowAsync"/> did: the key that signs now, the keys retired and deleted, and when every replica has loaded the change at the latest.</summary>
-public sealed record VerpKeyRotateNowResult(int KeyId, DateTimeOffset SignsFrom, IReadOnlyList<int> Retired, IReadOnlyList<int> Deleted, DateTimeOffset AllReplicasBy);
+public sealed record VerpKeyRotateNowResult(int KeyId, DateTimeOffset SignsFrom, IReadOnlyList<int> Retired, IReadOnlyList<int> Deleted, DateTimeOffset OtherReplicasBy);
 
 /// <summary>A key is needed but each of the 16 ids a bounce address can name is held by a key that must be kept.</summary>
 public sealed class VerpKeyIdsExhaustedException(string message) : InvalidOperationException(message);

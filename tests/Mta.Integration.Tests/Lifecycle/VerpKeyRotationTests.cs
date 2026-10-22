@@ -83,6 +83,12 @@ public class VerpKeyRotationTests
     [PostgresFact]
     public Task Rotating_at_once_takes_an_id_no_kept_key_holds_on_postgres() => OnPostgresAsync(RotateNowIdsAsync);
 
+    [Fact]
+    public Task Rotating_at_once_while_another_replica_holds_the_key_lease_gives_up_and_changes_nothing_on_sqlite() => OnSqliteAsync(RotateNowLeaseHeldAsync);
+
+    [PostgresFact]
+    public Task Rotating_at_once_while_another_replica_holds_the_key_lease_gives_up_and_changes_nothing_on_postgres() => OnPostgresAsync(RotateNowLeaseHeldAsync);
+
     private static async Task OnSqliteAsync(Func<HostBackend, VirtualClock, Task> test)
     {
         var clock = new VirtualClock();
@@ -286,7 +292,7 @@ public class VerpKeyRotationTests
         Assert.Equal(clock.UtcNow, result.SignsFrom);
         Assert.Empty(result.Retired);
         Assert.Equal([1, 2], result.Deleted.Order());
-        Assert.Equal(clock.UtcNow + VerpKeyRotation.ReloadInterval, result.AllReplicasBy);
+        Assert.Equal(clock.UtcNow + VerpKeyRotation.ReloadInterval, result.OtherReplicasBy);
         VerpKeyRecord only = Assert.Single(await config.GetVerpKeysAsync(default));
         Assert.Equal((3, clock.UtcNow, (DateTimeOffset?)null), (only.KeyId, only.ActivatesAt, only.RetiredAt));
 
@@ -370,5 +376,17 @@ public class VerpKeyRotationTests
         Assert.Equal(2, result!.KeyId);
         Assert.Equal([0, 1], result.Deleted.Order());
         Assert.Equal([2], (await config.GetVerpKeysAsync(default)).Select(k => k.KeyId));
+    }
+
+    private static async Task RotateNowLeaseHeldAsync(HostBackend backend, VirtualClock clock)
+    {
+        IConfigStore config = backend.Storage.Config;
+        VerpCodec codec = await VerpKeyStore.LoadOrCreateAsync(config, Secrets, default, clock);
+        Assert.NotNull(await config.TryAcquireLeaseAsync("verp-keys", "another-replica", TimeSpan.FromMinutes(5), clock.UtcNow, default));
+
+        Assert.Null(await Rotation(backend, codec, clock).RotateNowAsync(revokeOldKeys: true, default));   // the API answers 409
+
+        Assert.Equal([1], (await config.GetVerpKeysAsync(default)).Select(k => k.KeyId));
+        Assert.Equal(1, codec.ActiveKeyId);
     }
 }
