@@ -90,6 +90,8 @@ workflow refuses a stable tag without a non-empty section for that exact version
 
 ### Fixed
 
+- `GET /webhooks/{id}/attempts` returns each attempt's `eventType` (read from the outbox item while retention keeps it; decision 106), so the dashboard's event column fills against a real server. It was always null.
+
 - ACME: a certificate the CA sends for other names, for another key, empty, cut off or already expired is no longer stored (it is a recorded failure and the old certificate keeps serving); a chain in the wrong order is corrected. A rate limit's `Retry-After` lengthens the wait before the next order (at most a day). An account the CA no longer knows is replaced once instead of failing every order. A registration the CA refused (rate limit, wrong external account binding) is reported as the CA's refusal, not as "could not be reached". A refused certificate download is the CA's refusal, not a `NullReferenceException`, and the wait for a finalizing order is bounded (decision 99).
 - ACME with several replicas: replica names were the first 12 hex digits of a version 7 id (a millisecond timestamp), so two replicas started in the same millisecond shared a lease owner; the webhook dispatcher had the same line. A replica whose renewal lease was taken over while its order ran no longer overwrites the other replica's certificate or its renewal row (neither a result nor a failure is written without the lease).
 - A damaged replacement of a certificate row no longer takes the working certificate of the same name out of the served set, and a DNS provider that fails to delete a challenge record in any way no longer turns an issued certificate into a failure.

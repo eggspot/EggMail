@@ -1131,7 +1131,8 @@ internal sealed class MemoryWebhooks(MemoryState s) : IWebhookOutbox
         lock (s.Gate)
         {
             var list = s.WebhookAttempts.Where(a => a.TenantId == tenantId && a.EndpointId == endpointId).OrderByDescending(a => a.Seq).Take(Math.Max(0, max))
-                .Select(a => new WebhookAttemptRecord(a.OutboxId, a.At, a.StatusCode, TimeSpan.FromMilliseconds(a.DurationMs), a.ErrorClass, a.ResponseSnippet)).ToList();
+                .Select(a => new WebhookAttemptRecord(a.OutboxId, a.At, a.StatusCode, TimeSpan.FromMilliseconds(a.DurationMs), a.ErrorClass, a.ResponseSnippet,
+                    s.Outbox.TryGetValue(a.OutboxId, out WebhookOutboxEntity? o) && o.TenantId == tenantId ? o.EventType : null)).ToList();
             return ValueTask.FromResult<IReadOnlyList<WebhookAttemptRecord>>(list);
         }
     }

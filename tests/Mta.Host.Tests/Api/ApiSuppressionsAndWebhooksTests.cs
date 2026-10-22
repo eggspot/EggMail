@@ -372,6 +372,7 @@ public class ApiWebhooksTests : IAsyncLifetime
         JsonElement[] list = attempts.Json.EnumerateArray().ToArray();
         Assert.Equal(2, list.Length);
         Assert.Equal([200, 500], list.Select(a => a.GetProperty("status").GetInt32()));
+        Assert.All(list, a => Assert.Equal("webhook.test", a.GetProperty("eventType").GetString()));   // read from the outbox item (G11)
         JsonElement newest = list[0];
         Assert.Equal(outboxId.ToString("N"), newest.GetProperty("outboxId").GetString());
         Assert.Equal(80, newest.GetProperty("durationMs").GetInt64());
