@@ -63,5 +63,6 @@ public sealed record SqliteStoragePressure(long WriterQueueDepth, TimeSpan Write
         return samples[Math.Max(rank, 1) - 1];
     }
 
-    private static TimeSpan Duration(long stopwatchTicks) => TimeSpan.FromTicks(stopwatchTicks * TimeSpan.TicksPerSecond / Stopwatch.Frequency);
+    // Through double: stopwatch ticks times TimeSpan.TicksPerSecond overflows a long after about 15 minutes where Stopwatch.Frequency is 1 GHz (Linux, macOS).
+    private static TimeSpan Duration(long stopwatchTicks) => TimeSpan.FromSeconds((double)stopwatchTicks / Stopwatch.Frequency);
 }

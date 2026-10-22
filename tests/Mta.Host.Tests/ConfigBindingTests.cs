@@ -368,6 +368,7 @@ public class ConfigBindingTests : IDisposable
     [InlineData("Sqlite:RetentionDeleteBatchSize", "0")]
     [InlineData("Sqlite:StatsFlushInterval", "-00:00:01")]
     [InlineData("Sqlite:PressureQueueDepth", "0")]
+    [InlineData("Sqlite:PressureQueueDepth", "8193")]
     [InlineData("Sqlite:PressureQueueDuration", "-00:00:01")]
     [InlineData("Sqlite:PressureCommitP99", "00:00:00")]
     [InlineData("Sqlite:PressureWindow", "00:00:00")]

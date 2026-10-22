@@ -743,7 +743,7 @@ public static class ConfigLoader
         Require(s.Sqlite.RetentionDeleteBatchSize >= 1, "Sqlite:RetentionDeleteBatchSize must be at least 1.", errors);
         Require(s.Sqlite.StatsFlushInterval >= TimeSpan.Zero, "Sqlite:StatsFlushInterval must not be negative.", errors);
         Require(s.Sqlite.RetentionDeletePause >= TimeSpan.Zero, "Sqlite:RetentionDeletePause must not be negative.", errors);
-        Require(s.Sqlite.PressureQueueDepth >= 1, "Sqlite:PressureQueueDepth must be at least 1.", errors);
+        Require(s.Sqlite.PressureQueueDepth >= 1 && s.Sqlite.PressureQueueDepth <= s.Sqlite.WriterQueueCapacity, $"Sqlite:PressureQueueDepth must be between 1 and the writer queue capacity ({s.Sqlite.WriterQueueCapacity}).", errors);
         Require(s.Sqlite.PressureQueueDuration >= TimeSpan.Zero, "Sqlite:PressureQueueDuration must not be negative.", errors);
         Require(s.Sqlite.PressureCommitP99 > TimeSpan.Zero, "Sqlite:PressureCommitP99 must be positive.", errors);
         Require(s.Sqlite.PressureWindow > TimeSpan.Zero, "Sqlite:PressureWindow must be positive.", errors);

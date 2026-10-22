@@ -9,11 +9,12 @@ import { Chip, Notice } from './ui';
 export function PressureIndicators({ pressure, showLink = true }: { pressure?: Pressure; showLink?: boolean }) {
   if (!pressure) return null;
   const depth = pressure.queueDepthThreshold ?? 1000;
-  const minutes = (pressure.queueThresholdSeconds ?? 300) / 60;
+  const seconds = pressure.queueThresholdSeconds ?? 300;
   const p99 = pressure.commitP99ThresholdMs ?? 100;
   const queueOver = pressure.writerQueueDepth >= depth;
   const commitOver = pressure.commitP99Ms > p99;
-  const duration = minutes === 1 ? '1 minute' : `${formatNumber(minutes)} minutes`;
+  const duration =
+    seconds % 60 !== 0 ? `${formatNumber(seconds)} seconds` : seconds === 60 ? '1 minute' : `${formatNumber(seconds / 60)} minutes`;
   return (
     <section class="card" aria-labelledby="pressure-title" data-testid="pressure">
       <div class="card-head">

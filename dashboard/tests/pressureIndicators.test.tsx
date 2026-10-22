@@ -17,6 +17,11 @@ describe('PressureIndicators', () => {
     expect(screen.getByText(/Threshold: 250 or more for 2 minutes/)).toBeTruthy();
   });
 
+  it('shows a duration that is not whole minutes in seconds', () => {
+    render(<PressureIndicators showLink={false} pressure={{ writerQueueDepth: 1, writerQueueOverThresholdSeconds: 0, commitP99Ms: 1, advisory: false, queueThresholdSeconds: 30 }} />);
+    expect(screen.getByText(/or more for 30 seconds/)).toBeTruthy();
+  });
+
   it('falls back to the default thresholds when the server does not send them', () => {
     render(<PressureIndicators showLink={false} pressure={{ writerQueueDepth: 12, writerQueueOverThresholdSeconds: 0, commitP99Ms: 9, advisory: false }} />);
     expect(screen.getByText('below 1,000')).toBeTruthy();

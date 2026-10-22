@@ -46,6 +46,19 @@ public class SqlitePressureTests : SqliteTestBase
     }
 
     [Fact]
+    public void A_queue_deep_for_an_hour_stays_advisory()
+    {
+        // Regression: the duration was computed as ticks * TicksPerSecond / Frequency, which overflowed after about 922 s at 1 GHz.
+        WriterMetrics m = Metrics();
+        long start = 1000 * Second;
+        m.SetQueueDepth(1500, start);
+
+        SqliteStoragePressure p = Measure(m, 1500, start + (3600 * Second));
+        Assert.Equal(3600, p.WriterQueueOverThreshold.TotalSeconds, 3);
+        Assert.True(p.Advisory);
+    }
+
+    [Fact]
     public void A_dip_below_the_depth_restarts_the_timer()
     {
         WriterMetrics m = Metrics();
