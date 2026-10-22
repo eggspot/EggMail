@@ -7,11 +7,12 @@ namespace Mta.Dsn;
 internal sealed class DerivedRingKeys
 {
     /// <summary>The derived keys of one key set, with the id of the key that signs.</summary>
-    public sealed class Snapshot(VerpCodec.KeySet source, IReadOnlyDictionary<int, byte[]> keys)
+    public sealed class Snapshot(VerpCodec.KeySet source, Dictionary<int, byte[]> keys)
     {
         public VerpCodec.KeySet Source { get; } = source;
 
-        public IReadOnlyDictionary<int, byte[]> Keys { get; } = keys;
+        /// <summary>The concrete type on purpose: a verifier loops over every key, and the dictionary's own enumerator does not allocate.</summary>
+        public Dictionary<int, byte[]> Keys { get; } = keys;
 
         public int ActiveKeyId => Source.ActiveKeyId;
 

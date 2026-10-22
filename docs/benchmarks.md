@@ -141,6 +141,20 @@ Needs the .NET 10 SDK and python3. PostgreSQL rows need either `initdb`, `pg_ctl
 
 **Status: written, never run.** Docker is not used on the development machine and the owner runs the comparison by hand on a quiet Linux host. The EggMail path (provisioning script) was exercised against a locally running server; the Postfix configuration and the KumoMTA policy were written from the documentation of the two projects and will probably need small fixes on the first run (the KumoMTA image tag is not pinned, option names must be checked against the pinned version). Haraka, Stalwart and mox are not included (cut order).
 
+## VERP, SRS and hop marker with a replaceable key set (2026-10-23, decision 110)
+
+`bench/Mta.Benchmarks/Dsn/VerpBenchmarks.cs` (`--filter "*VerpBenchmarks*"`), ring of three keys. Apple M4 laptop, .NET 10.0.401, BenchmarkDotNet `ShortRun` (`MediumRun` for the two verify rows); not a quiet host, so read the times as "no change", not as published figures. Before is `main` at c2eec1c with the same benchmark file.
+
+| Operation | Before | After | Allocated before / after |
+|---|---|---|---|
+| VERP address issued (`CreateLocalPart`, bound) | 628 ns | 618 ns | 544 B / 544 B |
+| VERP address decoded (`TryDecode`) | 326 ns | 322 ns | 0 / 0 |
+| SRS address issued | 391 ns | 359 ns | 568 B / 568 B |
+| SRS address verified (three keys) | 991 ns | 995 ns | 736 B / 736 B |
+| Hop marker verified (three keys) | 1,127 ns | 1,133 ns | 1,376 B / 1,376 B |
+
+The key set is one volatile read per call; the derived SRS and hop-marker keys are a dictionary kept per key set (a first version exposed it as `IReadOnlyDictionary` and its boxed enumerator cost 40 B per verification, caught by this benchmark).
+
 ## CI trend numbers (2026-10-14)
 
 **GitHub-hosted ubuntu-latest 4-core runner, noisy, not publishable.** (The core count is the real one: `nproc` says 4 on this public repository, and the workflow builds the label from `nproc` instead of assuming 2. Ubuntu 24.04, .NET 10.0.13.) The load generator, the server, the counting sink and PostgreSQL 17 in a container all share that machine, and so do the other jobs of its host. One manual run of `bench-throughput` ([run 38511632277](https://github.com/eggspot/EggMail/actions/runs/38511632277), on the code of the PR with the allocation work of decisions 64 to 68), pipeline harness, 2 KB messages, 16 connections, TLS and AUTH on, `History:Mode=Full` unless stated, median of 3 runs (range in brackets):
