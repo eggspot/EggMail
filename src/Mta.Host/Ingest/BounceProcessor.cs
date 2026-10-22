@@ -35,7 +35,8 @@ public enum BounceOutcome
 /// </summary>
 public sealed class BounceProcessor
 {
-    private static readonly TimeSpan MaxTokenAge = TimeSpan.FromDays(14);
+    /// <summary>The longest a bounce address is accepted after it was issued; <see cref="Mta.Host.Hosting.VerpKeyRotation"/> keeps a retired key at least this long.</summary>
+    public static readonly TimeSpan MaxTokenAge = TimeSpan.FromDays(14);
 
     private readonly VerpCodec _verp;
     private readonly IConfigStore _config;

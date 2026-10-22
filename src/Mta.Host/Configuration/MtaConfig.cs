@@ -263,6 +263,12 @@ public sealed class SecretsSection
 
     /// <summary>With <c>KmsProvider=LocalKey</c>: the wrapping key itself (base64 or hex), for platforms that only pass environment variables.</summary>
     public string? KmsKey { get; init; }
+
+    /// <summary>
+    /// Days a VERP signing key (bounce addresses; the SRS and forward hop-marker keys derive from it) signs before a new one replaces it: 0 turns automatic rotation off, otherwise 7 to 365.
+    /// A new key signs an hour after it is created and the old one still verifies until the addresses it signed have expired (<see cref="Mta.Host.Hosting.VerpKeyRotation"/>, decision 110).
+    /// </summary>
+    public int VerpKeyRotationDays { get; init; } = 90;
 }
 
 public sealed class ObservabilitySection

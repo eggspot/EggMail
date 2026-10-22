@@ -194,4 +194,36 @@ public class VerpTests
             codec.TryDecode("b+" + new string(chars), Now, TimeSpan.FromDays(1), out _);
         }
     }
+
+    [Fact]
+    public void Replace_switches_the_signing_key_and_keeps_verifying_with_the_keys_it_is_given()
+    {
+        var codec = Codec();
+        var tenant = Ids.New();
+        var domain = Ids.New();
+        string before = codec.CreateLocalPart(tenant, domain, Now, "example.net");
+
+        byte[] key1 = VerpCodec.GenerateKey();
+        byte[] key2 = VerpCodec.GenerateKey();
+        var ring = new VerpCodec(new Dictionary<int, byte[]> { [1] = key1 }, 1);
+        string fromKey1 = ring.CreateLocalPart(tenant, domain, Now, "example.net");
+
+        ring.Replace(new Dictionary<int, byte[]> { [1] = key1, [2] = key2 }, 2);
+        Assert.Equal(2, ring.ActiveKeyId);
+        Assert.Equal([1, 2], ring.KeyIds.Order());
+        string fromKey2 = ring.CreateLocalPart(tenant, domain, Now, "example.net");
+        Assert.True(ring.TryDecode(fromKey2, Now, TimeSpan.FromDays(14), out var token));
+        Assert.Equal(2, token.KeyId);
+        Assert.Equal(VerpDestinationCheck.Match, ring.CheckDestination(token, "example.net"));
+        Assert.True(ring.TryDecode(fromKey1, Now, TimeSpan.FromDays(14), out token), "a token of the key that stopped signing still verifies");
+        Assert.Equal(VerpDestinationCheck.Match, ring.CheckDestination(token, "example.net"));
+
+        ring.Replace(new Dictionary<int, byte[]> { [2] = key2 }, 2);
+        Assert.False(ring.TryDecode(fromKey1, Now, TimeSpan.FromDays(14), out _), "a pruned key verifies nothing");
+        Assert.False(codec.TryDecode(fromKey2, Now, TimeSpan.FromDays(14), out _));
+        Assert.True(codec.TryDecode(before, Now, TimeSpan.FromDays(14), out _));
+
+        Assert.Throws<ArgumentException>(() => ring.Replace(new Dictionary<int, byte[]> { [2] = key2 }, 3));
+        Assert.Equal(2, ring.ActiveKeyId);   // a refused set leaves the codec as it was
+    }
 }
