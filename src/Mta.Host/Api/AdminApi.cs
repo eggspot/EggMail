@@ -73,7 +73,10 @@ public sealed record AdminStorageStatus(bool Healthy, string? Detail, IReadOnlyL
 
 public sealed record AdminCertificateStatus(string Subject, DateTimeOffset NotAfter, string Source);
 
-public sealed record AdminPressureStatus(long WriterQueueDepth, long WriterQueueOverThresholdSeconds, double CommitP99Ms, bool Advisory);
+public sealed record AdminPressureStatus(long WriterQueueDepth, long WriterQueueOverThresholdSeconds, double CommitP99Ms, bool Advisory,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? QueueDepthThreshold,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? QueueThresholdSeconds,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? CommitP99ThresholdMs);
 
 public sealed record AdminSwitchStatus(string State);
 
@@ -266,7 +269,7 @@ public sealed partial class AdminApi(
             new AdminQueueStatus(queue.Queued + queue.Leased + queue.Deferred, queue.Deferred, queue.OldestDueAt),
             new AdminStorageStatus(health.Ready, detail, health.Warnings.Select(w => new CapabilityWarning(w.Code, w.Message)).ToList()),
             certificates.Where(c => c.Active).Select(c => new AdminCertificateStatus(SubjectOf(c), c.NotAfter, SourceName(c.Source))).ToList(),
-            p is null ? null : new AdminPressureStatus(p.WriterQueueDepth, p.WriterQueueOverThresholdSeconds, p.CommitP99Ms, p.Advisory),
+            p is null ? null : new AdminPressureStatus(p.WriterQueueDepth, p.WriterQueueOverThresholdSeconds, p.CommitP99Ms, p.Advisory, p.QueueDepthThreshold, p.QueueThresholdSeconds, p.CommitP99ThresholdMs),
             new AdminSwitchStatus(sw.State)));
     }
 

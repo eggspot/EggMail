@@ -53,6 +53,9 @@ public sealed class SqliteStorage : IStorage
 
     public StorageBackend Backend => StorageBackend.Sqlite;
 
+    /// <summary>The options this storage was created with (the pressure thresholds the dashboard shows come from here).</summary>
+    public StorageOptions Options => _options;
+
     public HistoryMode HistoryMode => _options.History.Mode;
 
     public IMessageIntake Intake => _queue;

@@ -175,21 +175,24 @@ public interface IStoragePressureSource
     StoragePressure Get();
 }
 
-public sealed record StoragePressure(long WriterQueueDepth, long WriterQueueOverThresholdSeconds, double CommitP99Ms, bool Advisory);
+/// <summary>The figures and the thresholds they are judged against (so the dashboard shows the configured ones, not the defaults).</summary>
+public sealed record StoragePressure(long WriterQueueDepth, long WriterQueueOverThresholdSeconds, double CommitP99Ms, bool Advisory,
+    long? QueueDepthThreshold = null, long? QueueThresholdSeconds = null, double? CommitP99ThresholdMs = null);
 
 /// <summary>
 /// The pressure source of the SQLite backend (decision 108). PostgreSQL has no single writer to measure and registers none, so its
 /// <c>/admin/status</c> leaves <c>pressure</c> out (gap G16 in open-questions.md).
 /// </summary>
-public sealed class SqliteStoragePressureSource(Mta.Storage.Sqlite.SqliteStorage storage) : IStoragePressureSource
+public sealed class SqliteStoragePressureSource(Mta.Storage.Sqlite.SqliteStorage storage, Mta.Storage.SqliteOptions options) : IStoragePressureSource
 {
     /// <summary>The source for <paramref name="storage"/>, or null when its backend does not measure pressure.</summary>
-    public static IStoragePressureSource? For(IStorage storage) => storage is Mta.Storage.Sqlite.SqliteStorage sqlite ? new SqliteStoragePressureSource(sqlite) : null;
+    public static IStoragePressureSource? For(IStorage storage) => storage is Mta.Storage.Sqlite.SqliteStorage sqlite ? new SqliteStoragePressureSource(sqlite, sqlite.Options.Sqlite) : null;
 
     public StoragePressure Get()
     {
         Mta.Storage.Sqlite.SqliteStoragePressure p = storage.GetPressure();
-        return new StoragePressure(p.WriterQueueDepth, (long)p.WriterQueueOverThreshold.TotalSeconds, Math.Round(p.CommitP99.TotalMilliseconds, 1), p.Advisory);
+        return new StoragePressure(p.WriterQueueDepth, (long)p.WriterQueueOverThreshold.TotalSeconds, Math.Round(p.CommitP99.TotalMilliseconds, 1), p.Advisory,
+            options.PressureQueueDepth, (long)options.PressureQueueDuration.TotalSeconds, options.PressureCommitP99.TotalMilliseconds);
     }
 }
 

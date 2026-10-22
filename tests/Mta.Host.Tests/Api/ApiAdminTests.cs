@@ -131,6 +131,7 @@ public class ApiAdminTests : IAsyncLifetime
         Assert.Equal(410, p.GetProperty("writerQueueOverThresholdSeconds").GetInt64());
         Assert.Equal(118.5, p.GetProperty("commitP99Ms").GetDouble());
         Assert.True(p.GetProperty("advisory").GetBoolean());
+        Assert.False(p.TryGetProperty("queueDepthThreshold", out _)); // optional: a source that does not name its thresholds leaves them out
     }
 
     [Fact]
@@ -149,6 +150,9 @@ public class ApiAdminTests : IAsyncLifetime
             Assert.Equal(0, p.GetProperty("writerQueueOverThresholdSeconds").GetInt64());
             Assert.True(p.GetProperty("commitP99Ms").GetDouble() >= 0);
             Assert.False(p.GetProperty("advisory").GetBoolean());
+            Assert.Equal(1000, p.GetProperty("queueDepthThreshold").GetInt64()); // the configured thresholds, for the dashboard's labels
+            Assert.Equal(300, p.GetProperty("queueThresholdSeconds").GetInt64());
+            Assert.Equal(100, p.GetProperty("commitP99ThresholdMs").GetDouble());
         }
         finally
         {

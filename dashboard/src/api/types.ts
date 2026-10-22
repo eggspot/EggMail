@@ -418,8 +418,12 @@ export interface PressureIndicators {
   writerQueueDepth: number;
   writerQueueOverThresholdSeconds: number;
   commitP99Ms: number;
-  /** True when the advisory thresholds (queue over 1,000 for 5 min, p99 over about 100 ms) are exceeded. */
+  /** True when the advisory thresholds (by default queue over 1,000 for 5 min, p99 over 100 ms) are exceeded. */
   advisory: boolean;
+  /** The configured thresholds (`Sqlite:Pressure*`); absent from an older server, which used the defaults. */
+  queueDepthThreshold?: number;
+  queueThresholdSeconds?: number;
+  commitP99ThresholdMs?: number;
 }
 
 /** Renewal state of a certificate requested through ACME (GET /admin/certificates/acme). */
