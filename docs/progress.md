@@ -220,7 +220,7 @@ Legend: **yes** implemented and wired; **partial** implemented with the gap name
 | G11: webhook attempts API returned `eventType` null | read from the outbox item when the log is listed (decision 106), conformance test on all backends | 116 |
 | G15: `docs/api.md` not compared with the mapped routes | Route index in api.md checked in both directions by `ApiDocumentationTests`; three shorthand entries named routes that do not exist | 116 |
 | G2: storage-pressure indicator had no production source | SQLite measures it (commit latency ring and deep-queue timer in the writer, `Sqlite:Pressure*` keys, decision 108); PostgreSQL leaves it out (G16) | 119 |
-| G16: PostgreSQL had no storage-pressure source | the runtime pool is sampled from Npgsql's instruments (waiting callers, connections in use, timeouts; `Storage:Postgres:Pressure*` keys, decision 109); the dashboard shows the pool with its own remedy and no switch link | PRNUM |
+| G16: PostgreSQL had no storage-pressure source | the runtime pool is sampled from Npgsql's instruments (waiting callers, connections in use, timeouts; `Storage:Postgres:Pressure*` keys, decision 109); the dashboard shows the pool with its own remedy and no switch link | 120 |
 
 ### What remains
 
