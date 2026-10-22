@@ -79,6 +79,9 @@ public sealed class SqliteStorage : IStorage
     /// <summary>Writer counters per file (commits, batch sizes, queue depth) for the storage-pressure indicator and tests.</summary>
     public IReadOnlyDictionary<string, WriterMetrics> WriterMetrics => _rt.Writers.ToDictionary(w => w.File.Name, w => w.Metrics);
 
+    /// <summary>The advisory storage-pressure figures right now (decision 108): cheap enough for every dashboard poll, nothing on the writer path.</summary>
+    public SqliteStoragePressure GetPressure() => SqliteStoragePressure.Measure(_rt.Writers.Select(w => (w.PendingCommands, w.Metrics)), _options.Sqlite, System.Diagnostics.Stopwatch.GetTimestamp());
+
     /// <summary>Internals for the SQLite-specific tests (pragmas, writer fault injection).</summary>
     internal SqliteRuntime Runtime => _rt;
 

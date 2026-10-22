@@ -322,7 +322,9 @@ public class ConfigBindingTests : IDisposable
         StorageOptions s = Valid(
             ("Storage:Postgres:PartitionsAheadDays", "14"), ("Storage:Postgres:StatsFlushInterval", "00:00:05"), ("Storage:Postgres:RetentionDeleteBatchSize", "1000"),
             ("Storage:Postgres:RetentionDeletePause", "00:00:00.100"), ("Storage:Postgres:CommandTimeoutSeconds", "60"), ("Storage:Postgres:MaxPoolSize", "12"),
-            ("Sqlite:StatsFlushInterval", "00:00:20"), ("Sqlite:RetentionDeleteBatchSize", "2000"), ("Sqlite:RetentionDeletePause", "00:00:00.050")).Config.Storage;
+            ("Sqlite:StatsFlushInterval", "00:00:20"), ("Sqlite:RetentionDeleteBatchSize", "2000"), ("Sqlite:RetentionDeletePause", "00:00:00.050"),
+            ("Sqlite:PressureQueueDepth", "250"), ("Sqlite:PressureQueueDuration", "00:01:00"), ("Sqlite:PressureCommitP99", "00:00:00.040"),
+            ("Sqlite:PressureWindow", "00:10:00")).Config.Storage;
 
         Assert.Equal(14, s.Postgres.PartitionsAheadDays);
         Assert.Equal(TimeSpan.FromSeconds(5), s.Postgres.StatsFlushInterval);
@@ -333,6 +335,10 @@ public class ConfigBindingTests : IDisposable
         Assert.Equal(TimeSpan.FromSeconds(20), s.Sqlite.StatsFlushInterval);
         Assert.Equal(2000, s.Sqlite.RetentionDeleteBatchSize);
         Assert.Equal(TimeSpan.FromMilliseconds(50), s.Sqlite.RetentionDeletePause);
+        Assert.Equal(250, s.Sqlite.PressureQueueDepth);
+        Assert.Equal(TimeSpan.FromMinutes(1), s.Sqlite.PressureQueueDuration);
+        Assert.Equal(TimeSpan.FromMilliseconds(40), s.Sqlite.PressureCommitP99);
+        Assert.Equal(TimeSpan.FromMinutes(10), s.Sqlite.PressureWindow);
     }
 
     [Fact]
@@ -347,6 +353,10 @@ public class ConfigBindingTests : IDisposable
         Assert.Equal(d.Postgres.CommandTimeoutSeconds, s.Postgres.CommandTimeoutSeconds);
         Assert.Equal(d.Sqlite.StatsFlushInterval, s.Sqlite.StatsFlushInterval);
         Assert.Equal(d.Sqlite.RetentionDeleteBatchSize, s.Sqlite.RetentionDeleteBatchSize);
+        Assert.Equal(1000, s.Sqlite.PressureQueueDepth); // decision C: over 1,000 for 5 minutes, or p99 commit over about 100 ms
+        Assert.Equal(TimeSpan.FromMinutes(5), s.Sqlite.PressureQueueDuration);
+        Assert.Equal(TimeSpan.FromMilliseconds(100), s.Sqlite.PressureCommitP99);
+        Assert.Equal(TimeSpan.FromMinutes(5), s.Sqlite.PressureWindow);
     }
 
     [Theory]
@@ -357,6 +367,10 @@ public class ConfigBindingTests : IDisposable
     [InlineData("Storage:Postgres:MaxPoolSize", "0")]
     [InlineData("Sqlite:RetentionDeleteBatchSize", "0")]
     [InlineData("Sqlite:StatsFlushInterval", "-00:00:01")]
+    [InlineData("Sqlite:PressureQueueDepth", "0")]
+    [InlineData("Sqlite:PressureQueueDuration", "-00:00:01")]
+    [InlineData("Sqlite:PressureCommitP99", "00:00:00")]
+    [InlineData("Sqlite:PressureWindow", "00:00:00")]
     public void Out_of_range_tuning_knobs_are_reported_at_start_not_when_the_storage_is_created(string key, string value)
     {
         Assert.Contains(Load((key, value)).Errors, e => e.Contains(key, StringComparison.Ordinal));

@@ -132,6 +132,10 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | `Sqlite:StatsFlushInterval` | `00:00:10` | How often the in-memory statistics are written; a crash loses at most this window. `00:00:00` disables the timer |
 | `Sqlite:RetentionDeleteBatchSize` | 5000 | Rows per batched retention `DELETE` |
 | `Sqlite:RetentionDeletePause` | `00:00:00.020` | Pause between those batches so intake stays responsive |
+| `Sqlite:PressureQueueDepth` | 1000 | Writer queue depth (commands waiting for one file's writer) the advisory storage-pressure indicator counts as deep |
+| `Sqlite:PressureQueueDuration` | `00:05:00` | How long a writer queue must stay that deep, without a break, before the indicator says the thresholds are exceeded |
+| `Sqlite:PressureCommitP99` | `00:00:00.100` | p99 commit latency over `Sqlite:PressureWindow` above which the indicator says the thresholds are exceeded (at least 20 commits of one file in the window) |
+| `Sqlite:PressureWindow` | `00:05:00` | How far back the commit p99 looks (at most the last 1,024 commits of each file) |
 | `Storage:Postgres:OwnerConnectionString` | none | Owner role: runs migrations and partition DDL |
 | `Storage:Postgres:RuntimeConnectionString` | none | Runtime role: normal work (required for PostgreSQL). With only one of the two set it serves both roles and health warns |
 | `Storage:Postgres:ReadOnlyConnectionString` | none | Optional read-only role for the read queries of the dashboard and the API (message search, detail, events, statistics); must name a `Username` and point at the primary; the migration grants it `SELECT` on the history and statistics tables only. Without it those queries use the runtime role |

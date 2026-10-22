@@ -133,6 +133,39 @@ public class ApiAdminTests : IAsyncLifetime
         Assert.True(p.GetProperty("advisory").GetBoolean());
     }
 
+    [Fact]
+    public async Task Status_carries_the_pressure_of_a_real_sqlite_storage()
+    {
+        string dir = Directory.CreateTempSubdirectory("eggmail-pressure-").FullName;
+        try
+        {
+            await using var sqlite = Mta.Storage.Sqlite.SqliteStorage.Create(new StorageOptions { Sqlite = new SqliteOptions { DataDirectory = dir, StatsFlushInterval = TimeSpan.Zero } });
+            await sqlite.InitializeAsync(default);
+            IStoragePressureSource source = Assert.IsType<SqliteStoragePressureSource>(SqliteStoragePressureSource.For(sqlite));
+            await using ApiFixture f = await ApiFixture.StartAsync(new ApiFixtureOptions { ConfigureServices = s => s.AddSingleton(source) });
+            ApiClient admin = await f.SignedInAsync("root");
+            JsonElement p = (await admin.GetAsync("/api/v1/admin/status"))["pressure"];
+            Assert.Equal(0, p.GetProperty("writerQueueDepth").GetInt64());
+            Assert.Equal(0, p.GetProperty("writerQueueOverThresholdSeconds").GetInt64());
+            Assert.True(p.GetProperty("commitP99Ms").GetDouble() >= 0);
+            Assert.False(p.GetProperty("advisory").GetBoolean());
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch (IOException) { }
+        }
+    }
+
+    [Fact]
+    public async Task Only_the_sqlite_backend_has_a_pressure_source()
+    {
+        await using var memory = new Mta.Storage.InMemory.InMemoryStorage(new StorageOptions());
+        Assert.Null(SqliteStoragePressureSource.For(memory));
+        var pg = new PostgresOptions { RuntimeConnectionString = "Host=127.0.0.1;Port=1;Database=none;Username=none" };
+        await using var postgres = Mta.Storage.Postgres.PostgresStorage.Create(new StorageOptions { Backend = StorageBackend.Postgres, Postgres = pg });
+        Assert.Null(SqliteStoragePressureSource.For(postgres)); // no single writer to measure: status leaves pressure out (decision 108)
+    }
+
     // Global settings
 
     private static JsonElement Item(Reply r, string key) => r["items"].EnumerateArray().Single(i => i.GetProperty("key").GetString() == key);

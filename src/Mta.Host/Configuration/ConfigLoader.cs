@@ -320,6 +320,10 @@ public static class ConfigLoader
                 StatsFlushInterval = c.GetValue("Sqlite:StatsFlushInterval", d.Sqlite.StatsFlushInterval),
                 RetentionDeleteBatchSize = c.GetValue("Sqlite:RetentionDeleteBatchSize", d.Sqlite.RetentionDeleteBatchSize),
                 RetentionDeletePause = c.GetValue("Sqlite:RetentionDeletePause", d.Sqlite.RetentionDeletePause),
+                PressureQueueDepth = c.GetValue("Sqlite:PressureQueueDepth", d.Sqlite.PressureQueueDepth),
+                PressureQueueDuration = c.GetValue("Sqlite:PressureQueueDuration", d.Sqlite.PressureQueueDuration),
+                PressureCommitP99 = c.GetValue("Sqlite:PressureCommitP99", d.Sqlite.PressureCommitP99),
+                PressureWindow = c.GetValue("Sqlite:PressureWindow", d.Sqlite.PressureWindow),
             },
             Postgres = new PostgresOptions
             {
@@ -739,6 +743,10 @@ public static class ConfigLoader
         Require(s.Sqlite.RetentionDeleteBatchSize >= 1, "Sqlite:RetentionDeleteBatchSize must be at least 1.", errors);
         Require(s.Sqlite.StatsFlushInterval >= TimeSpan.Zero, "Sqlite:StatsFlushInterval must not be negative.", errors);
         Require(s.Sqlite.RetentionDeletePause >= TimeSpan.Zero, "Sqlite:RetentionDeletePause must not be negative.", errors);
+        Require(s.Sqlite.PressureQueueDepth >= 1, "Sqlite:PressureQueueDepth must be at least 1.", errors);
+        Require(s.Sqlite.PressureQueueDuration >= TimeSpan.Zero, "Sqlite:PressureQueueDuration must not be negative.", errors);
+        Require(s.Sqlite.PressureCommitP99 > TimeSpan.Zero, "Sqlite:PressureCommitP99 must be positive.", errors);
+        Require(s.Sqlite.PressureWindow > TimeSpan.Zero, "Sqlite:PressureWindow must be positive.", errors);
     }
 
     /// <summary>The relay from configuration: a combination that cannot work stops the start with a message that says what to set. (The first administrator's name and password are checked when the account is created, see <see cref="Mta.Host.Hosting.FirstAdministrator"/>.)</summary>

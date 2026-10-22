@@ -177,6 +177,22 @@ public interface IStoragePressureSource
 
 public sealed record StoragePressure(long WriterQueueDepth, long WriterQueueOverThresholdSeconds, double CommitP99Ms, bool Advisory);
 
+/// <summary>
+/// The pressure source of the SQLite backend (decision 108). PostgreSQL has no single writer to measure and registers none, so its
+/// <c>/admin/status</c> leaves <c>pressure</c> out (gap G16 in open-questions.md).
+/// </summary>
+public sealed class SqliteStoragePressureSource(Mta.Storage.Sqlite.SqliteStorage storage) : IStoragePressureSource
+{
+    /// <summary>The source for <paramref name="storage"/>, or null when its backend does not measure pressure.</summary>
+    public static IStoragePressureSource? For(IStorage storage) => storage is Mta.Storage.Sqlite.SqliteStorage sqlite ? new SqliteStoragePressureSource(sqlite) : null;
+
+    public StoragePressure Get()
+    {
+        Mta.Storage.Sqlite.SqliteStoragePressure p = storage.GetPressure();
+        return new StoragePressure(p.WriterQueueDepth, (long)p.WriterQueueOverThreshold.TotalSeconds, Math.Round(p.CommitP99.TotalMilliseconds, 1), p.Advisory);
+    }
+}
+
 /// <summary>When this process started (for the uptime in the admin status).</summary>
 public sealed class ApiRuntimeInfo(IClock clock)
 {
