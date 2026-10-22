@@ -29,7 +29,7 @@ public static class ApiHosting
         }
 
         services.AddSingleton<IRoutingConfigNotifier>(new DeliveryEngineRoutingNotifier(runtime.Delivery));
-        if (SqliteStoragePressureSource.For(runtime.Storage) is { } pressure)
+        if ((SqliteStoragePressureSource.For(runtime.Storage) ?? PostgresStoragePressureSource.For(runtime.Storage)) is { } pressure)
         {
             services.AddSingleton(pressure);
         }

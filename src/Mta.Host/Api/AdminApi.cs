@@ -73,10 +73,23 @@ public sealed record AdminStorageStatus(bool Healthy, string? Detail, IReadOnlyL
 
 public sealed record AdminCertificateStatus(string Subject, DateTimeOffset NotAfter, string Source);
 
-public sealed record AdminPressureStatus(long WriterQueueDepth, long WriterQueueOverThresholdSeconds, double CommitP99Ms, bool Advisory,
+/// <summary>The advisory pressure figures: the writer fields on SQLite (decision 108), the pool fields on PostgreSQL (decision 109); null fields are left out.</summary>
+public sealed record AdminPressureStatus(
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? WriterQueueDepth,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? WriterQueueOverThresholdSeconds,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? CommitP99Ms,
+    bool Advisory,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? QueueDepthThreshold,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? QueueThresholdSeconds,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? CommitP99ThresholdMs);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? CommitP99ThresholdMs,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? PoolPendingRequests,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? PoolConnectionsInUse,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? PoolMaxSize,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? PoolWaitingPercent,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? PoolSamples,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? PoolTimeouts,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? PoolWindowSeconds,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? PoolWaitingPercentThreshold);
 
 public sealed record AdminSwitchStatus(string State);
 
@@ -269,7 +282,8 @@ public sealed partial class AdminApi(
             new AdminQueueStatus(queue.Queued + queue.Leased + queue.Deferred, queue.Deferred, queue.OldestDueAt),
             new AdminStorageStatus(health.Ready, detail, health.Warnings.Select(w => new CapabilityWarning(w.Code, w.Message)).ToList()),
             certificates.Where(c => c.Active).Select(c => new AdminCertificateStatus(SubjectOf(c), c.NotAfter, SourceName(c.Source))).ToList(),
-            p is null ? null : new AdminPressureStatus(p.WriterQueueDepth, p.WriterQueueOverThresholdSeconds, p.CommitP99Ms, p.Advisory, p.QueueDepthThreshold, p.QueueThresholdSeconds, p.CommitP99ThresholdMs),
+            p is null ? null : new AdminPressureStatus(p.WriterQueueDepth, p.WriterQueueOverThresholdSeconds, p.CommitP99Ms, p.Advisory, p.QueueDepthThreshold, p.QueueThresholdSeconds, p.CommitP99ThresholdMs,
+                p.PoolPendingRequests, p.PoolConnectionsInUse, p.PoolMaxSize, p.PoolWaitingPercent, p.PoolSamples, p.PoolTimeouts, p.PoolWindowSeconds, p.PoolWaitingPercentThreshold),
             new AdminSwitchStatus(sw.State)));
     }
 

@@ -64,6 +64,9 @@ internal sealed class PostgresRuntime
         }
     }
 
+    /// <summary>The name of the runtime pool (<see cref="Data"/>): Npgsql's pool metrics carry it, and the pressure sampler (decision 109) selects it by it.</summary>
+    public const string RuntimePoolName = "eggmail-runtime";
+
     public StorageOptions Options { get; }
 
     public IClock Clock { get; }
@@ -181,7 +184,7 @@ internal sealed class PostgresRuntime
 
         // The name becomes the "db.client.connection.pool.name" label of Npgsql's pool metrics. Unnamed, Npgsql uses the connection string
         // (host, user, database), which is both long and an information leak in a scrape; two fixed names are bounded and say what they are.
-        return new NpgsqlDataSourceBuilder(builder.ConnectionString) { Name = runtimePool ? "eggmail-runtime" : "eggmail-owner" }.Build();
+        return new NpgsqlDataSourceBuilder(builder.ConnectionString) { Name = runtimePool ? RuntimePoolName : "eggmail-owner" }.Build();
     }
 
     /// <summary>

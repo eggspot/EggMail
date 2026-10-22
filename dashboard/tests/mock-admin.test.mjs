@@ -70,7 +70,7 @@ describe('tenants', () => {
 });
 
 describe('status, settings, certificates', () => {
-  it('reports status from the runtime options with advisory pressure on sqlite only', async () => {
+  it('reports status from the runtime options with writer pressure on sqlite and pool pressure on postgres', async () => {
     await admin({ backend: 'sqlite', history: 'statsonly', warnings: ['sqlite_sync_off'] });
     const s = (await mock.get('/api/v1/admin/status')).data;
     expect(s.backend).toBe('sqlite');
@@ -80,7 +80,9 @@ describe('status, settings, certificates', () => {
     expect(s.switch.state).toBe('none');
     await mock.post('/__mock/config', { backend: 'postgres', warnings: [] });
     const p = (await mock.get('/api/v1/admin/status')).data;
-    expect(p.pressure).toBeUndefined();
+    expect(p.pressure.writerQueueDepth).toBeUndefined();
+    expect(p.pressure.poolMaxSize).toBe(50);
+    expect(p.pressure.advisory).toBe(false);
     expect(p.storage.warnings).toEqual([]);
   });
 

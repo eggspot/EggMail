@@ -340,6 +340,9 @@ public static class ConfigLoader
                 RetentionDeleteBatchSize = c.GetValue("Storage:Postgres:RetentionDeleteBatchSize", d.Postgres.RetentionDeleteBatchSize),
                 RetentionDeletePause = c.GetValue("Storage:Postgres:RetentionDeletePause", d.Postgres.RetentionDeletePause),
                 CommandTimeoutSeconds = c.GetValue("Storage:Postgres:CommandTimeoutSeconds", d.Postgres.CommandTimeoutSeconds),
+                PressureWindow = c.GetValue("Storage:Postgres:PressureWindow", d.Postgres.PressureWindow),
+                PressureSampleInterval = c.GetValue("Storage:Postgres:PressureSampleInterval", d.Postgres.PressureSampleInterval),
+                PressureWaitingPercent = c.GetValue("Storage:Postgres:PressureWaitingPercent", d.Postgres.PressureWaitingPercent),
             },
         };
     }
@@ -740,6 +743,10 @@ public static class ConfigLoader
         Require(pg.RetentionDeleteBatchSize >= 1, "Storage:Postgres:RetentionDeleteBatchSize must be at least 1.", errors);
         Require(pg.RetentionDeletePause >= TimeSpan.Zero, "Storage:Postgres:RetentionDeletePause must not be negative.", errors);
         Require(pg.CommandTimeoutSeconds >= 1, "Storage:Postgres:CommandTimeoutSeconds must be at least 1.", errors);
+        Require(pg.PressureSampleInterval >= TimeSpan.FromSeconds(1), "Storage:Postgres:PressureSampleInterval must be at least 1 second.", errors);
+        Require(pg.PressureWindow >= pg.PressureSampleInterval && pg.PressureWindow.TotalSeconds <= pg.PressureSampleInterval.TotalSeconds * PostgresOptions.MaxPressureSamples,
+            $"Storage:Postgres:PressureWindow must be between one and {PostgresOptions.MaxPressureSamples} times Storage:Postgres:PressureSampleInterval.", errors);
+        Require(pg.PressureWaitingPercent is >= 1 and <= 100, "Storage:Postgres:PressureWaitingPercent must be between 1 and 100.", errors);
         Require(s.Sqlite.RetentionDeleteBatchSize >= 1, "Sqlite:RetentionDeleteBatchSize must be at least 1.", errors);
         Require(s.Sqlite.StatsFlushInterval >= TimeSpan.Zero, "Sqlite:StatsFlushInterval must not be negative.", errors);
         Require(s.Sqlite.RetentionDeletePause >= TimeSpan.Zero, "Sqlite:RetentionDeletePause must not be negative.", errors);
