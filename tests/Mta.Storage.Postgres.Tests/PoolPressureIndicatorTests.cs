@@ -113,6 +113,18 @@ public class PoolPressureMeasureTests
     }
 
     [Fact]
+    public async Task An_interval_so_long_that_4096_of_them_overflow_a_timespan_is_still_judged_without_an_overflow()
+    {
+        var pg = new PostgresOptions
+        {
+            RuntimeConnectionString = "Host=127.0.0.1;Port=1;Database=none;Username=none",
+            PressureSampleInterval = TimeSpan.FromDays(10_000), PressureWindow = TimeSpan.FromDays(20_000),
+        };
+        await using PostgresStorage storage = PostgresStorage.Create(new StorageOptions { Backend = StorageBackend.Postgres, Postgres = pg });
+        Assert.Equal(2, PostgresStoragePressure.SamplesInWindow(pg));
+    }
+
+    [Fact]
     public void An_empty_ring_reports_zeros()
     {
         PostgresStoragePressure p = PostgresStoragePressure.Measure(new PoolSample[60], 0, Defaults, Now);
@@ -200,8 +212,7 @@ public class PostgresStoragePressureTests : PgTestBase
         });
         await PoolPressureSamplerTests.WaitUntilAsync(() => fast.GetPressure()!.Samples >= 1, TimeSpan.FromSeconds(30));
         PostgresStoragePressure p = fast.GetPressure()!;
-        Assert.True(p.MaxPoolSize >= 1); // the eggmail-runtime pools of this process, read through Npgsql's meter
-        Assert.Equal(0, p.Timeouts);
+        Assert.True(p.MaxPoolSize >= 1); // the eggmail-runtime pools of this process (other tests' too), read through Npgsql's meter
     }
 
     [Fact]
