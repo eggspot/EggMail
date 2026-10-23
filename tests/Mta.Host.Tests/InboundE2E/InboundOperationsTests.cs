@@ -46,7 +46,8 @@ public abstract class InboundOperationsTests(LabBackend backend)
         }
 
         string token = lab.BounceLocalPart();
-        Assert.Equal(250, (await lab.SendAsync("", $"{token}@{InboundLab.BounceDomain}", InboundLab.Dsn($"{token}@{InboundLab.BounceDomain}", "gone@dest.example"))).Code);
+        string sent = await lab.MessageIdOfAMessageDeliveredToAsync("gone@dest.example");
+        Assert.Equal(250, (await lab.SendAsync("", $"{token}@{InboundLab.BounceDomain}", InboundLab.Dsn($"{token}@{InboundLab.BounceDomain}", "gone@dest.example", sent))).Code);
         Assert.True(await lab.Storage.Config.IsSuppressedAsync(InboundLab.Acme, "gone@dest.example", default));
 
         Assert.Equal(2, (await lab.MessagesAsync(InboundLab.Acme)).Count);

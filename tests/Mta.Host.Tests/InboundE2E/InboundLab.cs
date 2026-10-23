@@ -441,12 +441,36 @@ internal sealed class InboundLab : IAsyncDisposable
 
     public Mta.Dsn.SrsCodec Srs => new(Runtime.Verp);
 
-    public static string Dsn(string to, string finalRecipient) =>
+    public async Task<string> MessageIdOfAMessageDeliveredToAsync(string recipient)
+    {
+        DateTimeOffset now = Clock.UtcNow;
+        Guid deliveryId = Ids.New(now);
+        string messageIdHeader = $"<{Guid.NewGuid():N}@example.org>";
+        await Storage.Intake.AcceptAsync(new AcceptedMessage
+        {
+            MessageId = Ids.New(now),
+            TenantId = Acme,
+            Source = MessageSource.Api,
+            EnvelopeFrom = EmailAddress.Parse("news@example.org"),
+            Recipients = [new AcceptedRecipient(deliveryId, EmailAddress.Parse(recipient))],
+            Raw = Encoding.ASCII.GetBytes($"Message-ID: {messageIdHeader}\r\nFrom: news@example.org\r\nTo: {recipient}\r\nSubject: News\r\n\r\nbody\r\n"),
+            ReceivedAt = now.Add(DueOnlyAfterTheLabsDeliveryWorkerCouldTakeIt),
+            ExpiresAt = now.AddDays(5),
+            SendingDomain = "example.org",
+            MessageIdHeader = messageIdHeader,
+        }, default);
+        await Storage.Deliveries.RecordAttemptAsync(new DeliveryAttempt { DeliveryId = deliveryId, Outcome = DeliveryOutcome.Delivered, At = now, SmtpCode = 250 }, default);
+        return messageIdHeader;
+    }
+
+    private static readonly TimeSpan DueOnlyAfterTheLabsDeliveryWorkerCouldTakeIt = TimeSpan.FromDays(1);
+
+    public static string Dsn(string to, string finalRecipient, string messageId = "<orig@egg.test>") =>
         $"From: MAILER-DAEMON@remote.example\r\nTo: {to}\r\nSubject: Undelivered Mail Returned to Sender\r\nAuto-Submitted: auto-replied\r\n" +
         "Content-Type: multipart/report; report-type=delivery-status; boundary=\"BB\"\r\n\r\n" +
         "--BB\r\nContent-Type: text/plain\r\n\r\nCould not deliver.\r\n" +
         $"--BB\r\nContent-Type: message/delivery-status\r\n\r\nReporting-MTA: dns; remote.example\r\n\r\nFinal-Recipient: rfc822; {finalRecipient}\r\nAction: failed\r\nStatus: 5.1.1\r\nDiagnostic-Code: smtp; 550 5.1.1 No such user\r\n\r\n" +
-        "--BB\r\nContent-Type: text/rfc822-headers\r\n\r\nMessage-ID: <orig@egg.test>\r\nSubject: x\r\n\r\n--BB--\r\n";
+        $"--BB\r\nContent-Type: text/rfc822-headers\r\n\r\nMessage-ID: {messageId}\r\nSubject: x\r\n\r\n--BB--\r\n";
 
     public static string Message(string from = "Bob <bob@sender.test>", string to = "support@example.org", string subject = "Hello", string body = "Hi there.", string extraHeaders = "") =>
         InboundFixture.Message(from, to, subject, body, extraHeaders);

@@ -193,9 +193,10 @@ public abstract class InboundRelayAndBackscatterTests(LabBackend backend)
 
         string token = lab.BounceLocalPart();
         string address = $"{token}@{InboundLab.BounceDomain}";
+        string sent = await lab.MessageIdOfAMessageDeliveredToAsync("gone@dest.example");
         await using FakeMta mta = await lab.ConnectedAsync();
 
-        Assert.Equal(250, (await mta.SendAsync("", address, InboundLab.Dsn(address, "gone@dest.example"))).Code);
+        Assert.Equal(250, (await mta.SendAsync("", address, InboundLab.Dsn(address, "gone@dest.example", sent))).Code);
         Assert.True(await lab.Storage.Config.IsSuppressedAsync(InboundLab.Acme, "gone@dest.example", default));
         Assert.False(await lab.Storage.Config.IsSuppressedAsync(InboundLab.Globex, "gone@dest.example", default));
         Assert.Empty(await lab.MessagesAsync(InboundLab.Acme));
@@ -227,7 +228,8 @@ public abstract class InboundRelayAndBackscatterTests(LabBackend backend)
 
         string address = $"{lab.BounceLocalPart()}@{InboundLab.BounceDomain}";
         string padding = new string('p', 1_200_000);
-        string dsn = InboundLab.Dsn(address, "gone@dest.example").Replace("--BB--", padding + "\r\n--BB--", StringComparison.Ordinal);
+        string sent = await lab.MessageIdOfAMessageDeliveredToAsync("gone@dest.example");
+        string dsn = InboundLab.Dsn(address, "gone@dest.example", sent).Replace("--BB--", padding + "\r\n--BB--", StringComparison.Ordinal);
 
         Assert.Equal(552, (await lab.SendAsync("stranger@sender.test", address, dsn)).Code);
         Assert.False(await lab.Storage.Config.IsSuppressedAsync(InboundLab.Acme, "gone@dest.example", default));
