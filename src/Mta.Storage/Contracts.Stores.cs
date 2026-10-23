@@ -253,8 +253,10 @@ public interface IHistoryStore
     /// <summary>
     /// Attaches an asynchronous bounce or complaint to the history of the tenant's message whose <c>Message-ID</c> header is
     /// <paramref name="messageIdHeader"/> (angle brackets and case do not matter; the newest message wins if a client reused an id): appends the event and moves the
-    /// message status (<see cref="Logic.MessageStatus.AfterReport"/>). Returns the message id, or null when nothing was attached: history is not recorded
-    /// (<see cref="HistoryMode.StatsOnly"/>), the message is unknown, belongs to another tenant or is past <c>Retention:MetadataDays</c>.
+    /// message status (<see cref="Logic.MessageStatus.AfterReport"/>). When the report names a recipient (<see cref="AsyncReport.Recipient"/>, case does not matter) only a
+    /// message sent to that address qualifies, so a found id confirms that the address was a recipient of the quoted message (decision 112). Returns the message id, or
+    /// null when nothing was attached: history is not recorded (<see cref="HistoryMode.StatsOnly"/>), the message is unknown, belongs to another tenant, is past
+    /// <c>Retention:MetadataDays</c> or was not sent to the named recipient.
     /// </summary>
     ValueTask<Guid?> AttachReportAsync(Guid tenantId, string messageIdHeader, AsyncReport report, CancellationToken cancellationToken);
 }

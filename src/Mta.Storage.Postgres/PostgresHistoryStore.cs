@@ -237,11 +237,13 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore, 
             Guid messageId;
             int recipients;
             string status;
+            string? recipient = string.IsNullOrWhiteSpace(report.Recipient) ? null : report.Recipient.Trim().ToLowerInvariant();
             await using (var find = new NpgsqlCommand(
-                "SELECT day, message_id, recipient_count, status FROM message_index WHERE tenant_id = $1 AND message_id_header = $2 AND ($3::timestamptz IS NULL OR received_at > $3) " +
-                "ORDER BY day DESC, message_id DESC LIMIT 1 FOR UPDATE", c, tx))
+                "SELECT m.day, m.message_id, m.recipient_count, m.status FROM message_index m WHERE m.tenant_id = $1 AND m.message_id_header = $2 AND ($3::timestamptz IS NULL OR m.received_at > $3) " +
+                "AND ($4::text IS NULL OR EXISTS (SELECT 1 FROM message_recipient r WHERE r.day = m.day AND r.message_id = m.message_id AND r.recipient = $4)) " +
+                "ORDER BY m.day DESC, m.message_id DESC LIMIT 1 FOR UPDATE OF m", c, tx))
             {
-                find.Parameters.Uuid(tenantId).Text(key).Time(floor);
+                find.Parameters.Uuid(tenantId).Text(key).Time(floor).Text(recipient);
                 await using NpgsqlDataReader r = await find.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
                 if (!await r.ReadAsync(cancellationToken).ConfigureAwait(false))
                 {

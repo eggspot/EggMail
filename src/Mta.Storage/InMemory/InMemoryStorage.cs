@@ -989,10 +989,12 @@ internal sealed class MemoryHistory(MemoryState s) : IHistoryStore, IMessageReci
         }
 
         DateTimeOffset now = s.Clock.UtcNow;
+        string? recipient = string.IsNullOrWhiteSpace(report.Recipient) ? null : report.Recipient.Trim().ToLowerInvariant();
         lock (s.Gate)
         {
             var m = s.Index.Values
                 .Where(x => x.TenantId == tenantId && x.MessageIdHeader == key && !IsMetadataExpired(x, now))
+                .Where(x => recipient is null || (s.Recipients.TryGetValue(x.MessageId, out var rs) && rs.Contains(recipient)))
                 .OrderByDescending(x => x.Day).ThenByDescending(x => MemoryState.IdText(x.MessageId), StringComparer.Ordinal).FirstOrDefault();
             if (m is null)
             {

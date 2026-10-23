@@ -135,7 +135,12 @@ public sealed class EggMailRuntime : IAsyncDisposable
 
         var throttle = new AuthThrottle(clock, shared: sharedFailures, digestKey: digestKey, log: log);
 
-        var bounces = new BounceProcessor(verp, storage.Config, storage.Stats, new StorageWebhookPublisher(storage), clock, log, history: storage.History);
+        if (BounceProcessor.RetentionWarning(storage.HistoryMode, storageOptions.Retention.MetadataDays) is { } retentionWarning)
+        {
+            log.Write(MtaLogLevel.Warning, "startup", retentionWarning);
+        }
+
+        var bounces = new BounceProcessor(verp, storage.Config, storage.Stats, new StorageWebhookPublisher(storage), clock, log, history: storage.HistoryMode == HistoryMode.Full ? storage.History : null);
         DeliveryEngine? engine = null;
         var handler = new IngestHandler(storage, submission, throttle, new IngestOptions { BounceDomain = config.Delivery.BounceDomain, MaxRecipientsPerMessage = config.Smtp.MaxRecipients }, bounces, onAccepted: () => engine?.Wake(), log);
 
