@@ -132,6 +132,20 @@ public sealed class SqliteOptions
 
     /// <summary>How often the statistics aggregate is flushed to stats.db (design §4.5: about 10 s).</summary>
     public TimeSpan StatsFlushInterval { get; init; } = TimeSpan.FromSeconds(10);
+
+    // Advisory storage-pressure indicator (decision C, decision 108; provisional defaults, calibrate with benchmarks):
+
+    /// <summary>Writer queue depth (commands waiting for one file's writer) that counts as "deep".</summary>
+    public int PressureQueueDepth { get; init; } = 1000;
+
+    /// <summary>How long the queue must stay at or over <see cref="PressureQueueDepth"/> before the indicator turns advisory.</summary>
+    public TimeSpan PressureQueueDuration { get; init; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>p99 commit latency over <see cref="PressureWindow"/> above which the indicator turns advisory.</summary>
+    public TimeSpan PressureCommitP99 { get; init; } = TimeSpan.FromMilliseconds(100);
+
+    /// <summary>How far back the commit latency p99 looks.</summary>
+    public TimeSpan PressureWindow { get; init; } = TimeSpan.FromMinutes(5);
 }
 
 public sealed class PostgresOptions
@@ -177,4 +191,18 @@ public sealed class PostgresOptions
 
     /// <summary>Maximum Npgsql pool size of the read-only connections (design: about 8 for the dashboard).</summary>
     public int ReadOnlyMaxPoolSize { get; init; } = 8;
+
+    // Advisory storage-pressure indicator (decision 109; provisional defaults, calibrate with benchmarks):
+
+    /// <summary>Samples one <see cref="PressureWindow"/> may hold (the sampler's ring is allocated once at that size).</summary>
+    public const int MaxPressureSamples = 4096;
+
+    /// <summary>How far back the runtime pool's samples are judged: at most <see cref="MaxPressureSamples"/> times <see cref="PressureSampleInterval"/>.</summary>
+    public TimeSpan PressureWindow { get; init; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>How often the runtime pool is sampled (waiting callers, connections in use, the limit).</summary>
+    public TimeSpan PressureSampleInterval { get; init; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>Share of the samples in <see cref="PressureWindow"/> that found a caller waiting for a connection, 1 to 100, above which the indicator turns advisory.</summary>
+    public int PressureWaitingPercent { get; init; } = 50;
 }

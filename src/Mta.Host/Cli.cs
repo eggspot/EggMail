@@ -16,14 +16,17 @@ using Mta.Storage;
 
 namespace Mta.Host;
 
-/// <summary>The <c>mta</c> command line: <c>serve</c> (default), <c>--healthcheck</c>, <c>migrate-db</c>, <c>migrate-storage</c>, <c>admin</c>, <c>domains</c>, <c>self-test</c>, <c>--version</c>.</summary>
+/// <summary>The <c>mta</c> command line: <c>serve</c> (default), <c>--healthcheck</c>, <c>migrate-db</c>, <c>migrate-storage</c>, <c>admin</c>, <c>domains</c>, <c>secrets</c>, <c>self-test</c>, <c>--version</c>.</summary>
 internal static class Cli
 {
-    public static async Task<int> RunAsync(string[] args)
+    public static Task<int> RunAsync(string[] args) => RunAsync(args, Console.Out, Console.Error);
+
+    /// <summary>The one-off commands write to <paramref name="output"/> and <paramref name="error"/>; <c>serve</c>, <c>migrate-db</c>, <c>--healthcheck</c> and <c>self-test</c> write to the console.</summary>
+    internal static async Task<int> RunAsync(string[] args, TextWriter output, TextWriter error)
     {
         (string command, string[] rest) = SplitCommand(args);
         // Every command that handles mail, addresses or accounts needs working Unicode; --version, --healthcheck and self-test (which reports it) do not.
-        if (command is "serve" or "migrate-db" or "migrate-storage" or "admin" or "domains" or "secrets" && !UnicodeSelfTest.Enforce(RequiresUnicodeSupport(rest), UnicodeLog(command), Console.Error))
+        if (command is "serve" or "migrate-db" or "migrate-storage" or "admin" or "domains" or "secrets" && !UnicodeSelfTest.Enforce(RequiresUnicodeSupport(rest), UnicodeLog(command), error))
         {
             return UnicodeSelfTest.FailedExitCode;
         }
@@ -31,24 +34,26 @@ internal static class Cli
         switch (command)
         {
             case "--version":
-                Console.WriteLine(typeof(Cli).Assembly.GetName().Version?.ToString(3) ?? "0.0.0");
+                output.WriteLine(typeof(Cli).Assembly.GetName().Version?.ToString(3) ?? "0.0.0");
                 return 0;
             case "--healthcheck":
                 return await HealthCheckAsync(rest).ConfigureAwait(false);
             case "migrate-db":
                 return await MigrateDbAsync(rest).ConfigureAwait(false);
             case "migrate-storage":
-                return await MigrateStorageCommand.RunAsync(rest, Console.Out, Console.Error).ConfigureAwait(false);
+                return await MigrateStorageCommand.RunAsync(rest, output, error).ConfigureAwait(false);
             case "admin":
-                return await AdminCommand.RunAsync(rest, Console.Out, Console.Error).ConfigureAwait(false);
+                return await AdminCommand.RunAsync(rest, output, error).ConfigureAwait(false);
             case "domains":
-                return await DomainsCommand.RunAsync(rest, Console.Out, Console.Error).ConfigureAwait(false);
+                return await DomainsCommand.RunAsync(rest, output, error).ConfigureAwait(false);
+            case "secrets":
+                return await SecretsCommand.RunAsync(rest, output, error).ConfigureAwait(false);
             case "self-test":
                 return SelfTest(rest);
             case "serve":
                 return await ServeAsync(rest).ConfigureAwait(false);
             default:
-                Console.Error.WriteLine($"Unknown command '{command}'. Commands: serve (default), migrate-db, migrate-storage, admin, domains, self-test, --healthcheck, --version.");
+                error.WriteLine($"Unknown command '{command}'. Commands: serve (default), migrate-db, migrate-storage, admin, domains, secrets, self-test, --healthcheck, --version.");
                 return 64;
         }
     }
@@ -291,6 +296,7 @@ internal static class Cli
             builder.Services.AddHostedService<InboundActionService>();
             builder.Services.AddHostedService<CertificateService>();
             builder.Services.AddHostedService<MaintenanceService>();
+            builder.Services.AddHostedService<VerpKeyRotationService>();
             builder.Services.AddHostedService<TlsReportService>();
             builder.Services.AddHostedService<BackupService>();
             builder.Services.AddHostedService<SendingLimitsService>();

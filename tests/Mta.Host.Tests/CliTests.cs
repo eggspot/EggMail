@@ -27,4 +27,18 @@ public class CliTests
         Assert.Equal("--healthcheck", Cli.SplitCommand(["--healthcheck", "--Dashboard:HttpPort=9000"]).Command);
         Assert.Equal("--version", Cli.SplitCommand(["--version"]).Command);
     }
+
+    [Fact]
+    public async Task The_secrets_command_is_dispatched()
+    {
+        // Regression: `mta secrets rewrap` was documented (operations.md) but the command line answered "Unknown command 'secrets'".
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        int code = await Cli.RunAsync(["secrets"], output, error);
+
+        Assert.Equal(64, code);
+        Assert.StartsWith("Usage: mta secrets", error.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("Unknown command", error.ToString(), StringComparison.Ordinal);
+    }
 }

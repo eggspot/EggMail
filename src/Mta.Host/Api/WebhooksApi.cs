@@ -264,7 +264,7 @@ public sealed class WebhooksApi(ApiAuthenticator auth, IStorage storage, ISecret
         var attempts = await storage.Webhooks.GetAttemptsAsync(caller.TenantId, endpoint.Id, limit, context.RequestAborted).ConfigureAwait(false);
         return ApiResults.Ok(attempts.Select(a => new WebhookAttemptResponse(
             ApiJson.Id(a.OutboxId) + "-" + a.At.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture),
-            a.OutboxId, null, a.At, a.StatusCode, (long)a.Duration.TotalMilliseconds, a.ErrorClass, a.ResponseSnippet)).ToList());
+            a.OutboxId, a.EventType, a.At, a.StatusCode, (long)a.Duration.TotalMilliseconds, a.ErrorClass, a.ResponseSnippet)).ToList());
     }
 
     private async Task<IResult> ReplayAsync(HttpContext context, string outboxId)

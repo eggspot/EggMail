@@ -1,8 +1,8 @@
 namespace Mta.Mime;
 
 /// <summary>
-/// Thrown when a header name or value contains CR, LF or NUL (or a name contains characters that are not allowed in
-/// a field name). Header injection is always rejected, never sanitized.
+/// Thrown when a header name or value contains CR, LF, NUL or another control character (tab is allowed in a value), a Unicode line
+/// separator, or a name contains characters that are not allowed in a field name. Header injection is always rejected, never sanitized.
 /// </summary>
 public sealed class HeaderInjectionException : ArgumentException
 {

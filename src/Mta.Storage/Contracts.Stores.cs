@@ -253,14 +253,22 @@ public interface IHistoryStore
     /// <summary>
     /// Attaches an asynchronous bounce or complaint to the history of the tenant's message whose <c>Message-ID</c> header is
     /// <paramref name="messageIdHeader"/> (angle brackets and case do not matter; the newest message wins if a client reused an id): appends the event and moves the
-    /// message status (<see cref="Logic.MessageStatus.AfterReport"/>). Returns the message id, or null when nothing was attached: history is not recorded
-    /// (<see cref="HistoryMode.StatsOnly"/>), the message is unknown, belongs to another tenant or is past <c>Retention:MetadataDays</c>.
+    /// message status (<see cref="Logic.MessageStatus.AfterReport"/>). When the report names a recipient (<see cref="AsyncReport.Recipient"/>, case does not matter) only a
+    /// message sent to that address qualifies, so a found id confirms that the address was a recipient of the quoted message (decision 112). Returns the message id, or
+    /// null when nothing was attached: history is not recorded (<see cref="HistoryMode.StatsOnly"/>), the message is unknown, belongs to another tenant, is past
+    /// <c>Retention:MetadataDays</c> or was not sent to the named recipient.
+    /// <para>With <see cref="AsyncReport.AttemptedWithin"/> the message must also show a delivery attempt (<see cref="Logic.ReportConfirmation.IsAttempt"/>) to the named recipient
+    /// (to any recipient when none is named) recorded inside that window, the hour its bounce address was issued (decision 113); otherwise nothing is attached.</para>
     /// </summary>
     ValueTask<Guid?> AttachReportAsync(Guid tenantId, string messageIdHeader, AsyncReport report, CancellationToken cancellationToken);
 }
 
 /// <summary>The event an asynchronous bounce (<see cref="MessageEventType.Bounced"/>) or complaint (<see cref="MessageEventType.Complained"/>) adds to a message's history.</summary>
-public sealed record AsyncReport(MessageEventType Type, DateTimeOffset At, string? Recipient, int? SmtpCode, string? EnhancedCode, string? Message);
+/// <param name="AttemptedWithin">Not stored: when set, the report is attached only to a message with a delivery attempt to <paramref name="Recipient"/> recorded inside this window (decision 113).</param>
+public sealed record AsyncReport(MessageEventType Type, DateTimeOffset At, string? Recipient, int? SmtpCode, string? EnhancedCode, string? Message, AttemptWindow? AttemptedWithin = null);
+
+/// <summary>A time range, <see cref="From"/> inclusive and <see cref="Until"/> exclusive, in which a delivery attempt must have been recorded (<see cref="AsyncReport.AttemptedWithin"/>).</summary>
+public readonly record struct AttemptWindow(DateTimeOffset From, DateTimeOffset Until);
 
 /// <summary>
 /// Optional capability of an <see cref="IHistoryStore"/>: the recipients of several messages in one call, so list views can show them
@@ -292,13 +300,19 @@ public sealed class WebhookOutboxItem
     public required DateTimeOffset CreatedAt { get; init; }
 }
 
+/// <summary>One webhook delivery attempt.</summary>
+/// <param name="EventType">
+/// The event type of the outbox item, filled in by <see cref="IWebhookOutbox.GetAttemptsAsync"/> (read from the outbox when the log is listed, not
+/// stored in the log; null once retention removed the item). Ignored by <see cref="IWebhookOutbox.CompleteAsync"/>.
+/// </param>
 public sealed record WebhookAttemptRecord(
     Guid OutboxId,
     DateTimeOffset At,
     int? StatusCode,
     TimeSpan Duration,
     string? ErrorClass,
-    string? ResponseSnippet);
+    string? ResponseSnippet,
+    string? EventType = null);
 
 public interface IWebhookOutbox
 {
@@ -307,6 +321,7 @@ public interface IWebhookOutbox
     /// <summary>Records the attempt and either schedules the next one, marks the item delivered, or marks it failed (state change in the same commit).</summary>
     ValueTask CompleteAsync(Guid outboxId, WebhookAttemptRecord attempt, WebhookOutboxState newState, DateTimeOffset? nextAttemptAt, CancellationToken cancellationToken);
 
+    /// <summary>The newest attempts of one endpoint of the tenant, newest first, each with the event type of its outbox item while the item is kept.</summary>
     ValueTask<IReadOnlyList<WebhookAttemptRecord>> GetAttemptsAsync(Guid tenantId, Guid endpointId, int max, CancellationToken cancellationToken);
 
     /// <summary>

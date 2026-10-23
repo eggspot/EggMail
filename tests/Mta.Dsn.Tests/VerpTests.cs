@@ -127,6 +127,24 @@ public class VerpTests
         Assert.True(codec.TryDecode(local.ToUpperInvariant(), Now, TimeSpan.FromDays(1), out _));
     }
 
+    [Theory]
+    [InlineData('k', '\u212A')] // Kelvin sign: char.ToLowerInvariant maps it to 'k' (the fuzz finding)
+    [InlineData('i', '\u0130')] // capital I with dot above and long s: guards, folded to ASCII by some culture or upper-casing rules
+    [InlineData('s', '\u017F')]
+    public void A_non_ascii_look_alike_of_a_base32_letter_is_not_another_spelling_of_the_token(char ascii, char lookAlike)
+    {
+        var codec = Codec();
+        string local = Enumerable.Range(0, 200)
+            .Select(_ => codec.CreateLocalPart(Ids.New(), Ids.New(), Now))
+            .First(l => l.IndexOf(ascii, 2) >= 0);
+        int at = local.IndexOf(ascii, 2);
+        string spoofed = string.Concat(local.AsSpan(0, at), lookAlike.ToString(), local.AsSpan(at + 1));
+
+        Assert.True(codec.TryDecode(local, Now, TimeSpan.FromDays(1), out _));
+        Assert.False(codec.TryDecode(spoofed, Now, TimeSpan.FromDays(1), out var token));
+        Assert.Equal(default, token);
+    }
+
     [Fact]
     public void Tampering_expiry_and_foreign_keys_are_rejected()
     {
@@ -175,5 +193,37 @@ public class VerpTests
             codec.TryDecode(new string(chars), Now, TimeSpan.FromDays(1), out _);
             codec.TryDecode("b+" + new string(chars), Now, TimeSpan.FromDays(1), out _);
         }
+    }
+
+    [Fact]
+    public void Replace_switches_the_signing_key_and_keeps_verifying_with_the_keys_it_is_given()
+    {
+        var codec = Codec();
+        var tenant = Ids.New();
+        var domain = Ids.New();
+        string before = codec.CreateLocalPart(tenant, domain, Now, "example.net");
+
+        byte[] key1 = VerpCodec.GenerateKey();
+        byte[] key2 = VerpCodec.GenerateKey();
+        var ring = new VerpCodec(new Dictionary<int, byte[]> { [1] = key1 }, 1);
+        string fromKey1 = ring.CreateLocalPart(tenant, domain, Now, "example.net");
+
+        ring.Replace(new Dictionary<int, byte[]> { [1] = key1, [2] = key2 }, 2);
+        Assert.Equal(2, ring.ActiveKeyId);
+        Assert.Equal([1, 2], ring.KeyIds.Order());
+        string fromKey2 = ring.CreateLocalPart(tenant, domain, Now, "example.net");
+        Assert.True(ring.TryDecode(fromKey2, Now, TimeSpan.FromDays(14), out var token));
+        Assert.Equal(2, token.KeyId);
+        Assert.Equal(VerpDestinationCheck.Match, ring.CheckDestination(token, "example.net"));
+        Assert.True(ring.TryDecode(fromKey1, Now, TimeSpan.FromDays(14), out token), "a token of the key that stopped signing still verifies");
+        Assert.Equal(VerpDestinationCheck.Match, ring.CheckDestination(token, "example.net"));
+
+        ring.Replace(new Dictionary<int, byte[]> { [2] = key2 }, 2);
+        Assert.False(ring.TryDecode(fromKey1, Now, TimeSpan.FromDays(14), out _), "a pruned key verifies nothing");
+        Assert.False(codec.TryDecode(fromKey2, Now, TimeSpan.FromDays(14), out _));
+        Assert.True(codec.TryDecode(before, Now, TimeSpan.FromDays(14), out _));
+
+        Assert.Throws<ArgumentException>(() => ring.Replace(new Dictionary<int, byte[]> { [2] = key2 }, 3));
+        Assert.Equal(2, ring.ActiveKeyId);   // a refused set leaves the codec as it was
     }
 }

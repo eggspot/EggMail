@@ -79,7 +79,7 @@ public class MigrationTests : PgTestBase
         Assert.Equal(0, await ScalarAsync<long>(
             "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND data_type = 'text' AND collation_name IS DISTINCT FROM 'C' AND table_name <> 'eggmail_schema_version'"));
         Assert.Equal(0, await ScalarAsync<long>(
-            "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND column_name LIKE '%\\_id' AND data_type <> 'uuid' AND column_name NOT IN ('outbox_id', 'chunk_id') AND table_name NOT IN ('eggmail_schema_version')"));
+            "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND column_name LIKE '%\\_id' AND data_type <> 'uuid' AND column_name NOT IN ('outbox_id', 'chunk_id', 'key_id') AND table_name NOT IN ('eggmail_schema_version')"));
     }
 
     [Fact]

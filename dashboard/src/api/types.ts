@@ -414,12 +414,32 @@ export interface CertificateInfo {
   thumbprint?: string;
 }
 
+/**
+ * Advisory storage-pressure figures (GET /admin/status). SQLite sends the writer fields (decision 108),
+ * PostgreSQL the pool fields (decision 109); the other backend's fields are absent.
+ */
 export interface PressureIndicators {
-  writerQueueDepth: number;
-  writerQueueOverThresholdSeconds: number;
-  commitP99Ms: number;
-  /** True when the advisory thresholds (queue over 1,000 for 5 min, p99 over about 100 ms) are exceeded. */
+  writerQueueDepth?: number;
+  writerQueueOverThresholdSeconds?: number;
+  commitP99Ms?: number;
+  /** True when the backend's advisory thresholds are exceeded. */
   advisory: boolean;
+  /** The configured thresholds (`Sqlite:Pressure*`); absent from an older server, which used the defaults. */
+  queueDepthThreshold?: number;
+  queueThresholdSeconds?: number;
+  commitP99ThresholdMs?: number;
+  /** PostgreSQL: callers waiting for a pooled connection right now. */
+  poolPendingRequests?: number;
+  poolConnectionsInUse?: number;
+  poolMaxSize?: number;
+  /** PostgreSQL: share of the samples in the window that found a caller waiting, 0 to 100. */
+  poolWaitingPercent?: number;
+  poolSamples?: number;
+  /** PostgreSQL: connection requests that timed out in the window. */
+  poolTimeouts?: number;
+  poolWindowSeconds?: number;
+  /** PostgreSQL: the configured `Storage:Postgres:PressureWaitingPercent`. */
+  poolWaitingPercentThreshold?: number;
 }
 
 /** Renewal state of a certificate requested through ACME (GET /admin/certificates/acme). */

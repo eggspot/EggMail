@@ -1,4 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
+using Mta.Core;
 
 namespace Mta.Fuzz;
 
@@ -66,4 +67,12 @@ internal static class Guard
             throw new FuzzFindingException(what);
         }
     }
+}
+
+/// <summary>A clock that never moves, so that targets which check time (DKIM expiry, message dates) give the same result on every run.</summary>
+internal sealed class FixedClock(DateTimeOffset now) : IClock
+{
+    public DateTimeOffset UtcNow => now;
+
+    public long Timestamp => now.Ticks;
 }

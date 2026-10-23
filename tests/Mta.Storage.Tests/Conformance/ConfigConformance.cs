@@ -505,6 +505,40 @@ public abstract class ConfigConformance : StorageTestBase
         Assert.Empty(await C.GetDkimKeysAsync(d.Id, Ct));
     }
 
+    [Fact]
+    public async Task Verp_keys_are_added_together_retired_once_and_deleted()
+    {
+        DateTimeOffset now = Clock.UtcNow;
+        Assert.Empty(await C.GetVerpKeysAsync(Ct));
+        await C.AddVerpKeysAsync([new VerpKeyRecord(2, [2, 2], now, now, null), new VerpKeyRecord(1, [1, 1], now.AddDays(-1), now.AddDays(-1), now)], Ct);
+        var keys = await C.GetVerpKeysAsync(Ct);
+        Assert.Equal([1, 2], keys.Select(k => k.KeyId));
+        Assert.Equal<byte[]>([1, 1], keys[0].KeyProtected);
+        Assert.Equal(now.AddDays(-1), keys[0].ActivatesAt);
+        Assert.Equal(now, keys[0].RetiredAt);
+        Assert.Null(keys[1].RetiredAt);
+
+        // A taken id refuses the whole batch: neither key of it is added.
+        await Assert.ThrowsAsync<StorageConflictException>(async () => await C.AddVerpKeysAsync([new VerpKeyRecord(3, [3], now, now, null), new VerpKeyRecord(2, [9], now, now, null)], Ct));
+        Assert.Equal([1, 2], (await C.GetVerpKeysAsync(Ct)).Select(k => k.KeyId));
+        Assert.Equal<byte[]>([2, 2], (await C.GetVerpKeysAsync(Ct))[1].KeyProtected);
+
+        // The first retirement is kept.
+        Assert.True(await C.RetireVerpKeyAsync(2, now.AddHours(1), Ct));
+        Assert.False(await C.RetireVerpKeyAsync(2, now.AddHours(2), Ct));
+        Assert.False(await C.RetireVerpKeyAsync(1, now.AddHours(2), Ct));
+        Assert.False(await C.RetireVerpKeyAsync(7, now, Ct));
+        Assert.Equal(now.AddHours(1), (await C.GetVerpKeysAsync(Ct))[1].RetiredAt);
+
+        Assert.True(await C.DeleteVerpKeyAsync(1, Ct));
+        Assert.False(await C.DeleteVerpKeyAsync(1, Ct));
+        Assert.Equal([2], (await C.GetVerpKeysAsync(Ct)).Select(k => k.KeyId));
+
+        // A deleted id can be taken again.
+        await C.AddVerpKeysAsync([new VerpKeyRecord(1, [5], now, now, null)], Ct);
+        Assert.Equal([1, 2], (await C.GetVerpKeysAsync(Ct)).Select(k => k.KeyId));
+    }
+
     // Suppressions
 
     [Fact]

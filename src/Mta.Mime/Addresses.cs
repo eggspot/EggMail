@@ -110,13 +110,9 @@ public sealed class Mailbox : AddressItem
 
     internal static string FormatPhrase(string name, bool allowUtf8)
     {
-        foreach (char c in name)
-        {
-            if (c is '\r' or '\n' or '\0')
-            {
-                throw new HeaderInjectionException("display name", "display name contains CR, LF or NUL");
-            }
-        }
+        // The same characters as in any other header value: CR, LF, NUL, the other controls except tab, Unicode line separators. Before, only CR,
+        // LF and NUL were refused, and other controls went out inside an encoded word (found by the message-builder fuzz target).
+        HeaderValidator.ValidateValue("display name", name, allowNonAscii: true);
 
         bool ascii = System.Text.Ascii.IsValid(name);
         if (!ascii && !allowUtf8)

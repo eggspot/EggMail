@@ -174,7 +174,7 @@ public static class MessageComposer
                     }
                     catch (Exception ex) when (ex is ArgumentException or MessageBuildException)
                     {
-                        errors.Add("headers", ex is HeaderInjectionException ? $"Header '{Printable(name)}' contains characters that are not allowed (CR, LF or NUL)." : ex.Message);
+                        errors.Add("headers", ex is HeaderInjectionException ? $"Header '{Printable(name)}' contains characters that are not allowed (a control character other than tab, or a line separator)." : ex.Message);
                     }
                 }
             }

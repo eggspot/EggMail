@@ -8,7 +8,7 @@ import { PreflightStep } from '../../components/switch/PreflightStep';
 import { ProgressStep, VerifyStep } from '../../components/switch/RunningSteps';
 import { StartStep } from '../../components/switch/StartStep';
 import { Stepper } from '../../components/switch/Stepper';
-import { PressureIndicators } from '../../components/PressureIndicators';
+import { isPoolPressure, PressureIndicators } from '../../components/PressureIndicators';
 import { Card, Chip, ErrorNotice, Loading, Notice, PageHeader } from '../../components/ui';
 import { useAction, useApi, useDocumentTitle, usePolling } from '../../lib/hooks';
 import { allowedActions, buildRequest, flowReducer, initialForm, initialLocal, isRunning, stateLabel, stateText, stepFor } from '../../lib/switchFlow';
@@ -117,7 +117,8 @@ export default function StorageSwitch(_props: Record<string, unknown>) {
         }
       />
 
-      <PressureIndicators pressure={admin.data?.pressure} showLink={false} />
+      {/* The pool card of PostgreSQL (decision 109) is left out here: a busy pool is never a reason to switch. */}
+      {admin.data?.pressure && !isPoolPressure(admin.data.pressure) && <PressureIndicators pressure={admin.data.pressure} showLink={false} />}
 
       {state === 'rolled_back' && step === 'choose' && (
         <Notice tone="info" title="The last switch was rolled back">

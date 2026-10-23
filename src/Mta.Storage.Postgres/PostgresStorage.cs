@@ -35,6 +35,7 @@ public sealed class PostgresStorage : IStorage
     private EfStorageTransfer? _transfer;
     private IInboundStore? _inbound;
     private readonly PostgresReplicaCoordination _replicas;
+    private PostgresPoolSampler? _pressure;
     private int _initialized;
     private int _disposed;
 
@@ -66,6 +67,9 @@ public sealed class PostgresStorage : IStorage
 
     public StorageBackend Backend => StorageBackend.Postgres;
 
+    /// <summary>The options this storage was created with (the pressure thresholds the dashboard shows come from here).</summary>
+    public StorageOptions Options => _options;
+
     public HistoryMode HistoryMode => _options.History.Mode;
 
     public IMessageIntake Intake => _queue;
@@ -87,6 +91,9 @@ public sealed class PostgresStorage : IStorage
     public IStorageTransfer Transfer => _transfer ?? throw NotInitialized();
 
     public IReplicaCoordination? Replicas => _replicas;
+
+    /// <summary>The advisory storage-pressure figures of the runtime pool (decision 109), or null before <see cref="InitializeAsync"/>: cheap enough for every dashboard poll.</summary>
+    public PostgresStoragePressure? GetPressure() => _pressure?.Measure();
 
     /// <summary>The shared runtime state (data sources, partition manager) for the PostgreSQL-specific tests.</summary>
     internal PostgresRuntime Runtime => _rt;
@@ -150,6 +157,7 @@ public sealed class PostgresStorage : IStorage
         }
 
         _maintenance = new PostgresMaintenance(_rt, _queue, _stats);
+        _pressure = new PostgresPoolSampler(PostgresRuntime.RuntimePoolName, _options.Postgres);
         try
         {
             // A backend switch may have closed this store (a fenced source, a target that is not activated yet); the state is persisted.
@@ -236,6 +244,7 @@ public sealed class PostgresStorage : IStorage
             return;
         }
 
+        _pressure?.Dispose();
         if (_flushCts is not null)
         {
             await _flushCts.CancelAsync().ConfigureAwait(false);

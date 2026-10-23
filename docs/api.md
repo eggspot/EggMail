@@ -70,7 +70,7 @@ Request bodies are limited (JSON: 1 MiB `Api:MaxBodyBytes`, the two sending endp
   "store_attachments": false, "tags": ["welcome"] }
 ```
 
-Response `202`: `{ "id": "<message id>", "status": "queued", "recipients": 1 }` (`recipients` counts distinct addresses). `subject` and at least one of `text`/`html` are required. Validation: the From domain must belong to the tenant and be `verified` (or `temporary_failure`; a subdomain of a registered domain is fine unless it is registered itself), at most 50 recipients in total (`to` + `cc` + `bcc`, `Smtp:MaxRecipients`), total size within `maxMessageBytes` (`413 payload_too_large`), no CR/LF/NUL in subject or headers (rejected, never sanitized), custom headers must not be ones the server owns (`From`, `Sender`, `To`, `Cc`, `Bcc`, `Reply-To`, `Subject`, `Date`, `Message-ID`, MIME and content headers, `Received`, `Return-Path`, `DKIM-Signature`, `Authentication-Results`, ARC, `Resent-*`, `In-Reply-To`, `References`, `X-Mta-*`), attachments are base64, a `content_id` makes the attachment an inline resource. `Bcc` recipients get the message but the header is never written. International addresses are composed with UTF-8 headers and queued as SMTPUTF8. Suppressed recipients are accepted into the response but recorded as `suppressed` when delivery is attempted. `store_attachments` follows the precedence per-send flag, then the tenant setting `Content:StoreAttachments`, then the global default, behind the master switch `Content:AllowAttachmentStorage`. **(addition)** `tags` are validated (at most 10, 1 to 64 characters without control characters; a repeated tag is kept once) and stored with the message's history (`History:Mode=full`; under `statsonly` nothing is stored per message). They are returned by the messages API below and can be searched with `tag`. `/messages/raw` takes no tags.
+Response `202`: `{ "id": "<message id>", "status": "queued", "recipients": 1 }` (`recipients` counts distinct addresses). `subject` and at least one of `text`/`html` are required. Validation: the From domain must belong to the tenant and be `verified` (or `temporary_failure`; a subdomain of a registered domain is fine unless it is registered itself), at most 50 recipients in total (`to` + `cc` + `bcc`, `Smtp:MaxRecipients`), total size within `maxMessageBytes` (`413 payload_too_large`), no CR, LF, NUL or other control character (tab is allowed) in the subject, display names or headers (rejected, never sanitized), custom headers must not be ones the server owns (`From`, `Sender`, `To`, `Cc`, `Bcc`, `Reply-To`, `Subject`, `Date`, `Message-ID`, MIME and content headers, `Received`, `Return-Path`, `DKIM-Signature`, `Authentication-Results`, ARC, `Resent-*`, `In-Reply-To`, `References`, `X-Mta-*`), attachments are base64, a `content_id` makes the attachment an inline resource. `Bcc` recipients get the message but the header is never written. International addresses are composed with UTF-8 headers and queued as SMTPUTF8. Suppressed recipients are accepted into the response but recorded as `suppressed` when delivery is attempted. `store_attachments` follows the precedence per-send flag, then the tenant setting `Content:StoreAttachments`, then the global default, behind the master switch `Content:AllowAttachmentStorage`. **(addition)** `tags` are validated (at most 10, 1 to 64 characters without control characters; a repeated tag is kept once) and stored with the message's history (`History:Mode=full`; under `statsonly` nothing is stored per message). They are returned by the messages API below and can be searched with `tag`. `/messages/raw` takes no tags.
 
 `Idempotency-Key` (per tenant, remembered 24 h; keys that start with `inbound:` or `eggmail-`, in any case, are reserved for the server and answered `400 validation_failed`): the same key with the same body returns the original result (`202` with the original id, header `Idempotent-Replayed: true`, nothing new is queued); the same key with a different body (compared by SHA-256 of the request bytes, and the endpoint) is `409 idempotency_conflict` and nothing is queued. A request that is refused (validation, unverified domain) does not use up the key.
 
@@ -154,15 +154,15 @@ Conventions: wire words are lower-case (`record_only`, `flag`, `reject`; `webhoo
 
 ## Webhooks (`webhooks` scope)
 
-- `GET/POST /webhooks`, `GET/PATCH/DELETE /webhooks/{id}`. Create: `{ "url": "https://...", "event_types": ["message.delivered", ...] }` → `201` with the signing secret once (`secret`, `whsec_...`). **(addition)** Object: `{ id, url, event_types, enabled, disabledReason, disabledAt, createdAt, secretRotationPending, secret? }`. Event types: `message.delivered`, `message.deferred`, `message.bounced`, `message.expired`, `message.suppressed`, `message.complained`, `message.cancelled` **(addition, decision 86)**, `inbound.action.failed` **(decision 97)**, `webhook.endpoint.disabled`, `webhook.test`, or `*` for all. `message.cancelled` has the shape of the other `message.*` events, `data` `{ message_id, delivery_id, from, recipient, attempt, possible_duplicate? }` (`attempt` is the number of attempts made before the cancel, 0 when none; `possible_duplicate: true` when an earlier attempt's outcome was unknown) and is published once per cancelled recipient. `PATCH` takes `url`, `event_types`, `enabled` (re-enabling clears the disabled reason). At most 50 endpoints per tenant (`Api:MaxWebhooksPerTenant`). **(addition)** `message.bounced` and `message.complained` that come from an asynchronous report have `data` `{ message_id, recipient, original_message_id, enhanced_code, response, feedback_type, asynchronous: true }`: `message_id` is this server's id of the message when the report could be attached to it (see `/messages`) and `null` otherwise; `original_message_id` is the `Message-ID` header the report quoted.
+- `GET/POST /webhooks`, `GET/PATCH/DELETE /webhooks/{id}`. Create: `{ "url": "https://...", "event_types": ["message.delivered", ...] }` → `201` with the signing secret once (`secret`, `whsec_...`). **(addition)** Object: `{ id, url, event_types, enabled, disabledReason, disabledAt, createdAt, secretRotationPending, secret? }`. Event types: `message.delivered`, `message.deferred`, `message.bounced`, `message.expired`, `message.suppressed`, `message.complained`, `message.cancelled` **(addition, decision 86)**, `inbound.action.failed` **(decision 97)**, `webhook.endpoint.disabled`, `webhook.test`, or `*` for all. `message.cancelled` has the shape of the other `message.*` events, `data` `{ message_id, delivery_id, from, recipient, attempt, possible_duplicate? }` (`attempt` is the number of attempts made before the cancel, 0 when none; `possible_duplicate: true` when an earlier attempt's outcome was unknown) and is published once per cancelled recipient. `PATCH` takes `url`, `event_types`, `enabled` (re-enabling clears the disabled reason). At most 50 endpoints per tenant (`Api:MaxWebhooksPerTenant`). **(addition)** `message.bounced` and `message.complained` that come from an asynchronous report have `data` `{ message_id, recipient, original_message_id, enhanced_code, response, feedback_type, asynchronous: true }`: `message_id` is this server's id of the message when the report could be attached to it (see `/messages`) and `null` otherwise (with `History:Mode=StatsOnly`, or a bounce address issued before decision 92; otherwise a report is published only when the history confirms its recipient, decisions 112 and 113); `original_message_id` is the `Message-ID` header the report quoted.
 - HTTPS only unless the operator allows http (`Webhooks:AllowHttp`); the SSRF guard refuses localhost, non-public addresses (loopback, private, link-local including `169.254.169.254`, unique-local, multicast) and credentials in the URL at registration, and again for every resolved address at delivery. Internal endpoints need the tenant allowlist (**addition**: tenant setting `Webhooks:AllowedNetworks`, a comma separated CIDR list that **only an administrator can set**, so a tenant cannot lift its own protection).
 - `POST /webhooks/{id}/rotate-secret` returns the endpoint with the new secret; deliveries are signed with the new and the previous secret (at most two) until the old one is removed with **(addition)** `DELETE /webhooks/{id}/previous-secret` (`204`, `404` when no rotation is pending). `POST /webhooks/{id}/test` queues a `webhook.test` event to that endpoint whatever it subscribes to (`202` `{ outboxId, status }`; `409` when the endpoint is disabled).
-- `GET /webhooks/{id}/attempts?limit=` (1 to 200, default 50) → the attempt log, newest first: `[ { id, outboxId, at, status, durationMs, errorClass, snippet } ]` (status null on a network error, snippet ≤ 1 KB).
+- `GET /webhooks/{id}/attempts?limit=` (1 to 200, default 50) → the attempt log, newest first: `[ { id, outboxId, eventType?, at, status, durationMs, errorClass, snippet } ]` (status null on a network error, snippet ≤ 1 KB). **(addition)** `eventType` is the event type of the outbox item, read from the outbox when the log is listed; it is omitted once retention has deleted the item (`Retention:WebhookOutboxDays`, finished items only), so keep that at least as long as `Retention:WebhookAttemptLogDays`.
 - `POST /webhook-events/{outboxId}/replay` re-queues a finished or failed delivery of the tenant (`202` `{ outboxId, status }`; `404` for a pending, unknown or foreign one).
 
 ## Credentials (`keys` scope)
 
-`GET/POST/DELETE /api-keys` (create returns the key once as `key`; **(addition)** object `{ id, name, prefix, scopes, createdAt, lastUsedAt, key? }`; `DELETE` revokes, revoked keys are no longer listed; a key can only create keys with scopes it has itself; at most 100 active keys per tenant, `Api:MaxApiKeysPerTenant`) and `GET/POST/DELETE /smtp-credentials` (SMTP AUTH users for this tenant; creating one needs the `send` scope as well as `keys`, because the credential can send mail; create takes `{ "username": "..." }` (3 to 64 of `A-Za-z0-9._@-`, unique on the server) and returns a generated password once as `password`; object `{ id, username, createdAt, enabled, password? }`; at most 100 per tenant, `Api:MaxSmtpCredentialsPerTenant`). Both lists are bare arrays.
+`GET/POST /api-keys`, `DELETE /api-keys/{id}` (create returns the key once as `key`; **(addition)** object `{ id, name, prefix, scopes, createdAt, lastUsedAt, key? }`; `DELETE` revokes, revoked keys are no longer listed; a key can only create keys with scopes it has itself; at most 100 active keys per tenant, `Api:MaxApiKeysPerTenant`) and `GET/POST /smtp-credentials`, `DELETE /smtp-credentials/{id}` (SMTP AUTH users for this tenant; creating one needs the `send` scope as well as `keys`, because the credential can send mail; create takes `{ "username": "..." }` (3 to 64 of `A-Za-z0-9._@-`, unique on the server) and returns a generated password once as `password`; object `{ id, username, createdAt, enabled, password? }`; at most 100 per tenant, `Api:MaxSmtpCredentialsPerTenant`). Both lists are bare arrays.
 
 ## Statistics (`read` scope)
 
@@ -175,10 +175,11 @@ Conventions: wire words are lower-case (`record_only`, `flag`, `reject`; `webhoo
 
 ## Admin (role `admin`)
 
-- `GET/POST/PATCH /admin/tenants`: **(addition)** tenant `{ id, name, slug, status: "active"|"suspended", createdAt, storeAttachments }`; `POST { name }` creates an active tenant with a unique slug; `PATCH { name?, status? }`. Suspending stops the tenant's keys, sessions and sending at once.
-- `GET /admin/status` → **(addition)** `{ version, backend, historyMode, uptimeSeconds, queue: { depth, deferred, oldestDueAt }, storage: { healthy, detail, warnings }, certificates: [{ subject, notAfter, source }], pressure?, switch: { state } }`. `pressure` (`writerQueueDepth`, `writerQueueOverThresholdSeconds`, `commitP99Ms`, `advisory`) is advisory only (decision C) and present when the backend measures it.
+- `GET/POST /admin/tenants`, `PATCH /admin/tenants/{id}`: **(addition)** tenant `{ id, name, slug, status: "active"|"suspended", createdAt, storeAttachments }`; `POST { name }` creates an active tenant with a unique slug; `PATCH { name?, status? }`. Suspending stops the tenant's keys, sessions and sending at once.
+- `GET /admin/status` → **(addition)** `{ version, backend, historyMode, uptimeSeconds, queue: { depth, deferred, oldestDueAt }, storage: { healthy, detail, warnings }, certificates: [{ subject, notAfter, source }], pressure?, switch: { state } }`. `pressure` is advisory only (decision C) and present when the backend measures it, with `advisory` and the fields of that backend; the other backend's fields are left out. SQLite (decision 108): `writerQueueDepth`, `writerQueueOverThresholdSeconds`, `commitP99Ms` and the thresholds they are judged against, `queueDepthThreshold`, `queueThresholdSeconds`, `commitP99ThresholdMs`. PostgreSQL (decision 109), the runtime connection pool of this process: `poolPendingRequests` (callers waiting now), `poolConnectionsInUse`, `poolMaxSize`, `poolWaitingPercent` (share of the samples in the window that found a caller waiting), `poolSamples`, `poolTimeouts` (requests that timed out waiting, in the window), `poolWindowSeconds`, `poolWaitingPercentThreshold`. The in-memory backend reports none.
 - `GET /admin/certificates` → `[ { id, name, subject, issuer, san, notBefore, notAfter, source: "acme"|"upload"|"self_signed", active, thumbprint } ]`. `POST /admin/certificates` uploads `{ certificatePem, privateKeyPem }` (leaf first, chain allowed, unencrypted key) or `{ pfxBase64, pfxPassword }` (`201`); the key must belong to the certificate, which must be currently valid; the private key is stored protected; the same certificate twice is `409`; an upload deactivates the first-run self-signed certificate. `POST /admin/certificates/acme` `{ "domains": [...] }` (1 to 10 names, `*.` wildcards allowed) starts an order in the background (`202` `{ status: "pending", message }`; `409` while one runs; `503 not_ready` when ACME is not configured). **(addition)** `GET /admin/certificates/acme` lists the renewal state (`certificateName, status, lastAttemptAt, nextAttemptAt, failures, lastError`); certificates requested this way are renewed with the configured one.
 - `POST /admin/maintenance/run` starts the storage maintenance in the background (`202` `{ status: "started"|"running" }`); **(addition)** `GET /admin/maintenance` → `{ running, startedAt, finishedAt, error, reports: [{ job, durationMs, rowsAffected, detail }] }`.
+- **(addition)** VERP keys (decision 111): `GET /admin/verp-keys` → `[ { keyId, state: "signing"|"pending"|"replaced"|"retired", createdAt, activatesAt, retiredAt } ]` (never the key material; `replaced`: a newer key signs and this one is retired an hour after it took over; the first key of an installation shows `activatesAt` `1970-01-01T00:00:00Z`). `POST /admin/verp-keys/rotate` `{ "oldKeys": "revoke"|"retire" }` (`{}` means `revoke`) rotates at once, for a leaked key: a new key with an id no kept key holds signs from now on, a key waiting to sign is deleted, and the other keys are deleted (`revoke`: they verify nothing more, so a leaked key stops working, and bounces, complaints and SRS bounces to addresses they signed are refused from then on) or retired (`retire`: they still verify what they signed until it expires). → `200 { keyId, signsFrom, retiredKeyIds, deletedKeyIds, otherReplicasBy }`: this process signs with the new key at once, other replicas on the same database by `otherReplicasBy` (their next reload, at most 10 minutes; until then they still accept the old keys, sign with the old key and refuse bounces to the new one; restart them to apply it sooner). `409 conflict` while a backend switch holds the store (anything but an active store or a draining source), while another replica changes the keys, or when `retire` finds no free key id; `503 not_ready` in a process that does not run the keys.
 - Backend switch (decision 14, design §4.6), never automatic: `POST /admin/storage/switch/preflight` `{ "to": "postgres"|"sqlite", "target": {...}, "include": ["queue","history"], "mode": "drain"|"quiesce" }`, `POST .../start` (adds `exportPassphrase`, at least 12 characters, and `confirmation`, the phrase `switch to <postgres|sqlite>`), `GET /admin/storage/switch` (state, progress, report; states: `none`, `draining`, `quiescing`, `fenced`, `exporting`, `importing`, `verifying`, `verified`, `confirmed`, `active`, `finalized`, `rolled_back`, `failed`; `orchestratorManaged` is known from the start, `cutoverPatch` is created by `activate` with `kind` `patch` or `bootstrap`), `POST .../confirm`, `.../activate`, `.../rollback`, `.../finalize`. The API validates the request and delegates to the switch engine (`IStorageSwitchService`); the same engine backs `mta migrate-storage`. `IStorageSwitchService` is implemented over `IStorageSwitchEngine` (`Mta.Storage.Portability`, see [components/switch.md](components/switch.md)). Without a configured target status reads `{ state: "none", available: false }` and every operation answers `503 not_ready`. While a switch drains, quiesces or fences the instance, mail submission answers `503` with `Retry-After` (`SwitchRuntimeState.AcceptingApi`) and the banner is shown (`SwitchRuntimeState.Banner`). The shapes of the request and of the responses (`PreflightReport`, `SwitchStatus`) are those of [components/dashboard.md](components/dashboard.md) item 13; a step in the wrong state is `409 conflict`.
 
 ### Relay routes and TLS policies (role `admin`, **addition**)
@@ -223,6 +224,113 @@ Accounts that sign in to the dashboard (`POST /session`) are managed while the s
 ## Operational endpoints (no `/api/v1` prefix)
 
 `GET /healthz` (liveness, always cheap), `GET /readyz` (readiness; `503` with `Retry-After` when the storage backend is down; response `{ status, warnings }`, internals are never included), `GET /metrics` (Prometheus text exposition of the `Mta.*` meters, answered only to loopback and private networks (`Api:MetricsAllowedNetworks`) and never to a request that carries `X-Forwarded-For`/`Forwarded`; `404` when switched off).
+
+## Route index
+
+Every route the server maps, one row per method (the paths under `/api/v1` and the operational endpoints). `tests/Mta.Host.Tests/Api/ApiDocumentationTests.cs` compares this table with the server's endpoint table in both directions, parameter names included: a new route must be added here and described in its section.
+
+| Method | Path | Section |
+|---|---|---|
+| `GET` | `/api/v1/admin/certificates` | [Admin](#admin-role-admin) |
+| `POST` | `/api/v1/admin/certificates` | [Admin](#admin-role-admin) |
+| `GET` | `/api/v1/admin/certificates/acme` | [Admin](#admin-role-admin) |
+| `POST` | `/api/v1/admin/certificates/acme` | [Admin](#admin-role-admin) |
+| `GET` | `/api/v1/admin/maintenance` | [Admin](#admin-role-admin) |
+| `POST` | `/api/v1/admin/maintenance/run` | [Admin](#admin-role-admin) |
+| `GET` | `/api/v1/admin/relay-routes` | [Relay routes and TLS policies](#relay-routes-and-tls-policies-role-admin-addition) |
+| `POST` | `/api/v1/admin/relay-routes` | [Relay routes and TLS policies](#relay-routes-and-tls-policies-role-admin-addition) |
+| `GET` | `/api/v1/admin/relay-routes/{id}` | [Relay routes and TLS policies](#relay-routes-and-tls-policies-role-admin-addition) |
+| `PATCH` | `/api/v1/admin/relay-routes/{id}` | [Relay routes and TLS policies](#relay-routes-and-tls-policies-role-admin-addition) |
+| `DELETE` | `/api/v1/admin/relay-routes/{id}` | [Relay routes and TLS policies](#relay-routes-and-tls-policies-role-admin-addition) |
+| `GET` | `/api/v1/admin/settings` | [Settings](#settings) |
+| `PUT` | `/api/v1/admin/settings` | [Settings](#settings) |
+| `GET` | `/api/v1/admin/status` | [Admin](#admin-role-admin) |
+| `GET` | `/api/v1/admin/storage/switch` | [Admin](#admin-role-admin) |
+| `POST` | `/api/v1/admin/storage/switch/activate` | [Admin](#admin-role-admin) |
+| `POST` | `/api/v1/admin/storage/switch/confirm` | [Admin](#admin-role-admin) |
+| `POST` | `/api/v1/admin/storage/switch/finalize` | [Admin](#admin-role-admin) |
+| `POST` | `/api/v1/admin/storage/switch/preflight` | [Admin](#admin-role-admin) |
+| `POST` | `/api/v1/admin/storage/switch/rollback` | [Admin](#admin-role-admin) |
+| `POST` | `/api/v1/admin/storage/switch/start` | [Admin](#admin-role-admin) |
+| `GET` | `/api/v1/admin/tenants` | [Admin](#admin-role-admin) |
+| `POST` | `/api/v1/admin/tenants` | [Admin](#admin-role-admin) |
+| `PATCH` | `/api/v1/admin/tenants/{id}` | [Admin](#admin-role-admin) |
+| `GET` | `/api/v1/admin/tls-policies` | [Relay routes and TLS policies](#relay-routes-and-tls-policies-role-admin-addition) |
+| `POST` | `/api/v1/admin/tls-policies` | [Relay routes and TLS policies](#relay-routes-and-tls-policies-role-admin-addition) |
+| `GET` | `/api/v1/admin/tls-policies/{id}` | [Relay routes and TLS policies](#relay-routes-and-tls-policies-role-admin-addition) |
+| `PATCH` | `/api/v1/admin/tls-policies/{id}` | [Relay routes and TLS policies](#relay-routes-and-tls-policies-role-admin-addition) |
+| `DELETE` | `/api/v1/admin/tls-policies/{id}` | [Relay routes and TLS policies](#relay-routes-and-tls-policies-role-admin-addition) |
+| `GET` | `/api/v1/admin/users` | [Dashboard users](#dashboard-users-role-admin-addition) |
+| `POST` | `/api/v1/admin/users` | [Dashboard users](#dashboard-users-role-admin-addition) |
+| `GET` | `/api/v1/admin/users/{id}` | [Dashboard users](#dashboard-users-role-admin-addition) |
+| `PATCH` | `/api/v1/admin/users/{id}` | [Dashboard users](#dashboard-users-role-admin-addition) |
+| `DELETE` | `/api/v1/admin/users/{id}` | [Dashboard users](#dashboard-users-role-admin-addition) |
+| `POST` | `/api/v1/admin/users/{id}/reset-password` | [Dashboard users](#dashboard-users-role-admin-addition) |
+| `GET` | `/api/v1/admin/verp-keys` | [Admin](#admin-role-admin) |
+| `POST` | `/api/v1/admin/verp-keys/rotate` | [Admin](#admin-role-admin) |
+| `GET` | `/api/v1/api-keys` | [Credentials](#credentials-keys-scope) |
+| `POST` | `/api/v1/api-keys` | [Credentials](#credentials-keys-scope) |
+| `DELETE` | `/api/v1/api-keys/{id}` | [Credentials](#credentials-keys-scope) |
+| `GET` | `/api/v1/capabilities` | [Capabilities](#capabilities) |
+| `GET` | `/api/v1/domains` | [Domains](#domains-domains-scope) |
+| `POST` | `/api/v1/domains` | [Domains](#domains-domains-scope) |
+| `GET` | `/api/v1/domains/{id}` | [Domains](#domains-domains-scope) |
+| `DELETE` | `/api/v1/domains/{id}` | [Domains](#domains-domains-scope) |
+| `POST` | `/api/v1/domains/{id}/dkim/rotate` | [Domains](#domains-domains-scope) |
+| `DELETE` | `/api/v1/domains/{id}/dkim/rotate` | [Domains](#domains-domains-scope) |
+| `GET` | `/api/v1/domains/{id}/inbound` | [Inbound mail](#inbound-mail-inboundread-and-inboundwrite-scopes) |
+| `PATCH` | `/api/v1/domains/{id}/inbound` | [Inbound mail](#inbound-mail-inboundread-and-inboundwrite-scopes) |
+| `GET` | `/api/v1/domains/{id}/inbound/routes` | [Inbound mail](#inbound-mail-inboundread-and-inboundwrite-scopes) |
+| `POST` | `/api/v1/domains/{id}/inbound/routes` | [Inbound mail](#inbound-mail-inboundread-and-inboundwrite-scopes) |
+| `GET` | `/api/v1/domains/{id}/inbound/routes/match` | [Inbound mail](#inbound-mail-inboundread-and-inboundwrite-scopes) |
+| `GET` | `/api/v1/domains/{id}/inbound/routes/{routeId}` | [Inbound mail](#inbound-mail-inboundread-and-inboundwrite-scopes) |
+| `PATCH` | `/api/v1/domains/{id}/inbound/routes/{routeId}` | [Inbound mail](#inbound-mail-inboundread-and-inboundwrite-scopes) |
+| `DELETE` | `/api/v1/domains/{id}/inbound/routes/{routeId}` | [Inbound mail](#inbound-mail-inboundread-and-inboundwrite-scopes) |
+| `GET` | `/api/v1/domains/{id}/records` | [Domains](#domains-domains-scope) |
+| `POST` | `/api/v1/domains/{id}/verify` | [Domains](#domains-domains-scope) |
+| `GET` | `/api/v1/inbound/messages` | [Inbound mail](#inbound-mail-inboundread-and-inboundwrite-scopes) |
+| `DELETE` | `/api/v1/inbound/messages` | [Inbound mail](#inbound-mail-inboundread-and-inboundwrite-scopes) |
+| `GET` | `/api/v1/inbound/messages/{id}` | [Inbound mail](#inbound-mail-inboundread-and-inboundwrite-scopes) |
+| `DELETE` | `/api/v1/inbound/messages/{id}` | [Inbound mail](#inbound-mail-inboundread-and-inboundwrite-scopes) |
+| `GET` | `/api/v1/inbound/messages/{id}/attachments/{index}` | [Inbound mail](#inbound-mail-inboundread-and-inboundwrite-scopes) |
+| `GET` | `/api/v1/inbound/messages/{id}/raw` | [Inbound mail](#inbound-mail-inboundread-and-inboundwrite-scopes) |
+| `POST` | `/api/v1/inbound/messages/{id}/retry` | [Inbound mail](#inbound-mail-inboundread-and-inboundwrite-scopes) |
+| `GET` | `/api/v1/inbound/usage` | [Inbound mail](#inbound-mail-inboundread-and-inboundwrite-scopes) |
+| `GET` | `/api/v1/me` | [Authentication](#authentication) |
+| `POST` | `/api/v1/me/password` | [Authentication](#authentication) |
+| `GET` | `/api/v1/messages` | [Messages](#messages-read-scope-per-message-history-historymodefull) |
+| `POST` | `/api/v1/messages` | [Sending](#sending) |
+| `POST` | `/api/v1/messages/raw` | [Sending](#sending) |
+| `GET` | `/api/v1/messages/{id}` | [Messages](#messages-read-scope-per-message-history-historymodefull) |
+| `POST` | `/api/v1/messages/{id}/cancel` | [Messages](#messages-read-scope-per-message-history-historymodefull) |
+| `GET` | `/api/v1/messages/{id}/content` | [Messages](#messages-read-scope-per-message-history-historymodefull) |
+| `GET` | `/api/v1/messages/{id}/events` | [Messages](#messages-read-scope-per-message-history-historymodefull) |
+| `POST` | `/api/v1/messages/{id}/resend` | [Messages](#messages-read-scope-per-message-history-historymodefull) |
+| `POST` | `/api/v1/session` | [Authentication](#authentication) |
+| `DELETE` | `/api/v1/session` | [Authentication](#authentication) |
+| `GET` | `/api/v1/settings` | [Settings](#settings) |
+| `PUT` | `/api/v1/settings` | [Settings](#settings) |
+| `GET` | `/api/v1/smtp-credentials` | [Credentials](#credentials-keys-scope) |
+| `POST` | `/api/v1/smtp-credentials` | [Credentials](#credentials-keys-scope) |
+| `DELETE` | `/api/v1/smtp-credentials/{id}` | [Credentials](#credentials-keys-scope) |
+| `GET` | `/api/v1/stats` | [Statistics](#statistics-read-scope) |
+| `GET` | `/api/v1/stats/recent-events` | [Statistics](#statistics-read-scope) |
+| `GET` | `/api/v1/suppressions` | [Suppressions](#suppressions-suppressions-scope) |
+| `POST` | `/api/v1/suppressions` | [Suppressions](#suppressions-suppressions-scope) |
+| `DELETE` | `/api/v1/suppressions/{address}` | [Suppressions](#suppressions-suppressions-scope) |
+| `POST` | `/api/v1/webhook-events/{outboxId}/replay` | [Webhooks](#webhooks-webhooks-scope) |
+| `GET` | `/api/v1/webhooks` | [Webhooks](#webhooks-webhooks-scope) |
+| `POST` | `/api/v1/webhooks` | [Webhooks](#webhooks-webhooks-scope) |
+| `GET` | `/api/v1/webhooks/{id}` | [Webhooks](#webhooks-webhooks-scope) |
+| `PATCH` | `/api/v1/webhooks/{id}` | [Webhooks](#webhooks-webhooks-scope) |
+| `DELETE` | `/api/v1/webhooks/{id}` | [Webhooks](#webhooks-webhooks-scope) |
+| `GET` | `/api/v1/webhooks/{id}/attempts` | [Webhooks](#webhooks-webhooks-scope) |
+| `DELETE` | `/api/v1/webhooks/{id}/previous-secret` | [Webhooks](#webhooks-webhooks-scope) |
+| `POST` | `/api/v1/webhooks/{id}/rotate-secret` | [Webhooks](#webhooks-webhooks-scope) |
+| `POST` | `/api/v1/webhooks/{id}/test` | [Webhooks](#webhooks-webhooks-scope) |
+| `GET` | `/healthz` | [Operational endpoints](#operational-endpoints-no-apiv1-prefix) |
+| `GET` | `/metrics` | [Operational endpoints](#operational-endpoints-no-apiv1-prefix) |
+| `GET` | `/readyz` | [Operational endpoints](#operational-endpoints-no-apiv1-prefix) |
 
 ## Compatibility
 

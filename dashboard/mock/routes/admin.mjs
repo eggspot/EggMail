@@ -209,9 +209,20 @@ export function register(r, state) {
         warnings: o.warnings.map((code) => ({ code, message: WARNING_TEXT[code] || code })),
       },
       certificates: store.certs.filter((c) => c.active || c.source === 'acme').map((c) => ({ subject: c.subject, notAfter: c.notAfter, source: c.source })),
+      // Like the server: SQLite reports its writers (decision 108), PostgreSQL its connection pool (decision 109).
       pressure: sqlite
-        ? { writerQueueDepth: 1240, writerQueueOverThresholdSeconds: 410, commitP99Ms: 118, advisory: true }
-        : { writerQueueDepth: 12, writerQueueOverThresholdSeconds: 0, commitP99Ms: 9, advisory: false },
+        ? { writerQueueDepth: 1240, writerQueueOverThresholdSeconds: 410, commitP99Ms: 118, advisory: true, queueDepthThreshold: 1000, queueThresholdSeconds: 300, commitP99ThresholdMs: 100 }
+        : {
+            advisory: false,
+            poolPendingRequests: 0,
+            poolConnectionsInUse: 12,
+            poolMaxSize: 50,
+            poolWaitingPercent: 3.3,
+            poolSamples: 60,
+            poolTimeouts: 0,
+            poolWindowSeconds: 300,
+            poolWaitingPercentThreshold: 50,
+          },
       switch: { state: computeState(state, store.switch) },
     };
   });

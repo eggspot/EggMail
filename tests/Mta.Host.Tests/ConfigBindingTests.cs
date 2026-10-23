@@ -239,6 +239,41 @@ public class ConfigBindingTests : IDisposable
         }
     }
 
+    // VERP key rotation (decision 110)
+
+    [Fact]
+    public void Verp_key_rotation_is_on_every_90_days_by_default_and_0_turns_it_off()
+    {
+        Assert.Equal(90, Valid().Config.Secrets.VerpKeyRotationDays);
+        Assert.Equal(0, Valid(("Secrets:VerpKeyRotationDays", "0")).Config.Secrets.VerpKeyRotationDays);
+        Assert.Equal(30, Valid(("Secrets:VerpKeyRotationDays", "30"), ("Inbound:Srs:MaxAgeDays", "200")).Config.Secrets.VerpKeyRotationDays);
+        Valid(("Inbound:Srs:MaxAgeDays", "500"));   // the default period holds the keys of the longest SRS age in 16 ids
+    }
+
+    [Theory]
+    [InlineData("6", "21", "between 7 and 365")]
+    [InlineData("366", "21", "between 7 and 365")]
+    [InlineData("-1", "21", "between 7 and 365")]
+    [InlineData("7", "200", "too short for Inbound:Srs:MaxAgeDays (200)")]   // 201 days of retired keys: 29 periods + 2 = 31 ids
+    [InlineData("15", "215", "too short for Inbound:Srs:MaxAgeDays (215)")]  // 216 days: 15 + 2 = 17, one over
+    [InlineData("14", "500", "too short for Inbound:Srs:MaxAgeDays (500)")]
+    public void A_verp_key_rotation_period_out_of_range_or_with_more_keys_than_ids_is_refused(string days, string srsDays, string expectedInError)
+    {
+        LoadedConfig loaded = Load(("Secrets:VerpKeyRotationDays", days), ("Inbound:Srs:MaxAgeDays", srsDays));
+        Assert.Contains(loaded.Errors, e => e.Contains("Secrets:VerpKeyRotationDays", StringComparison.Ordinal) && e.Contains(expectedInError, StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(7, 21)]     // 22 days: 4 periods + 2 = 6 ids
+    [InlineData(14, 180)]   // 181 days: 13 + 2 = 15
+    [InlineData(15, 200)]   // 201 days: 14 + 2 = 16, the limit
+    public void Periods_whose_keys_fit_in_16_ids_are_accepted(int days, int srsDays)
+    {
+        var errors = new List<string>();
+        VerpKeyRotation.Validate(days, srsDays, errors);
+        Assert.Empty(errors);
+    }
+
     // Api
 
     [Fact]
@@ -322,7 +357,10 @@ public class ConfigBindingTests : IDisposable
         StorageOptions s = Valid(
             ("Storage:Postgres:PartitionsAheadDays", "14"), ("Storage:Postgres:StatsFlushInterval", "00:00:05"), ("Storage:Postgres:RetentionDeleteBatchSize", "1000"),
             ("Storage:Postgres:RetentionDeletePause", "00:00:00.100"), ("Storage:Postgres:CommandTimeoutSeconds", "60"), ("Storage:Postgres:MaxPoolSize", "12"),
-            ("Sqlite:StatsFlushInterval", "00:00:20"), ("Sqlite:RetentionDeleteBatchSize", "2000"), ("Sqlite:RetentionDeletePause", "00:00:00.050")).Config.Storage;
+            ("Sqlite:StatsFlushInterval", "00:00:20"), ("Sqlite:RetentionDeleteBatchSize", "2000"), ("Sqlite:RetentionDeletePause", "00:00:00.050"),
+            ("Sqlite:PressureQueueDepth", "250"), ("Sqlite:PressureQueueDuration", "00:01:00"), ("Sqlite:PressureCommitP99", "00:00:00.040"),
+            ("Sqlite:PressureWindow", "00:10:00"), ("Storage:Postgres:PressureWindow", "00:15:00"), ("Storage:Postgres:PressureSampleInterval", "00:00:10"),
+            ("Storage:Postgres:PressureWaitingPercent", "25")).Config.Storage;
 
         Assert.Equal(14, s.Postgres.PartitionsAheadDays);
         Assert.Equal(TimeSpan.FromSeconds(5), s.Postgres.StatsFlushInterval);
@@ -333,6 +371,13 @@ public class ConfigBindingTests : IDisposable
         Assert.Equal(TimeSpan.FromSeconds(20), s.Sqlite.StatsFlushInterval);
         Assert.Equal(2000, s.Sqlite.RetentionDeleteBatchSize);
         Assert.Equal(TimeSpan.FromMilliseconds(50), s.Sqlite.RetentionDeletePause);
+        Assert.Equal(250, s.Sqlite.PressureQueueDepth);
+        Assert.Equal(TimeSpan.FromMinutes(1), s.Sqlite.PressureQueueDuration);
+        Assert.Equal(TimeSpan.FromMilliseconds(40), s.Sqlite.PressureCommitP99);
+        Assert.Equal(TimeSpan.FromMinutes(10), s.Sqlite.PressureWindow);
+        Assert.Equal(TimeSpan.FromMinutes(15), s.Postgres.PressureWindow);
+        Assert.Equal(TimeSpan.FromSeconds(10), s.Postgres.PressureSampleInterval);
+        Assert.Equal(25, s.Postgres.PressureWaitingPercent);
     }
 
     [Fact]
@@ -347,6 +392,13 @@ public class ConfigBindingTests : IDisposable
         Assert.Equal(d.Postgres.CommandTimeoutSeconds, s.Postgres.CommandTimeoutSeconds);
         Assert.Equal(d.Sqlite.StatsFlushInterval, s.Sqlite.StatsFlushInterval);
         Assert.Equal(d.Sqlite.RetentionDeleteBatchSize, s.Sqlite.RetentionDeleteBatchSize);
+        Assert.Equal(1000, s.Sqlite.PressureQueueDepth); // decision C: over 1,000 for 5 minutes, or p99 commit over about 100 ms
+        Assert.Equal(TimeSpan.FromMinutes(5), s.Sqlite.PressureQueueDuration);
+        Assert.Equal(TimeSpan.FromMilliseconds(100), s.Sqlite.PressureCommitP99);
+        Assert.Equal(TimeSpan.FromMinutes(5), s.Sqlite.PressureWindow);
+        Assert.Equal(TimeSpan.FromMinutes(5), s.Postgres.PressureWindow); // decision 109: callers waited in half of 5 minutes of 5-second samples
+        Assert.Equal(TimeSpan.FromSeconds(5), s.Postgres.PressureSampleInterval);
+        Assert.Equal(50, s.Postgres.PressureWaitingPercent);
     }
 
     [Theory]
@@ -357,6 +409,16 @@ public class ConfigBindingTests : IDisposable
     [InlineData("Storage:Postgres:MaxPoolSize", "0")]
     [InlineData("Sqlite:RetentionDeleteBatchSize", "0")]
     [InlineData("Sqlite:StatsFlushInterval", "-00:00:01")]
+    [InlineData("Sqlite:PressureQueueDepth", "0")]
+    [InlineData("Sqlite:PressureQueueDepth", "8193")]
+    [InlineData("Sqlite:PressureQueueDuration", "-00:00:01")]
+    [InlineData("Sqlite:PressureCommitP99", "00:00:00")]
+    [InlineData("Sqlite:PressureWindow", "00:00:00")]
+    [InlineData("Storage:Postgres:PressureSampleInterval", "00:00:00.500")]
+    [InlineData("Storage:Postgres:PressureWindow", "00:00:01")]
+    [InlineData("Storage:Postgres:PressureWindow", "06:00:00")] // more than 4,096 samples of 5 seconds
+    [InlineData("Storage:Postgres:PressureWaitingPercent", "0")]
+    [InlineData("Storage:Postgres:PressureWaitingPercent", "101")]
     public void Out_of_range_tuning_knobs_are_reported_at_start_not_when_the_storage_is_created(string key, string value)
     {
         Assert.Contains(Load((key, value)).Errors, e => e.Contains(key, StringComparison.Ordinal));

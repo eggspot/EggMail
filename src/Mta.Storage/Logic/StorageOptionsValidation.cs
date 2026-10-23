@@ -52,6 +52,18 @@ public static class StorageOptionsValidation
         {
             throw new ArgumentException("Sqlite writer batch/queue options must be positive.");
         }
+
+        if (s.PressureQueueDepth < 1 || s.PressureQueueDuration < TimeSpan.Zero || s.PressureCommitP99 <= TimeSpan.Zero || s.PressureWindow <= TimeSpan.Zero)
+        {
+            throw new ArgumentException("Sqlite pressure thresholds must be positive (Sqlite:PressureQueueDuration may be zero).");
+        }
+
+        PostgresOptions pg = options.Postgres;
+        if (pg.PressureSampleInterval < TimeSpan.FromSeconds(1) || pg.PressureWindow < pg.PressureSampleInterval || pg.PressureWindow.TotalSeconds > pg.PressureSampleInterval.TotalSeconds * PostgresOptions.MaxPressureSamples
+            || pg.PressureWaitingPercent is < 1 or > 100)
+        {
+            throw new ArgumentException($"Postgres pressure options out of range (sample interval at least 1 s, window between one and {PostgresOptions.MaxPressureSamples} intervals, waiting percent 1 to 100).");
+        }
     }
 
     private static void NonNegative(int value, string name)

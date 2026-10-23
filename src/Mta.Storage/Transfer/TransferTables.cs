@@ -51,6 +51,13 @@ public static class TransferTables
         Secrets = [new TransferSecret<DkimKeyEntity>(nameof(DkimKeyEntity.PrivateKeyProtected), SecretPurposes.DkimKey, x => x.PrivateKeyProtected, (x, v) => x.PrivateKeyProtected = v ?? [])],
     });
 
+    /// <summary>The VERP signing keys move, re-protected like the other secrets, so bounces of mail sent before a switch still verify on the target (decision 107).</summary>
+    public static readonly TransferTable<VerpKeyEntity> VerpKeys = new("verp_key", TransferPart.Config, new()
+    {
+        Order = q => q.OrderBy(x => x.KeyId),
+        Secrets = [new TransferSecret<VerpKeyEntity>(nameof(VerpKeyEntity.KeyProtected), SecretPurposes.VerpKey, x => x.KeyProtected, (x, v) => x.KeyProtected = v ?? [])],
+    });
+
     public static readonly TransferTable<SuppressionEntity> Suppressions = new("suppression", TransferPart.Config, new()
     {
         Order = q => q.OrderBy(x => x.TenantId).ThenBy(x => x.Address),
@@ -283,7 +290,7 @@ public static class TransferTables
     /// <summary>Every table, in import order (config, stats, queue, history).</summary>
     public static IReadOnlyList<TransferTable> All { get; } =
     [
-        Tenants, ApiKeys, SmtpCredentials, DashboardUsers, DashboardSessions, Domains, DkimKeys, Suppressions, WebhookEndpoints, Settings, TlsPolicies, RelayRoutes, Certificates, AcmeAccounts, AcmeRenewals, DomainRecordChecks, TlsRptBuckets, SendingCounters, InboundDomainSettings, InboundRoutes,
+        Tenants, ApiKeys, SmtpCredentials, DashboardUsers, DashboardSessions, Domains, DkimKeys, VerpKeys, Suppressions, WebhookEndpoints, Settings, TlsPolicies, RelayRoutes, Certificates, AcmeAccounts, AcmeRenewals, DomainRecordChecks, TlsRptBuckets, SendingCounters, InboundDomainSettings, InboundRoutes,
         StatAggregates, StatMeta, RecentEvents, WebhookAttempts,
         Deliveries, Spool, WebhookOutbox, IdempotencyKeys, InboundMessages, InboundRaw,
         MessageIndex, MessageRecipients, MessageEvents, MessageContents, RetainedRaw,

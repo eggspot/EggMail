@@ -46,35 +46,58 @@ public sealed class VerpCodec
     private static readonly DateTimeOffset Epoch = new(2024, 1, 1, 0, 0, 0, TimeSpan.Zero);
     private const string Alphabet = "abcdefghijklmnopqrstuvwxyz234567";
 
-    private readonly IReadOnlyDictionary<int, byte[]> _keys;
-    private readonly int _activeKeyId;
+    /// <summary>The keys and the id of the one that signs, replaced as a whole by <see cref="Replace"/> so a reader never sees the keys of one set with the active id of another.</summary>
+    internal sealed class KeySet(IReadOnlyDictionary<int, byte[]> keys, int activeKeyId)
+    {
+        public IReadOnlyDictionary<int, byte[]> Keys { get; } = keys;
+
+        public int ActiveKeyId { get; } = activeKeyId;
+    }
+
+    private volatile KeySet _set;
 
     /// <param name="keys">Signing keys by id (0..15). Keep retired keys here while their tokens may still be in flight.</param>
     public VerpCodec(IReadOnlyDictionary<int, byte[]> keys, int activeKeyId)
     {
+        _set = Validate(keys, activeKeyId);
+    }
+
+    /// <summary>The id of the key new tokens are signed with.</summary>
+    public int ActiveKeyId => _set.ActiveKeyId;
+
+    /// <summary>The current key set: <see cref="SrsCodec"/> and <see cref="ForwardHopMarker"/> derive their keys again when it changes.</summary>
+    internal KeySet Current => _set;
+
+    public static byte[] GenerateKey() => RandomNumberGenerator.GetBytes(32);
+
+    /// <summary>
+    /// Swaps in a new key set (a rotated key, a pruned one) while the codec is in use: tokens are signed with <paramref name="activeKeyId"/> from now on and verified against
+    /// <paramref name="keys"/>. Every operation reads one set, so a call that runs during the swap uses either the old set or the new one, never a mix.
+    /// </summary>
+    public void Replace(IReadOnlyDictionary<int, byte[]> keys, int activeKeyId) => _set = Validate(keys, activeKeyId);
+
+    private static KeySet Validate(IReadOnlyDictionary<int, byte[]> keys, int activeKeyId)
+    {
+        ArgumentNullException.ThrowIfNull(keys);
         if (!keys.TryGetValue(activeKeyId, out var k) || k.Length < 16 || activeKeyId is < 0 or > 15)
         {
             throw new ArgumentException("The active key must exist, be at least 16 bytes and have an id in 0..15.");
         }
 
-        _keys = keys;
-        _activeKeyId = activeKeyId;
+        return new KeySet(new Dictionary<int, byte[]>(keys), activeKeyId);   // a copy: a caller that changes its dictionary later does not change the set in use
     }
 
-    /// <summary>The id of the key new tokens are signed with.</summary>
-    public int ActiveKeyId => _activeKeyId;
-
-    public static byte[] GenerateKey() => RandomNumberGenerator.GetBytes(32);
-
     /// <summary>The ids of every key in the ring (the active key and the retired ones whose tokens may still be in flight): what a verifier of a derived secret (<see cref="DeriveKey"/>) tries in turn.</summary>
-    public IReadOnlyCollection<int> KeyIds => _keys.Keys.ToArray();
+    public IReadOnlyCollection<int> KeyIds => _set.Keys.Keys.ToArray();
 
     /// <summary>
     /// A key for another purpose, derived from the ring key <paramref name="keyId"/> with HKDF-SHA-256 and <paramref name="purpose"/> as the context (for example <c>EggMail.Srs.v1</c>): the
     /// bounce key is the only secret the deployment holds, so SRS addresses and the forward hop marker do not add a new one to deploy or back up, and rotating the ring rotates them too.
     /// </summary>
-    public byte[] DeriveKey(int keyId, string purpose) =>
-        System.Security.Cryptography.HKDF.DeriveKey(HashAlgorithmName.SHA256, _keys[keyId], 32, salt: [], info: System.Text.Encoding.UTF8.GetBytes(purpose));
+    public byte[] DeriveKey(int keyId, string purpose) => DeriveKey(_set, keyId, purpose);
+
+    internal static byte[] DeriveKey(KeySet set, int keyId, string purpose) =>
+        System.Security.Cryptography.HKDF.DeriveKey(HashAlgorithmName.SHA256, set.Keys[keyId], 32, salt: [], info: System.Text.Encoding.UTF8.GetBytes(purpose));
 
     /// <summary>
     /// The hour (counted from the codec's epoch) a token made at <paramref name="now"/> carries. Everything else in an address is fixed for a tenant, sending domain, return-path host and destination domain, so
@@ -88,11 +111,12 @@ public sealed class VerpCodec
     /// </summary>
     public string CreateLocalPart(Guid tenantId, Guid domainId, DateTimeOffset now, string? destinationDomain = null)
     {
+        KeySet set = _set;
         bool bound = !string.IsNullOrWhiteSpace(destinationDomain);
         int payloadLength = bound ? PayloadLengthV2 : PayloadLengthV1;
         int macLength = bound ? MacLengthV2 : MacLengthV1;
         Span<byte> data = stackalloc byte[payloadLength + macLength];
-        data[0] = (byte)(((bound ? 2 : 1) << 4) | _activeKeyId);   // version in the high nibble
+        data[0] = (byte)(((bound ? 2 : 1) << 4) | set.ActiveKeyId);   // version in the high nibble
         tenantId.TryWriteBytes(data[1..17], bigEndian: true, out _);
         Span<byte> dom = stackalloc byte[16];
         domainId.TryWriteBytes(dom, bigEndian: true, out _);
@@ -103,11 +127,11 @@ public sealed class VerpCodec
         data[27] = (byte)hours;
         if (bound)
         {
-            System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(data[28..32], DestinationTag(_keys[_activeKeyId], destinationDomain!));
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(data[28..32], DestinationTag(set.Keys[set.ActiveKeyId], destinationDomain!));
         }
 
         Span<byte> mac = stackalloc byte[32];
-        HMACSHA256.HashData(_keys[_activeKeyId], data[..payloadLength], mac);
+        HMACSHA256.HashData(set.Keys[set.ActiveKeyId], data[..payloadLength], mac);
         mac[..macLength].CopyTo(data[payloadLength..]);
         return Prefix + Base32Encode(data);
     }
@@ -152,7 +176,7 @@ public sealed class VerpCodec
         }
 
         int keyId = data[0] & 0xF;
-        if (!_keys.TryGetValue(keyId, out var key))
+        if (!_set.Keys.TryGetValue(keyId, out var key))
         {
             return false;
         }
@@ -190,7 +214,7 @@ public sealed class VerpCodec
             return VerpDestinationCheck.Unbound;
         }
 
-        return _keys.TryGetValue(token.KeyId, out var key) && DestinationTag(key, recipientDomain) == token.DestinationTag
+        return _set.Keys.TryGetValue(token.KeyId, out var key) && DestinationTag(key, recipientDomain) == token.DestinationTag
             ? VerpDestinationCheck.Match
             : VerpDestinationCheck.Mismatch;
     }
@@ -265,7 +289,8 @@ public sealed class VerpCodec
         int buffer = 0, bits = 0, n = 0;
         foreach (char raw in text)
         {
-            char c = char.ToLowerInvariant(raw);
+            // ASCII-only case folding: char.ToLowerInvariant maps the Kelvin sign (U+212A) to 'k', a second spelling of the token.
+            char c = raw is >= 'A' and <= 'Z' ? (char)(raw | 0x20) : raw;
             int v = c switch
             {
                 >= 'a' and <= 'z' => c - 'a',

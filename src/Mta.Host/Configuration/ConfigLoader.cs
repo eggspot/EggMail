@@ -320,6 +320,10 @@ public static class ConfigLoader
                 StatsFlushInterval = c.GetValue("Sqlite:StatsFlushInterval", d.Sqlite.StatsFlushInterval),
                 RetentionDeleteBatchSize = c.GetValue("Sqlite:RetentionDeleteBatchSize", d.Sqlite.RetentionDeleteBatchSize),
                 RetentionDeletePause = c.GetValue("Sqlite:RetentionDeletePause", d.Sqlite.RetentionDeletePause),
+                PressureQueueDepth = c.GetValue("Sqlite:PressureQueueDepth", d.Sqlite.PressureQueueDepth),
+                PressureQueueDuration = c.GetValue("Sqlite:PressureQueueDuration", d.Sqlite.PressureQueueDuration),
+                PressureCommitP99 = c.GetValue("Sqlite:PressureCommitP99", d.Sqlite.PressureCommitP99),
+                PressureWindow = c.GetValue("Sqlite:PressureWindow", d.Sqlite.PressureWindow),
             },
             Postgres = new PostgresOptions
             {
@@ -336,6 +340,9 @@ public static class ConfigLoader
                 RetentionDeleteBatchSize = c.GetValue("Storage:Postgres:RetentionDeleteBatchSize", d.Postgres.RetentionDeleteBatchSize),
                 RetentionDeletePause = c.GetValue("Storage:Postgres:RetentionDeletePause", d.Postgres.RetentionDeletePause),
                 CommandTimeoutSeconds = c.GetValue("Storage:Postgres:CommandTimeoutSeconds", d.Postgres.CommandTimeoutSeconds),
+                PressureWindow = c.GetValue("Storage:Postgres:PressureWindow", d.Postgres.PressureWindow),
+                PressureSampleInterval = c.GetValue("Storage:Postgres:PressureSampleInterval", d.Postgres.PressureSampleInterval),
+                PressureWaitingPercent = c.GetValue("Storage:Postgres:PressureWaitingPercent", d.Postgres.PressureWaitingPercent),
             },
         };
     }
@@ -529,6 +536,7 @@ public static class ConfigLoader
         }
 
         Secrets.SecretsConfigurationCheck.Validate(c.Secrets, errors);
+        Hosting.VerpKeyRotation.Validate(c.Secrets.VerpKeyRotationDays, c.Inbound.Srs.MaxAgeDays, errors);
 
         if (c.Delivery.Workers < 1)
         {
@@ -736,9 +744,17 @@ public static class ConfigLoader
         Require(pg.RetentionDeleteBatchSize >= 1, "Storage:Postgres:RetentionDeleteBatchSize must be at least 1.", errors);
         Require(pg.RetentionDeletePause >= TimeSpan.Zero, "Storage:Postgres:RetentionDeletePause must not be negative.", errors);
         Require(pg.CommandTimeoutSeconds >= 1, "Storage:Postgres:CommandTimeoutSeconds must be at least 1.", errors);
+        Require(pg.PressureSampleInterval >= TimeSpan.FromSeconds(1), "Storage:Postgres:PressureSampleInterval must be at least 1 second.", errors);
+        Require(pg.PressureWindow >= pg.PressureSampleInterval && pg.PressureWindow.TotalSeconds <= pg.PressureSampleInterval.TotalSeconds * PostgresOptions.MaxPressureSamples,
+            $"Storage:Postgres:PressureWindow must be between one and {PostgresOptions.MaxPressureSamples} times Storage:Postgres:PressureSampleInterval.", errors);
+        Require(pg.PressureWaitingPercent is >= 1 and <= 100, "Storage:Postgres:PressureWaitingPercent must be between 1 and 100.", errors);
         Require(s.Sqlite.RetentionDeleteBatchSize >= 1, "Sqlite:RetentionDeleteBatchSize must be at least 1.", errors);
         Require(s.Sqlite.StatsFlushInterval >= TimeSpan.Zero, "Sqlite:StatsFlushInterval must not be negative.", errors);
         Require(s.Sqlite.RetentionDeletePause >= TimeSpan.Zero, "Sqlite:RetentionDeletePause must not be negative.", errors);
+        Require(s.Sqlite.PressureQueueDepth >= 1 && s.Sqlite.PressureQueueDepth <= s.Sqlite.WriterQueueCapacity, $"Sqlite:PressureQueueDepth must be between 1 and the writer queue capacity ({s.Sqlite.WriterQueueCapacity}).", errors);
+        Require(s.Sqlite.PressureQueueDuration >= TimeSpan.Zero, "Sqlite:PressureQueueDuration must not be negative.", errors);
+        Require(s.Sqlite.PressureCommitP99 > TimeSpan.Zero, "Sqlite:PressureCommitP99 must be positive.", errors);
+        Require(s.Sqlite.PressureWindow > TimeSpan.Zero, "Sqlite:PressureWindow must be positive.", errors);
     }
 
     /// <summary>The relay from configuration: a combination that cannot work stops the start with a message that says what to set. (The first administrator's name and password are checked when the account is created, see <see cref="Mta.Host.Hosting.FirstAdministrator"/>.)</summary>

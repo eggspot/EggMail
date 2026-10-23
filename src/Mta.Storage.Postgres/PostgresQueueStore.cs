@@ -717,13 +717,15 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
         {
             await using NpgsqlConnection connection = await rt.Data.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
             await using var cmd = new NpgsqlCommand(
-                "SELECT outbox_id, at, status_code, duration_ms, error_class, response_snippet FROM webhook_attempt WHERE tenant_id = $1 AND endpoint_id = $2 ORDER BY seq DESC LIMIT $3", connection);
+                "SELECT a.outbox_id, a.at, a.status_code, a.duration_ms, a.error_class, a.response_snippet, o.event_type FROM webhook_attempt a " +
+                "LEFT JOIN webhook_outbox o ON o.id = a.outbox_id AND o.tenant_id = a.tenant_id " +
+                "WHERE a.tenant_id = $1 AND a.endpoint_id = $2 ORDER BY a.seq DESC LIMIT $3", connection);
             cmd.Parameters.Uuid(tenantId).Uuid(endpointId).Long(Math.Max(0, max));
             var list = new List<WebhookAttemptRecord>();
             await using NpgsqlDataReader r = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
             while (await r.ReadAsync(cancellationToken).ConfigureAwait(false))
             {
-                list.Add(new WebhookAttemptRecord(r.GetGuid(0), r.GetInstant(1), r.GetNullableInt(2), TimeSpan.FromMilliseconds(r.GetInt64(3)), r.GetNullableString(4), r.GetNullableString(5)));
+                list.Add(new WebhookAttemptRecord(r.GetGuid(0), r.GetInstant(1), r.GetNullableInt(2), TimeSpan.FromMilliseconds(r.GetInt64(3)), r.GetNullableString(4), r.GetNullableString(5), r.GetNullableString(6)));
             }
 
             return list;

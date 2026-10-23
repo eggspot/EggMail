@@ -240,4 +240,35 @@ public class SrsAndHopMarkerTests
         Assert.False(hops.TryVerify("0; " + hops.CreateValue(0, hash).Split("; ")[1], hash, out _));
         Assert.Equal(3, ForwardHopMarker.MaxHops);
     }
+
+    // ------------------------------------------------------------------ a ring whose key set is replaced (rotation, decision 110)
+
+    [Fact]
+    public void After_the_ring_is_replaced_srs_and_the_hop_marker_sign_with_the_new_key_and_verify_with_every_key_it_holds()
+    {
+        byte[] oldKey = VerpCodec.GenerateKey();
+        byte[] newKey = VerpCodec.GenerateKey();
+        var ring = new VerpCodec(new Dictionary<int, byte[]> { [1] = oldKey }, 1);
+        var srs = new SrsCodec(ring);
+        var hops = new ForwardHopMarker(ring);
+        string hash = ForwardHopMarker.BodyHash(Encoding.UTF8.GetBytes("body\r\n"));
+        string oldAddress = srs.CreateLocalPart("sender.test", "bob", Now);
+        string oldMarker = hops.CreateValue(1, hash);
+
+        ring.Replace(new Dictionary<int, byte[]> { [1] = oldKey, [2] = newKey }, 2);
+
+        var newOnly = new VerpCodec(new Dictionary<int, byte[]> { [2] = newKey }, 2);
+        string newAddress = srs.CreateLocalPart("sender.test", "bob", Now);
+        Assert.Equal(new SrsCodec(newOnly).CreateLocalPart("sender.test", "bob", Now), newAddress);   // signed with key 2
+        Assert.Equal(new ForwardHopMarker(newOnly).CreateValue(1, hash), hops.CreateValue(1, hash));
+        Assert.True(srs.TryVerify(oldAddress, Now), "an address of the retired key verifies while the ring holds it");
+        Assert.True(srs.TryVerify(newAddress, Now));
+        Assert.True(hops.TryVerify(oldMarker, hash, out _));
+
+        // The old key is pruned: what it signed no longer verifies.
+        ring.Replace(new Dictionary<int, byte[]> { [2] = newKey }, 2);
+        Assert.False(srs.TryVerify(oldAddress, Now));
+        Assert.False(hops.TryVerify(oldMarker, hash, out _));
+        Assert.True(srs.TryVerify(newAddress, Now));
+    }
 }

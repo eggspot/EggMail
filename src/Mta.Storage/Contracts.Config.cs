@@ -52,6 +52,12 @@ public sealed record DkimKeyRecord(
     bool Active,
     DateTimeOffset? RetiredAt);
 
+/// <summary>
+/// A VERP signing key (decision 107). <see cref="KeyProtected"/> holds the key bytes protected with Data Protection (<c>SecretPurposes.VerpKey</c>); <see cref="KeyId"/> (0 to 15) is the id
+/// a bounce address carries. A key signs from <see cref="ActivatesAt"/> until it is retired; a retired key still verifies the addresses it made.
+/// </summary>
+public sealed record VerpKeyRecord(int KeyId, byte[] KeyProtected, DateTimeOffset CreatedAt, DateTimeOffset ActivatesAt, DateTimeOffset? RetiredAt);
+
 public sealed record SuppressionRecord(Guid TenantId, string Address, SuppressionReason Reason, string? Source, DateTimeOffset CreatedAt, Guid? MessageId);
 
 public sealed record WebhookEndpointRecord(
@@ -296,6 +302,18 @@ public interface IConfigStore : IRuntimeStateStore, IInboundConfigStore
 
     /// <summary>Deletes a key that never signed (not active, never retired: a rotation that was cancelled). False for any other key or an unknown id.</summary>
     ValueTask<bool> DeletePendingDkimKeyAsync(Guid domainId, Guid keyId, CancellationToken ct);
+
+    // VERP signing keys (decision 107)
+    ValueTask<IReadOnlyList<VerpKeyRecord>> GetVerpKeysAsync(CancellationToken ct);
+
+    /// <summary>Adds the keys in one write. Raises <see cref="StorageConflictException"/> (nothing added) when one of the ids is taken.</summary>
+    ValueTask AddVerpKeysAsync(IReadOnlyList<VerpKeyRecord> keys, CancellationToken ct);
+
+    /// <summary>Retires the key at <paramref name="at"/> unless it is retired already (the first instant is kept). False for an unknown id or a key retired before.</summary>
+    ValueTask<bool> RetireVerpKeyAsync(int keyId, DateTimeOffset at, CancellationToken ct);
+
+    /// <summary>Deletes the key: the bounce addresses it made no longer verify. False for an unknown id.</summary>
+    ValueTask<bool> DeleteVerpKeyAsync(int keyId, CancellationToken ct);
 
     // Suppressions
     ValueTask<bool> IsSuppressedAsync(Guid tenantId, string address, CancellationToken ct);
