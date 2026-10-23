@@ -207,7 +207,7 @@ internal sealed class SqliteFile
 
             if (version <= 10)
             {
-                UpgradeFromV7(connection);   // also takes a file at version 8, 9 or 10 to 11: every statement is "if not exists" and comes from the generated script
+                UpgradeFromV7(connection);
             }
 
             UpgradeFromV11(connection);
