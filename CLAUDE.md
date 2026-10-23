@@ -1,6 +1,6 @@
 # EggMail — Claude Code instructions
 
-Self-hosted outbound email server (SMTP ingress, HTTP API, delivery tracking, dashboard) on .NET 10. MIT.
+Self-hosted outbound email server (SMTP ingress, HTTP API, delivery tracking, dashboard) on .NET 10. MIT OR Apache-2.0.
 Status: implemented, not production-ready. `docs/progress.md` says what is verified; keep it honest.
 
 ## Build, test, run (no Docker locally — images are built by GitHub Actions only)

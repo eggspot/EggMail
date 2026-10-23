@@ -12,7 +12,7 @@
     <Authors>eggspot</Authors>
     <Company>eggspot</Company>
     <Copyright>Copyright (c) 2026 eggspot</Copyright>
-    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageLicenseExpression>MIT OR Apache-2.0</PackageLicenseExpression>
     <RepositoryUrl>https://github.com/eggspot/EggMail</RepositoryUrl>
     <Version>0.1.0</Version>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>

@@ -36,7 +36,7 @@ ARG REVISION=unknown
 LABEL org.opencontainers.image.source="https://github.com/eggspot/EggMail" \
       org.opencontainers.image.title="EggMail" \
       org.opencontainers.image.description="Open-source, performance-first .NET outbound SMTP server" \
-      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.licenses="MIT OR Apache-2.0" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${REVISION}"
 WORKDIR /app

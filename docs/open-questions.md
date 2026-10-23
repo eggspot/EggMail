@@ -6,7 +6,7 @@ The four former "decided by default" items are **OWNER-DECIDED**, and a later ow
 
 | # | Topic | Decision |
 |---|---|---|
-| 1 | License | **MIT**, copyright eggspot (owner wants 100% open source where anyone can do anything) |
+| 1 | License | **MIT OR Apache-2.0**, at the user's option, copyright eggspot (owner, 2026-10-23). Anyone can still use it under MIT and do anything; Apache-2.0 adds a patent grant |
 | 2 | Webhook retention | 7-day default, configurable, `0` = keep forever (unlimited allowed; manual or external cleanup needed) |
 | 3 | Switching | Never automatic. Thresholds (queue over 1,000 for 5 min, p99 commit over about 100 ms) are advisory dashboard indicators only |
 | 4 | SQLite sync default | `synchronous=OFF` for the SQLite data files (process-crash-safe, **not** power-loss-safe; corruption possible on OS crash or power loss). `Sqlite:SyncMode = Off (default) \| Normal \| Full` |
