@@ -30,8 +30,9 @@ public enum BounceOutcome
 /// is trusted for correlation. What the body says decides what happens to the addresses it names: a permanent failure that the reply
 /// classifier attributes to the recipient suppresses it, a complaint suppresses it as a complaint, and both are published as webhooks.
 /// <para>With per-message history (<c>History:Mode=Full</c>) the bounce or complaint is also attached to the message it is about: the returned headers carry the original
-/// <c>Message-ID</c>, which is looked up among the message history of the tenant named by the verified token (<see cref="IHistoryStore.AttachReportAsync"/>). The message id found
-/// goes into the webhook payload. With <c>StatsOnly</c> no per-message record is stored, so nothing is attached.</para>
+/// <c>Message-ID</c>, which is looked up among the message history of the tenant named by the verified token (<see cref="IHistoryStore.AttachReportAsync"/>). The address the
+/// report names must be a recipient of that message, or the report is ignored (decision 112). The message id found goes into the webhook payload. With <c>StatsOnly</c> no
+/// per-message record is stored: nothing is attached and the destination domain of the token is the only check.</para>
 /// </summary>
 public sealed class BounceProcessor
 {
@@ -47,6 +48,7 @@ public sealed class BounceProcessor
     private readonly IMtaLog _log;
     private readonly IHistoryStore? _history;
 
+    /// <param name="history">The tenant's per-message history when it is recorded (<c>History:Mode=Full</c>), which reports are then confirmed against; null with <c>StatsOnly</c>.</param>
     public BounceProcessor(VerpCodec verp, IConfigStore config, IStatsStore stats, IWebhookPublisher webhooks, IClock clock, IMtaLog? log = null, ReplyClassifier? classifier = null, IHistoryStore? history = null)
     {
         _history = history;
@@ -57,6 +59,19 @@ public sealed class BounceProcessor
         _clock = clock;
         _classifier = classifier ?? ReplyClassifier.Default;
         _log = log ?? NullMtaLog.Instance;
+    }
+
+    /// <summary>
+    /// The startup warning when per-message history can end before a bounce address of its message expires: the history counts from when the message
+    /// was received, the bounce address from its delivery attempt, which can be up to <paramref name="queueMaxLifetime"/> later. A report that arrives after
+    /// its message left the history cannot be confirmed and is ignored (decision 112). Null when there is nothing to warn about.
+    /// </summary>
+    public static string? RetentionWarning(HistoryMode mode, int metadataDays, TimeSpan queueMaxLifetime)
+    {
+        double needed = Math.Ceiling((MaxTokenAge + queueMaxLifetime).TotalDays);
+        return mode == HistoryMode.Full && metadataDays > 0 && metadataDays < needed
+            ? $"Retention:MetadataDays ({metadataDays}) is shorter than the {needed:0} days a message's bounce address can be used ({MaxTokenAge.TotalDays:0} days after a delivery attempt, which can come up to Queue:MaxLifetime after the message was received): a bounce or complaint that arrives after its message left the history cannot be confirmed and is ignored."
+            : null;
     }
 
     /// <summary>True if <paramref name="localPart"/> is a bounce address token that verifies now.</summary>
@@ -91,61 +106,105 @@ public sealed class BounceProcessor
     }
 
     /// <summary>
-    /// The address a report is about: the first of the candidates that parses and, when the token is bound to a destination domain, lies in that
-    /// domain. Anyone who received a message holds a valid token (it is in the Return-Path), so without this a forged report could name any
-    /// address and have it suppressed for the tenant. A forwarded message is reported by the final server with the forwarding target as
-    /// Final-Recipient; the Original-Recipient field is what names the address the message was sent to, so it is a candidate as well.
+    /// The address a report is about, and the message it is about when that is known. A candidate counts only when it parses and, when the token is
+    /// bound to a destination domain, lies in that domain: anyone who received a message holds a valid token (it is in the Return-Path), so without
+    /// this a forged report could name any address and have it suppressed for the tenant (decision 92). A forwarded message is reported by the final
+    /// server with the forwarding target as Final-Recipient; the Original-Recipient field is what names the address the message was sent to, so it is
+    /// a candidate as well.
+    /// <para>With per-message history the candidate must also be a recorded recipient of the message whose <c>Message-ID</c> the report quotes, which
+    /// closes the residual of decision 92 (a holder of a token for <c>gmail.com</c> naming another <c>gmail.com</c> address). A report that cannot be
+    /// confirmed is ignored: no suppression, no webhook, no statistics (decision 112). The confirmation is the attachment of the report to the
+    /// message's history, so a storage failure is not swallowed here: it fails the SMTP transaction with a temporary error and the remote retries.</para>
     /// </summary>
-    private bool TryChooseRecipient(VerpToken token, string kind, out EmailAddress address, params string?[] candidates)
+    private async ValueTask<(EmailAddress Address, Guid? MessageId)?> ChooseRecipientAsync(
+        Guid tenantId, VerpToken token, string kind, string? originalMessageId, Func<string, AsyncReport> report, CancellationToken ct, params string?[] candidates)
     {
-        EmailAddress? first = null;
+        var inDomain = new List<EmailAddress>(candidates.Length);
+        bool outside = false;
         foreach (string? candidate in candidates)
         {
-            if (!EmailAddress.TryParse(candidate, allowUtf8: true, out var parsed))
+            if (!EmailAddress.TryParse(candidate, allowUtf8: true, out var parsed) || inDomain.Any(a => Key(a) == Key(parsed)))
             {
-                continue;
+                continue;   // unusable, or the same address again (Final-Recipient and Original-Recipient are often equal)
             }
 
             switch (_verp.CheckDestination(token, parsed.Domain))
             {
-                case VerpDestinationCheck.Unbound:   // a token issued before destinations were bound: the first usable address, as before
+                case VerpDestinationCheck.Unbound:   // a token issued before destinations were bound: the first usable address, as before, without confirmation
+                    return (parsed, await AttachAsync(tenantId, originalMessageId, report(Key(parsed)), ct).ConfigureAwait(false));
                 case VerpDestinationCheck.Match:
-                    address = parsed;
-                    return true;
+                    inDomain.Add(parsed);
+                    break;
                 default:
-                    first ??= parsed;
+                    outside = true;
                     break;
             }
         }
 
-        if (first is not null)
+        if (inDomain.Count == 0)
         {
-            BounceMetrics.ReportsIgnored.Add(1, new KeyValuePair<string, object?>("kind", kind));
-            _log.Write(MtaLogLevel.Information, "bounce", $"{kind} ignored: it names an address outside the domain its bounce address was issued for");
+            if (outside)
+            {
+                Ignore(kind, "outside_destination_domain", "it names an address outside the domain its bounce address was issued for");
+            }
+
+            return null;
         }
 
-        address = default;
-        return false;
+        if (_history is null)
+        {
+            return (inDomain[0], null);
+        }
+
+        if (string.IsNullOrWhiteSpace(originalMessageId))
+        {
+            Ignore(kind, "no_message_id", "it quotes no Message-ID, so the history cannot confirm the address it names");
+            return null;
+        }
+
+        foreach (EmailAddress address in inDomain)
+        {
+            Guid? messageId = await _history.AttachReportAsync(tenantId, originalMessageId, report(Key(address)), ct).ConfigureAwait(false);
+            if (messageId is not null)
+            {
+                return (address, messageId);
+            }
+        }
+
+        Ignore(kind, "not_in_history", "the message history does not show the address it names as a recipient of the message it quotes");
+        return null;
     }
+
+    private void Ignore(string kind, string reason, string why)
+    {
+        BounceMetrics.ReportsIgnored.Add(1, new KeyValuePair<string, object?>("kind", kind), new KeyValuePair<string, object?>("reason", reason));
+        _log.Write(MtaLogLevel.Information, "bounce", $"{kind} ignored: {why}");
+    }
+
+    private static string Key(EmailAddress address) => address.ToString().ToLowerInvariant();
 
     private async Task HandleBounceAsync(Tenant tenant, VerpToken token, InboundReport report, DateTimeOffset now, CancellationToken ct)
     {
         foreach (var r in report.Recipients.Where(r => r.IsPermanentFailure))
         {
-            if (!TryChooseRecipient(token, "bounce", out var parsed, r.FinalRecipient, r.OriginalRecipient))
+            int code = ParseCode(r.DiagnosticCode);
+            var chosen = await ChooseRecipientAsync(
+                tenant.Id, token, "bounce", report.OriginalMessageId, address => new AsyncReport(MessageEventType.Bounced, now, address, code == 0 ? null : code, r.Status, r.DiagnosticCode), ct,
+                r.FinalRecipient, r.OriginalRecipient).ConfigureAwait(false);
+            if (chosen is not { } found)
             {
                 continue;
             }
 
-            int code = ParseCode(r.DiagnosticCode);
+            var (parsed, messageId) = found;
+
             var remote = new RemoteReply(code == 0 ? 550 : code, r.Status, r.DiagnosticCode);
             bool recipientProblem = _classifier.Classify(remote, SmtpStage.EndOfData).Class.ShouldSuppressRecipient();
             if (recipientProblem)
             {
-                await _config.AddSuppressionAsync(new SuppressionRecord(tenant.Id, parsed.ToString().ToLowerInvariant(), SuppressionReason.HardBounce, "async-bounce", now, null), ct).ConfigureAwait(false);
+                await _config.AddSuppressionAsync(new SuppressionRecord(tenant.Id, Key(parsed), SuppressionReason.HardBounce, "async-bounce", now, null), ct).ConfigureAwait(false);
             }
 
-            Guid? messageId = await AttachAsync(tenant.Id, report.OriginalMessageId, new AsyncReport(MessageEventType.Bounced, now, parsed.ToString().ToLowerInvariant(), code == 0 ? null : code, r.Status, r.DiagnosticCode), ct).ConfigureAwait(false);
             var draft = WebhookEventFactory.ForInboundReport(WebhookEventFactory.Bounced, now, parsed.ToString(), report.OriginalMessageId, r.Status, r.DiagnosticCode, null, messageId);
             await _webhooks.PublishAsync(tenant.Id, draft, now, ct).ConfigureAwait(false);
             _stats.Add(new StatKey(HourStart(now), tenant.Id, string.Empty, parsed.Domain.ToLowerInvariant()), StatCounter.HardBounce);
@@ -154,25 +213,33 @@ public sealed class BounceProcessor
 
     private async Task HandleComplaintAsync(Tenant tenant, VerpToken token, InboundReport report, DateTimeOffset now, CancellationToken ct)
     {
-        if (!TryChooseRecipient(token, "complaint", out var parsed, report.ArfOriginalRecipient))
+        var chosen = await ChooseRecipientAsync(
+            tenant.Id, token, "complaint", report.OriginalMessageId, address => new AsyncReport(MessageEventType.Complained, now, address, null, null, report.FeedbackType), ct,
+            report.ArfOriginalRecipient).ConfigureAwait(false);
+        if (chosen is not { } found)
         {
-            _log.Write(MtaLogLevel.Information, "bounce", "complaint without a usable original recipient was ignored");
+            if (!EmailAddress.TryParse(report.ArfOriginalRecipient, allowUtf8: true, out _))
+            {
+                _log.Write(MtaLogLevel.Information, "bounce", "complaint without a usable original recipient was ignored");
+            }
+
             return;
         }
+
+        var (parsed, messageId) = found;
 
         // Only abuse-type feedback counts as a complaint; "not-spam" and virus reports do not suppress.
         if (report.FeedbackType is "abuse" or "fraud")
         {
-            await _config.AddSuppressionAsync(new SuppressionRecord(tenant.Id, parsed.ToString().ToLowerInvariant(), SuppressionReason.Complaint, "feedback-loop", now, null), ct).ConfigureAwait(false);
+            await _config.AddSuppressionAsync(new SuppressionRecord(tenant.Id, Key(parsed), SuppressionReason.Complaint, "feedback-loop", now, null), ct).ConfigureAwait(false);
         }
 
-        Guid? messageId = await AttachAsync(tenant.Id, report.OriginalMessageId, new AsyncReport(MessageEventType.Complained, now, parsed.ToString().ToLowerInvariant(), null, null, report.FeedbackType), ct).ConfigureAwait(false);
         var draft = WebhookEventFactory.ForInboundReport(WebhookEventFactory.Complained, now, parsed.ToString(), report.OriginalMessageId, null, null, report.FeedbackType, messageId);
         await _webhooks.PublishAsync(tenant.Id, draft, now, ct).ConfigureAwait(false);
         _stats.Add(new StatKey(HourStart(now), tenant.Id, string.Empty, parsed.Domain.ToLowerInvariant()), StatCounter.Complained);
     }
 
-    /// <summary>Attaches the report to the message's history. Never fails the bounce handling: a history problem is logged and the suppression and webhook still happen.</summary>
+    /// <summary>Attaches the report of a token issued before destinations were bound to the message's history, best effort: a history problem is logged and the suppression and webhook still happen.</summary>
     private async Task<Guid?> AttachAsync(Guid tenantId, string? originalMessageId, AsyncReport report, CancellationToken ct)
     {
         if (_history is null || string.IsNullOrWhiteSpace(originalMessageId))

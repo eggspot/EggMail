@@ -33,7 +33,8 @@ public class BounceTrustTests : IAsyncLifetime
         await _storage.InitializeAsync(default);
         await _storage.Config.UpsertTenantAsync(new Tenant(TenantId, "Acme", "acme", true, DateTimeOffset.UtcNow, false), default);
         _verp = new VerpCodec(new Dictionary<int, byte[]> { [1] = VerpCodec.GenerateKey() }, 1);
-        _bounces = new BounceProcessor(_verp, _storage.Config, _storage.Stats, new StorageWebhookPublisher(_storage), SystemClock.Instance, history: _storage.History);
+        // No history: the destination-domain binding is the whole check, as with History:Mode=StatsOnly. BounceHistoryConfirmationTests cover the history on top.
+        _bounces = new BounceProcessor(_verp, _storage.Config, _storage.Stats, new StorageWebhookPublisher(_storage), SystemClock.Instance);
     }
 
     public async Task DisposeAsync() => await _storage.DisposeAsync();
@@ -96,8 +97,8 @@ public class BounceTrustTests : IAsyncLifetime
         await _bounces.ProcessAsync(local, Complaint("victim@customer.example"), default);
         await _bounces.ProcessAsync(local, Dsn(local + "@" + BounceDomain, "gone@dest.example"), default);   // acted on: not counted
 
-        Assert.Equal(1, capture.Sum("mta.bounce.reports.ignored", ("kind", "bounce")));
-        Assert.Equal(1, capture.Sum("mta.bounce.reports.ignored", ("kind", "complaint")));
+        Assert.Equal(1, capture.Sum("mta.bounce.reports.ignored", ("kind", "bounce"), ("reason", "outside_destination_domain")));
+        Assert.Equal(1, capture.Sum("mta.bounce.reports.ignored", ("kind", "complaint"), ("reason", "outside_destination_domain")));
     }
 
     [Fact]

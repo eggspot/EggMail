@@ -258,6 +258,30 @@ public abstract class HistoryConformance : StorageTestBase
     }
 
     [Fact]
+    public async Task A_report_naming_a_recipient_attaches_only_to_a_message_sent_to_that_address()
+    {
+        var m = await AcceptAsync(Msg(messageIdHeader: "<sent@x>", to: ["alice@example.org", "bob@example.org"]));
+
+        // Another address at the same provider is not confirmed by the message (decision 112), whatever the case of the report.
+        Assert.Null(await Storage.History.AttachReportAsync(TenantA, "<sent@x>", Bounce(Clock.UtcNow, "carol@example.org"), CancellationToken.None));
+        Assert.Equal([MessageEventType.Queued], (await Storage.History.GetEventsAsync(TenantA, m.MessageId, CancellationToken.None)).Select(e => e.Type));
+
+        Assert.Equal(m.MessageId, await Storage.History.AttachReportAsync(TenantA, "<sent@x>", Bounce(Clock.UtcNow, " Bob@Example.ORG "), CancellationToken.None));
+        Assert.Equal(m.MessageId, await Storage.History.AttachReportAsync(TenantA, "<sent@x>", new AsyncReport(MessageEventType.Complained, Clock.UtcNow, null, null, null, "abuse"), CancellationToken.None));
+        Assert.Equal(2, (await Storage.History.GetEventsAsync(TenantA, m.MessageId, CancellationToken.None)).Count(e => e.Type is MessageEventType.Bounced or MessageEventType.Complained));
+    }
+
+    [Fact]
+    public async Task A_reused_message_id_header_attaches_to_the_newest_message_sent_to_the_reported_recipient()
+    {
+        var older = await AcceptAsync(Msg(messageIdHeader: "<again@x>", to: ["alice@example.org"], received: Start));
+        var newer = await AcceptAsync(Msg(messageIdHeader: "<again@x>", to: ["bob@example.org"], received: Start.AddMinutes(1)));
+
+        Assert.Equal(older.MessageId, await Storage.History.AttachReportAsync(TenantA, "<again@x>", Bounce(Clock.UtcNow, "alice@example.org"), CancellationToken.None));
+        Assert.Equal(newer.MessageId, await Storage.History.AttachReportAsync(TenantA, "<again@x>", Bounce(Clock.UtcNow, "bob@example.org"), CancellationToken.None));
+    }
+
+    [Fact]
     public async Task A_reused_message_id_header_attaches_to_the_newest_message()
     {
         await AcceptAsync(Msg(messageIdHeader: "<same@x>", received: Start));

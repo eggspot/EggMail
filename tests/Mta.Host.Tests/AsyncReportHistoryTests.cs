@@ -15,6 +15,7 @@ namespace Mta.Host.Tests;
 /// Asynchronous bounces and complaints (a remote server accepted the message and reported a problem later) are attached to the history of the message they are about:
 /// the verified VERP token names the tenant, the <c>Message-ID</c> in the returned headers finds the message. <c>History:Mode</c> decides whether anything is recorded per message.
 /// </summary>
+[Collection("bounce-history")]   // shares the process-wide ignored-report counter with BounceHistoryConfirmationTests
 public class AsyncReportHistoryTests
 {
     private static readonly Guid TenantId = Guid.Parse("a0000000-0000-7000-8000-000000000001");
@@ -44,7 +45,7 @@ public class AsyncReportHistoryTests
             {
                 Storage = storage,
                 Verp = verp,
-                Bounces = new BounceProcessor(verp, storage.Config, storage.Stats, new StorageWebhookPublisher(storage), SystemClock.Instance, history: storage.History),
+                Bounces = new BounceProcessor(verp, storage.Config, storage.Stats, new StorageWebhookPublisher(storage), SystemClock.Instance, history: mode == HistoryMode.Full ? storage.History : null),
                 Submission = new SubmissionService(storage, SystemClock.Instance, new SenderPolicy(), options, new SubmissionOptions { MessageIdDomain = "egg.test", DomainCacheTtl = TimeSpan.Zero }),
             };
         }
@@ -81,7 +82,7 @@ public class AsyncReportHistoryTests
 
         public async Task<BounceOutcome> SendDsnAsync(Guid tenant, string originalMessageId, string recipient = "gone@dest.example")
         {
-            string address = Verp.CreateAddress(tenant, Ids.New(), "bounces.egg.test", DateTimeOffset.UtcNow);
+            string address = Verp.CreateAddress(tenant, Ids.New(), "bounces.egg.test", DateTimeOffset.UtcNow, "dest.example");
             byte[] dsn = DsnBuilder.Build(new DsnRequest
             {
                 ReportingMta = "mx.remote.example",
@@ -97,7 +98,7 @@ public class AsyncReportHistoryTests
 
         public async Task<BounceOutcome> SendComplaintAsync(Guid tenant, string originalMessageId, string recipient = "gone@dest.example")
         {
-            string address = Verp.CreateAddress(tenant, Ids.New(), "bounces.egg.test", DateTimeOffset.UtcNow);
+            string address = Verp.CreateAddress(tenant, Ids.New(), "bounces.egg.test", DateTimeOffset.UtcNow, "dest.example");
             string arf = $"From: fbl@isp.example\r\nTo: {address}\r\nSubject: FW: spam\r\nContent-Type: multipart/report; report-type=feedback-report; boundary=\"FF\"\r\n\r\n" +
                 "--FF\r\nContent-Type: text/plain\r\n\r\nAbuse report.\r\n" +
                 $"--FF\r\nContent-Type: message/feedback-report\r\n\r\nFeedback-Type: abuse\r\nUser-Agent: SomeISP/1.0\r\nVersion: 1\r\nOriginal-Rcpt-To: <{recipient}>\r\n\r\n" +
@@ -137,12 +138,10 @@ public class AsyncReportHistoryTests
         Assert.Equal("<client.chosen.id@example.org>", header);
 
         await rig.SendDsnAsync(TenantId, "<CLIENT.chosen.ID@example.org>");   // servers fold case
-        await rig.SendDsnAsync(TenantId, "<nobody@elsewhere.example>");        // a message this server never sent
+        await rig.SendDsnAsync(TenantId, "<nobody@elsewhere.example>");        // a message this server never sent: not confirmed, no webhook (decision 112)
 
-        var items = await rig.Storage.Webhooks.ClaimDueAsync("w", 10, DateTimeOffset.UtcNow.AddSeconds(1), TimeSpan.FromMinutes(1), default);
-        Assert.Equal(2, items.Count);
-        Assert.Single(items, i => i.PayloadJson.Contains($"\"message_id\":\"{Ids.ToCompact(id)}\"", StringComparison.Ordinal));
-        Assert.Single(items, i => i.PayloadJson.Contains("\"message_id\":null", StringComparison.Ordinal));
+        var item = Assert.Single(await rig.Storage.Webhooks.ClaimDueAsync("w", 10, DateTimeOffset.UtcNow.AddSeconds(1), TimeSpan.FromMinutes(1), default));
+        Assert.Contains($"\"message_id\":\"{Ids.ToCompact(id)}\"", item.PayloadJson, StringComparison.Ordinal);
     }
 
     [Fact]
