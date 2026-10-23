@@ -16,6 +16,8 @@ public static class DeliveryMetrics
     /// <summary>Deliveries held locally by sending limits or destination throttling (nothing was sent).</summary>
     public static readonly Counter<long> Held = Meter.CreateCounter<long>("mta.delivery.held", "{recipient}", "Deliveries held by local limits");
 
+    public static readonly Counter<long> DkimKeyFailures = Meter.CreateCounter<long>("mta.delivery.dkim.key.failures", "{load}", "DKIM keys that could not be read; their mail is held");
+
     public static readonly Counter<long> Claimed = Meter.CreateCounter<long>("mta.delivery.claimed", "{recipient}", "Deliveries claimed from the queue");
 
     private static readonly KeyValuePair<string, object?>[] OutcomeTags = BuildOutcomeTags();

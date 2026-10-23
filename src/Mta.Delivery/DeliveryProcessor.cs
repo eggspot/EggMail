@@ -205,6 +205,17 @@ public sealed class DeliveryProcessor
             return;
         }
 
+        DkimSigner? signer;
+        try
+        {
+            signer = await _s.Dkim.GetSignerAsync(first.SendingDomain ?? string.Empty, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            HoldForUnreadableDkimKey(first, pending, results, now, ex);
+            return;
+        }
+
         var decision = _s.Limits.TryReserve(first.TenantId, first.SendingDomain, pending.Count);
         if (!decision.IsAllowed)
         {
@@ -228,16 +239,6 @@ public sealed class DeliveryProcessor
         try
         {
             using var lease = tr.Lease!;
-            DkimSigner? signer = null;
-            try
-            {
-                signer = await _s.Dkim.GetSignerAsync(first.SendingDomain ?? string.Empty, ct).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                _s.Log.Write(MtaLogLevel.Warning, Source, $"DKIM key unavailable for {first.SendingDomain}; sending unsigned", ex);
-            }
-
             // What goes on the wire (and so what DKIM signs) is decided per server, after its EHLO: see OutboundTransaction.
             transaction = new OutboundTransaction(raw, signer, first.HeadersUtf8, await ChooseEnvelopeFromAsync(first, now, ct).ConfigureAwait(false), RecipientsOf(pending), byteExact: first.Source == MessageSource.Forward);
             var attempt = await RunRoutesAsync(first, transaction, ct).ConfigureAwait(false);
@@ -1211,6 +1212,21 @@ public sealed class DeliveryProcessor
             CountAttempt = false,
         },
     };
+
+    private void HoldForUnreadableDkimKey(ClaimedDelivery first, List<ClaimedDelivery> pending, List<Result> results, DateTimeOffset now, Exception ex)
+    {
+        if (ex is not DkimKeyUnavailableException { Cached: true })
+        {
+            DeliveryMetrics.DkimKeyFailures.Add(1);
+            _s.Log.Write(MtaLogLevel.Error, Source, $"DKIM key for {first.SendingDomain} cannot be read; its mail is held until the key is repaired or retired", ex);
+        }
+
+        var until = now + DkimKeyUnavailableHold + TimeSpan.FromMilliseconds(Random.Shared.Next(0, (int)DkimKeyUnavailableHoldJitter.TotalMilliseconds));
+        Hold(pending, results, now, until, "held: DKIM key for " + first.SendingDomain + " cannot be read");
+    }
+
+    private static readonly TimeSpan DkimKeyUnavailableHold = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan DkimKeyUnavailableHoldJitter = TimeSpan.FromSeconds(30);
 
     private void Hold(List<ClaimedDelivery> pending, List<Result> results, DateTimeOffset now, DateTimeOffset until, string reason)
     {
