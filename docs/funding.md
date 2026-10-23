@@ -13,7 +13,7 @@
 ## Policy
 
 1. **Transparency.** Once money is received, publish a short summary of income and how it was used (at least yearly). Where the platform provides a public ledger, point to it; whether a given platform does is **unverified** for the options below.
-2. **No feature gating, no priority code.** Sponsors get no features, no private builds, no paid-only options and no priority for their issues or pull requests. The project stays 100% MIT open source. Support and roadmap decisions are not for sale.
+2. **No feature gating, no priority code.** Sponsors get no features, no private builds, no paid-only options and no priority for their issues or pull requests. The project stays 100% open source (MIT OR Apache-2.0) open source. Support and roadmap decisions are not for sale.
 3. **Optional recognition.** Sponsors who want it may be listed in the README (name or logo, in a single "Sponsors" list, by tier at most). Listing is opt-in and removable on request. Recognition carries no influence.
 4. **No conflicts.** Sponsorship is not a way to buy design decisions; the decisions record ([decisions.md](decisions.md)) stays the place where project decisions are made and explained.
 
