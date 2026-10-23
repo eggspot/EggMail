@@ -201,7 +201,7 @@ The tables below list every key; the test `ConfigurationDocumentationTests` fail
 | `Delivery:RetryDelays` | built-in ladder | Delays between retries (2 m, 5 m, 15 m, 30 m, 1 h, 2 h, 4 h); the last repeats |
 | `Delivery:Throttle:MaxConnections` | 20 | Ceiling of concurrent connections to one destination domain |
 | `Delivery:Throttle:MaxMessagesPerMinute` | 600 | Ceiling of messages per minute to one destination domain |
-| `Delivery:Throttle:MaxMessagesPerConnection` | 100 | Reserved: read and validated, but **not enforced yet** (a connection is closed when it goes idle, and a transaction carries one message group); only `MaxConnections` and `MaxMessagesPerMinute` limit a destination today |
+| `Delivery:Throttle:MaxMessagesPerConnection` | 100 | Messages sent over one outbound connection (direct MX or relay) before it is closed with `QUIT` instead of being kept for the next delivery; at least 1. A message counts once its data was sent, so a transaction whose recipients were all refused does not. Set it to a receiver's own limit when that receiver answers `421` to the next `MAIL` on a busy connection: otherwise that message waits for a retry (decision 117) |
 | `Delivery:Throttle:InitialConnections` | 5 | Connections allowed at first; grows while the destination keeps accepting |
 | `Delivery:Throttle:InitialMessagesPerMinute` | 120 | Messages per minute allowed at first; grows the same way |
 | `Delivery:RemotePort` | 25 | Destination port for direct MX delivery; lab setups only |

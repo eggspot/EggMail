@@ -14,25 +14,28 @@ public sealed class SmtpConnectionPool : IAsyncDisposable
     private readonly int _maxIdlePerTarget;
     private readonly int _maxIdleTotal;
     private readonly TimeSpan _idleTimeout;
-    private readonly int _maxTransactionsPerConnection;
+    private readonly int _maxMessagesPerConnection;
     private readonly ConcurrentDictionary<string, ConcurrentStack<SmtpClientConnection>> _idle = new();
     private readonly Timer _reaper;
     private int _idleCount;
     private bool _disposed;
 
     public SmtpConnectionPool(SmtpClientOptions options, IClock? clock = null, int maxIdlePerTarget = 2, int maxIdleTotal = 256,
-        TimeSpan? idleTimeout = null, int maxTransactionsPerConnection = 100)
+        TimeSpan? idleTimeout = null, int maxMessagesPerConnection = 100)
     {
+        ArgumentOutOfRangeException.ThrowIfLessThan(maxMessagesPerConnection, 1);
         _options = options;
         _clock = clock ?? SystemClock.Instance;
         _maxIdlePerTarget = maxIdlePerTarget;
         _maxIdleTotal = maxIdleTotal;
         _idleTimeout = idleTimeout ?? TimeSpan.FromSeconds(30);
-        _maxTransactionsPerConnection = maxTransactionsPerConnection;
+        _maxMessagesPerConnection = maxMessagesPerConnection;
         _reaper = new Timer(_ => _ = ReapAsync(), null, _idleTimeout, _idleTimeout);
     }
 
     public int IdleConnections => Volatile.Read(ref _idleCount);
+
+    public int MaxMessagesPerConnection => _maxMessagesPerConnection;
 
     /// <summary>Gets a ready connection (idle reuse or a fresh connect). Dispose the lease to return or discard it.</summary>
     [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
@@ -61,7 +64,7 @@ public sealed class SmtpConnectionPool : IAsyncDisposable
     [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     internal async ValueTask ReturnAsync(string key, SmtpClientConnection connection, bool discard)
     {
-        if (discard || _disposed || !connection.IsReusable || connection.TransactionsCompleted >= _maxTransactionsPerConnection ||
+        if (discard || _disposed || !connection.IsReusable || connection.TransactionsCompleted >= _maxMessagesPerConnection ||
             Volatile.Read(ref _idleCount) >= _maxIdleTotal)
         {
             await CloseAsync(connection).ConfigureAwait(false);

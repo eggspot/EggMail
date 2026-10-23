@@ -441,6 +441,52 @@ public class ClientTests
     }
 
     [Fact]
+    public async Task Pool_closes_a_connection_once_it_has_carried_its_maximum_number_of_messages()
+    {
+        await using var server = new RealServer();
+        await using var pool = new SmtpConnectionPool(Options, maxMessagesPerConnection: 2);
+        var target = server.Target(SmtpTlsPolicy.Disabled);
+        for (int i = 0; i < 5; i++)
+        {
+            await using var lease = await pool.RentAsync(target);
+            var r = await lease.Connection.SendAsync(Env("r@dest.example"), Msg($"msg {i}\r\n"));
+            Assert.True(r.Delivered);
+        }
+
+        Assert.Equal(3, server.Handler.Connections);
+        Assert.Equal(5, server.Handler.Messages.Count);
+        Assert.Equal(1, pool.IdleConnections);
+    }
+
+    [Fact]
+    public async Task A_transaction_whose_recipients_were_all_refused_does_not_count_towards_the_maximum_number_of_messages()
+    {
+        await using var server = new RealServer();
+        server.Handler.RcptPolicy = r => r.ToString().StartsWith("bad", StringComparison.Ordinal) ? SmtpReply.Create(550, "5.1.1", "No such user") : null;
+        await using var pool = new SmtpConnectionPool(Options, maxMessagesPerConnection: 1);
+        var target = server.Target(SmtpTlsPolicy.Disabled);
+
+        await using (var lease = await pool.RentAsync(target))
+        {
+            Assert.False((await lease.Connection.SendAsync(Env("bad@dest.example"), Msg())).Delivered);
+        }
+
+        await using (var lease = await pool.RentAsync(target))
+        {
+            Assert.True((await lease.Connection.SendAsync(Env("good@dest.example"), Msg())).Delivered);
+        }
+
+        Assert.Equal(1, server.Handler.Connections);
+        Assert.Equal(0, pool.IdleConnections);
+    }
+
+    [Fact]
+    public void A_pool_needs_at_least_one_message_per_connection()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => new SmtpConnectionPool(Options, maxMessagesPerConnection: 0));
+    }
+
+    [Fact]
     public async Task Concurrent_senders_through_pool()
     {
         await using var server = new RealServer();

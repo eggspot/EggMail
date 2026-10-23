@@ -76,6 +76,7 @@ workflow refuses a stable tag without a non-empty section for that exact version
 
 ### Changed
 
+- `Delivery:Throttle:MaxMessagesPerConnection` is enforced: an outbound connection that has carried that many messages is closed instead of being reused. The connection pool used a fixed 100 before, so the default behaviour is unchanged; a value below 1 now stops the start with a configuration error instead of an exception.
 - A sending domain whose DKIM key cannot be read (the key ring cannot decrypt it, the stored key is damaged, the configuration store fails) now has its mail held and retried every 5 minutes instead of sent unsigned (decision 116); a domain without an active key still sends unsigned. Each failed key load writes one `Error` log line and counts `mta_delivery_dkim_key_failures_total`; mail held this way expires at `Queue:MaxLifetime` if the key is never repaired.
 - The container image no longer sets `Storage__Backend` and `Sqlite__DataDirectory` (the defaults are the same): an environment variable counts as supplied by the deployment, which made a backend switch from the one-container quick start print a cutover patch instead of writing the bootstrap file.
 - `ci` starts on every pull request and skips its work for documentation-only changes inside the job, so a branch rule that requires the `build-test` check never waits for a documentation-only pull request; a missing PostgreSQL or Pebble in CI now fails the run instead of silently skipping their tests.

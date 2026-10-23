@@ -127,6 +127,24 @@ public class ConnectionReuseTests
         Assert.DoesNotContain(await lab.EventsAsync(third), e => e.Type is MessageEventType.PossibleDuplicate or MessageEventType.Bounced);
     }
 
+    [Fact]
+    public async Task With_the_maximum_set_to_the_peers_limit_the_third_message_goes_out_on_a_new_connection_without_a_deferral()
+    {
+        var peer = Personalities.Postfix();
+        peer.MaxMessagesPerConnection = 2;
+        await using var lab = SingleMx(peer, out var mx, new LabSettings { MaxMessagesPerConnection = 2 });
+
+        await DeliverAsync(lab, "one@dest.example");
+        await DeliverAsync(lab, "two@dest.example");
+        var third = await lab.SendAsync(["three@dest.example"]);
+        var events = await lab.WaitForEventAsync(third, MessageEventType.Delivered);
+
+        Assert.Equal(3, mx.Messages.Count);
+        Assert.Equal(2, mx.ConnectionCount);
+        Assert.DoesNotContain(events, e => e.Type == MessageEventType.Deferred);
+        Assert.Equal("QUIT", mx.Sessions[0].Verbs[^1]);
+    }
+
     // ------------------------------------------------------------------------- pipelining and chunking
 
     [Fact]

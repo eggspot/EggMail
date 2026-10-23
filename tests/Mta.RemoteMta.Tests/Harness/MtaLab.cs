@@ -43,6 +43,8 @@ public sealed record LabSettings
 
     public TimeSpan? PoolIdleTimeout { get; init; }
 
+    public int MaxMessagesPerConnection { get; init; } = 100;
+
     public MxAddressPreference AddressPreference { get; init; } = MxAddressPreference.Ipv4First;
 
     /// <summary>Seed of the shuffle among equal-preference MX hosts.</summary>
@@ -134,7 +136,7 @@ public sealed class MtaLab : IAsyncDisposable
             Tls = new OutboundTlsPolicyResolver(sts, Settings.Dane ? new DaneTlsaLookup(Dns) : null),
             TlsReports = TlsReports,
             TlsPolicies = new TlsPolicyTable(tlsOptions),
-            Pool = new SmtpConnectionPool(Settings.Client ?? new SmtpClientOptions { HeloName = "egg.test" }, Clock, idleTimeout: Settings.PoolIdleTimeout),
+            Pool = new SmtpConnectionPool(Settings.Client ?? new SmtpClientOptions { HeloName = "egg.test" }, Clock, idleTimeout: Settings.PoolIdleTimeout, maxMessagesPerConnection: Settings.MaxMessagesPerConnection),
             Routes = new RoutePlanner(RouteHealth),
             Throttle = Throttle,
             Limits = new SendingLimits(Clock, null, null),

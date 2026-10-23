@@ -192,7 +192,8 @@ public sealed class EggMailRuntime : IAsyncDisposable
         var mx = new MxResolver(dns, new MxResolverOptions { ExcludeSpecialAddresses = !config.Delivery.AllowPrivateMxAddresses });
         var mtaSts = new MtaStsPolicyStore(dns, new MtaStsPolicyFetcher(), clock: clock);
         var tls = new OutboundTlsPolicyResolver(mtaSts, new DaneTlsaLookup(dns));
-        var pool = new SmtpConnectionPool(new SmtpClientOptions { HeloName = config.Delivery.HeloName ?? config.Hostname, PreferChunking = config.Delivery.PreferChunking }, clock, maxIdlePerTarget: config.Delivery.MaxIdleConnectionsPerTarget);
+        var pool = new SmtpConnectionPool(new SmtpClientOptions { HeloName = config.Delivery.HeloName ?? config.Hostname, PreferChunking = config.Delivery.PreferChunking }, clock, maxIdlePerTarget: config.Delivery.MaxIdleConnectionsPerTarget,
+            maxMessagesPerConnection: config.Delivery.Throttle.MaxMessagesPerConnection);
         var routeHealth = new RouteHealth(clock);
         var routes = new RoutePlanner(routeHealth);
         var sendingCounters = new InMemorySendingCounterStore();

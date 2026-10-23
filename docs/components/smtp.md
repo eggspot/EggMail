@@ -35,7 +35,7 @@ Hand-written and package-free (decision 4). `Mta.Smtp.Protocol` is pure (no I/O)
 - The client never emits a bare CR/LF (the `DotStuffer` refuses them); such messages fail locally with `LocalFailure.MalformedMessage` and the connection is dropped.
 - Local checks before touching the wire: SIZE limit, SMTPUTF8 and 8BITMIME support (the delivery processor decides beforehand what to send per server, so these are a safety net there: see [delivery.md](delivery.md#8-bit-and-internationalized-mail)). `SmtpClientConnection.LocalIpAddress` (and `SmtpClientException.LocalIpAddress` for failed setups) is the local address of the TCP connection, used for TLS-RPT.
 - STARTTLS stripping is surfaced (`TlsSession.StartTlsAdvertised == false`, `TlsException(NotAdvertised)` when TLS is required) and plaintext injected behind the server's `220` aborts the upgrade.
-- `SmtpConnectionPool` keeps idle connections per target (idle timeout, per-target and total caps, transaction cap).
+- `SmtpConnectionPool` keeps idle connections per target (idle timeout, per-target and total caps) so consecutive deliveries to the same MX skip the connect, banner, EHLO and TLS handshake. Concurrency limits per destination are the delivery scheduler's job, not the pool's. A rented idle connection is checked with `NOOP`; a lease is returned with `RSET` when disposed, or closed when the caller discarded it after an error or a surprising reply. A connection that has carried `Delivery:Throttle:MaxMessagesPerConnection` messages (end of data sent; a transaction refused before `DATA` does not count) is closed with `QUIT` instead (decision 117).
 
 ## Listener roles and the inbound hooks
 
