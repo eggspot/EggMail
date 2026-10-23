@@ -73,6 +73,7 @@ From the plan-coverage audit in [progress.md](progress.md#plan-coverage). Each i
 | G12 | Ed25519 DKIM (cut item 1); List-Unsubscribe and one-click endpoint (not in the plan; Gmail and Yahoo require it from bulk senders); delayed DSN, NOTIFY/RET/ORCPT; operator hold/release/retry-now; RFC 6857 and REQUIRETLS | Features customers will ask for | M each | Yes: which are v1 |
 | G13 | Allocation budget: met for the SQLite ingest path since PR 98 (decision 89); not met for PostgreSQL (22 KB per message, no gate) or the delivery path ([benchmarks.md](benchmarks.md)) | Phase 2 gate | M-L | Whether the budget is binding for PostgreSQL |
 | G14 | Runtime: a DKIM key that cannot be read sends the message unsigned; the bounce and TLS-RPT mail is unsigned | DMARC failures on a key problem; reports may be refused by a strict receiver | S | Whether to defer instead of sending unsigned |
+| G17 | Residual of decision 112: a report is confirmed by the recipient and the `Message-ID` it quotes, not by the token's issue time or sending domain, so a holder of a token for the victim's domain who knows the `Message-ID` of any message to the victim (a client-chosen or reused id, one leaked through `References` or an archive) can still get the victim suppressed. Also require the message to have been sent from the token's domain and attempted around its issue time | Forged suppression with a known `Message-ID` | S | No |
 
 ## Questions still open in the sources
 

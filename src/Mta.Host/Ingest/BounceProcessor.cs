@@ -62,13 +62,17 @@ public sealed class BounceProcessor
     }
 
     /// <summary>
-    /// The startup warning when per-message history is kept for less time than a bounce address is accepted: a report that arrives after its message
-    /// left the history cannot be confirmed and is ignored (decision 112). Null when there is nothing to warn about.
+    /// The startup warning when per-message history can end before a bounce address of its message expires: the history counts from when the message
+    /// was received, the bounce address from its delivery attempt, which can be up to <paramref name="queueMaxLifetime"/> later. A report that arrives after
+    /// its message left the history cannot be confirmed and is ignored (decision 112). Null when there is nothing to warn about.
     /// </summary>
-    public static string? RetentionWarning(HistoryMode mode, int metadataDays) =>
-        mode == HistoryMode.Full && metadataDays > 0 && metadataDays < MaxTokenAge.TotalDays
-            ? $"Retention:MetadataDays ({metadataDays}) is shorter than the {MaxTokenAge.TotalDays:0} days a bounce address is accepted: a bounce or complaint that arrives after its message left the history cannot be confirmed and is ignored."
+    public static string? RetentionWarning(HistoryMode mode, int metadataDays, TimeSpan queueMaxLifetime)
+    {
+        double needed = Math.Ceiling((MaxTokenAge + queueMaxLifetime).TotalDays);
+        return mode == HistoryMode.Full && metadataDays > 0 && metadataDays < needed
+            ? $"Retention:MetadataDays ({metadataDays}) is shorter than the {needed:0} days a message's bounce address can be used ({MaxTokenAge.TotalDays:0} days after a delivery attempt, which can come up to Queue:MaxLifetime after the message was received): a bounce or complaint that arrives after its message left the history cannot be confirmed and is ignored."
             : null;
+    }
 
     /// <summary>True if <paramref name="localPart"/> is a bounce address token that verifies now.</summary>
     public bool IsValidBounceAddress(string localPart) => _verp.TryDecode(localPart, _clock.UtcNow, MaxTokenAge, out _);
@@ -119,9 +123,9 @@ public sealed class BounceProcessor
         bool outside = false;
         foreach (string? candidate in candidates)
         {
-            if (!EmailAddress.TryParse(candidate, allowUtf8: true, out var parsed))
+            if (!EmailAddress.TryParse(candidate, allowUtf8: true, out var parsed) || inDomain.Any(a => Key(a) == Key(parsed)))
             {
-                continue;
+                continue;   // unusable, or the same address again (Final-Recipient and Original-Recipient are often equal)
             }
 
             switch (_verp.CheckDestination(token, parsed.Domain))
@@ -214,7 +218,11 @@ public sealed class BounceProcessor
             report.ArfOriginalRecipient).ConfigureAwait(false);
         if (chosen is not { } found)
         {
-            _log.Write(MtaLogLevel.Information, "bounce", "complaint without a usable original recipient was ignored");
+            if (!EmailAddress.TryParse(report.ArfOriginalRecipient, allowUtf8: true, out _))
+            {
+                _log.Write(MtaLogLevel.Information, "bounce", "complaint without a usable original recipient was ignored");
+            }
+
             return;
         }
 

@@ -243,7 +243,7 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore, 
                 "AND ($4::text IS NULL OR EXISTS (SELECT 1 FROM message_recipient r WHERE r.day = m.day AND r.message_id = m.message_id AND r.recipient = $4)) " +
                 "ORDER BY m.day DESC, m.message_id DESC LIMIT 1 FOR UPDATE OF m", c, tx))
             {
-                find.Parameters.Uuid(tenantId).Text(key).Time(floor).Text(recipient);
+                find.Parameters.Uuid(tenantId).Text(key).Time(floor).TextExact(recipient);
                 await using NpgsqlDataReader r = await find.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
                 if (!await r.ReadAsync(cancellationToken).ConfigureAwait(false))
                 {

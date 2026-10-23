@@ -135,7 +135,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
 
         var throttle = new AuthThrottle(clock, shared: sharedFailures, digestKey: digestKey, log: log);
 
-        if (BounceProcessor.RetentionWarning(storage.HistoryMode, storageOptions.Retention.MetadataDays) is { } retentionWarning)
+        if (BounceProcessor.RetentionWarning(storage.HistoryMode, storageOptions.Retention.MetadataDays, storageOptions.Queue.MaxLifetime) is { } retentionWarning)
         {
             log.Write(MtaLogLevel.Warning, "startup", retentionWarning);
         }

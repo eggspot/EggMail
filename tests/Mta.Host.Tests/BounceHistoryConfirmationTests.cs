@@ -184,15 +184,28 @@ public class BounceHistoryConfirmationTests : IAsyncLifetime
         Assert.False(await SuppressedAsync("gone@dest.example"));
     }
 
-    [Theory]
-    [InlineData(HistoryMode.Full, 7, true)]
-    [InlineData(HistoryMode.Full, 13, true)]
-    [InlineData(HistoryMode.Full, 14, false)]
-    [InlineData(HistoryMode.Full, 0, false)]          // kept forever
-    [InlineData(HistoryMode.StatsOnly, 7, false)]     // nothing is confirmed against the history
-    public void A_history_shorter_than_a_bounce_address_lives_is_warned_about_at_start(HistoryMode mode, int metadataDays, bool warned)
+    [Fact]
+    public async Task A_report_naming_an_address_outside_the_destination_domain_is_ignored_before_the_history_is_asked()
     {
-        string? warning = BounceProcessor.RetentionWarning(mode, metadataDays);
+        var (id, header) = await SendAsync("victim@customer.example");
+        string local = LocalPart();   // a token for dest.example
+
+        await _bounces.ProcessAsync(local, Dsn(local, "victim@customer.example", header), default);
+
+        Assert.False(await SuppressedAsync("victim@customer.example"));
+        Assert.Equal([MessageEventType.Queued], await EventTypesAsync(id));
+    }
+
+    [Theory]
+    [InlineData(HistoryMode.Full, 7, 5, true)]
+    [InlineData(HistoryMode.Full, 18, 5, true)]       // a bounce address issued at the last attempt, five days after receipt, lives until day 19
+    [InlineData(HistoryMode.Full, 19, 5, false)]
+    [InlineData(HistoryMode.Full, 14, 0, false)]
+    [InlineData(HistoryMode.Full, 0, 5, false)]       // kept forever
+    [InlineData(HistoryMode.StatsOnly, 7, 5, false)]  // nothing is confirmed against the history
+    public void A_history_shorter_than_a_bounce_address_can_be_used_is_warned_about_at_start(HistoryMode mode, int metadataDays, int queueDays, bool warned)
+    {
+        string? warning = BounceProcessor.RetentionWarning(mode, metadataDays, TimeSpan.FromDays(queueDays));
 
         Assert.Equal(warned, warning is not null);
         if (warned)
