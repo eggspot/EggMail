@@ -257,12 +257,18 @@ public interface IHistoryStore
     /// message sent to that address qualifies, so a found id confirms that the address was a recipient of the quoted message (decision 112). Returns the message id, or
     /// null when nothing was attached: history is not recorded (<see cref="HistoryMode.StatsOnly"/>), the message is unknown, belongs to another tenant, is past
     /// <c>Retention:MetadataDays</c> or was not sent to the named recipient.
+    /// <para>With <see cref="AsyncReport.AttemptedWithin"/> the message must also show a delivery attempt (<see cref="Logic.ReportConfirmation.IsAttempt"/>) to the named recipient
+    /// (to any recipient when none is named) recorded inside that window, the hour its bounce address was issued (decision 113); otherwise nothing is attached.</para>
     /// </summary>
     ValueTask<Guid?> AttachReportAsync(Guid tenantId, string messageIdHeader, AsyncReport report, CancellationToken cancellationToken);
 }
 
 /// <summary>The event an asynchronous bounce (<see cref="MessageEventType.Bounced"/>) or complaint (<see cref="MessageEventType.Complained"/>) adds to a message's history.</summary>
-public sealed record AsyncReport(MessageEventType Type, DateTimeOffset At, string? Recipient, int? SmtpCode, string? EnhancedCode, string? Message);
+/// <param name="AttemptedWithin">Not stored: when set, the report is attached only to a message with a delivery attempt to <paramref name="Recipient"/> recorded inside this window (decision 113).</param>
+public sealed record AsyncReport(MessageEventType Type, DateTimeOffset At, string? Recipient, int? SmtpCode, string? EnhancedCode, string? Message, AttemptWindow? AttemptedWithin = null);
+
+/// <summary>A time range, <see cref="From"/> inclusive and <see cref="Until"/> exclusive, in which a delivery attempt must have been recorded (<see cref="AsyncReport.AttemptedWithin"/>).</summary>
+public readonly record struct AttemptWindow(DateTimeOffset From, DateTimeOffset Until);
 
 /// <summary>
 /// Optional capability of an <see cref="IHistoryStore"/>: the recipients of several messages in one call, so list views can show them

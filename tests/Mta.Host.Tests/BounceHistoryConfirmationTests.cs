@@ -14,7 +14,8 @@ namespace Mta.Host.Tests;
 /// <summary>
 /// A bounce address is bound to a destination domain, not an address, so a recipient at <c>dest.example</c> holds a token that verifies for every
 /// <c>dest.example</c> address (decision 92). With per-message history a report is acted on only when the address it names is a recorded recipient of the
-/// message it quotes; anything else is ignored: no suppression, no webhook, no statistics (decision 112, gap G3).
+/// message it quotes, attempted in the hour the report's bounce address was issued; anything else is ignored: no suppression, no webhook, no statistics
+/// (decisions 112 and 113, gaps G3 and G17).
 /// </summary>
 [Collection("bounce-history")]   // the ignored-report counter is a process-wide static instrument; AsyncReportHistoryTests also produces these reasons
 public class BounceHistoryConfirmationTests : IAsyncLifetime
@@ -44,8 +45,11 @@ public class BounceHistoryConfirmationTests : IAsyncLifetime
 
     public async Task DisposeAsync() => await _storage.DisposeAsync();
 
-    /// <summary>Submits a message to <paramref name="recipients"/> and returns its id and the Message-ID header the server stored.</summary>
-    private async Task<(Guid Id, string MessageIdHeader)> SendAsync(params string[] recipients)
+    /// <summary>Submits a message to <paramref name="recipients"/>, records a delivery to each, and returns its id and the Message-ID header the server stored.</summary>
+    private async Task<(Guid Id, string MessageIdHeader)> SendAsync(params string[] recipients) => await SendAsync(DateTimeOffset.UtcNow, recipients);
+
+    /// <summary>The same, with the deliveries recorded at <paramref name="attemptedAt"/> (null: not attempted yet).</summary>
+    private async Task<(Guid Id, string MessageIdHeader)> SendAsync(DateTimeOffset? attemptedAt, params string[] recipients)
     {
         string raw = $"From: Acme <news@example.org>\r\nTo: {string.Join(", ", recipients)}\r\nSubject: Hi\r\n\r\nbody\r\n";
         SubmissionResult result = await _submission.SubmitAsync(new SubmissionRequest
@@ -57,11 +61,19 @@ public class BounceHistoryConfirmationTests : IAsyncLifetime
             Message = Encoding.ASCII.GetBytes(raw),
         }, default);
         Assert.Equal(SubmissionStatus.Accepted, result.Status);
-        byte[] stored = (await _storage.Deliveries.GetRawAsync(result.MessageId, default))!;
+        byte[] stored = (await _storage.Deliveries.GetRawAsync(result.MessageId, default))!;   // before the delivery, which releases the spool
+        if (attemptedAt is { } at)
+        {
+            foreach (ClaimedDelivery d in await _storage.Deliveries.ClaimAsync("t", 100, DateTimeOffset.UtcNow.AddSeconds(1), TimeSpan.FromMinutes(1), default))
+            {
+                await _storage.Deliveries.RecordAttemptAsync(new DeliveryAttempt { DeliveryId = d.DeliveryId, Outcome = DeliveryOutcome.Delivered, At = at, SmtpCode = 250 }, default);
+            }
+        }
+
         return (result.MessageId, MimeMessage.Parse(stored).Headers.GetFirstValue("Message-ID")!);
     }
 
-    private string LocalPart(string? destinationDomain = "dest.example") => _verp.CreateLocalPart(TenantId, Ids.New(), DateTimeOffset.UtcNow, destinationDomain);
+    private string LocalPart(string? destinationDomain = "dest.example", DateTimeOffset? issuedAt = null) => _verp.CreateLocalPart(TenantId, Ids.New(), issuedAt ?? DateTimeOffset.UtcNow, destinationDomain);
 
     private static byte[] Dsn(string local, string finalRecipient, string? messageId, string? originalRecipient = null)
     {
@@ -88,6 +100,8 @@ public class BounceHistoryConfirmationTests : IAsyncLifetime
 
     private async Task<IEnumerable<MessageEventType>> EventTypesAsync(Guid id) => (await _storage.History.GetEventsAsync(TenantId, id, default)).Select(e => e.Type);
 
+    private static readonly MessageEventType[] Sent = [MessageEventType.Queued, MessageEventType.Delivered];
+
     [Fact]
     public async Task A_report_about_a_recipient_of_the_quoted_message_suppresses_it_and_is_attached()
     {
@@ -112,7 +126,52 @@ public class BounceHistoryConfirmationTests : IAsyncLifetime
 
         Assert.False(await SuppressedAsync("victim@dest.example"));
         Assert.Equal(0, await WebhookItemsAsync());
+        Assert.Equal(Sent, await EventTypesAsync(id));
+    }
+
+    [Fact]
+    public async Task A_token_from_another_hour_does_not_confirm_a_report_about_a_message_whose_message_id_is_known()
+    {
+        // Gap G17: the attacker received a message to dest.example yesterday, so holds a genuine token from then, and learned the Message-ID of
+        // a message sent to the victim today (a client-chosen id, one quoted in References). The victim was not attempted when that token was issued.
+        var (id, header) = await SendAsync("victim@dest.example");
+        string local = LocalPart(issuedAt: DateTimeOffset.UtcNow.AddDays(-1));
+
+        await _bounces.ProcessAsync(local, Dsn(local, "victim@dest.example", header), default);
+        await _bounces.ProcessAsync(local, Complaint(local, "victim@dest.example", header), default);
+
+        Assert.False(await SuppressedAsync("victim@dest.example"));
+        Assert.Equal(0, await WebhookItemsAsync());
+        Assert.Equal(Sent, await EventTypesAsync(id));
+    }
+
+    [Fact]
+    public async Task A_report_about_a_message_not_attempted_yet_changes_nothing()
+    {
+        var (id, header) = await SendAsync(attemptedAt: null, "gone@dest.example");
+        string local = LocalPart();
+
+        await _bounces.ProcessAsync(local, Dsn(local, "gone@dest.example", header), default);
+
+        Assert.False(await SuppressedAsync("gone@dest.example"));
         Assert.Equal([MessageEventType.Queued], await EventTypesAsync(id));
+    }
+
+    [Fact]
+    public async Task An_attempt_recorded_after_the_issue_hour_confirms_until_the_window_ends()
+    {
+        // The bounce address is made before the transaction and the attempt recorded after it, which can be in the next hour (decision 113).
+        DateTimeOffset issued = DateTimeOffset.UtcNow.AddHours(-4);
+        DateTimeOffset hour = new(issued.Year, issued.Month, issued.Day, issued.Hour, 0, 0, TimeSpan.Zero);
+        var (_, late) = await SendAsync(hour + BounceProcessor.AttemptSlackAfter - TimeSpan.FromSeconds(1), "late@dest.example");
+        var (_, tooLate) = await SendAsync(hour + BounceProcessor.AttemptSlackAfter, "toolate@dest.example");
+        string local = LocalPart(issuedAt: issued);
+
+        await _bounces.ProcessAsync(local, Dsn(local, "late@dest.example", late), default);
+        await _bounces.ProcessAsync(local, Dsn(local, "toolate@dest.example", tooLate), default);
+
+        Assert.True(await SuppressedAsync("late@dest.example"));
+        Assert.False(await SuppressedAsync("toolate@dest.example"));
     }
 
     [Fact]
@@ -193,7 +252,7 @@ public class BounceHistoryConfirmationTests : IAsyncLifetime
         await _bounces.ProcessAsync(local, Dsn(local, "victim@customer.example", header), default);
 
         Assert.False(await SuppressedAsync("victim@customer.example"));
-        Assert.Equal([MessageEventType.Queued], await EventTypesAsync(id));
+        Assert.Equal(Sent, await EventTypesAsync(id));
     }
 
     [Theory]

@@ -47,6 +47,13 @@ internal static class HistorySql
         "AND EXISTS (SELECT 1 FROM message_recipient r WHERE r.day = m.day AND r.message_id = m.message_id AND r.recipient = @r) ORDER BY m.day DESC, m.message_id DESC LIMIT 1",
         "@t", "@h", "@floor", "@r");
 
+    // The attempt events of the candidate messages inside the window, newest message first; the recipient is compared in C# (ReportConfirmation.IsRecipient).
+    public static readonly Stmt IndexFindByHeaderWithAttempt = new(
+        "SELECT m.day, m.message_id, m.recipient_count, m.status, e.recipient FROM message_index m JOIN message_event e ON e.day = m.day AND e.message_id = m.message_id " +
+        "WHERE m.tenant_id = @t AND m.message_id_header = @h AND m.received_at > @floor AND e.delivery_id IS NOT NULL AND e.\"type\" IN (" + ReportConfirmation.AttemptTypesSql + ") " +
+        "AND e.\"at\" >= @from AND e.\"at\" < @until ORDER BY m.day DESC, m.message_id DESC",
+        "@t", "@h", "@floor", "@from", "@until");
+
     public static readonly Stmt IndexSetRetained = new("UPDATE message_index SET raw_retained = 1 WHERE day = @day AND message_id = @m", "@day", "@m");
 }
 
@@ -228,14 +235,25 @@ internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore, IMes
         int recipients;
         string status;
         string? recipient = string.IsNullOrWhiteSpace(s.Report.Recipient) ? null : s.Report.Recipient.Trim().ToLowerInvariant();
-        PreparedCommand find = recipient is null
-            ? ctx.Command(HistorySql.IndexFindByHeader).Set(0, s.Tenant).Set(1, s.Key).Set(2, s.Floor)
-            : ctx.Command(HistorySql.IndexFindByHeaderAndRecipient).Set(0, s.Tenant).Set(1, s.Key).Set(2, s.Floor).Set(3, recipient);
+        bool attempted = s.Report.AttemptedWithin is not null;
+        PreparedCommand find = s.Report.AttemptedWithin is { } window
+            ? ctx.Command(HistorySql.IndexFindByHeaderWithAttempt).Set(0, s.Tenant).Set(1, s.Key).Set(2, s.Floor).Set(3, StorageTime.ToUnixMs(window.From)).Set(4, StorageTime.ToUnixMs(window.Until))
+            : recipient is null
+                ? ctx.Command(HistorySql.IndexFindByHeader).Set(0, s.Tenant).Set(1, s.Key).Set(2, s.Floor)
+                : ctx.Command(HistorySql.IndexFindByHeaderAndRecipient).Set(0, s.Tenant).Set(1, s.Key).Set(2, s.Floor).Set(3, recipient);
         using (RawReader r = find.ExecuteReader())
         {
-            if (!r.Read())
+            while (true)
             {
-                return null;
+                if (!r.Read())
+                {
+                    return null;
+                }
+
+                if (!attempted || ReportConfirmation.IsRecipient(r.GetNullableString(4), recipient))
+                {
+                    break;
+                }
             }
 
             day = r.GetInt32(0);

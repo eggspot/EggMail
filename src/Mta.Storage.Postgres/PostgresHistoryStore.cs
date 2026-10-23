@@ -73,6 +73,12 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore, 
         "INSERT INTO message_event (day, message_id, event_id, delivery_id, tenant_id, type, at, recipient, smtp_code, enhanced_code, message, mx_host, route, tls_json) " +
         "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)";
 
+    // The attempt events of the candidate messages inside the window, newest message first; the recipient is compared in C# (ReportConfirmation.IsRecipient).
+    private static readonly string FindWithAttempt =
+        "SELECT m.day, m.message_id, m.recipient_count, m.status, e.recipient FROM message_index m JOIN message_event e ON e.day = m.day AND e.message_id = m.message_id " +
+        "WHERE m.tenant_id = $1 AND m.message_id_header = $2 AND ($3::timestamptz IS NULL OR m.received_at > $3) AND e.delivery_id IS NOT NULL " +
+        "AND e.type IN (" + ReportConfirmation.AttemptTypesSql + ") AND e.at >= $4 AND e.at < $5 ORDER BY m.day DESC, m.message_id DESC FOR UPDATE OF m";
+
     private const string IndexCounts =
         "UPDATE message_index SET final_count = final_count + $1, delivered_count = delivered_count + $2, failed_count = failed_count + $3 " +
         "WHERE day = $4 AND message_id = $5 RETURNING recipient_count, final_count, delivered_count, failed_count, status";
@@ -238,16 +244,35 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore, 
             int recipients;
             string status;
             string? recipient = string.IsNullOrWhiteSpace(report.Recipient) ? null : report.Recipient.Trim().ToLowerInvariant();
-            await using (var find = new NpgsqlCommand(
-                "SELECT m.day, m.message_id, m.recipient_count, m.status FROM message_index m WHERE m.tenant_id = $1 AND m.message_id_header = $2 AND ($3::timestamptz IS NULL OR m.received_at > $3) " +
-                "AND ($4::text IS NULL OR EXISTS (SELECT 1 FROM message_recipient r WHERE r.day = m.day AND r.message_id = m.message_id AND r.recipient = $4)) " +
-                "ORDER BY m.day DESC, m.message_id DESC LIMIT 1 FOR UPDATE OF m", c, tx))
+            await using (NpgsqlCommand find = report.AttemptedWithin is not null
+                ? new NpgsqlCommand(FindWithAttempt, c, tx)
+                : new NpgsqlCommand(
+                    "SELECT m.day, m.message_id, m.recipient_count, m.status, NULL::text FROM message_index m WHERE m.tenant_id = $1 AND m.message_id_header = $2 AND ($3::timestamptz IS NULL OR m.received_at > $3) " +
+                    "AND ($4::text IS NULL OR EXISTS (SELECT 1 FROM message_recipient r WHERE r.day = m.day AND r.message_id = m.message_id AND r.recipient = $4)) " +
+                    "ORDER BY m.day DESC, m.message_id DESC LIMIT 1 FOR UPDATE OF m", c, tx))
             {
-                find.Parameters.Uuid(tenantId).Text(key).Time(floor).TextExact(recipient);
-                await using NpgsqlDataReader r = await find.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-                if (!await r.ReadAsync(cancellationToken).ConfigureAwait(false))
+                find.Parameters.Uuid(tenantId).Text(key).Time(floor);
+                if (report.AttemptedWithin is { } w)
                 {
-                    return null;
+                    find.Parameters.Time(w.From).Time(w.Until);
+                }
+                else
+                {
+                    find.Parameters.TextExact(recipient);
+                }
+
+                await using NpgsqlDataReader r = await find.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+                while (true)
+                {
+                    if (!await r.ReadAsync(cancellationToken).ConfigureAwait(false))
+                    {
+                        return null;
+                    }
+
+                    if (report.AttemptedWithin is null || ReportConfirmation.IsRecipient(r.IsDBNull(4) ? null : r.GetString(4), recipient))
+                    {
+                        break;
+                    }
                 }
 
                 day = r.GetInt32(0);

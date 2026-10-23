@@ -995,6 +995,8 @@ internal sealed class MemoryHistory(MemoryState s) : IHistoryStore, IMessageReci
             var m = s.Index.Values
                 .Where(x => x.TenantId == tenantId && x.MessageIdHeader == key && !IsMetadataExpired(x, now))
                 .Where(x => recipient is null || (s.Recipients.TryGetValue(x.MessageId, out var rs) && rs.Contains(recipient)))
+                .Where(x => report.AttemptedWithin is not { } window || (s.Events.TryGetValue(x.MessageId, out var es) && es.Any(e =>
+                    ReportConfirmation.IsAttempt(e.Type, e.DeliveryId) && ReportConfirmation.InWindow(e.At, window) && ReportConfirmation.IsRecipient(e.Recipient, recipient))))
                 .OrderByDescending(x => x.Day).ThenByDescending(x => MemoryState.IdText(x.MessageId), StringComparer.Ordinal).FirstOrDefault();
             if (m is null)
             {
