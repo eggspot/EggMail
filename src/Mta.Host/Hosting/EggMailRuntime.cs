@@ -87,7 +87,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
     private readonly List<IAsyncDisposable> _owned = [];
 
     public static async Task<EggMailRuntime> CreateAsync(MtaConfig config, IStorage storage, IClock clock, IMtaLog log, CancellationToken ct, IDnsResolver? dnsOverride = null,
-        IAcmeOrderRunner? acmeRunnerOverride = null, IDnsChallengeProvider? acmeDnsOverride = null, bool hostnameConfigured = true)
+        IAcmeOrderRunner? acmeRunnerOverride = null, IDnsChallengeProvider? acmeDnsOverride = null, bool hostnameConfigured = true, Func<SmtpSessionContext, System.Net.IPAddress>? inboundClientAddress = null)
     {
         var secrets = Mta.Host.Secrets.SecretsFactory.Create(config.Secrets, storage.Config);
         foreach (string warning in Mta.Host.Secrets.SecretsFactory.Warnings(config.Secrets, storage.Config))
@@ -155,7 +155,7 @@ public sealed class EggMailRuntime : IAsyncDisposable
             inbound = new InboundReceiver(
                 handler, storage.Inbound, inboundConfiguration, new InboundVerifier(dns, inboundOptions, config.Hostname, clock),
                 new VerificationSlots(inboundOptions.VerificationMaxConcurrency, inboundOptions.VerificationMaxConcurrencyPerRemote), new InboundRateLimiter(),
-                new DnsblChecker(dns, inboundOptions.DnsblZones, inboundOptions.DnsblTimeout), srs, new ForwardHopMarker(verp), inboundOptions, config.Hostname, clock, log, onAccepted: () => engine?.Wake());
+                new DnsblChecker(dns, inboundOptions.DnsblZones, inboundOptions.DnsblTimeout), srs, new ForwardHopMarker(verp), inboundOptions, config.Hostname, clock, log, clientAddress: inboundClientAddress, onAccepted: () => engine?.Wake());
             handler.UseInbound(inbound);
             log.Write(MtaLogLevel.Information, "startup", "Inbound mail is on: the port-25 listener receives mail for the domains tenants enabled. SPF and the per-address limits need the real client address: publish the port without source NAT (see the Inbound mail section of the operations guide); the server warns once an hour if connections look internal.");
         }

@@ -93,28 +93,36 @@ internal sealed class PostgresQueueStore(PostgresRuntime rt, PostgresHistoryStor
         return result;
     }
 
-    /// <summary>
-    /// A write that hits a missing partition (dropped by another replica, or never created for this day) creates it and tries
-    /// once more. The failed attempt has already given its connection and transaction back, so the partition is created while
-    /// this caller holds no pooled connection: nothing here ever waits for a second connection while holding the first.
-    /// </summary>
+    internal const int AttemptsWhenAPartitionIsMissing = 3;
+
     private async Task<T> WithPartitionRetryAsync<T>(Func<Task<T>> body, Func<int?> missingDay, CancellationToken ct)
     {
-        try
+        for (int attempt = 1; ; attempt++)
         {
-            return await body().ConfigureAwait(false);
-        }
-        catch (PostgresException ex) when (ex.SqlState == PostgresErrors.CheckViolation && ex.MessageText.Contains("no partition", StringComparison.Ordinal))
-        {
-            rt.Partitions.ForgetAll();
-            if (missingDay() is { } day)
+            try
             {
-                await rt.Partitions.EnsureDayAsync(day, force: true, ct).ConfigureAwait(false);
+                return await body().ConfigureAwait(false);
             }
+            catch (PostgresException ex) when (IsMissingPartition(ex) && attempt < AttemptsWhenAPartitionIsMissing)
+            {
+                rt.Partitions.ForgetAll();
+                if (missingDay() is { } day)
+                {
+                    await rt.Partitions.EnsureDayAsync(day, force: true, ct).ConfigureAwait(false);
+                }
 
-            return await body().ConfigureAwait(false);
+                if (attempt > 1)
+                {
+                    DiscardPooledBackendsThatMayHoldAStalePartitionList();
+                }
+            }
         }
     }
+
+    private static bool IsMissingPartition(PostgresException ex) =>
+        ex.SqlState == PostgresErrors.CheckViolation && ex.MessageText.Contains("no partition", StringComparison.Ordinal);
+
+    private void DiscardPooledBackendsThatMayHoldAStalePartitionList() => rt.Data.Clear();
 
     private async Task<IntakeResult> AcceptCoreAsync(AcceptedMessage m, DateTimeOffset now, int day, bool writeHistory, MessageContent? content, bool storeContent, string? subject, Guid eventId, CancellationToken ct)
     {

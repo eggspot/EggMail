@@ -672,7 +672,7 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
             else
             {
                 route = InboundRules.MatchRoute(await Inbound.GetRoutesAsync(domain.Id, ct).ConfigureAwait(false), address.LocalPart);
-                reply = route is null ? "550 5.1.1" : "250";
+                reply = route is null && !InboundRules.IsPostmaster(address.LocalPart) ? "550 5.1.1" : "250";
             }
         }
 

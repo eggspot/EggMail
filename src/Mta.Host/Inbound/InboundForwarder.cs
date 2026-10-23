@@ -210,6 +210,8 @@ public sealed class InboundForwarder : IInboundForwarder
         {
             case SenderCheck.Refused:
                 return Refused("unauthenticated_local_sender");
+            case SenderCheck.UnusableFrom:
+                return Refused("unusable_from");
             case SenderCheck.Unsettled:
                 // DMARC could not be settled at receipt (a DNS error): the message is not shown to be foreign, and not shown to be a spoof either. The verdict is the one stored at receipt and is not
                 // evaluated again here, so waiting does not change it: the action runs its ladder (about 27 hours) and ends failed with dmarc_unsettled. It is a retry, not a refusal, only so that the
@@ -425,14 +427,20 @@ public sealed class InboundForwarder : IInboundForwarder
 
         /// <summary>The same, but DMARC could not be settled at receipt (a temporary error): not a verdict, so not a permanent refusal.</summary>
         Unsettled,
+
+        UnusableFrom,
     }
 
-    /// <summary>Whether the message may be forwarded: a From in the route's own organizational domain needs a DMARC pass (the SRS envelope and our signature would otherwise launder a spoof of it).</summary>
     private static SenderCheck CheckSender(InboundMessage message, byte[] raw)
     {
         if (message.Auth.Dmarc == InboundVerdict.Pass)
         {
             return SenderCheck.Allowed;
+        }
+
+        if (message.Auth.Dmarc == InboundVerdict.PermError)
+        {
+            return SenderCheck.UnusableFrom;
         }
 
         SenderCheck refusal = message.Auth.Dmarc == InboundVerdict.TempError ? SenderCheck.Unsettled : SenderCheck.Refused;

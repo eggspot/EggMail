@@ -315,9 +315,11 @@ public sealed class InboundReceiver
             return MailboxFull;
         }
 
-        if (state.CountedDomains.Add(view.DomainId))
+        if (state.CountedDomains.Add(view.DomainId) && !_limiter.TryCount(view.DomainId, state.Client, limits.MaxMessagesPerMinute, limits.MaxMessagesPerMinutePerRemote, now))
         {
-            _limiter.Count(view.DomainId, state.Client, now);
+            state.CountedDomains.Remove(view.DomainId);
+            InboundMetrics.Recipient("rate_limited");
+            return TooManyMessages;
         }
 
         state.Kind = Kind.Inbound;

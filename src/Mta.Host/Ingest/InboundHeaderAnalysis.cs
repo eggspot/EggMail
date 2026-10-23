@@ -5,11 +5,6 @@ using Mta.Mime;
 
 namespace Mta.Host.Ingest;
 
-/// <summary>
-/// What the receive path reads from the header block of an inbound message before it stamps it (design sections 11.5 and 11.7): which header fields must go (a forged
-/// <c>Authentication-Results</c> of ours, every <c>X-EggMail-*</c> field that is not a valid hop marker), how many <c>Received</c> fields there are, the From domains, and the subject.
-/// The message is parsed once; <see cref="Compose"/> then writes the stored copy: our headers on top of the received bytes minus the removed fields.
-/// </summary>
 internal sealed class InboundHeaderAnalysis
 {
     private const int MaxFromDomains = 3;
@@ -26,26 +21,18 @@ internal sealed class InboundHeaderAnalysis
 
     public HeaderList Headers { get; }
 
-    /// <summary>More header fields, or a larger header block, than the parser records: fields we would have to inspect (and maybe remove) could be hidden behind the limit, so the message is refused.</summary>
     public bool Oversized { get; private set; }
 
-    /// <summary>
-    /// The message starts with white space: its first line would be a continuation of a header field that does not exist, and the field we put in front of it (our <c>Authentication-Results</c>) would swallow
-    /// that line as its own continuation, letting the sender write verdicts into our header. No real message starts like that; it is refused.
-    /// </summary>
     public bool StartsWithWhiteSpace { get; private set; }
 
-    /// <summary>A From field has a mailbox that does not parse (or the message has no From, an empty one or only groups): there is no identity whose policy could be applied.</summary>
     public bool FromUnusable => FromInvalid || FromDomains.Count == 0;
 
     private bool FromInvalid { get; set; }
 
     public int ReceivedCount { get; private set; }
 
-    /// <summary>The distinct domains of the From field(s), lower-case, in order.</summary>
     public List<string> FromDomains { get; } = [];
 
-    /// <summary>More From fields or domains than <see cref="MaxFromDomains"/>: no real message has that, and each one is a DMARC lookup.</summary>
     public bool TooManyFromDomains { get; private set; }
 
     public string? Subject { get; private set; }
@@ -54,10 +41,6 @@ internal sealed class InboundHeaderAnalysis
 
     public int RemovedCount => _removed.Count;
 
-    /// <summary>
-    /// Parses <paramref name="original"/> (CRLF lines, as received) and decides what to remove. <paramref name="ownAuthservIds"/> are the identifiers an <c>Authentication-Results</c> header must not
-    /// carry (ours); <paramref name="hops"/> verifies the signed forward marker (null: every marker is removed).
-    /// </summary>
     public static InboundHeaderAnalysis Analyze(ReadOnlyMemory<byte> original, IReadOnlyCollection<string> ownAuthservIds, ForwardHopMarker? hops)
     {
         HeaderList headers = HeaderList.Parse(original, Limits);
@@ -80,9 +63,7 @@ internal sealed class InboundHeaderAnalysis
         {
             MimeHeader header = headers[i];
 
-            // The name as a lenient consumer of the stored message might read it: control characters and white space dropped (a field named "X-EggMail-Dmarc<VT>:" is still ours), and a line without a colon
-            // judged by what it looks like. Anything that reads as one of our names but is not exactly that name written properly is removed.
-            string looksLike = Normalize(header);
+            string looksLike = NameAsALenientReaderSeesIt(header);
             bool properName = !header.IsMalformed && header.NameBytes.Length > 0 && IsToken(NameOf(header));
             string name = header.IsMalformed ? string.Empty : NameOf(header);
             if (looksLike == "authentication-results" || looksLike.StartsWith("authentication-results", StringComparison.Ordinal) && header.IsMalformed)
@@ -123,20 +104,19 @@ internal sealed class InboundHeaderAnalysis
             }
         }
 
-        // Among the markers with a valid signature only the highest count is kept (the first one when several say the same); every other marker goes.
-        int keep = -1, best = -1;
+        int highestValidMarker = -1, highestValidCount = -1;
         foreach ((int index, int count, bool valid) in hopFields)
         {
-            if (valid && count > best)
+            if (valid && count > highestValidCount)
             {
-                best = count;
-                keep = index;
+                highestValidCount = count;
+                highestValidMarker = index;
             }
         }
 
         foreach ((int index, _, _) in hopFields)
         {
-            if (index != keep)
+            if (index != highestValidMarker)
             {
                 analysis.Remove(headers[index]);
             }
@@ -146,7 +126,6 @@ internal sealed class InboundHeaderAnalysis
         return analysis;
     }
 
-    /// <summary>The field name as the sender wrote it, without the whitespace some senders put before the colon.</summary>
     public static string NameOf(MimeHeader header)
     {
         ReadOnlySpan<byte> name = header.NameBytes;
@@ -158,8 +137,7 @@ internal sealed class InboundHeaderAnalysis
         return Encoding.Latin1.GetString(name);
     }
 
-    /// <summary>The text before the colon (the whole line when there is none) reduced to lower-case letters, digits and hyphens.</summary>
-    private static string Normalize(MimeHeader header)
+    private static string NameAsALenientReaderSeesIt(MimeHeader header)
     {
         ReadOnlySpan<byte> raw = header.Raw.Span;
         int colon = raw.IndexOf((byte)':');
@@ -207,12 +185,14 @@ internal sealed class InboundHeaderAnalysis
             return;
         }
 
-        AddressList list = AddressList.Parse(header, Limits);
+        string value = header.GetValue(Limits.MaxHeaderValueBytes);
+        AddressList list = AddressList.Parse(value, Limits);
         if (list.Count == 0)
         {
-            FromInvalid = true;   // an empty From field
+            FromInvalid = true;
         }
 
+        var taken = new HashSet<string>(StringComparer.Ordinal);
         foreach (Mailbox mailbox in list.Mailboxes)
         {
             string domain;
@@ -222,18 +202,19 @@ internal sealed class InboundHeaderAnalysis
             }
             else if (TryRecoverDomain(mailbox.AddrSpec, out string? recovered))
             {
-                domain = recovered;   // a local part the strict parser refuses (john.@x, jo..hn@x) still names the domain whose policy applies
+                domain = recovered;
             }
-            else if (!mailbox.AddrSpec.Contains('@', StringComparison.Ordinal))
+            else if (IsPieceOfADisplayName(mailbox))
             {
-                continue;   // a piece of a display name split at an unquoted comma ("Doe, John <john@x>"): it claims no identity; the other pieces decide whether there is one
+                continue;
             }
             else
             {
-                FromInvalid = true;   // an "@" with no domain that can be read after it
+                FromInvalid = true;
                 continue;
             }
 
+            taken.Add(domain);
             if (!FromDomains.Contains(domain, StringComparer.Ordinal))
             {
                 if (FromDomains.Count >= MaxFromDomains)
@@ -245,21 +226,32 @@ internal sealed class InboundHeaderAnalysis
                 FromDomains.Add(domain);
             }
         }
+
+        foreach (string candidate in FromAmbiguity.CandidateDomains(value))
+        {
+            if (!taken.Contains(candidate))
+            {
+                FromInvalid = true;
+                break;
+            }
+        }
     }
 
-    /// <summary>The domain after the last <c>@</c> of an address the strict parser refused, when it is a plausible domain name (at least two labels).</summary>
     private static bool TryRecoverDomain(string addrSpec, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out string? domain)
     {
         domain = null;
-        // Exactly one "@": a refused mailbox with several ("ceo@victim.test x@evil.test") reads as different addresses to different parsers, and the one after the last "@" is the one an attacker would pick.
-        int at = addrSpec.LastIndexOf('@');
-        if (at < 0 || addrSpec.IndexOf('@', StringComparison.Ordinal) != at)
+        string? only = null;
+        foreach (string candidate in FromAmbiguity.CandidateDomains(addrSpec))
         {
-            return false;
+            if (only is not null && !string.Equals(only, candidate, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            only = candidate;
         }
 
-        string candidate = addrSpec[(at + 1)..].Trim().TrimEnd('>', ' ');
-        if (!Mta.Host.Domains.DomainNames.TryNormalize(candidate, out string normalized) || !normalized.Contains('.', StringComparison.Ordinal))
+        if (only is null || !Mta.Host.Domains.DomainNames.TryNormalize(only, out string normalized))
         {
             return false;
         }
@@ -267,6 +259,11 @@ internal sealed class InboundHeaderAnalysis
         domain = normalized.ToLowerInvariant();
         return true;
     }
+
+    private static bool IsPieceOfADisplayName(Mailbox mailbox) => !mailbox.AddrSpec.Contains('@', StringComparison.Ordinal);
+
+    private static bool IsControlOrBidirectionalFormatting(char c) =>
+        char.IsControl(c) || c is >= '\u202A' and <= '\u202E' or >= '\u2066' and <= '\u2069' or '\u200E' or '\u200F' or '\u061C';
 
     private static string? CleanSubject(MimeHeader header)
     {
@@ -279,8 +276,7 @@ internal sealed class InboundHeaderAnalysis
                 break;
             }
 
-            // Control characters and the bidirectional controls (override, embedding, isolate and mark characters) become spaces: a subject is shown in lists and must not reorder the text around it.
-            sb.Append(char.IsControl(c) || c is >= '\u202A' and <= '\u202E' or >= '\u2066' and <= '\u2069' or '\u200E' or '\u200F' or '\u061C' ? ' ' : c);
+            sb.Append(IsControlOrBidirectionalFormatting(c) ? ' ' : c);
         }
 
         string subject = sb.ToString().Trim();
@@ -292,10 +288,8 @@ internal sealed class InboundHeaderAnalysis
         return subject.Length == 0 ? null : subject;
     }
 
-    /// <summary>The stored copy: <paramref name="prefix"/> (the headers we add, CRLF terminated), then the received bytes without the removed fields.</summary>
     public byte[] Compose(ReadOnlySpan<byte> prefix)
     {
-        // The received bytes must start on a line of their own: a prefix that stopped mid-line would let the first received line continue our last field.
         if (prefix.Length < 2 || prefix[^2] != (byte)'\r' || prefix[^1] != (byte)'\n')
         {
             throw new ArgumentException("The headers we add must end with CRLF.", nameof(prefix));
@@ -326,5 +320,171 @@ internal sealed class InboundHeaderAnalysis
 
         source[position..].CopyTo(result.AsSpan(written));
         return result;
+    }
+}
+
+internal static class FromAmbiguity
+{
+    private const int MaxCandidates = 64;
+    private const string UnterminatedQuoteOrComment = "?unterminated";
+
+    private static readonly System.Buffers.SearchValues<char> RouteDomainLiteralCharacters = System.Buffers.SearchValues.Create("0123456789abcdefABCDEFIPv6:.");
+
+    public static IEnumerable<string> CandidateDomains(string field)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var result = new List<string>();
+        int commentDepth = 0;
+        bool quoted = false;
+        for (int i = 0; i < field.Length && result.Count < MaxCandidates; i++)
+        {
+            char c = field[i];
+            if (c == '\\' && (quoted || commentDepth > 0))
+            {
+                i++;
+                continue;
+            }
+
+            if (quoted)
+            {
+                quoted = c != '"';
+                continue;
+            }
+
+            if (commentDepth > 0)
+            {
+                commentDepth += c == '(' ? 1 : c == ')' ? -1 : 0;
+                continue;
+            }
+
+            switch (c)
+            {
+                case '"':
+                    quoted = true;
+                    break;
+                case '(':
+                    commentDepth = 1;
+                    break;
+                case '<':
+                    i = SkipRoute(field, i + 1) - 1;
+                    break;
+                case '@':
+                    {
+                        int start = SkipCfws(field, i + 1);
+                        int end = start;
+                        if (end < field.Length && field[end] == '[')
+                        {
+                            end = field.IndexOf(']', end) is var close and >= 0 ? close + 1 : field.Length;
+                        }
+                        else
+                        {
+                            while (end < field.Length && (char.IsAsciiLetterOrDigit(field[end]) || field[end] is '-' or '.' || field[end] > '\u007F'))
+                            {
+                                end++;
+                            }
+                        }
+
+                        string name = field[start..end].TrimEnd('.');
+                        string key = Mta.Core.EmailAddress.TryParse("postmaster@" + name, allowUtf8: true, out Mta.Core.EmailAddress parsed) && name.Length > 0
+                            ? parsed.Domain.ToLowerInvariant()
+                            : "?" + name.ToLowerInvariant();
+                        if (seen.Add(key))
+                        {
+                            result.Add(key);
+                        }
+
+                        i = Math.Max(i, end - 1);
+                        break;
+                    }
+            }
+        }
+
+        if (quoted || commentDepth > 0)
+        {
+            result.Add(UnterminatedQuoteOrComment);
+        }
+
+        return result;
+    }
+
+    private static int SkipCfws(string field, int position)
+    {
+        int i = position;
+        while (i < field.Length)
+        {
+            if (field[i] is ' ' or '\t' or '\r' or '\n')
+            {
+                i++;
+            }
+            else if (field[i] == '(')
+            {
+                int depth = 0;
+                while (i < field.Length)
+                {
+                    char c = field[i++];
+                    if (c == '\\' && i < field.Length)
+                    {
+                        i++;
+                    }
+                    else if (c == '(')
+                    {
+                        depth++;
+                    }
+                    else if (c == ')' && --depth == 0)
+                    {
+                        break;
+                    }
+                }
+            }
+            else
+            {
+                break;
+            }
+        }
+
+        return i;
+    }
+
+    private static int SkipRoute(string field, int position)
+    {
+        int i = SkipCfws(field, position);
+        if (i >= field.Length || field[i] != '@')
+        {
+            return position;
+        }
+
+        char previous = '<';
+        while (i < field.Length)
+        {
+            char c = field[i];
+            if (c is ' ' or '\t' or '\r' or '\n' or '(')
+            {
+                i = SkipCfws(field, i);
+                continue;
+            }
+
+            if (c == ':')
+            {
+                return i + 1;
+            }
+
+            if (c == '[' && previous == '@' && field.IndexOf(']', i) is var close and >= 0
+                && field.AsSpan(i + 1, close - i - 1).IndexOfAnyExcept(RouteDomainLiteralCharacters) < 0)
+            {
+                previous = ']';
+                i = close + 1;
+                continue;
+            }
+
+            if ((c == '@' && previous is not ('<' or ',')) || c is '<' or '>' or '"' or '\\' or ';')
+            {
+                return position;
+            }
+
+            previous = c;
+            i++;
+        }
+
+        return position;
     }
 }
