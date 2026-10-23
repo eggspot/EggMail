@@ -4,7 +4,6 @@ using Mta.Storage;
 
 namespace Mta.RemoteMta.Tests.Scenarios;
 
-/// <summary>The connection pool seen from the peer: reuse, RSET and NOOP, idle expiry, a peer that closes idle clients, pipelining and chunking.</summary>
 public class ConnectionReuseTests
 {
     private static MtaLab SingleMx(MtaPersonality peer, out FakeMta mx, LabSettings? settings = null)
@@ -34,8 +33,8 @@ public class ConnectionReuseTests
         Assert.Equal(3, mx.Messages.Count);
         var verbs = mx.Sessions.Single().Verbs;
         Assert.Equal(1, verbs.Count(v => v == "EHLO"));
-        Assert.Equal(3, verbs.Count(v => v == "RSET"));   // the transaction is cleared before the connection goes back to the pool
-        Assert.Equal(2, verbs.Count(v => v == "NOOP"));   // and the connection is checked before it is lent out again
+        Assert.Equal(3, verbs.Count(v => v == "RSET"));
+        Assert.Equal(2, verbs.Count(v => v == "NOOP"));
         Assert.True(verbs.ToList().IndexOf("NOOP") > verbs.ToList().IndexOf("RSET"));
     }
 
@@ -118,7 +117,7 @@ public class ConnectionReuseTests
         await DeliverAsync(lab, "one@dest.example");
         await DeliverAsync(lab, "two@dest.example");
         var third = await lab.SendAsync(["three@dest.example"]);
-        var due = await lab.WaitForRetryScheduleAsync(third);   // known limit: the 421 on the reused connection defers the message instead of retrying on a fresh connection at once
+        var due = await lab.WaitForRetryScheduleAsync(third);
         lab.Advance(due - lab.Clock.UtcNow);
         await lab.WaitForEventAsync(third, MessageEventType.Delivered);
 
@@ -144,8 +143,6 @@ public class ConnectionReuseTests
         Assert.DoesNotContain(events, e => e.Type == MessageEventType.Deferred);
         Assert.Equal("QUIT", mx.Sessions[0].Verbs[^1]);
     }
-
-    // ------------------------------------------------------------------------- pipelining and chunking
 
     [Fact]
     public async Task A_peer_that_offers_pipelining_receives_the_envelope_in_one_go()
@@ -204,6 +201,6 @@ public class ConnectionReuseTests
 
         var message = Assert.Single(mx.Messages);
         Assert.False(message.Chunked);
-        Assert.Equal(raw, message.Body);   // what the peer reads back after un-stuffing is exactly what was queued
+        Assert.Equal(raw, message.Body);
     }
 }

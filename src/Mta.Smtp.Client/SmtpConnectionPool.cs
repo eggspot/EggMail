@@ -3,10 +3,6 @@ using Mta.Core;
 
 namespace Mta.Smtp.Client;
 
-/// <summary>
-/// Keeps a few idle connections per remote target so consecutive deliveries to the same MX skip the connect, banner,
-/// EHLO and TLS handshake. Concurrency limits per destination are the delivery scheduler's job, not the pool's.
-/// </summary>
 public sealed class SmtpConnectionPool : IAsyncDisposable
 {
     private readonly SmtpClientOptions _options;
@@ -37,7 +33,6 @@ public sealed class SmtpConnectionPool : IAsyncDisposable
 
     public int MaxMessagesPerConnection => _maxMessagesPerConnection;
 
-    /// <summary>Gets a ready connection (idle reuse or a fresh connect). Dispose the lease to return or discard it.</summary>
     [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<PooledConnection> RentAsync(SmtpRemoteTarget target, CancellationToken ct = default)
     {
@@ -152,7 +147,6 @@ public sealed class SmtpConnectionPool : IAsyncDisposable
     }
 }
 
-/// <summary>A connection on loan from the pool.</summary>
 public sealed class PooledConnection : IAsyncDisposable
 {
     private readonly SmtpConnectionPool _pool;
@@ -169,7 +163,6 @@ public sealed class PooledConnection : IAsyncDisposable
 
     public SmtpClientConnection Connection { get; }
 
-    /// <summary>Do not return this connection to the pool (after an error or a surprising reply).</summary>
     public void Discard() => _discard = true;
 
     [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]

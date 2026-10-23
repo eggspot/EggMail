@@ -19,10 +19,10 @@ public class ConfigTests
         var l = Load();
         Assert.True(l.IsValid, string.Join("; ", l.Errors));
         var c = l.Config;
-        Assert.Equal(StorageBackend.Sqlite, c.Storage.Backend);                 // decision Q
-        Assert.Equal(HistoryMode.Full, c.Storage.History.Mode);                 // decision J
-        Assert.Equal(SqliteSyncMode.Off, c.Storage.Sqlite.SyncMode);            // decision D
-        Assert.Equal(SqliteSyncMode.Full, c.Storage.Sqlite.ConfigSyncMode);     // decision F
+        Assert.Equal(StorageBackend.Sqlite, c.Storage.Backend);
+        Assert.Equal(HistoryMode.Full, c.Storage.History.Mode);
+        Assert.Equal(SqliteSyncMode.Off, c.Storage.Sqlite.SyncMode);
+        Assert.Equal(SqliteSyncMode.Full, c.Storage.Sqlite.ConfigSyncMode);
         Assert.Equal(7, c.Storage.Content.RetentionDays);
         Assert.Equal(TimeSpan.FromDays(5), c.Storage.Queue.MaxLifetime);
         Assert.Equal(25L * 1024 * 1024, c.Smtp.MaxMessageSize);
@@ -45,7 +45,7 @@ public class ConfigTests
         Assert.Equal(2526, ls["bounce"].Port);
         Assert.Equal(ListenerRole.Bounce, ls["bounce"].Role);
         Assert.False(ls["bounce"].AuthRequired);
-        Assert.False(ls["alternate-587"].Enabled);   // 2587 and 2465 are off by default
+        Assert.False(ls["alternate-587"].Enabled);
         Assert.False(ls["alternate-465"].Enabled);
     }
 
@@ -56,7 +56,7 @@ public class ConfigTests
         Assert.True(l.IsValid, string.Join("; ", l.Errors));
         var ls = l.Config.Smtp.Listeners;
         Assert.Equal(587, ls["submission"].Port);
-        Assert.Equal(ListenerMode.StartTls, ls["submission"].Mode);      // kept from the default
+        Assert.Equal(ListenerMode.StartTls, ls["submission"].Mode);
         Assert.True(ls["submission"].AuthRequired);
         Assert.True(ls["alternate-587"].Enabled);
         Assert.Equal(9999, ls["custom"].Port);
@@ -81,14 +81,14 @@ public class ConfigTests
         Assert.False(s.Content.Retain);
         Assert.Equal(14, s.Content.RetentionDays);
         Assert.Equal(TimeSpan.FromDays(2), s.Queue.MaxLifetime);
-        Assert.Equal(0, s.Retention.StatsHourlyDays);          // 0 = unlimited is valid
+        Assert.Equal(0, s.Retention.StatsHourlyDays);
         Assert.Equal(0, s.Retention.WebhookOutboxDays);
         Assert.Equal(90, s.Retention.MetadataDays);
         Assert.Equal(1048576, l.Config.Smtp.MaxMessageSize);
     }
 
     [Theory]
-    [InlineData("Content:RetentionDays", "0")]       // no unlimited for content (decision O)
+    [InlineData("Content:RetentionDays", "0")]
     [InlineData("Content:RetentionDays", "5")]
     [InlineData("Content:RetentionDays", "31")]
     [InlineData("Retention:MetadataDays", "-1")]
@@ -115,7 +115,6 @@ public class ConfigTests
         Assert.Contains(Load(("Smtp:Listeners:alternate:Port", "5587")).Errors, e => e.Contains("same port"));
         Assert.Contains(Load(("Smtp:Listeners:submission:Mode", "Plain")).Errors, e => e.Contains("nobody could ever authenticate"));
         Assert.Contains(Load(("Queue:MaxLifetime", "10.00:00:00")).Errors, e => e.Contains("shorter than Content:RetentionDays"));
-        // With StatsOnly there is no stored content, so a long queue lifetime is fine.
         Assert.True(Load(("Queue:MaxLifetime", "10.00:00:00"), ("History:Mode", "StatsOnly")).IsValid);
     }
 
@@ -169,18 +168,17 @@ public class ConfigTests
     [Fact]
     public void The_bootstrap_file_lives_in_the_data_directory_given_on_the_command_line()
     {
-        // Regression: a server started with --Sqlite:DataDirectory=<dir> read, and a backend switch wrote, /data/bootstrap.json.
         string dir = Directory.CreateTempSubdirectory().FullName;
         try
         {
             string expected = Path.Combine(dir, ConfigLoader.BootstrapFileName);
             Assert.Equal(expected, ConfigLoader.ResolveBootstrapPath(args: ["--Sqlite:DataDirectory=" + dir]));
-            Assert.Equal(Path.Combine("/explicit", ConfigLoader.BootstrapFileName), ConfigLoader.ResolveBootstrapPath("/explicit", ["--Sqlite:DataDirectory=" + dir])); // a hint still wins
+            Assert.Equal(Path.Combine("/explicit", ConfigLoader.BootstrapFileName), ConfigLoader.ResolveBootstrapPath("/explicit", ["--Sqlite:DataDirectory=" + dir]));
 
             File.WriteAllText(expected, "{ \"History\": { \"Mode\": \"StatsOnly\" } }");
             IConfigurationRoot root = ConfigLoader.Build(["--Sqlite:DataDirectory=" + dir]);
             Assert.Equal(HistoryMode.StatsOnly, ConfigLoader.Load(root).Config.Storage.History.Mode);
-            Assert.Equal(expected, root[ConfigLoader.BootstrapPathKey]); // what the switch activator is given
+            Assert.Equal(expected, root[ConfigLoader.BootstrapPathKey]);
         }
         finally
         {
