@@ -125,4 +125,60 @@ public class PoolPressureTests : PgTestBase
         Assert.Equal(PostgresPartitions.Tables.Length, await creation);
         await tx.RollbackAsync();
     }
+
+    [Fact]
+    public async Task A_partition_still_missing_after_it_was_created_is_retried_on_a_new_backend()
+    {
+        DeliveryAttempt attempt = await DeliveredAttemptOfANewMessageAsync();
+        await FailMessageEventInsertsAsMissingPartitionAsync(times: 2);
+
+        PostgresStorage single = await OpenReplicaAsync(SmallPool(1));
+        await single.Deliveries.RecordAttemptAsync(attempt, CancellationToken.None);
+
+        Assert.Equal(3, await ScalarAsync<long>("SELECT last_value FROM missing_partition_attempt"));
+        long firstBackend = await ScalarAsync<long>("SELECT last_value FROM missing_partition_backend_1");
+        long secondBackend = await ScalarAsync<long>("SELECT last_value FROM missing_partition_backend_2");
+        int thirdBackend = await ScalarAsync<int>("SELECT pid FROM missing_partition_backend_3 LIMIT 1");
+        Assert.Equal(firstBackend, secondBackend);
+        Assert.NotEqual(secondBackend, thirdBackend);
+        Assert.Equal(1L, await ScalarAsync<long>("SELECT count(*) FROM message_event WHERE type = 1"));
+    }
+
+    [Fact]
+    public async Task A_partition_that_never_becomes_visible_fails_after_a_bounded_number_of_attempts()
+    {
+        DeliveryAttempt attempt = await DeliveredAttemptOfANewMessageAsync();
+        await FailMessageEventInsertsAsMissingPartitionAsync(times: int.MaxValue);
+
+        PostgresStorage single = await OpenReplicaAsync(SmallPool(1));
+        PostgresException failure = await Assert.ThrowsAsync<PostgresException>(async () => await single.Deliveries.RecordAttemptAsync(attempt, CancellationToken.None));
+
+        Assert.Equal(PostgresErrorCodes.CheckViolation, failure.SqlState);
+        Assert.Equal(PostgresQueueStore.AttemptsWhenAPartitionIsMissing, await ScalarAsync<long>("SELECT last_value FROM missing_partition_attempt"));
+        Assert.Equal(1, (await single.Deliveries.GetQueueStatsAsync(CancellationToken.None)).Leased);
+    }
+
+    private async Task<DeliveryAttempt> DeliveredAttemptOfANewMessageAsync()
+    {
+        await AcceptAsync(Msg(received: Start));
+        ClaimedDelivery claimed = (await ClaimAsync()).Single();
+        return new DeliveryAttempt { DeliveryId = claimed.DeliveryId, Outcome = DeliveryOutcome.Delivered, At = Clock.UtcNow, SmtpCode = 250 };
+    }
+
+    private async Task FailMessageEventInsertsAsMissingPartitionAsync(int times)
+    {
+        await ExecuteAsync(
+            "CREATE SEQUENCE missing_partition_attempt; CREATE SEQUENCE missing_partition_backend_1; CREATE SEQUENCE missing_partition_backend_2; " +
+            "CREATE TABLE missing_partition_backend_3 (pid int); " +
+            "CREATE FUNCTION fail_as_missing_partition() RETURNS trigger LANGUAGE plpgsql AS $$ " +
+            "DECLARE n bigint := nextval('missing_partition_attempt'); " +
+            "BEGIN " +
+            "  IF n = 1 THEN PERFORM setval('missing_partition_backend_1', pg_backend_pid()); END IF; " +
+            "  IF n = 2 THEN PERFORM setval('missing_partition_backend_2', pg_backend_pid()); END IF; " +
+            $"  IF n <= {times} THEN RAISE EXCEPTION 'no partition of relation \"message_event\" found for row' USING ERRCODE = 'check_violation'; END IF; " +
+            "  INSERT INTO missing_partition_backend_3 VALUES (pg_backend_pid()); " +
+            "  RETURN NEW; " +
+            "END $$; " +
+            "CREATE TRIGGER fail_as_missing_partition BEFORE INSERT ON message_event FOR EACH ROW EXECUTE FUNCTION fail_as_missing_partition();");
+    }
 }
