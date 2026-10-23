@@ -6,7 +6,6 @@ using StoredDkimKey = Mta.Storage.DkimKeyRecord;
 
 namespace Mta.Delivery;
 
-/// <summary>Supplies the DKIM signer for a sending domain; null when the domain has no active key (the message goes out unsigned).</summary>
 public interface IDkimSignerProvider
 {
     ValueTask<DkimSigner?> GetSignerAsync(string sendingDomain, CancellationToken cancellationToken);
@@ -22,7 +21,6 @@ public sealed class DkimKeyUnavailableException(string domain, Guid? keyId, bool
     public bool Cached { get; } = cached;
 }
 
-/// <summary>A provider that never signs.</summary>
 public sealed class NoDkimSignerProvider : IDkimSignerProvider
 {
     public static readonly NoDkimSignerProvider Instance = new();
@@ -30,11 +28,6 @@ public sealed class NoDkimSignerProvider : IDkimSignerProvider
     public ValueTask<DkimSigner?> GetSignerAsync(string sendingDomain, CancellationToken cancellationToken) => ValueTask.FromResult<DkimSigner?>(null);
 }
 
-/// <summary>
-/// Looks the signing key up in the configuration store: the sending domain's own record or the nearest registered parent domain,
-/// and its newest active key. Private keys are stored as PKCS#8 DER protected with <see cref="SecretPurposes.DkimKey"/>.
-/// Results (including "no key") are cached for <see cref="DeliveryOptions.DkimCacheTtl"/>, so a rotation takes effect within that time.
-/// </summary>
 public sealed class ConfigDkimSignerProvider : IDkimSignerProvider, IDisposable
 {
     private sealed record Entry(DkimSigner? Signer, long ExpiresAtTimestamp, DkimKeyUnavailableException? Failure = null);
