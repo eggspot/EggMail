@@ -1218,7 +1218,7 @@ public sealed class DeliveryProcessor
         if (ex is not DkimKeyUnavailableException { Cached: true })
         {
             DeliveryMetrics.DkimKeyFailures.Add(1);
-            _s.Log.Write(MtaLogLevel.Error, Source, $"DKIM key for {first.SendingDomain} cannot be read; its mail is held until the key is repaired or retired", ex);
+            _s.Log.Write(MtaLogLevel.Error, Source, $"DKIM key for {first.SendingDomain} cannot be read; its mail is held until the key ring is repaired or the key is replaced", ex);
         }
 
         var until = now + DkimKeyUnavailableHold + TimeSpan.FromMilliseconds(Random.Shared.Next(0, (int)DkimKeyUnavailableHoldJitter.TotalMilliseconds));
