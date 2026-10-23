@@ -548,6 +548,11 @@ public static class ConfigLoader
             errors.Add("Delivery:MaxIdleConnectionsPerTarget must be between 0 and 256.");
         }
 
+        if (c.Delivery.Throttle.MaxMessagesPerConnection < 1)
+        {
+            errors.Add("Delivery:Throttle:MaxMessagesPerConnection must be at least 1.");
+        }
+
         if (c.Switch.QuiesceTimeoutSeconds < 1)
         {
             errors.Add("Switch:QuiesceTimeoutSeconds must be at least 1.");

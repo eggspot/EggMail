@@ -3,10 +3,6 @@ using Mta.Core;
 
 namespace Mta.Smtp.Client;
 
-/// <summary>
-/// Keeps a few idle connections per remote target so consecutive deliveries to the same MX skip the connect, banner,
-/// EHLO and TLS handshake. Concurrency limits per destination are the delivery scheduler's job, not the pool's.
-/// </summary>
 public sealed class SmtpConnectionPool : IAsyncDisposable
 {
     private readonly SmtpClientOptions _options;
@@ -14,27 +10,29 @@ public sealed class SmtpConnectionPool : IAsyncDisposable
     private readonly int _maxIdlePerTarget;
     private readonly int _maxIdleTotal;
     private readonly TimeSpan _idleTimeout;
-    private readonly int _maxTransactionsPerConnection;
+    private readonly int _maxMessagesPerConnection;
     private readonly ConcurrentDictionary<string, ConcurrentStack<SmtpClientConnection>> _idle = new();
     private readonly Timer _reaper;
     private int _idleCount;
     private bool _disposed;
 
     public SmtpConnectionPool(SmtpClientOptions options, IClock? clock = null, int maxIdlePerTarget = 2, int maxIdleTotal = 256,
-        TimeSpan? idleTimeout = null, int maxTransactionsPerConnection = 100)
+        TimeSpan? idleTimeout = null, int maxMessagesPerConnection = 100)
     {
+        ArgumentOutOfRangeException.ThrowIfLessThan(maxMessagesPerConnection, 1);
         _options = options;
         _clock = clock ?? SystemClock.Instance;
         _maxIdlePerTarget = maxIdlePerTarget;
         _maxIdleTotal = maxIdleTotal;
         _idleTimeout = idleTimeout ?? TimeSpan.FromSeconds(30);
-        _maxTransactionsPerConnection = maxTransactionsPerConnection;
+        _maxMessagesPerConnection = maxMessagesPerConnection;
         _reaper = new Timer(_ => _ = ReapAsync(), null, _idleTimeout, _idleTimeout);
     }
 
     public int IdleConnections => Volatile.Read(ref _idleCount);
 
-    /// <summary>Gets a ready connection (idle reuse or a fresh connect). Dispose the lease to return or discard it.</summary>
+    public int MaxMessagesPerConnection => _maxMessagesPerConnection;
+
     [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<PooledConnection> RentAsync(SmtpRemoteTarget target, CancellationToken ct = default)
     {
@@ -61,7 +59,7 @@ public sealed class SmtpConnectionPool : IAsyncDisposable
     [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     internal async ValueTask ReturnAsync(string key, SmtpClientConnection connection, bool discard)
     {
-        if (discard || _disposed || !connection.IsReusable || connection.TransactionsCompleted >= _maxTransactionsPerConnection ||
+        if (discard || _disposed || !connection.IsReusable || connection.TransactionsCompleted >= _maxMessagesPerConnection ||
             Volatile.Read(ref _idleCount) >= _maxIdleTotal)
         {
             await CloseAsync(connection).ConfigureAwait(false);
@@ -149,7 +147,6 @@ public sealed class SmtpConnectionPool : IAsyncDisposable
     }
 }
 
-/// <summary>A connection on loan from the pool.</summary>
 public sealed class PooledConnection : IAsyncDisposable
 {
     private readonly SmtpConnectionPool _pool;
@@ -166,7 +163,6 @@ public sealed class PooledConnection : IAsyncDisposable
 
     public SmtpClientConnection Connection { get; }
 
-    /// <summary>Do not return this connection to the pool (after an error or a surprising reply).</summary>
     public void Discard() => _discard = true;
 
     [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]

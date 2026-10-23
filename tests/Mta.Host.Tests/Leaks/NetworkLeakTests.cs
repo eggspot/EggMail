@@ -138,7 +138,7 @@ public sealed class NetworkLeakTests(ITestOutputHelper output)
         await using var server = new Peer();
         SmtpClientOptions options = ClientOptions();
         var clock = new VirtualClock();
-        await using var pool = new SmtpConnectionPool(options, clock, maxTransactionsPerConnection: 50);
+        await using var pool = new SmtpConnectionPool(options, clock, maxMessagesPerConnection: 50);
         SmtpRemoteTarget target = server.Target(SmtpTlsPolicy.Disabled);
 
         using var probe = new LeakProbe(output.WriteLine);
