@@ -20,6 +20,21 @@ public class PortabilityUnitTests : IDisposable
     private static BundleManifest Manifest() => new() { SwitchId = Ids.New(), CreatedAt = DateTimeOffset.UtcNow, CreatedBy = "test" };
 
     [Fact]
+    public void A_history_row_of_a_bundle_from_before_the_sending_domain_column_reads_back_without_one()
+    {
+        var row = new Mta.Storage.Model.MessageIndexEntity { Day = 20384, MessageId = Ids.New(), TenantId = Ids.New(), ReceivedAt = DateTimeOffset.UnixEpoch, EnvelopeFrom = "a@example.org", Status = "queued" };
+        string older = TransferTables.MessageIndex.Serialize(row);
+        Assert.DoesNotContain("sendingDomainId", older, StringComparison.Ordinal);
+
+        var back = (Mta.Storage.Model.MessageIndexEntity)TransferTables.MessageIndex.Deserialize(older);
+        Assert.Null(back.SendingDomainId);
+        Assert.Equal(TransferTables.MessageIndex.Canonical(row), TransferTables.MessageIndex.Canonical(back));
+
+        row.SendingDomainId = Ids.New();
+        Assert.Equal(row.SendingDomainId, ((Mta.Storage.Model.MessageIndexEntity)TransferTables.MessageIndex.Deserialize(TransferTables.MessageIndex.Serialize(row))).SendingDomainId);
+    }
+
+    [Fact]
     public void Row_checksums_do_not_depend_on_the_order_rows_arrive_in()
     {
         string[] rows = Enumerable.Range(0, 200).Select(i => $"row-{i}").ToArray();

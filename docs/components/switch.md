@@ -35,7 +35,7 @@ The **gate** (`SwitchGate`) is derived from that row when a store is opened and 
 ## Bundle layout
 
 ```
-manifest.json                      format 1.4.0: switch id, source, effective settings, per-file SHA-256, per-table rows + checksum,
+manifest.json                      format 1.5.0: switch id, source, effective settings, per-file SHA-256, per-table rows + checksum,
                                    mode, history export progress, the protected digest key
 config/<table>.NNNNN.ndjson        tenants, domains, DKIM keys, VERP keys, API keys, SMTP credentials, suppressions, webhook endpoints, settings,
                                    TLS policies, relay routes, certificates, ACME accounts and renewals, domain_record_check

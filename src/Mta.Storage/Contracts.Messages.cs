@@ -137,6 +137,8 @@ public sealed class AcceptedMessage
     /// <summary>Recipient-domain buckets and sending domain for statistics.</summary>
     public string? SendingDomain { get; set; }
 
+    public Guid SendingDomainId { get; set; }
+
     /// <summary>
     /// The message's <c>Message-ID</c> header, so an asynchronous bounce or complaint that returns the headers can be attached to the message's history
     /// (<see cref="IHistoryStore.AttachReportAsync"/>). Recorded only with <see cref="HistoryMode.Full"/>.

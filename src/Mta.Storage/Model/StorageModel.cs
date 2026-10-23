@@ -47,9 +47,9 @@ public static class StorageModel
     /// a message uses. SQLite files go from 5 straight to 7 so that the number matches PostgreSQL's <c>V007</c>: PostgreSQL's <c>V006</c> (replica
     /// coordination tables) is PostgreSQL-only and has no SQLite counterpart. Version 8 added the inbound mail tables; version 9 the index on
     /// <c>inbound_message (tenant_id, action_next_attempt_at, id)</c> for the pending rows, which the per-tenant claim of the route actions probes once per tenant; version 10 the partial index on
-    /// <c>delivery_queue (tenant_id, sending_domain)</c> for the rows of source Forward, which the forward action counts before it queues another copy; version 11 the <c>verp_key</c> table (the VERP signing keys, protected, decision 107).
+    /// <c>delivery_queue (tenant_id, sending_domain)</c> for the rows of source Forward, which the forward action counts before it queues another copy; version 11 the <c>verp_key</c> table (the VERP signing keys, protected, decision 107); version 12 <c>message_index.sending_domain_id</c> (decision 118).
     /// </summary>
-    public const int SchemaVersion = 11;
+    public const int SchemaVersion = 12;
 
     /// <summary>
     /// Entity annotation requesting a <c>WITHOUT ROWID</c> table on SQLite (small rows whose primary key is the

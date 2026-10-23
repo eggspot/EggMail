@@ -324,6 +324,7 @@ public sealed class SubmissionService
             accepted.Content = content;
             accepted.RetainRaw = retainRaw;
             accepted.SendingDomain = decision.SendingDomain?.Name ?? fromDomain;
+            accepted.SendingDomainId = decision.SendingDomain?.Id ?? Guid.Empty;
             accepted.MessageIdHeader = messageIdHeader;
             accepted.Tags = request.Tags is { Count: > 0 } tags ? tags.Distinct(StringComparer.Ordinal).ToList() : null;
 
@@ -412,6 +413,7 @@ public sealed class SubmissionService
         message.Authenticated = null;
         message.Content = null;
         message.SendingDomain = null;
+        message.SendingDomainId = Guid.Empty;
         message.MessageIdHeader = null;
         message.Tags = null;
         if (Interlocked.Increment(ref _pooledMessages) <= 256)

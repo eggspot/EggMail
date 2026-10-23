@@ -31,4 +31,11 @@ public static class Ids
 
     /// <summary>Compact lowercase hex form without hyphens (used in Message-ID / VERP / file names).</summary>
     public static string ToCompact(Guid id) => id.ToString("N");
+
+    public static ulong Prefix64(Guid id)
+    {
+        Span<byte> bytes = stackalloc byte[16];
+        id.TryWriteBytes(bytes, bigEndian: true, out _);
+        return System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(bytes);
+    }
 }

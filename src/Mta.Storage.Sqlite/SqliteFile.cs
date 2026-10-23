@@ -205,7 +205,12 @@ internal sealed class SqliteFile
                 UpgradeFromV5(connection);
             }
 
-            UpgradeFromV7(connection);   // also takes a file at version 8, 9 or 10 to 11: every statement is "if not exists" and comes from the generated script
+            if (version <= 10)
+            {
+                UpgradeFromV7(connection);   // also takes a file at version 8, 9 or 10 to 11: every statement is "if not exists" and comes from the generated script
+            }
+
+            UpgradeFromV11(connection);
             return;
         }
 
@@ -470,7 +475,25 @@ internal sealed class SqliteFile
 
         using var cmd = connection.CreateCommand();
         cmd.Transaction = tx;
-        cmd.CommandText = "PRAGMA user_version=" + SchemaVersion.ToString(CultureInfo.InvariantCulture);
+        cmd.CommandText = "PRAGMA user_version=11";
+        cmd.ExecuteNonQuery();
+        tx.Commit();
+    }
+
+    private void UpgradeFromV11(SqliteConnection connection)
+    {
+        using var tx = connection.BeginTransaction();
+        if (Kind == SqliteFileKind.History && !ColumnExists(connection, tx, "message_index", "sending_domain_id"))
+        {
+            using var alter = connection.CreateCommand();
+            alter.Transaction = tx;
+            alter.CommandText = "ALTER TABLE \"message_index\" ADD COLUMN \"sending_domain_id\" TEXT NULL";
+            alter.ExecuteNonQuery();
+        }
+
+        using var cmd = connection.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = "PRAGMA user_version=12";
         cmd.ExecuteNonQuery();
         tx.Commit();
     }

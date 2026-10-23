@@ -85,7 +85,7 @@ public abstract class TransferConformance : StorageTestBase
             Raw = withFingerprint.Raw, ReceivedAt = withFingerprint.ReceivedAt, ExpiresAt = withFingerprint.ExpiresAt, IdempotencyKey = "idem-1", IdempotencyFingerprint = "fp-123", Content = withFingerprint.Content,
             RetainRaw = true, SendingDomain = withFingerprint.SendingDomain, HeadersUtf8 = true,
         });
-        await AcceptAsync(Msg(to: ["c@example.org"], idempotencyKey: "idem-2", size: 40_000));
+        await AcceptAsync(Msg(to: ["c@example.org"], idempotencyKey: "idem-2", size: 40_000, sendingDomainId: Ids.New(now)));
         await AcceptAsync(Msg(to: ["d@example.org"], tenant: TenantB));
         var claimed = await ClaimAsync(max: 10, now: now);
         Assert.Equal(4, claimed.Count);

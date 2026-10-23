@@ -145,7 +145,8 @@ public abstract class StorageTestBase : IAsyncLifetime
         MessageSource source = MessageSource.Api,
         string? messageIdHeader = null,
         string[]? tags = null,
-        bool headersUtf8 = false)
+        bool headersUtf8 = false,
+        Guid? sendingDomainId = null)
     {
         DateTimeOffset at = received ?? Clock.UtcNow;
         string[] recipients = to ?? ["alice@example.org"];
@@ -168,6 +169,7 @@ public abstract class StorageTestBase : IAsyncLifetime
             Content = noContent ? null : content ?? new MessageContent(subject, "plain body text", "<p>html body</p>", [new AttachmentInfo("a.pdf", "application/pdf", 1234, null)], false),
             RetainRaw = retainRaw,
             SendingDomain = sendingDomain,
+            SendingDomainId = sendingDomainId ?? Guid.Empty,
             MessageIdHeader = messageIdHeader,
             Tags = tags,
             HeadersUtf8 = headersUtf8,

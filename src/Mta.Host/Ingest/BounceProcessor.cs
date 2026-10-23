@@ -179,7 +179,7 @@ public sealed class BounceProcessor
 
         foreach (EmailAddress address in inDomain)
         {
-            AsyncReport confirmed = report(Key(address)) with { AttemptedWithin = AttemptWindowOf(token.IssuedAt) };
+            AsyncReport confirmed = report(Key(address)) with { AttemptedWithin = AttemptWindowOf(token.IssuedAt), SendingDomainIdPrefix = token.DomainIdPrefix };
             Guid? messageId = await _history.AttachReportAsync(tenantId, originalMessageId, confirmed, ct).ConfigureAwait(false);
             if (messageId is not null)
             {

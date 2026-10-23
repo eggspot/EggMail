@@ -27,6 +27,7 @@ public class AsyncReportHistoryTests
         public required BounceProcessor Bounces { get; init; }
         public required SubmissionService Submission { get; init; }
         public required VerpCodec Verp { get; init; }
+        public required IReadOnlyDictionary<Guid, Guid> SendingDomainIds { get; init; }
 
         public static async Task<Rig> CreateAsync(HistoryMode mode)
         {
@@ -34,10 +35,12 @@ public class AsyncReportHistoryTests
             var storage = new InMemoryStorage(options);
             await storage.InitializeAsync(default);
             var now = DateTimeOffset.UtcNow;
+            var sendingDomainIds = new Dictionary<Guid, Guid>();
             foreach (Guid tenant in new[] { TenantId, OtherTenantId })
             {
                 await storage.Config.UpsertTenantAsync(new Tenant(tenant, "T" + tenant.ToString("N")[..4], "t" + tenant.ToString("N")[..4], true, now, false), default);
-                await storage.Config.UpsertDomainAsync(new DomainRecord(Ids.New(), tenant, tenant == TenantId ? "example.org" : "other.example", DomainStatus.Verified, null, false, now, now, now, 0, null, false, null), default);
+                sendingDomainIds[tenant] = Ids.New(now.AddSeconds(sendingDomainIds.Count));
+                await storage.Config.UpsertDomainAsync(new DomainRecord(sendingDomainIds[tenant], tenant, tenant == TenantId ? "example.org" : "other.example", DomainStatus.Verified, null, false, now, now, now, 0, null, false, null), default);
             }
 
             var verp = new VerpCodec(new Dictionary<int, byte[]> { [1] = VerpCodec.GenerateKey() }, 1);
@@ -45,6 +48,7 @@ public class AsyncReportHistoryTests
             {
                 Storage = storage,
                 Verp = verp,
+                SendingDomainIds = sendingDomainIds,
                 Bounces = new BounceProcessor(verp, storage.Config, storage.Stats, new StorageWebhookPublisher(storage), SystemClock.Instance, history: mode == HistoryMode.Full ? storage.History : null),
                 Submission = new SubmissionService(storage, SystemClock.Instance, new SenderPolicy(), options, new SubmissionOptions { MessageIdDomain = "egg.test", DomainCacheTtl = TimeSpan.Zero }),
             };
@@ -82,7 +86,7 @@ public class AsyncReportHistoryTests
 
         public async Task<BounceOutcome> SendDsnAsync(Guid tenant, string originalMessageId, string recipient = "gone@dest.example")
         {
-            string address = Verp.CreateAddress(tenant, Ids.New(), "bounces.egg.test", DateTimeOffset.UtcNow, "dest.example");
+            string address = Verp.CreateAddress(tenant, SendingDomainIds[tenant], "bounces.egg.test", DateTimeOffset.UtcNow, "dest.example");
             byte[] dsn = DsnBuilder.Build(new DsnRequest
             {
                 ReportingMta = "mx.remote.example",
@@ -98,7 +102,7 @@ public class AsyncReportHistoryTests
 
         public async Task<BounceOutcome> SendComplaintAsync(Guid tenant, string originalMessageId, string recipient = "gone@dest.example")
         {
-            string address = Verp.CreateAddress(tenant, Ids.New(), "bounces.egg.test", DateTimeOffset.UtcNow, "dest.example");
+            string address = Verp.CreateAddress(tenant, SendingDomainIds[tenant], "bounces.egg.test", DateTimeOffset.UtcNow, "dest.example");
             string arf = $"From: fbl@isp.example\r\nTo: {address}\r\nSubject: FW: spam\r\nContent-Type: multipart/report; report-type=feedback-report; boundary=\"FF\"\r\n\r\n" +
                 "--FF\r\nContent-Type: text/plain\r\n\r\nAbuse report.\r\n" +
                 $"--FF\r\nContent-Type: message/feedback-report\r\n\r\nFeedback-Type: abuse\r\nUser-Agent: SomeISP/1.0\r\nVersion: 1\r\nOriginal-Rcpt-To: <{recipient}>\r\n\r\n" +
