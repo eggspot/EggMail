@@ -74,10 +74,13 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore, 
         "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)";
 
     // The attempt events of the candidate messages inside the window, newest message first; the recipient is compared in C# (ReportConfirmation.IsRecipient).
+    // Unlocked: only the message chosen is locked afterwards (LockChosen), not every candidate a reused Message-ID returns.
     private static readonly string FindWithAttempt =
         "SELECT m.day, m.message_id, m.recipient_count, m.status, e.recipient FROM message_index m JOIN message_event e ON e.day = m.day AND e.message_id = m.message_id " +
         "WHERE m.tenant_id = $1 AND m.message_id_header = $2 AND ($3::timestamptz IS NULL OR m.received_at > $3) AND e.delivery_id IS NOT NULL " +
-        "AND e.type IN (" + ReportConfirmation.AttemptTypesSql + ") AND e.at >= $4 AND e.at < $5 ORDER BY m.day DESC, m.message_id DESC FOR UPDATE OF m";
+        "AND e.type IN (" + ReportConfirmation.AttemptTypesSql + ") AND e.at >= $4 AND e.at < $5 ORDER BY m.day DESC, m.message_id DESC";
+
+    private const string LockChosen = "SELECT recipient_count, status FROM message_index WHERE day = $1 AND message_id = $2 FOR UPDATE";
 
     private const string IndexCounts =
         "UPDATE message_index SET final_count = final_count + $1, delivered_count = delivered_count + $2, failed_count = failed_count + $3 " +
@@ -279,6 +282,21 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore, 
                 messageId = r.GetGuid(1);
                 recipients = r.GetInt32(2);
                 status = r.GetString(3);
+            }
+
+            if (report.AttemptedWithin is not null)
+            {
+                // Locked now and its status read again, which a concurrent delivery may have moved since the unlocked read.
+                await using var lockChosen = new NpgsqlCommand(LockChosen, c, tx);
+                lockChosen.Parameters.Int(day).Uuid(messageId);
+                await using NpgsqlDataReader l = await lockChosen.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+                if (!await l.ReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    return null;   // dropped by retention in between
+                }
+
+                recipients = l.GetInt32(0);
+                status = l.GetString(1);
             }
 
             await using (var insert = new NpgsqlCommand(EventInsert, c, tx))

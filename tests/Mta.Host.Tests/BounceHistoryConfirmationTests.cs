@@ -175,6 +175,23 @@ public class BounceHistoryConfirmationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task An_attempt_recorded_just_before_the_issue_hour_confirms_only_within_the_slack()
+    {
+        // A clock stepped back between the token and the event (decision 113): five minutes before the hour still confirm, more does not.
+        DateTimeOffset issued = DateTimeOffset.UtcNow.AddHours(-4);
+        DateTimeOffset hour = new(issued.Year, issued.Month, issued.Day, issued.Hour, 0, 0, TimeSpan.Zero);
+        var (_, early) = await SendAsync(hour - BounceProcessor.AttemptSlackBefore, "early@dest.example");
+        var (_, tooEarly) = await SendAsync(hour - BounceProcessor.AttemptSlackBefore - TimeSpan.FromSeconds(1), "tooearly@dest.example");
+        string local = LocalPart(issuedAt: issued);
+
+        await _bounces.ProcessAsync(local, Dsn(local, "early@dest.example", early), default);
+        await _bounces.ProcessAsync(local, Dsn(local, "tooearly@dest.example", tooEarly), default);
+
+        Assert.True(await SuppressedAsync("early@dest.example"));
+        Assert.False(await SuppressedAsync("tooearly@dest.example"));
+    }
+
+    [Fact]
     public async Task A_report_that_quotes_no_message_id_or_an_unknown_one_changes_nothing()
     {
         await SendAsync("gone@dest.example");
