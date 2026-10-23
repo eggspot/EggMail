@@ -215,6 +215,7 @@ Legend: **yes** implemented and wired; **partial** implemented with the gap name
 | Disk full answered `451` | `452 4.3.1` through `StorageFullException` | 91 |
 | Webhook SSRF guard bypassable through a proxy environment | `UseProxy = false` | 91 |
 | `MaxMessagesPerConnection` documented as working | documented as reserved | 91 |
+| G5 (part): `Delivery:Throttle:MaxMessagesPerConnection` was never enforced; the pool closed connections after a fixed 100 messages | the pool closes a connection after the configured number of messages; below 1 is a configuration error (decision 117) | 126 |
 | The `changed-code.sh` self-test failed on `main` because `GITHUB_EVENT_NAME=push` leaked into every case | the self-test is hermetic (clean environment per case, isolated repository configuration) and CI runs it a second time under the push environment | 101 |
 | CI flakes seen on the way: the replica-liveness test used a 100 ms window, the outage test a 3 s connect timeout, ARI tests raced Pebble's order index | windows of seconds; 30 s timeout; PR 97 fixes the Pebble race at its source | 89, 91, 97 |
 | PostgreSQL write failed with "no partition" although the partition had just been created (seen once in CI in `PoolPressureTests`): a pooled backend can keep a partition list from before a concurrent `ATTACH` (PostgreSQL BUG #19690) | the retry runs on a new backend, at most three attempts (decision 115); the race itself is not reproducible on demand, the retry path is pinned with a trigger that raises the same error | 112 |

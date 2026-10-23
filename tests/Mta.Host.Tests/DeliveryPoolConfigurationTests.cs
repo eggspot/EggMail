@@ -22,14 +22,11 @@ public class DeliveryPoolConfigurationTests
                 Smtp = new SmtpSection { Listeners = new Dictionary<string, ListenerSection> { ["submission"] = new() { Port = 0, BindAddress = "127.0.0.1", Mode = ListenerMode.StartTls, AuthRequired = true } } },
                 Delivery = new DeliverySection { Throttle = new ThrottleSection { MaxMessagesPerConnection = 7 } },
             };
-            SqliteStorage storage = SqliteStorage.Create(config.Storage);
+            await using SqliteStorage storage = SqliteStorage.Create(config.Storage);
             await storage.InitializeAsync(default);
-            EggMailRuntime runtime = await EggMailRuntime.CreateAsync(config, storage, SystemClock.Instance, NullMtaLog.Instance, default);
+            await using EggMailRuntime runtime = await EggMailRuntime.CreateAsync(config, storage, SystemClock.Instance, NullMtaLog.Instance, default);
 
             Assert.Equal(7, runtime.Pool.MaxMessagesPerConnection);
-
-            await runtime.DisposeAsync();
-            await storage.DisposeAsync();
         }
         finally
         {
