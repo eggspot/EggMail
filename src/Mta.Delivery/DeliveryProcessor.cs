@@ -212,7 +212,7 @@ public sealed class DeliveryProcessor
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            HoldForUnreadableDkimKey(first, pending, results, now, ex);
+            HoldForUnavailableDkimKey(first, pending, results, now, ex);
             return;
         }
 
@@ -1213,9 +1213,9 @@ public sealed class DeliveryProcessor
         },
     };
 
-    private void HoldForUnreadableDkimKey(ClaimedDelivery first, List<ClaimedDelivery> pending, List<Result> results, DateTimeOffset now, Exception ex)
+    private void HoldForUnavailableDkimKey(ClaimedDelivery first, List<ClaimedDelivery> pending, List<Result> results, DateTimeOffset now, Exception ex)
     {
-        if (ex is not DkimKeyUnavailableException { Cached: true })
+        if (ex is not DkimKeyUnavailableException { FromCache: true })
         {
             DeliveryMetrics.DkimKeyFailures.Add(1);
             _s.Log.Write(MtaLogLevel.Error, Source, $"DKIM key for {first.SendingDomain} cannot be read; its mail is held until the key ring is repaired or the key is replaced", ex);

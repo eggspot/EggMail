@@ -33,7 +33,7 @@ public class DkimKeyUnavailableDeliveryTests
         var error = Assert.Single(log.Entries, e => e.Level == MtaLogLevel.Error);
         Assert.Contains("example.org", error.Message);
         Assert.IsType<DkimKeyUnavailableException>(error.Exception);
-        Assert.DoesNotContain(log.Entries, e => e.Message.Contains("unsigned", StringComparison.OrdinalIgnoreCase) && e.Level != MtaLogLevel.Error);
+        Assert.DoesNotContain(log.Entries, e => e.Message.Contains("unsigned", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -94,10 +94,10 @@ public class ConfigDkimSignerProviderFailureTests
 
         Assert.Equal(keyId, first.KeyId);
         Assert.Equal("example.org", first.Domain);
-        Assert.False(first.Cached);
+        Assert.False(first.FromCache);
         Assert.IsType<CryptographicException>(first.InnerException);
-        Assert.False(second.Cached);
-        Assert.True(third.Cached);
+        Assert.False(second.FromCache);
+        Assert.True(third.FromCache);
         Assert.Equal(keyId, third.KeyId);
         Assert.Equal(2, protector.Calls);
     }

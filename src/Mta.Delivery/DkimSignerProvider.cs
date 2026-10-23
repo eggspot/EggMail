@@ -11,14 +11,14 @@ public interface IDkimSignerProvider
     ValueTask<DkimSigner?> GetSignerAsync(string sendingDomain, CancellationToken cancellationToken);
 }
 
-public sealed class DkimKeyUnavailableException(string domain, Guid? keyId, bool cached, Exception innerException)
+public sealed class DkimKeyUnavailableException(string domain, Guid? keyId, bool fromCache, Exception innerException)
     : Exception($"DKIM key {(keyId is { } id ? id.ToString("N") + " " : string.Empty)}of {domain} cannot be read: {innerException.GetType().Name}: {innerException.Message}", innerException)
 {
     public string Domain { get; } = domain;
 
     public Guid? KeyId { get; } = keyId;
 
-    public bool Cached { get; } = cached;
+    public bool FromCache { get; } = fromCache;
 }
 
 public sealed class NoDkimSignerProvider : IDkimSignerProvider
@@ -59,7 +59,7 @@ public sealed class ConfigDkimSignerProvider : IDkimSignerProvider, IDisposable
         if (_cache.TryGetValue(name, out var cached) && now < cached.ExpiresAtTimestamp)
         {
             return cached.Failure is { } failure
-                ? throw new DkimKeyUnavailableException(failure.Domain, failure.KeyId, cached: true, failure.InnerException!)
+                ? throw new DkimKeyUnavailableException(failure.Domain, failure.KeyId, fromCache: true, failure.InnerException!)
                 : cached.Signer;
         }
 
@@ -76,7 +76,7 @@ public sealed class ConfigDkimSignerProvider : IDkimSignerProvider, IDisposable
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            var failure = new DkimKeyUnavailableException(name, null, cached: false, ex);
+            var failure = new DkimKeyUnavailableException(name, null, fromCache: false, ex);
             _cache[name] = new Entry(null, expiresAt, failure);
             throw failure;
         }
@@ -118,7 +118,7 @@ public sealed class ConfigDkimSignerProvider : IDkimSignerProvider, IDisposable
         }
         catch (Exception ex)
         {
-            throw new DkimKeyUnavailableException(domain, key.Id, cached: false, ex);
+            throw new DkimKeyUnavailableException(domain, key.Id, fromCache: false, ex);
         }
         finally
         {
