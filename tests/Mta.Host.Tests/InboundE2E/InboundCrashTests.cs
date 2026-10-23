@@ -5,11 +5,6 @@ using Npgsql;
 
 namespace Mta.Host.Tests.InboundE2E;
 
-/// <summary>
-/// A server that stops in the middle of receiving mail, on SQLite and on PostgreSQL: every message a sender was told <c>250</c> for is there afterwards, nothing is half stored, and a message exists twice
-/// only when a sender did not get to see the <c>250</c> of the first attempt and sent it again (SMTP gives no way around that, design section 11.2). The senders are real concurrent connections that
-/// retry the way an MTA does; the stop is the runtime and the storage closed with no flush, then opened again over the same files or database on a new port.
-/// </summary>
 public abstract class InboundCrashTests(LabBackend backend)
 {
     private sealed class Ledger
@@ -46,7 +41,7 @@ public abstract class InboundCrashTests(LabBackend backend)
 
                 if (r.Code == 250)
                 {
-                    dataSent = true;   // from here on a lost connection leaves the sender not knowing
+                    dataSent = true;
                     r = await mta.DataAsync(message);
                 }
 
@@ -57,9 +52,9 @@ public abstract class InboundCrashTests(LabBackend backend)
                     return;
                 }
 
-                dataSent = false;   // a reply was read: the sender knows this attempt did not store anything
+                dataSent = false;
                 ledger.Deferred.AddOrUpdate(id, 1, (_, n) => n + 1);
-                Assert.True(r.Code / 100 == 4, $"{id}: {r}");   // a stop is only ever a temporary failure for the sender
+                Assert.True(r.Code / 100 == 4, $"{id}: {r}");
             }
             catch (Exception ex) when (ex is IOException or EndOfStreamException or System.Net.Sockets.SocketException or ObjectDisposedException or InvalidOperationException)
             {
@@ -77,7 +72,6 @@ public abstract class InboundCrashTests(LabBackend backend)
         }
     }
 
-    // The clock of the lab stands still, so a per-minute limit would never lift: these tests are about the stop, not about the limits.
     internal static LabOptions Open() => new() { Inbound = new Mta.Host.Configuration.InboundSection { Enabled = true, CheckSpfForInternalClients = true, MaxMessagesPerMinute = 1_000_000, MaxMessagesPerMinutePerRemote = 1_000_000 } };
 
     private async Task RunAsync(Func<InboundLab, Task> stopTheServer)
@@ -89,7 +83,7 @@ public abstract class InboundCrashTests(LabBackend backend)
         }
 
         var ledger = new Ledger();
-        using var stop = new CancellationTokenSource(TimeSpan.FromMinutes(2));   // a hang guard, not a timing assertion
+        using var stop = new CancellationTokenSource(TimeSpan.FromMinutes(2));
         int currentPort = lab.Port;
         string[] ids = [.. Enumerable.Range(0, 120).Select(i => $"crash-{i:D3}")];
         Task[] senders = Enumerable.Range(0, 6).Select(worker => Task.Run(async () =>
@@ -100,7 +94,6 @@ public abstract class InboundCrashTests(LabBackend backend)
             }
         })).ToArray();
 
-        // Stop the server once a good part of the mail is in, with the senders still at work.
         while (Volatile.Read(ref ledger.TotalAcknowledged) < 40 && !senders.All(s => s.IsCompleted))
         {
             await Task.Delay(5);
@@ -118,13 +111,13 @@ public abstract class InboundCrashTests(LabBackend backend)
             InboundMessage[] copies = [.. stored.Where(m => m.Subject == id)];
             int acknowledged = ledger.Acknowledged.GetValueOrDefault(id);
             int ambiguous = ledger.Ambiguous.GetValueOrDefault(id);
-            Assert.Equal(1, acknowledged);   // every sender ended with a 250
+            Assert.Equal(1, acknowledged);
             Assert.True(copies.Length >= 1, $"{id}: acknowledged and not stored");
             Assert.True(copies.Length <= 1 + ambiguous, $"{id}: stored {copies.Length} times after {ambiguous} attempts whose answer was lost");
             foreach (InboundMessage copy in copies)
             {
                 Assert.True(copy.HasRaw);
-                string raw = await lab.RawAsync(copy);   // the body is there, whole
+                string raw = await lab.RawAsync(copy);
                 Assert.EndsWith(new string('x', 3_000) + "\r\n\r\n", raw, StringComparison.Ordinal);
                 Assert.Equal(InboundActionState.Done, copy.ActionState);
             }
@@ -132,8 +125,7 @@ public abstract class InboundCrashTests(LabBackend backend)
 
         Assert.InRange(stored.Count, ids.Length, ids.Length + ledger.Ambiguous.Values.Sum());
         Assert.Equal(stored.Count, stored.Select(m => m.Id).Distinct().Count());
-        Assert.All(stored, m => Assert.Contains(m.Subject!, ids));   // nothing but what was sent: no phantom rows
-        // The server is fully usable afterwards.
+        Assert.All(stored, m => Assert.Contains(m.Subject!, ids));
         Assert.Equal(250, (await lab.SendAsync("bob@sender.test", "support@example.org", InboundLab.Message(subject: "after the stop"))).Code);
         await lab.AssertNothingWasSentAsync();
     }
@@ -151,10 +143,8 @@ public abstract class InboundCrashTests(LabBackend backend)
     }
 }
 
-/// <summary>PostgreSQL only: the database server drops every connection of the receiver while mail is arriving.</summary>
 public sealed class PostgresInboundConnectionLossTests
 {
-    // The test's own reads share the pool with the receiver: the last kill may have closed a connection the pool still holds, and the first read on it fails. A client would read again.
     private static async Task<T> ReadAgainAsync<T>(Func<Task<T>> read)
     {
         for (int attempt = 0; ; attempt++)
@@ -197,14 +187,13 @@ public sealed class PostgresInboundConnectionLossTests
                         break;
                     }
 
-                    Assert.Equal(4, reply.Code / 100);   // the database being gone is a temporary failure for the sender: 451 or 452, never a refusal
+                    Assert.Equal(4, reply.Code / 100);
                     Interlocked.Increment(ref temporary);
                     await Task.Delay(10, stop.Token);
                 }
             }
         })).ToArray();
 
-        // Drop every other connection to the database a few times while the senders work.
         for (int round = 0; round < 5 && !senders.All(s => s.IsCompleted); round++)
         {
             await Task.Delay(40);
@@ -219,7 +208,7 @@ public sealed class PostgresInboundConnectionLossTests
 
         IReadOnlyList<InboundMessage> stored = await ReadAgainAsync(() => lab.MessagesAsync(InboundLab.Acme, new InboundMessageQuery(InboundLab.Acme, Limit: 200)));
         Assert.Equal(ids.Length, acknowledged);
-        Assert.Equal(ids.OrderBy(x => x, StringComparer.Ordinal), stored.Select(m => m.Subject!).Order(StringComparer.Ordinal));   // each exactly once: the sender always saw the answer here
+        Assert.Equal(ids.OrderBy(x => x, StringComparer.Ordinal), stored.Select(m => m.Subject!).Order(StringComparer.Ordinal));
         foreach (InboundMessage m in stored)
         {
             Assert.True(m.HasRaw);

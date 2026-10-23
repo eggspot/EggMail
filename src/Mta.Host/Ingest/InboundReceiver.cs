@@ -317,7 +317,6 @@ public sealed class InboundReceiver
 
         if (state.CountedDomains.Add(view.DomainId) && !_limiter.TryCount(view.DomainId, state.Client, limits.MaxMessagesPerMinute, limits.MaxMessagesPerMinutePerRemote, now))
         {
-            // Other connections of this sender counted in the meantime (the look at the top and this count are not one step: the checks above wait for DNS and storage): the limit holds exactly.
             state.CountedDomains.Remove(view.DomainId);
             InboundMetrics.Recipient("rate_limited");
             return TooManyMessages;

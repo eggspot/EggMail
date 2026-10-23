@@ -5,11 +5,6 @@ using Mta.Storage;
 
 namespace Mta.Host.Tests.InboundE2E;
 
-/// <summary>
-/// Text a stranger controls (the greeting name, the sender and recipient addresses, the subject, header values) reaches the stores of both backends and the API. PostgreSQL refuses NUL and lone
-/// surrogates in text where SQLite does not; the receive path must neither fail on them nor store them (decision 101, INJ-2). Whatever the sender sends, it is either refused in the dialog or stored
-/// cleaned, with a reply that is not a server error.
-/// </summary>
 public abstract class InboundHostileTextTests(LabBackend backend)
 {
     private static string Raw(params byte[] bytes) => Encoding.Latin1.GetString(bytes);
@@ -45,7 +40,7 @@ public abstract class InboundHostileTextTests(LabBackend backend)
         await using FakeMta mta = await lab.ConnectedAsync();
         FakeMta.Reply reply = await mta.SendAsync("bob@sender.test", "support@example.org", message);
 
-        Assert.True(reply.Code is 250 or 554 or 552, reply.ToString());   // stored, or refused as malformed: never a 4xx for the server's own failure
+        Assert.True(reply.Code is 250 or 554 or 552, reply.ToString());
         if (reply.Code != 250)
         {
             return;
@@ -64,7 +59,6 @@ public abstract class InboundHostileTextTests(LabBackend backend)
             }
         }
 
-        // The API reads it back: a search by a piece of it, the detail, as JSON.
         ApiClient alice = await lab.Api!.SignedInAsync("alice");
         Reply detail = await alice.GetAsync("/api/v1/inbound/messages/" + Mta.Host.Api.ApiJson.Id(stored.Id));
         Assert.Equal(System.Net.HttpStatusCode.OK, detail.Status);
@@ -106,7 +100,7 @@ public abstract class InboundHostileTextTests(LabBackend backend)
         FakeMta.Reply hello = await mta.CommandAsync(ehlo);
         if (hello.Code != 250)
         {
-            Assert.InRange(hello.Code, 500, 599);   // a greeting name nobody can use is refused in the dialog
+            Assert.InRange(hello.Code, 500, 599);
             return;
         }
 
@@ -134,7 +128,7 @@ public abstract class InboundHostileTextTests(LabBackend backend)
         Assert.Equal(stored.EnvelopeTo, stored.EnvelopeTo.ToLowerInvariant());
         ApiClient alice = await lab.Api!.SignedInAsync("alice");
         Reply listed = await alice.GetAsync("/api/v1/inbound/messages?sender=" + Uri.EscapeDataString(stored.EnvelopeFrom) + "&recipient=" + Uri.EscapeDataString(stored.EnvelopeTo));
-        Assert.Equal(1, listed["items"].GetArrayLength());   // what is stored is what a search finds
+        Assert.Equal(1, listed["items"].GetArrayLength());
         lab.AssertNoErrorsLogged();
     }
 }

@@ -6,11 +6,6 @@ using Mta.Storage.Transfer;
 
 namespace Mta.Host.Tests.InboundE2E;
 
-/// <summary>
-/// Retention of received mail through a real runtime and the maintenance job of the real store, on SQLite and PostgreSQL: mail that really arrived over SMTP on virtual days is kept exactly as long as
-/// its domain's setting, the server default and the operator's ceiling say; <c>0</c> means forever; a pending action is never deleted; a large purge goes in batches and leaves no body without a
-/// message; and what a tenant sets through the API is what the maintenance job does.
-/// </summary>
 public abstract class InboundRetentionTests(LabBackend backend)
 {
     private static readonly TimeSpan Day = TimeSpan.FromDays(1);
@@ -40,7 +35,6 @@ public abstract class InboundRetentionTests(LabBackend backend)
             return;
         }
 
-        // Five domains of one tenant: the server default (7 days), a short one (2), "forever" (0, which the ceiling of 10 turns into 10), too long (30, cut to 10), and one whose action is pending.
         (string Name, int? Days, int Kept)[] rules = [("default.example", null, 7), ("short.example", 2, 2), ("forever.example", 0, 10), ("long.example", 30, 10)];
         var domains = new Dictionary<string, Guid>();
         foreach ((string name, int? days, _) in rules)
@@ -54,7 +48,6 @@ public abstract class InboundRetentionTests(LabBackend backend)
         await lab.AddRouteAsync(waiting, InboundLab.Acme, 10, InboundMatchKind.CatchAll, null, InboundActionKind.Forward, ["archive@elsewhere.test"]);
         await lab.RefreshAsync();
 
-        // The server's own word: what the API says each domain gets.
         ApiClient api = await lab.Api!.SignedInAsync("alice");
         foreach ((string name, int? days, int kept) in rules)
         {
@@ -68,7 +61,7 @@ public abstract class InboundRetentionTests(LabBackend backend)
             arrivals[name] = [];
         }
 
-        Assert.Equal(250, (await lab.SendAsync("bob@sender.test", "x@waiting.example", InboundLab.Message(subject: "waiting"))).Code);   // pending, from day 0
+        Assert.Equal(250, (await lab.SendAsync("bob@sender.test", "x@waiting.example", InboundLab.Message(subject: "waiting"))).Code);
         int days25 = 25;
         for (int day = 0; day < days25; day++)
         {
@@ -79,7 +72,7 @@ public abstract class InboundRetentionTests(LabBackend backend)
                 arrivals[name].Add(arrived);
             }
 
-            await lab.AdvanceAsync(TimeSpan.FromMinutes(1));   // the run is a minute after the arrivals: a message of exactly N days is N days and a minute old at the Nth run
+            await lab.AdvanceAsync(TimeSpan.FromMinutes(1));
             await MaintainAsync(lab);
 
             foreach ((string name, _, int kept) in rules)
@@ -92,11 +85,9 @@ public abstract class InboundRetentionTests(LabBackend backend)
             await lab.AdvanceAsync(Day - TimeSpan.FromMinutes(1));
         }
 
-        // The pending forward is as old as the run but is still there, with its body.
         InboundMessage pending = Assert.Single(await lab.MessagesAsync(InboundLab.Acme, new InboundMessageQuery(InboundLab.Acme, DomainId: waiting)));
         Assert.Equal((InboundActionState.Pending, true), (pending.ActionState, pending.HasRaw));
         Assert.NotNull(await lab.Storage.Inbound.GetRawAsync(InboundLab.Acme, pending.Id, default));
-        // No body outlives its message, and every message with a body has it.
         long withBody = 0;
         foreach (InboundMessage m in await lab.MessagesAsync(InboundLab.Acme, new InboundMessageQuery(InboundLab.Acme, Limit: 200)))
         {
@@ -134,8 +125,7 @@ public abstract class InboundRetentionTests(LabBackend backend)
         InboundMessage kept = Assert.Single(await lab.MessagesAsync(InboundLab.Acme, new InboundMessageQuery(InboundLab.Acme, DomainId: forever)));
         Assert.NotNull(await lab.Storage.Inbound.GetRawAsync(InboundLab.Acme, kept.Id, default));
 
-        // The same domain with a setting of 1 day, set through the API, is cleaned at the next run: the setting is read when the job runs, not stored on the message.
-        ApiClient later = await lab.Api.SignedInAsync("alice");   // three years on, the first session has long expired
+        ApiClient later = await lab.Api.SignedInAsync("alice");
         Assert.Equal(System.Net.HttpStatusCode.OK, (await later.PatchAsync($"/api/v1/domains/{ApiJson.Id(forever)}/inbound", new { retentionDays = 1 })).Status);
         await MaintainAsync(lab);
         Assert.Empty(await lab.MessagesAsync(InboundLab.Acme, new InboundMessageQuery(InboundLab.Acme, DomainId: forever)));
@@ -169,9 +159,9 @@ public abstract class InboundRetentionTests(LabBackend backend)
         }
 
         var drafts = new List<InboundMessageDraft>();
-        Count(InboundActionKind.Store, 1_050, 30, "old stored ", drafts);     // 10.5 batches of 100
-        Count(InboundActionKind.Forward, 130, 30, "old pending ", drafts);    // pending: never deleted, whatever their age
-        Count(InboundActionKind.Store, 120, 2, "recent ", drafts);            // inside the 7 days
+        Count(InboundActionKind.Store, 1_050, 30, "old stored ", drafts);
+        Count(InboundActionKind.Forward, 130, 30, "old pending ", drafts);
+        Count(InboundActionKind.Store, 120, 2, "recent ", drafts);
         for (int i = 0; i < drafts.Count; i += 200)
         {
             await lab.Storage.Inbound.AcceptAsync(drafts.Skip(i).Take(200).ToList(), default);
@@ -184,12 +174,11 @@ public abstract class InboundRetentionTests(LabBackend backend)
         Assert.Equal(130 + 120, left.Count);
         Assert.Equal(130, left.Count(m => m.Subject!.StartsWith("old pending ", StringComparison.Ordinal)));
         Assert.Equal(120, left.Count(m => m.Subject!.StartsWith("recent ", StringComparison.Ordinal)));
-        Assert.Equal(left.Count, BodyRows(lab));   // not one body without its message
+        Assert.Equal(left.Count, BodyRows(lab));
 
-        await MaintainAsync(lab);   // a second run changes nothing
+        await MaintainAsync(lab);
         Assert.Equal(250, (await AllAsync(lab)).Count);
 
-        // The usage the receive path reads agrees with what is there.
         InboundUsage usage = await lab.Storage.Inbound.GetUsageAsync(InboundLab.Acme, null, default);
         Assert.Equal((250L, 130L), (usage.Messages, usage.Pending));
         Assert.Equal(left.Sum(m => m.Size), usage.BodyBytes);

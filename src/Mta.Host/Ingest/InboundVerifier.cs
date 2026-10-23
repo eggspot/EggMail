@@ -188,8 +188,6 @@ public sealed class InboundVerifier
         bool arcOverride = fromUsable && !anyUnsettled && chosen?.Result == DmarcResult.Fail && evaluations.Count == 1 && ArcVouches(arc, headers, fromDomains[0]);
 
         (InboundVerdict dkimVerdict, string? dkimDomain) = dkimTimedOut ? (InboundVerdict.TempError, null) : ReduceDkim(dkimResults);
-        // A From field that has no identity we can vouch for (it is empty, a mailbox does not parse, or another parser would read it as another address: design section 11.5) never gets the verdict of
-        // a domain it names: the evaluations above still decide what the action does, but what is recorded and shown, and so what a consumer relies on, is that the identity is unclear.
         InboundVerdict dmarcVerdict = chosen is null || !fromUsable ? InboundVerdict.PermError : decisive != DmarcDisposition.None ? InboundVerdict.Fail : anyUnsettled ? InboundVerdict.TempError : ToVerdict(chosen.Result);
         var auth = new InboundAuthResults(
             ToVerdict(effective.Result), effective.Domain,

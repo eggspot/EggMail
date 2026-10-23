@@ -4,11 +4,6 @@ using Mta.Storage;
 
 namespace Mta.Host.Tests.InboundE2E;
 
-/// <summary>
-/// The forward action's check of the sender, with the verdict the real receive path stored: a From that the receive path judged unusable (design section 11.5) is never forwarded, whatever domain the
-/// lenient reading of it names, and the refusal is counted as <c>unusable_from</c>; ordinary foreign mail is forwarded as before. Without this, <c>ceo@example.org &lt;x@evil.test&gt;</c> (the tenant's
-/// own address as the display name) reads as foreign mail of evil.test to the forwarder and goes out with our SRS envelope and our signature, while a reader of the copy sees the tenant's address.
-/// </summary>
 public abstract class InboundForwardSenderCheckTests(LabBackend backend)
 {
     private static async Task<InboundMessage> ActedOnAsync(InboundLab lab, Guid id)
@@ -61,7 +56,6 @@ public abstract class InboundForwardSenderCheckTests(LabBackend backend)
         });
         listener.Start();
 
-        // evil.test is the attacker's and authenticates (SPF for the client, p=none); the display name is the tenant's own address. The default action is record_only: the message is stored.
         lab.PublishSpf("evil.test");
         lab.PublishDmarc("evil.test", "none");
         lab.PublishSpf("sender.test");
@@ -71,7 +65,7 @@ public abstract class InboundForwardSenderCheckTests(LabBackend backend)
         IReadOnlyList<InboundMessage> stored = await lab.MessagesAsync(InboundLab.Acme);
         InboundMessage ambiguous = Assert.Single(stored, m => m.EnvelopeTo == "billing-1@example.org");
         InboundMessage ordinary = Assert.Single(stored, m => m.EnvelopeTo == "billing-2@example.org");
-        Assert.Equal(InboundVerdict.PermError, ambiguous.Auth.Dmarc);   // what the receive path recorded for the unusable From
+        Assert.Equal(InboundVerdict.PermError, ambiguous.Auth.Dmarc);
 
         InboundMessage refusedMessage = await ActedOnAsync(lab, ambiguous.Id);
         InboundMessage forwarded = await ActedOnAsync(lab, ordinary.Id);
@@ -79,7 +73,6 @@ public abstract class InboundForwardSenderCheckTests(LabBackend backend)
         Assert.Equal((InboundActionState.Failed, "unusable_from", (Guid?)null), (refusedMessage.ActionState, refusedMessage.ActionLastError, refusedMessage.ForwardMessageId));
         Assert.Equal(InboundActionState.Done, forwarded.ActionState);
         Assert.NotNull(forwarded.ForwardMessageId);
-        // Exactly one copy waits in the outbound queue: the ordinary one, for the route's target.
         var queued = await lab.Storage.Deliveries.ClaimAsync("oracle", 100, lab.Clock.UtcNow.AddMinutes(1), TimeSpan.FromMinutes(1), default);
         ClaimedDelivery copy = Assert.Single(queued);
         Assert.Equal((forwarded.ForwardMessageId, "archive@elsewhere.test", MessageSource.Forward), (copy.MessageId, copy.Recipient.ToString(), copy.Source));

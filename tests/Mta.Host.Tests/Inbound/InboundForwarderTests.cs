@@ -284,7 +284,6 @@ public class InboundForwarderTests
     {
         await using Rig rig = await StartAsync();
         InboundRouteRecord route = (await rig.Harness.Storage.Inbound.GetRouteAsync(rig.Harness.TenantId, rig.Harness.Route.Id, default))!;
-        // What the receive path stores for an unusable From: dmarc=permerror with no policy. The lenient parse of the forwarder alone reads x@evil.test (foreign) in the first one.
         byte[] ambiguous = Encoding.UTF8.GetBytes("Received: by egg.test\r\nFrom: ceo@example.com <x@evil.test>\r\nSubject: Hi\r\n\r\nbody\r\n");
         byte[] noFrom = Encoding.UTF8.GetBytes("Received: by egg.test\r\nSubject: Hi\r\n\r\nbody\r\n");
         InboundMessage unusable = await rig.Harness.GetAsync((await rig.Harness.ReceiveAsync(ambiguous)).Id);
@@ -302,9 +301,9 @@ public class InboundForwarderTests
 
         Assert.Equal(("unusable_from", (Guid?)null), (results[0].Error, results[0].ForwardMessageId));
         Assert.Equal("unusable_from", results[1].Error);
-        Assert.NotNull(results[2].ForwardMessageId);   // a foreign From needs no DMARC pass, as before
+        Assert.NotNull(results[2].ForwardMessageId);
         Assert.Equal(2, refused["unusable_from"]);
-        Assert.Single(await rig.Harness.Storage.Deliveries.ClaimAsync("t", 10, rig.Harness.Clock.UtcNow, TimeSpan.FromMinutes(1), default));   // only the foreign one was queued
+        Assert.Single(await rig.Harness.Storage.Deliveries.ClaimAsync("t", 10, rig.Harness.Clock.UtcNow, TimeSpan.FromMinutes(1), default));
     }
 
     [Fact]

@@ -17,57 +17,41 @@ using Mta.TestSupport;
 
 namespace Mta.Host.Tests.InboundE2E;
 
-/// <summary>The storage backend an end-to-end inbound scenario runs on. The scenarios are written once, in an abstract class, and each backend has a small subclass.</summary>
 public enum LabBackend
 {
     Sqlite,
     Postgres,
 }
 
-/// <summary>What a scenario changes about the server it runs against.</summary>
 internal sealed record LabOptions
 {
-    /// <summary>The <c>Inbound:*</c> settings; the default has inbound on, the test sender (127.0.0.1) checked by SPF, and everything else at its default.</summary>
     public InboundSection Inbound { get; init; } = new() { Enabled = true, CheckSpfForInternalClients = true };
 
     public ListenerMode Mode { get; init; } = ListenerMode.Plain;
 
-    /// <summary>The <c>Smtp:*</c> limits (the listener itself is always the one the lab defines).</summary>
     public SmtpSection Smtp { get; init; } = new() { Listeners = [] };
 
     public bool WithApi { get; init; }
 
-    /// <summary>Whether the lab seeds <c>example.org</c> (tenant Acme: support store, billing-* forward, old discard) and <c>example.net</c> (tenant Globex: catch-all store).</summary>
     public bool Seed { get; init; } = true;
 
     public string? BounceDomain { get; init; } = InboundLab.BounceDomain;
 
-    /// <summary>Whether the runner of the webhook and forward actions runs (in the background, polling every 50 ms); off, the test runs it by hand with <c>RunOnceAsync</c>.</summary>
     public bool RunActions { get; init; }
 
-    /// <summary>The webhook HTTP stack of the runtime: plain http is allowed (the receivers are on loopback), the allowlist lets the tenants call 127.0.0.0/8.</summary>
     public Mta.Webhooks.WebhookOptions Webhooks { get; init; } = new() { AllowHttp = true, Timeout = TimeSpan.FromSeconds(20) };
 
-    /// <summary>Whether the delivery engine runs (the forward action queues mail for it); its connections go to <see cref="RemotePort"/> whatever the MX says.</summary>
     public bool RunDelivery { get; init; }
 
-    /// <summary>The port every outbound connection goes to (a fake remote MTA, or another lab's listener); the MX records of the scripted DNS name the hosts.</summary>
     public int? RemotePort { get; init; }
 
-    /// <summary>The port of the listener; 0 is an ephemeral port. Two labs that forward to each other need each other's port before they start (see <see cref="InboundLab.ReservePort"/>).</summary>
     public int ListenerPort { get; init; }
 
-    /// <summary>The retention keys of the storage (<c>Inbound:RetentionDays</c>, <c>Inbound:MaxRetentionDays</c>).</summary>
     public InboundStorageOptions InboundStorage { get; init; } = new();
 
-    /// <summary>Replaces the resolver the runtime uses (one that hangs, one that counts); the scripted <see cref="InboundLab.Dns"/> stays the place to publish records.</summary>
     public Func<StaticDnsResolver, IDnsResolver>? WrapDns { get; init; }
 }
 
-/// <summary>
-/// A resolver that answers from the scripted records except for the names it is told to hold: those queries wait until <see cref="Release"/> (a test that wants a verification to be in progress
-/// while something else happens), or until the caller gives up. <see cref="Entered"/> completes when the first held query has arrived, so the test never guesses.
-/// </summary>
 internal sealed class GatedResolver(StaticDnsResolver inner, Func<string, bool> hold) : IDnsResolver
 {
     private readonly TaskCompletionSource _entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -76,7 +60,6 @@ internal sealed class GatedResolver(StaticDnsResolver inner, Func<string, bool> 
 
     public Task Entered => _entered.Task;
 
-    /// <summary>Completes when <paramref name="count"/> held queries have arrived (not counting the ones that arrive after).</summary>
     public async Task WaitForArrivalsAsync(int count)
     {
         for (int i = 0; i < count; i++)
@@ -100,7 +83,6 @@ internal sealed class GatedResolver(StaticDnsResolver inner, Func<string, bool> 
     }
 }
 
-/// <summary>A resolver that answers from the scripted records except for the names it is told to hold: those queries wait until the caller gives up.</summary>
 internal sealed class HoldingResolver(StaticDnsResolver inner, Func<string, bool> hold) : IDnsResolver
 {
     public async ValueTask<DnsResponse> QueryAsync(string name, DnsRecordType type, CancellationToken cancellationToken = default)
@@ -114,10 +96,6 @@ internal sealed class HoldingResolver(StaticDnsResolver inner, Func<string, bool
     }
 }
 
-/// <summary>
-/// A real <see cref="EggMailRuntime"/> (configuration, port-25 listener of role Inbound, receive path, the real inbound store of SQLite or PostgreSQL, the certificate provider) with a scripted
-/// DNS, a clock the test moves by hand, and optionally the HTTP API over the very same storage. The listener is on an ephemeral loopback port; the sender is the test, from 127.0.0.1.
-/// </summary>
 internal sealed class InboundLab : IAsyncDisposable
 {
     public const string Hostname = "mx.egg.test";
@@ -125,7 +103,7 @@ internal sealed class InboundLab : IAsyncDisposable
     public static readonly Guid Acme = ApiFixture.TenantAId;
     public static readonly Guid Globex = ApiFixture.TenantBId;
 
-    private readonly string? _directory;
+    private readonly string? _ownTemporaryDirectory;
     private TestDatabase? _database;
     private CancellationTokenSource? _refresh;
     private Task _refreshTask = Task.CompletedTask;
@@ -137,7 +115,7 @@ internal sealed class InboundLab : IAsyncDisposable
     private InboundLab(LabBackend backend, string? directory, TestDatabase? database)
     {
         Backend = backend;
-        _directory = directory;
+        _ownTemporaryDirectory = directory;
         _database = database;
     }
 
@@ -158,12 +136,10 @@ internal sealed class InboundLab : IAsyncDisposable
     public Guid NetRoute { get; private set; }
     public List<string> Warnings { get; } = [];
 
-    /// <summary>The address the receive path sees the sender at (the real one is always 127.0.0.1); a test sets it to be a public sender, an IPv6 client or a listed address.</summary>
     public IPAddress ClientIp { get; set; } = IPAddress.Loopback;
 
     private LabOptions _options = null!;
 
-    /// <summary>Starts the lab; null when the PostgreSQL scenario has no server to run on (and none is promised).</summary>
     public static async Task<InboundLab?> StartAsync(LabBackend backend, LabOptions? options = null)
     {
         options ??= new LabOptions();
@@ -201,7 +177,7 @@ internal sealed class InboundLab : IAsyncDisposable
         ? new StorageOptions
         {
             Inbound = _options.InboundStorage,
-            Sqlite = new SqliteOptions { DataDirectory = _directory!, ConfigSyncMode = SqliteSyncMode.Off, StatsFlushInterval = TimeSpan.Zero, RetentionDeletePause = TimeSpan.FromMilliseconds(1) },
+            Sqlite = new SqliteOptions { DataDirectory = _ownTemporaryDirectory!, ConfigSyncMode = SqliteSyncMode.Off, StatsFlushInterval = TimeSpan.Zero, RetentionDeletePause = TimeSpan.FromMilliseconds(1) },
         }
         : new StorageOptions
         {
@@ -299,7 +275,6 @@ internal sealed class InboundLab : IAsyncDisposable
         }
     }
 
-    /// <summary>A free loopback port, found by binding and releasing it (for a lab that must know its own port before it starts; the small race is acceptable on a test machine).</summary>
     public static int ReservePort()
     {
         var listener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
@@ -309,7 +284,6 @@ internal sealed class InboundLab : IAsyncDisposable
         return port;
     }
 
-    /// <summary>Gives the domain an active DKIM key (the private half protected as the server stores it), publishes the public half in the scripted DNS and returns the key (the caller disposes it).</summary>
     public async Task<RSA> AddDkimKeyAsync(Guid domainId, string domainName, string selector = "egg1")
     {
         RSA key = DkimKeyTools.GenerateRsa2048();
@@ -330,7 +304,6 @@ internal sealed class InboundLab : IAsyncDisposable
         }
     }
 
-    /// <summary>A webhook endpoint of a tenant that the runtime can call (its secret is protected the way the API protects it).</summary>
     public async Task<WebhookEndpointRecord> AddWebhookEndpointAsync(Guid tenant, string url, string? secret = null, bool enabled = true)
     {
         string whsec = secret ?? "whsec_" + Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(24));
@@ -341,13 +314,8 @@ internal sealed class InboundLab : IAsyncDisposable
         return endpoint;
     }
 
-    /// <summary>The secrets this lab generated for its endpoints (what a receiver would be given).</summary>
     public Dictionary<Guid, string> Secrets { get; } = [];
 
-    /// <summary>
-    /// What a process restart (or a crash) looks like to the data: the runtime and the storage are closed without any flush of the state kept in memory, a new storage is opened over the very same files
-    /// or database, and a new runtime starts on a new port. The inbound configuration is loaded again before the listener opens.
-    /// </summary>
     public async Task RestartAsync(bool crash = false, Func<LabOptions, LabOptions>? reconfigure = null)
     {
         if (reconfigure is not null)
@@ -371,14 +339,12 @@ internal sealed class InboundLab : IAsyncDisposable
         await RefreshAsync();
     }
 
-    /// <summary>Moves the clock and lets the receive path reload its configuration (the periodic refresh would have done it; without it the cache is too old after minutes and the listener answers 451).</summary>
     public async Task AdvanceAsync(TimeSpan by)
     {
         Clock.Advance(by);
         await RefreshAsync();
     }
 
-    /// <summary>Makes the receive path see what the storage holds now (the periodic refresh, on demand).</summary>
     public async Task RefreshAsync()
     {
         if (Runtime.InboundConfiguration is { } cache)
@@ -387,7 +353,6 @@ internal sealed class InboundLab : IAsyncDisposable
         }
     }
 
-    /// <summary>Lets the cache follow the storage in the background, as the host does (every change signal and interval), until the lab is disposed.</summary>
     public void FollowConfiguration()
     {
         _refresh = new CancellationTokenSource();
@@ -404,8 +369,6 @@ internal sealed class InboundLab : IAsyncDisposable
             _refresh = null;
         }
     }
-
-    // ---------------------------------------------------------------- seeding
 
     public async Task<Guid> AddDomainAsync(Guid tenant, string name, bool enableInbound = true, InboundDmarcAction action = InboundDmarcAction.RecordOnly, DomainStatus status = DomainStatus.Verified,
         Func<InboundDomainSettings, InboundDomainSettings>? change = null)
@@ -438,15 +401,11 @@ internal sealed class InboundLab : IAsyncDisposable
         await RefreshAsync();
     }
 
-    // ---------------------------------------------------------------- DNS
-
-    /// <summary>An SPF record that authorizes the sender (<see cref="ClientIp"/>).</summary>
     public void PublishSpf(string domain, bool authorize = true, string qualifier = "-") =>
         Dns.AddTxt(domain, authorize ? $"v=spf1 {(ClientIp.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork ? "ip4" : "ip6")}:{ClientIp} {qualifier}all" : $"v=spf1 {qualifier}all");
 
     public void PublishDmarc(string domain, string policy, string extra = "") => Dns.AddTxt("_dmarc." + domain, $"v=DMARC1; p={policy}{extra}");
 
-    /// <summary>Publishes a key for the selector and returns the private key (the caller disposes it).</summary>
     public RSA PublishDkimKey(string domain, string selector = "s1")
     {
         RSA key = DkimKeyTools.GenerateRsa2048();
@@ -454,15 +413,12 @@ internal sealed class InboundLab : IAsyncDisposable
         return key;
     }
 
-    /// <summary>The message with a DKIM signature of the library signer on top (the key is published).</summary>
     public string DkimSign(string message, string domain, string selector = "s1")
     {
         using RSA key = PublishDkimKey(domain, selector);
         using var signer = new DkimSigner(new DkimSignerOptions { Domain = domain, Selector = selector, Clock = Clock }, key);
         return signer.Sign(Encoding.UTF8.GetBytes(message)) + message;
     }
-
-    // ---------------------------------------------------------------- senders and observers
 
     public Task<FakeMta> ConnectAsync() => FakeMta.ConnectAsync(Port);
 
@@ -473,7 +429,6 @@ internal sealed class InboundLab : IAsyncDisposable
         return mta;
     }
 
-    /// <summary>One transaction on a connection of its own; returns the reply to the end of DATA or the first refusal on the way.</summary>
     public async Task<FakeMta.Reply> SendAsync(string from, string to, string message, string mailParameters = "")
     {
         await using FakeMta mta = await ConnectedAsync();
@@ -482,7 +437,6 @@ internal sealed class InboundLab : IAsyncDisposable
         return reply;
     }
 
-    /// <summary>The signed bounce local part of the shared bounce domain for a message of the tenant (what a real sender would put in the return path).</summary>
     public string BounceLocalPart(string destination = "dest.example") => Runtime.Verp.CreateLocalPart(Acme, ExampleOrg, Clock.UtcNow, destination);
 
     public Mta.Dsn.SrsCodec Srs => new(Runtime.Verp);
@@ -502,11 +456,6 @@ internal sealed class InboundLab : IAsyncDisposable
 
     public async Task<string> RawAsync(InboundMessage message) => Encoding.UTF8.GetString((await Storage.Inbound.GetRawAsync(message.TenantId, message.Id, default))!);
 
-    /// <summary>
-    /// The backscatter oracle: nothing at all was created on the outbound side. No delivery can be claimed, and the webhook outbox holds nothing (a bounce, a notice and an event would each show here).
-    /// Asked at two instants: a minute from now (what was queued is due at once, and a claim far in the future does not see a delivery whose queue lifetime, 5 days by default, is over by then) and
-    /// 30 days from now (anything scheduled for later).
-    /// </summary>
     public async Task AssertNothingWasSentAsync()
     {
         foreach (DateTimeOffset at in new[] { Clock.UtcNow.AddMinutes(1), Clock.UtcNow.AddDays(30) })
@@ -516,7 +465,6 @@ internal sealed class InboundLab : IAsyncDisposable
         }
     }
 
-    /// <summary>Whatever the runtime logged as an error while the test ran is a failure the sender may not have seen (a 451 for a reason that is the server's own, an exception in a background task).</summary>
     public void AssertNoErrorsLogged()
     {
         lock (Warnings)
@@ -548,13 +496,12 @@ internal sealed class InboundLab : IAsyncDisposable
             _database = null;
         }
 
-        if (_directory is not null)
+        if (_ownTemporaryDirectory is not null)
         {
             Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
             try
             {
-                // A directory this lab created itself (a unique name under the temp folder) and the only owner of its files.
-                Directory.Delete(_directory, recursive: true);
+                Directory.Delete(_ownTemporaryDirectory, recursive: true);
             }
             catch (IOException)
             {

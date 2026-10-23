@@ -2,10 +2,6 @@ using Mta.Host.Ingest;
 
 namespace Mta.Host.Tests.Inbound;
 
-/// <summary>
-/// The budget of uncached return-path host lookups of the bounce listener (a caller with a valid token can make the server ask storage about any <c>bounce.&lt;name&gt;</c>): per client, per process, and the
-/// bounded table of clients. The second is read through a function the test moves, so none of this depends on the time the test runs.
-/// </summary>
 public class LookupBudgetTests
 {
     private sealed class Seconds
@@ -27,7 +23,7 @@ public class LookupBudgetTests
         }
 
         Assert.False(budget.TryTake("203.0.113.9"));
-        Assert.True(budget.TryTake("203.0.113.10"));   // another client has its own
+        Assert.True(budget.TryTake("203.0.113.10"));
         clock.Value++;
         Assert.True(budget.TryTake("203.0.113.9"));
     }
@@ -38,7 +34,6 @@ public class LookupBudgetTests
         var clock = new Seconds();
         var budget = new LookupBudget(clock.Read);
 
-        // One greedy client asks a thousand times: ten pass, and only those ten were counted against the process.
         int passed = Enumerable.Range(0, 1_000).Count(_ => budget.TryTake("greedy"));
         Assert.Equal(LookupBudget.PerClientPerSecond, passed);
 
@@ -69,16 +64,16 @@ public class LookupBudgetTests
         var budget = new LookupBudget(clock.Read);
         for (int i = 0; i < LookupBudget.MaxTrackedClients; i++)
         {
-            budget.TryTake("client-" + i);   // whether the process budget lets it through or not, the client is tracked
+            budget.TryTake("client-" + i);
         }
 
         Assert.Equal(LookupBudget.MaxTrackedClients, budget.TrackedClients);
-        Assert.False(budget.TryTake("newcomer"));   // refused although it has not used anything: the table is full of this second
-        Assert.Equal(LookupBudget.MaxTrackedClients, budget.TrackedClients);   // and it was not added: the table does not grow past its bound
+        Assert.False(budget.TryTake("newcomer"));
+        Assert.Equal(LookupBudget.MaxTrackedClients, budget.TrackedClients);
 
         clock.Value++;
         Assert.True(budget.TryTake("newcomer"));
-        Assert.Equal(1, budget.TrackedClients);   // the entries of the earlier second went when the table was full and a newcomer came
+        Assert.Equal(1, budget.TrackedClients);
     }
 
     [Fact]
@@ -128,7 +123,6 @@ public class LookupBudgetTests
                 thread.Join();
             }
 
-            // 640 asks from 640 different clients in one second: exactly the process budget passes. (With separate steps for the window and the count, asks at the first instant of a second were lost or double counted.)
             Assert.Equal(LookupBudget.PerProcessPerSecond, granted);
         }
     }

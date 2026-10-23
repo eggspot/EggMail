@@ -672,7 +672,6 @@ public sealed class InboundApi(ApiAuthenticator auth, IStorage storage, DomainVe
             else
             {
                 route = InboundRules.MatchRoute(await Inbound.GetRoutesAsync(domain.Id, ct).ConfigureAwait(false), address.LocalPart);
-                // postmaster is accepted without a route (RFC 5321 section 4.5.1) and stored with the action store: the receive path says 250 for it, and so must this.
                 reply = route is null && !InboundRules.IsPostmaster(address.LocalPart) ? "550 5.1.1" : "250";
             }
         }

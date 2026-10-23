@@ -10,10 +10,6 @@ using MimeKit;
 
 namespace Mta.Host.Tests.InboundE2E;
 
-/// <summary>
-/// Mail that really came in by SMTP, read back through the HTTP API on SQLite and on PostgreSQL: the message, the raw download and the attachments byte for byte, hostile MIME that must not hurt the
-/// reader, and every inbound endpoint asked by another tenant. The API runs over the very storage the receive path wrote to.
-/// </summary>
 public abstract class InboundApiEndToEndTests(LabBackend backend)
 {
     private static async Task<(HttpResponseMessage Response, byte[] Body)> DownloadAsync(InboundLab lab, ApiClient client, string path)
@@ -53,7 +49,7 @@ public abstract class InboundApiEndToEndTests(LabBackend backend)
         }
 
         byte[] pdf = RandomNumberGenerator.GetBytes(40_000);
-        pdf[0] = 0; pdf[1] = (byte)'\r'; pdf[2] = (byte)'\n'; pdf[3] = (byte)'.'; pdf[4] = (byte)'\r'; pdf[5] = (byte)'\n';   // bytes that would end a message if anything treated them as text
+        pdf[0] = 0; pdf[1] = (byte)'\r'; pdf[2] = (byte)'\n'; pdf[3] = (byte)'.'; pdf[4] = (byte)'\r'; pdf[5] = (byte)'\n';
         var message = new MimeMessage();
         message.From.Add(new MailboxAddress("Bob", "bob@sender.test"));
         message.To.Add(new MailboxAddress("Support", "support@example.org"));
@@ -86,7 +82,6 @@ public abstract class InboundApiEndToEndTests(LabBackend backend)
             Assert.Equal(3, attachments.Count);
             Assert.Equal(40_000, attachments[0].GetProperty("size").GetInt64());
 
-            // The raw message: exactly the stored bytes, as a download.
             var (rawResponse, raw) = await DownloadAsync(lab, client, $"/api/v1/inbound/messages/{Id(stored)}/raw");
             using (rawResponse)
             {
@@ -99,7 +94,6 @@ public abstract class InboundApiEndToEndTests(LabBackend backend)
                 Assert.Equal("no-store", rawResponse.Headers.CacheControl!.ToString());
             }
 
-            // The attachments by reference (what a webhook payload links to): decoded bytes, never served with the type the sender claimed.
             var (first, firstBody) = await DownloadAsync(lab, client, $"/api/v1/inbound/messages/{Id(stored)}/attachments/0");
             using (first)
             {
@@ -119,7 +113,7 @@ public abstract class InboundApiEndToEndTests(LabBackend backend)
                 Assert.DoesNotContain("\\", disposition, StringComparison.Ordinal);
                 Assert.DoesNotContain("\u202E", disposition, StringComparison.Ordinal);
                 Assert.DoesNotContain("\r", disposition, StringComparison.Ordinal);
-                Assert.Equal("text/html", hostile.Headers.GetValues("X-Original-Content-Type").Single());   // a type a browser would render: it is only ever a download
+                Assert.Equal("text/html", hostile.Headers.GetValues("X-Original-Content-Type").Single());
             }
 
             var (missing, _) = await DownloadAsync(lab, client, $"/api/v1/inbound/messages/{Id(stored)}/attachments/3");
@@ -129,7 +123,6 @@ public abstract class InboundApiEndToEndTests(LabBackend backend)
             }
         }
 
-        // Deleting through the API removes the message and its body from the real store.
         Assert.Equal(HttpStatusCode.NoContent, (await alice.DeleteAsync("/api/v1/inbound/messages/" + Id(stored))).Status);
         Assert.Null(await lab.Storage.Inbound.GetAsync(InboundLab.Acme, stored.Id, default));
         Assert.Null(await lab.Storage.Inbound.GetRawAsync(InboundLab.Acme, stored.Id, default));
@@ -159,8 +152,8 @@ public abstract class InboundApiEndToEndTests(LabBackend backend)
         string discardedId = items["discarded"].GetProperty("id").GetString()!;
         (await alice.GetAsync($"/api/v1/inbound/messages/{discardedId}/raw")).Problem(HttpStatusCode.Gone, "inbound_body_gone");
         Reply usage = await alice.GetAsync("/api/v1/inbound/usage");
-        Assert.Equal(3L, usage["messages"].GetInt64());   // three rows...
-        Assert.Equal(2L, await CountBodiesAsync(lab));    // ...two bodies: the discarded one has none
+        Assert.Equal(3L, usage["messages"].GetInt64());
+        Assert.Equal(2L, await CountBodiesAsync(lab));
         await lab.AssertNothingWasSentAsync();
     }
 
@@ -221,7 +214,7 @@ public abstract class InboundApiEndToEndTests(LabBackend backend)
         }
 
         var reply = await lab.SendAsync("bob@sender.test", "support@example.org", message);
-        Assert.True(reply.Code is 250 or 554 or 552, reply.ToString());   // stored, or refused as malformed at the door: never an error of the server
+        Assert.True(reply.Code is 250 or 554 or 552, reply.ToString());
         InboundMessage[] stored = [.. await lab.MessagesAsync(InboundLab.Acme)];
         if (reply.Code != 250)
         {
@@ -254,8 +247,6 @@ public abstract class InboundApiEndToEndTests(LabBackend backend)
         lab.AssertNoErrorsLogged();
     }
 
-    // ------------------------------------------------------------------ tenant isolation
-
     [Fact]
     public async Task Every_inbound_endpoint_answers_another_tenant_exactly_like_an_id_that_does_not_exist_and_changes_nothing()
     {
@@ -265,7 +256,6 @@ public abstract class InboundApiEndToEndTests(LabBackend backend)
             return;
         }
 
-        // Tenant A has a stored message, a pending forward and a route; tenant B (a user, a key with both inbound scopes, and an administrator acting for B) asks for all of it.
         Assert.Equal(250, (await lab.SendAsync("bob@sender.test", "support@example.org", InboundLab.Message(subject: "A's private mail"))).Code);
         Assert.Equal(250, (await lab.SendAsync("bob@sender.test", "billing-1@example.org", InboundLab.Message(subject: "A's forward"))).Code);
         IReadOnlyList<InboundMessage> mine = await lab.MessagesAsync(InboundLab.Acme);
@@ -274,7 +264,6 @@ public abstract class InboundApiEndToEndTests(LabBackend backend)
         string domainA = ApiJson.Id(lab.ExampleOrg);
         string routeA = ApiJson.Id(lab.SupportRoute);
 
-        // B needs a domain of its own to have a valid-looking path to ask with (a made-up id answers 404 as well).
         var outsiders = new List<(string Name, ApiClient Client)>
         {
             ("user", await lab.Api!.SignedInAsync("bob")),
@@ -304,7 +293,6 @@ public abstract class InboundApiEndToEndTests(LabBackend backend)
         {
             foreach ((string method, string path, string? body) in routes)
             {
-                // The same call for an id that exists in tenant A and for an id that exists nowhere must be indistinguishable.
                 string Fill(string p, bool real) => p
                     .Replace("{id}", real ? Id(p.Contains("/retry", StringComparison.Ordinal) ? pending : stored) : missing, StringComparison.Ordinal)
                     .Replace("{domain}", real ? domainA : missing, StringComparison.Ordinal)
@@ -317,7 +305,6 @@ public abstract class InboundApiEndToEndTests(LabBackend backend)
                 Assert.Equal(none.Json.GetProperty("detail").GetString()!.Replace(missing, "X", StringComparison.Ordinal), real.Json.GetProperty("detail").GetString()!.Replace(Id(stored), "X", StringComparison.Ordinal).Replace(domainA, "X", StringComparison.Ordinal).Replace(routeA, "X", StringComparison.Ordinal));
             }
 
-            // The lists show nothing of A, a filter cannot reach across, and an erasure with every filter of A's data deletes nothing.
             Reply list = await client.GetAsync("/api/v1/inbound/messages?limit=200");
             Assert.Empty(list["items"].EnumerateArray());
             Assert.Empty((await client.GetAsync($"/api/v1/inbound/messages?domainId={domainA}&recipient=support%40example.org&sender=bob%40sender.test&subject=private")).Json.GetProperty("items").EnumerateArray());
@@ -328,7 +315,6 @@ public abstract class InboundApiEndToEndTests(LabBackend backend)
             Assert.Equal(HttpStatusCode.OK, (await client.DeleteAsync("/api/v1/inbound/messages?subject=private")).Status);
         }
 
-        // Tenant A's data is exactly as it was, in the store and for A.
         Assert.Equal(mine.Select(m => m.Id).Order(), (await lab.MessagesAsync(InboundLab.Acme)).Select(m => m.Id).Order());
         Assert.NotNull(await lab.Storage.Inbound.GetRawAsync(InboundLab.Acme, stored.Id, default));
         Assert.Equal(InboundActionState.Pending, (await lab.Storage.Inbound.GetAsync(InboundLab.Acme, pending.Id, default))!.ActionState);
@@ -354,7 +340,6 @@ public abstract class InboundApiEndToEndTests(LabBackend backend)
         ApiClient generalRead = await lab.Api.KeyClientAsync(InboundLab.Acme, "read", "send", "domains", "webhooks");
         ApiClient writeAndSend = await lab.Api.KeyClientAsync(InboundLab.Acme, "inbound:write", "send");
 
-        // Reading received mail needs inbound:read: not `read`, not inbound:write. Writing needs inbound:write: not inbound:read.
         Assert.Equal(HttpStatusCode.Forbidden, (await write.GetAsync("/api/v1/inbound/messages/" + Id(stored))).Status);
         Assert.Equal(HttpStatusCode.Forbidden, (await generalRead.GetAsync("/api/v1/inbound/messages")).Status);
         Assert.Equal(HttpStatusCode.Forbidden, (await generalRead.GetAsync($"/api/v1/inbound/messages/{Id(stored)}/raw")).Status);
@@ -363,18 +348,15 @@ public abstract class InboundApiEndToEndTests(LabBackend backend)
         Assert.Equal(HttpStatusCode.Forbidden, (await read.PatchAsync($"/api/v1/domains/{domain}/inbound", new { dmarcAction = "reject" })).Status);
         Assert.NotNull(await lab.Storage.Inbound.GetAsync(InboundLab.Acme, stored.Id, default));
 
-        // inbound:write alone controls where future mail goes, but a forward needs `send` as well: it is the scope that means "this key may make the server send mail".
         string forward = """{"name":"fwd","match":{"kind":"address","localPart":"fwd"},"action":{"kind":"forward","forwardTo":["me@elsewhere.test"]}}""";
         Assert.Equal(HttpStatusCode.Forbidden, (await write.SendAsync(HttpMethod.Post, $"/api/v1/domains/{domain}/inbound/routes", forward)).Status);
         Assert.Equal(HttpStatusCode.Created, (await writeAndSend.SendAsync(HttpMethod.Post, $"/api/v1/domains/{domain}/inbound/routes", forward)).Status);
-        // Changing an existing forward route's action to another kind, or another kind to a forward, follows the same rule.
         string store = """{"name":"s","match":{"kind":"address","localPart":"s"},"action":{"kind":"store"}}""";
         Reply made = await write.SendAsync(HttpMethod.Post, $"/api/v1/domains/{domain}/inbound/routes", store);
         Assert.Equal(HttpStatusCode.Created, made.Status);
         Assert.Equal(HttpStatusCode.Forbidden, (await write.SendAsync(HttpMethod.Patch, $"/api/v1/domains/{domain}/inbound/routes/{made.Str("id")}", """{"action":{"kind":"forward","forwardTo":["me@elsewhere.test"]}}""")).Status);
         Assert.Equal(HttpStatusCode.OK, (await writeAndSend.SendAsync(HttpMethod.Patch, $"/api/v1/domains/{domain}/inbound/routes/{made.Str("id")}", """{"action":{"kind":"forward","forwardTo":["me@elsewhere.test"]}}""")).Status);
 
-        // The receive path follows the API at once, on the same process: the new route takes mail without waiting for the interval.
         lab.FollowConfiguration();
         Assert.Equal(HttpStatusCode.Created, (await write.SendAsync(HttpMethod.Post, $"/api/v1/domains/{domain}/inbound/routes", """{"name":"late","order":5,"match":{"kind":"address","localPart":"late"},"action":{"kind":"store"}}""")).Status);
         int code;
@@ -390,8 +372,6 @@ public abstract class InboundApiEndToEndTests(LabBackend backend)
         while (code != 250 && DateTime.UtcNow < deadline);
         Assert.Equal(250, code);
     }
-
-    // ------------------------------------------------------------------ deleting a domain
 
     [Fact]
     public async Task A_domain_with_received_mail_is_deleted_only_with_a_purge_that_switches_receiving_off_first_and_leaves_nothing_behind()
@@ -424,9 +404,8 @@ public abstract class InboundApiEndToEndTests(LabBackend backend)
         Assert.Empty(await lab.MessagesAsync(InboundLab.Acme));
         Assert.Null(await lab.Storage.Inbound.GetSettingsAsync(lab.ExampleOrg, default));
         Assert.Empty(await lab.Storage.Inbound.GetRoutesAsync(lab.ExampleOrg, default));
-        Assert.Single(await lab.MessagesAsync(InboundLab.Globex));   // another tenant's mail is untouched
+        Assert.Single(await lab.MessagesAsync(InboundLab.Globex));
         Assert.Equal(0, (await lab.Storage.Inbound.GetUsageAsync(InboundLab.Acme, null, default)).BodyBytes);
-        // The receive path stops serving the domain at its next refresh: a name that is no longer ours is relayed to nobody.
         await lab.RefreshAsync();
         Assert.Equal(550, (await lab.SendAsync("bob@sender.test", "support@example.org", InboundLab.Message())).Code);
     }

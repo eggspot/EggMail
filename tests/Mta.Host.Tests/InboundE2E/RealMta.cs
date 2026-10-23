@@ -5,10 +5,6 @@ using Mta.Smtp.Client;
 
 namespace Mta.Host.Tests.InboundE2E;
 
-/// <summary>
-/// A sending mail server that is not the hand-written scripted client of the receive path tests: the project's own SMTP client (<see cref="SmtpClientConnection"/>, the one the delivery engine uses)
-/// talking to the lab's real listener. It behaves like a real MTA (EHLO, opportunistic STARTTLS, pipelining, SIZE), which the byte-level <c>FakeMta</c> deliberately does not.
-/// </summary>
 internal static class RealMta
 {
     public static SmtpRemoteTarget Target(int port, bool startTls = false, bool requireTls = false) => new()
@@ -36,7 +32,6 @@ internal static class RealMta
     public static SmtpEnvelope Envelope(string from, params string[] to) =>
         new(from.Length == 0 ? EmailAddress.Null : EmailAddress.Parse(from), to.Select(r => EmailAddress.Parse(r)).ToArray(), false, false);
 
-    /// <summary>One connection, one transaction, then QUIT.</summary>
     public static async Task<(SmtpSendResult Result, SmtpTlsSession Tls)> SendAsync(int port, string from, string[] to, string message, bool startTls = false, bool chunking = false)
     {
         await using SmtpClientConnection connection = await SmtpClientConnection.ConnectAsync(Target(port, startTls), Options(chunking));

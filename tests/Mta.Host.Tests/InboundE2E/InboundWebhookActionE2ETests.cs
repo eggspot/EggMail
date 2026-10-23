@@ -15,11 +15,6 @@ using MimeKit;
 
 namespace Mta.Host.Tests.InboundE2E;
 
-/// <summary>
-/// The webhook action of an inbound route end to end, on SQLite and on PostgreSQL: mail arrives over SMTP, the runtime's runner claims the action from the real store and posts to a real HTTP receiver
-/// over a real socket, and an independent Standard Webhooks verifier checks the signature. The payload, the attachments fetched by reference through the API, the raw format, the retry ladder (read off the
-/// clock the test moves), the final failure, the guard against internal addresses, and several runners over one database.
-/// </summary>
 public abstract class InboundWebhookActionE2ETests(LabBackend backend)
 {
     private static LabOptions Options(Action<InboundActionSection>? tune = null) => new()
@@ -89,8 +84,6 @@ public abstract class InboundWebhookActionE2ETests(LabBackend backend)
         return await response.Content.ReadAsByteArrayAsync();
     }
 
-    // ------------------------------------------------------------------ the json format
-
     [Fact]
     public async Task The_json_webhook_is_signed_describes_the_message_and_its_attachments_are_fetched_by_reference_through_the_api()
     {
@@ -142,7 +135,7 @@ public abstract class InboundWebhookActionE2ETests(LabBackend backend)
         Assert.Equal(("bob@sender.test", "hook@example.org"), (data.GetProperty("envelope").GetProperty("from").GetString(), data.GetProperty("envelope").GetProperty("to").GetString()));
         JsonElement auth = data.GetProperty("auth");
         Assert.Equal(("pass", "sender.test"), (auth.GetProperty("spf").GetProperty("result").GetString(), auth.GetProperty("spf").GetProperty("domain").GetString()));
-        Assert.Equal(("pass", "reject"), (auth.GetProperty("dmarc").GetProperty("result").GetString(), auth.GetProperty("dmarc").GetProperty("policy").GetString()));   // SPF passes for sender.test, the domain of the From header
+        Assert.Equal(("pass", "reject"), (auth.GetProperty("dmarc").GetProperty("result").GetString(), auth.GetProperty("dmarc").GetProperty("policy").GetString()));
         JsonElement message = data.GetProperty("message");
         Assert.Equal("invoice-77@sender.test", message.GetProperty("message_id").GetString()!.Trim('<', '>'));
         Assert.Equal("Invoice über alles", message.GetProperty("subject").GetString());
@@ -152,7 +145,6 @@ public abstract class InboundWebhookActionE2ETests(LabBackend backend)
         Assert.False(message.GetProperty("truncated").GetBoolean());
         Assert.Contains(message.GetProperty("headers").EnumerateArray().Select(h => h.GetProperty("name").GetString()), n => n == "Authentication-Results");
 
-        // Attachments are listed with a path and never inlined; the receiver fetches them with a key that has inbound:read.
         JsonElement attachments = data.GetProperty("attachments");
         Assert.Equal(2, attachments.GetArrayLength());
         Assert.DoesNotContain(Convert.ToBase64String(pdf[..64]), request.Text, StringComparison.Ordinal);
@@ -164,7 +156,6 @@ public abstract class InboundWebhookActionE2ETests(LabBackend backend)
         Assert.Equal("nötes", Encoding.UTF8.GetString(await FetchAsync(lab, reader, attachments[1].GetProperty("url").GetString()!)));
         Assert.Equal(await lab.Storage.Inbound.GetRawAsync(InboundLab.Acme, stored.Id, default), await FetchAsync(lab, reader, data.GetProperty("raw_url").GetString()!));
 
-        // The URLs carry no credential: another tenant's key gets nothing from them.
         ApiClient stranger = await lab.Api.KeyClientAsync(InboundLab.Globex, "inbound:read");
         using var probe = new HttpRequestMessage(HttpMethod.Get, url0);
         probe.Headers.Authorization = new AuthenticationHeaderValue("Bearer", stranger.Bearer);
@@ -177,8 +168,6 @@ public abstract class InboundWebhookActionE2ETests(LabBackend backend)
         Assert.Equal(1, stored.ActionAttempts);
         Assert.Null(stored.ActionLastError);
     }
-
-    // ------------------------------------------------------------------ raw_mime
 
     [Fact]
     public async Task The_raw_mime_webhook_posts_the_stored_message_byte_for_byte_with_the_verdicts_in_encoded_headers()
@@ -193,7 +182,6 @@ public abstract class InboundWebhookActionE2ETests(LabBackend backend)
         await using WebhookReceiver receiverScope = receiver;
         lab.PublishSpf("sender.test");
 
-        // An envelope sender that is hostile to a header: a quoted local part with spaces, quotes, a percent sign and non-ASCII (SMTPUTF8).
         await using (Host.Tests.Inbound.FakeMta mta = await lab.ConnectedAsync())
         {
             Assert.Equal(250, (await mta.CommandAsync("MAIL FROM:<\"a b\\\"c%0d%0aX-Injected: 1\"@sender.test> SMTPUTF8")).Code);
@@ -206,7 +194,7 @@ public abstract class InboundWebhookActionE2ETests(LabBackend backend)
         stored = await WaitForAsync(lab, InboundLab.Acme, stored.Id, m => m.ActionState == InboundActionState.Done);
 
         ReceivedWebhook request = Assert.Single(receiver.Requests);
-        Assert.True(IndependentWebhookVerifier.Verify(request, [lab.Secrets[endpoint.Id]], lab.Clock.UtcNow, TimeSpan.FromMinutes(5), out string reason), reason);   // signed over exactly these bytes
+        Assert.True(IndependentWebhookVerifier.Verify(request, [lab.Secrets[endpoint.Id]], lab.Clock.UtcNow, TimeSpan.FromMinutes(5), out string reason), reason);
         Assert.Equal(await lab.Storage.Inbound.GetRawAsync(InboundLab.Acme, stored.Id, default), request.Body);
         Assert.Equal("message/rfc822", request.ContentType);
         Assert.Equal(ApiJson.Id(stored.Id), request.Headers["EggMail-Inbound-Id"]);
@@ -217,16 +205,13 @@ public abstract class InboundWebhookActionE2ETests(LabBackend backend)
         Assert.DoesNotContain("\r", from, StringComparison.Ordinal);
         Assert.DoesNotContain("\n", from, StringComparison.Ordinal);
         Assert.DoesNotContain(" ", from, StringComparison.Ordinal);
-        Assert.False(request.Headers.ContainsKey("X-Injected"));   // nothing the sender wrote became a header of the request
-        Assert.Equal(stored.EnvelopeFrom, Uri.UnescapeDataString(from));   // and what is encoded decodes to what was stored
+        Assert.False(request.Headers.ContainsKey("X-Injected"));
+        Assert.Equal(stored.EnvelopeFrom, Uri.UnescapeDataString(from));
     }
-
-    // ------------------------------------------------------------------ the ladder
 
     [Fact]
     public async Task A_receiver_that_fails_is_tried_again_on_the_ladder_with_the_same_id_and_a_manual_retry_is_a_new_event()
     {
-        // The runner is stepped by hand (RunOnceAsync claims what is due and carries it out before it returns), so what is due is decided by the clock the test moves and nothing waits for real time.
         var setup = await SetUpAsync(backend, options: new LabOptions { WithApi = true, RunActions = false, Inbound = Options().Inbound });
         if (setup is not var (lab, receiver, endpoint, _))
         {
@@ -241,7 +226,6 @@ public abstract class InboundWebhookActionE2ETests(LabBackend backend)
         Assert.Equal(250, (await lab.SendAsync("bob@sender.test", "hook@example.org", InboundLab.Message(subject: "retry me"))).Code);
         Guid id = Assert.Single(await lab.MessagesAsync(InboundLab.Acme)).Id;
 
-        // Attempt 1 fails with 500: the next rung is 5 seconds on the clock; nothing is tried before it.
         Assert.Equal(1, await runner.RunOnceAsync(default));
         InboundMessage first = (await lab.Storage.Inbound.GetAsync(InboundLab.Acme, id, default))!;
         Assert.Equal((InboundActionState.Pending, 1, "webhook_http_500"), (first.ActionState, first.ActionAttempts, first.ActionLastError));
@@ -249,12 +233,12 @@ public abstract class InboundWebhookActionE2ETests(LabBackend backend)
         Assert.Equal(0, await runner.RunOnceAsync(default));
         Assert.Single(receiver.Requests);
 
-        await lab.AdvanceAsync(TimeSpan.FromSeconds(5));   // exactly due
+        await lab.AdvanceAsync(TimeSpan.FromSeconds(5));
         Assert.Equal(1, await runner.RunOnceAsync(default));
         InboundMessage second = (await lab.Storage.Inbound.GetAsync(InboundLab.Acme, id, default))!;
         Assert.Equal((InboundActionState.Pending, 2, "webhook_http_503"), (second.ActionState, second.ActionAttempts, second.ActionLastError));
         Assert.Equal(lab.Clock.UtcNow.AddMinutes(5), second.ActionNextAttemptAt);
-        await lab.AdvanceAsync(TimeSpan.FromMinutes(5) - TimeSpan.FromSeconds(1));   // one second early
+        await lab.AdvanceAsync(TimeSpan.FromMinutes(5) - TimeSpan.FromSeconds(1));
         Assert.Equal(0, await runner.RunOnceAsync(default));
 
         await lab.AdvanceAsync(TimeSpan.FromSeconds(1));
@@ -262,12 +246,10 @@ public abstract class InboundWebhookActionE2ETests(LabBackend backend)
         InboundMessage done = (await lab.Storage.Inbound.GetAsync(InboundLab.Acme, id, default))!;
         Assert.Equal((InboundActionState.Done, 3, null), (done.ActionState, done.ActionAttempts, done.ActionLastError));
 
-        // Automatic retries repeat the id (the receiver deduplicates them); every one is signed on its own.
         Assert.Equal(3, receiver.Requests.Count);
         Assert.Single(receiver.Requests.Select(r => r.Id).Distinct());
         Assert.All(receiver.Requests, r => Assert.True(IndependentWebhookVerifier.Verify(r, [lab.Secrets[endpoint.Id]], lab.Clock.UtcNow, TimeSpan.FromHours(1), out _)));
 
-        // A manual retry puts a finished action back: a new generation, a new webhook id.
         ApiClient writer = await lab.Api!.KeyClientAsync(InboundLab.Acme, "inbound:write");
         Reply retried = await writer.PostAsync($"/api/v1/inbound/messages/{ApiJson.Id(id)}/retry");
         Assert.Equal(HttpStatusCode.Accepted, retried.Status);
@@ -293,7 +275,6 @@ public abstract class InboundWebhookActionE2ETests(LabBackend backend)
         Assert.Equal(250, (await lab.SendAsync("bob@sender.test", "hook@example.org", InboundLab.Message(subject: "never delivered"))).Code);
         Guid id = Assert.Single(await lab.MessagesAsync(InboundLab.Acme)).Id;
 
-        // The seven rungs of the ladder (5 s, 5 m, 30 m, 2 h, 5 h, 10 h, 10 h): each attempt is made exactly when its rung is due and the eighth is the last.
         TimeSpan[] rungs = [TimeSpan.FromSeconds(5), TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(30), TimeSpan.FromHours(2), TimeSpan.FromHours(5), TimeSpan.FromHours(10), TimeSpan.FromHours(10)];
         for (int attempt = 1; attempt <= 8; attempt++)
         {
@@ -305,7 +286,7 @@ public abstract class InboundWebhookActionE2ETests(LabBackend backend)
                 Assert.Equal(InboundActionState.Pending, m.ActionState);
                 Assert.Equal(lab.Clock.UtcNow + rungs[attempt - 1], m.ActionNextAttemptAt);
                 await lab.AdvanceAsync(rungs[attempt - 1] - TimeSpan.FromSeconds(1));
-                Assert.Equal(0, await runner.RunOnceAsync(default));   // a second early: not yet
+                Assert.Equal(0, await runner.RunOnceAsync(default));
                 await lab.AdvanceAsync(TimeSpan.FromSeconds(1));
             }
         }
@@ -314,10 +295,9 @@ public abstract class InboundWebhookActionE2ETests(LabBackend backend)
         Assert.Equal((InboundActionState.Failed, 8, "webhook_http_500"), (state.ActionState, state.ActionAttempts, state.ActionLastError));
         Assert.Equal(8, receiver.Requests.Count);
         Assert.NotNull(state.ActionFinishedAt);
-        Assert.True(state.HasRaw);   // a failed message keeps its body: it is the source for a retry
-        Assert.Equal(0, await runner.RunOnceAsync(default));   // and nothing more is tried
+        Assert.True(state.HasRaw);
+        Assert.Equal(0, await runner.RunOnceAsync(default));
 
-        // The tenant's own endpoints are told: an inbound.action.failed event waits in the outbox of the tenant, with no address or URL in it.
         var queued = await lab.Storage.Webhooks.ClaimDueAsync("check", 50, lab.Clock.UtcNow.AddDays(30), TimeSpan.FromMinutes(1), default);
         WebhookOutboxItem failure = Assert.Single(queued, e => e.EventType == "inbound.action.failed");
         Assert.Equal(InboundLab.Acme, failure.TenantId);
@@ -325,15 +305,12 @@ public abstract class InboundWebhookActionE2ETests(LabBackend backend)
         Assert.Equal(ApiJson.Id(id), payload.RootElement.GetProperty("data").GetProperty("inbound_id").GetString());
         Assert.DoesNotContain("127.0.0.1", failure.PayloadJson, StringComparison.Ordinal);
 
-        // A retry through the API starts a new ladder: the receiver is fine now.
         receiver.Respond(200);
         ApiClient writer = await lab.Api!.KeyClientAsync(InboundLab.Acme, "inbound:write");
         Assert.Equal(HttpStatusCode.Accepted, (await writer.PostAsync($"/api/v1/inbound/messages/{ApiJson.Id(id)}/retry")).Status);
         Assert.Equal(1, await runner.RunOnceAsync(default));
         Assert.Equal(InboundActionState.Done, (await lab.Storage.Inbound.GetAsync(InboundLab.Acme, id, default))!.ActionState);
     }
-
-    // ------------------------------------------------------------------ guards
 
     [Fact]
     public async Task A_webhook_route_to_an_internal_address_is_not_called_unless_the_tenants_allowlist_says_so()
@@ -346,14 +323,14 @@ public abstract class InboundWebhookActionE2ETests(LabBackend backend)
 
         await using InboundLab labScope = lab;
         await using WebhookReceiver receiverScope = receiver;
-        lab.Runtime.Webhooks.AllowlistProvider = _ => [];   // no network is allowed to the tenant: the receiver is on loopback
+        lab.Runtime.Webhooks.AllowlistProvider = _ => [];
 
         Assert.Equal(250, (await lab.SendAsync("bob@sender.test", "hook@example.org", InboundLab.Message(subject: "to loopback"))).Code);
         Guid id = Assert.Single(await lab.MessagesAsync(InboundLab.Acme)).Id;
 
         InboundMessage blocked = await WaitForAsync(lab, InboundLab.Acme, id, m => m.ActionAttempts == 1 && m.ActionState == InboundActionState.Pending && m.ActionLastError is not null);
         Assert.Equal("webhook_ssrf_blocked", blocked.ActionLastError);
-        Assert.Empty(receiver.Requests);   // nothing reached it
+        Assert.Empty(receiver.Requests);
 
         lab.Runtime.Webhooks.AllowlistProvider = _ => [IpNetwork.Parse("127.0.0.0/8")];
         await lab.AdvanceAsync(TimeSpan.FromSeconds(6));
@@ -377,10 +354,9 @@ public abstract class InboundWebhookActionE2ETests(LabBackend backend)
         Assert.Equal(250, (await lab.SendAsync("bob@sender.test", "hook@example.org", InboundLab.Message(subject: "gone"))).Code);
         Guid id = Assert.Single(await lab.MessagesAsync(InboundLab.Acme)).Id;
         InboundMessage after = await WaitForAsync(lab, InboundLab.Acme, id, m => m.ActionAttempts == 1 && m.ActionLastError == "webhook_gone");
-        Assert.Equal(InboundActionState.Pending, after.ActionState);   // it keeps its ladder
+        Assert.Equal(InboundActionState.Pending, after.ActionState);
         Assert.False((await lab.Storage.Config.GetWebhookEndpointAsync(endpoint.Id, default))!.Enabled);
 
-        // While the endpoint is off, the next rung is a deferral that sends nothing.
         await lab.AdvanceAsync(TimeSpan.FromSeconds(6));
         await WaitForAsync(lab, InboundLab.Acme, id, m => m.ActionAttempts == 2 && m.ActionLastError == "endpoint_disabled");
         Assert.Single(receiver.Requests);
@@ -404,7 +380,7 @@ public abstract class InboundWebhookActionE2ETests(LabBackend backend)
 
         await using InboundLab labScope = lab;
         await using WebhookReceiver receiverScope = receiver;
-        Assert.Equal(250, (await lab.SendAsync("bob@sender.test", "hook@example.org", InboundLab.Message(subject: "waiting"))).Code);   // no runner: it waits
+        Assert.Equal(250, (await lab.SendAsync("bob@sender.test", "hook@example.org", InboundLab.Message(subject: "waiting"))).Code);
         InboundMessage waiting = Assert.Single(await lab.MessagesAsync(InboundLab.Acme));
         Assert.Equal(InboundActionState.Pending, waiting.ActionState);
 
@@ -418,12 +394,10 @@ public abstract class InboundWebhookActionE2ETests(LabBackend backend)
         Assert.Equal((InboundActionState.Done, "route_is_now_store", true), (done.ActionState, done.ActionNote, done.HasRaw));
         Assert.Empty(receiver.Requests);
         Reply detail = await writer.GetAsync("/api/v1/inbound/messages/" + ApiJson.Id(waiting.Id));
-        Assert.Equal("webhook", detail["action"].GetProperty("kind").GetString());          // what it was given at receipt
-        Assert.Equal("store", detail["action"].GetProperty("currentKind").GetString());     // what its route does now
+        Assert.Equal("webhook", detail["action"].GetProperty("kind").GetString());
+        Assert.Equal("store", detail["action"].GetProperty("currentKind").GetString());
         Assert.Equal("route_is_now_store", detail["action"].GetProperty("note").GetString());
     }
-
-    // ------------------------------------------------------------------ several runners
 
     [Fact]
     public async Task Two_runners_over_one_database_deliver_every_message_exactly_once_and_one_tenant_never_takes_every_worker()
@@ -436,7 +410,6 @@ public abstract class InboundWebhookActionE2ETests(LabBackend backend)
 
         await using InboundLab labScope = lab;
         await using WebhookReceiver receiverScope = receiver;
-        // A second replica: its own runner over the same storage.
         using var transport = new WebhookTransport(lab.Config.Webhooks, lab.Clock) { AllowlistProvider = _ => [IpNetwork.Parse("127.0.0.0/8")] };
         var second = new InboundActionRunner(
             lab.Storage, transport, new WebhookEndpointHealth(lab.Storage.Config, lab.Config.Webhooks, null, null), lab.Runtime.Secrets, new InboundActionOptions { PollInterval = TimeSpan.FromMilliseconds(40) },
@@ -445,7 +418,7 @@ public abstract class InboundWebhookActionE2ETests(LabBackend backend)
         Task secondLoop = second.RunAsync(stop.Token);
         try
         {
-            receiver.Gate = async () => await Task.Delay(30);   // a receiver that takes a moment, so claims overlap
+            receiver.Gate = async () => await Task.Delay(30);
             const int Count = 60;
             await using Host.Tests.Inbound.FakeMta mta = await lab.ConnectedAsync();
             for (int i = 0; i < Count; i++)
@@ -463,10 +436,10 @@ public abstract class InboundWebhookActionE2ETests(LabBackend backend)
 
             IReadOnlyList<InboundMessage> all = await lab.MessagesAsync(InboundLab.Acme, new InboundMessageQuery(InboundLab.Acme, Limit: 200));
             Assert.Equal(Count, all.Count);
-            Assert.All(all, m => Assert.Equal((InboundActionState.Done, 1), (m.ActionState, m.ActionAttempts)));   // each claimed once
-            Assert.Equal(Count, receiver.Requests.Select(r => r.Id).Distinct().Count());   // each posted once: no failure, no lost lease, so no duplicate
+            Assert.All(all, m => Assert.Equal((InboundActionState.Done, 1), (m.ActionState, m.ActionAttempts)));
+            Assert.Equal(Count, receiver.Requests.Select(r => r.Id).Distinct().Count());
             Assert.Equal(Count, receiver.Requests.Count);
-            Assert.InRange(receiver.MaxConcurrent, 1, 4);   // two replicas, two attempts of one tenant each
+            Assert.InRange(receiver.MaxConcurrent, 1, 4);
         }
         finally
         {
@@ -474,8 +447,6 @@ public abstract class InboundWebhookActionE2ETests(LabBackend backend)
             try { await secondLoop; } catch (OperationCanceledException) { }
         }
     }
-
-    // ------------------------------------------------------------------ suspended tenant
 
     [Fact]
     public async Task While_the_tenant_is_suspended_its_actions_are_deferred_with_the_reason_and_delivered_after_it_is_back()
@@ -495,7 +466,6 @@ public abstract class InboundWebhookActionE2ETests(LabBackend backend)
         await lab.Storage.Config.UpsertTenantAsync(acme with { Enabled = false }, default);
         await lab.RefreshAsync();
 
-        // New mail is told to come back later; the one that is stored waits, and the attempt is a deferral that says why (it counts against the ladder).
         Assert.Equal(450, (await lab.SendAsync("bob@sender.test", "hook@example.org", InboundLab.Message(subject: "during"))).Code);
         Assert.Equal(1, await lab.Runtime.InboundActions.RunOnceAsync(default));
         InboundMessage deferred = (await lab.Storage.Inbound.GetAsync(InboundLab.Acme, id, default))!;

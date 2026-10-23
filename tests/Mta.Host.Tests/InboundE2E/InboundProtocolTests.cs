@@ -7,20 +7,14 @@ using Mta.Storage;
 
 namespace Mta.Host.Tests.InboundE2E;
 
-/// <summary>
-/// The SMTP-level defences of the port-25 listener through a real runtime: end-of-data smuggling (DATA and BDAT), STARTTLS (offered, command injection, plaintext buffered behind it), declared and
-/// actual size, and what a refused or abandoned message leaves behind in the stores. The byte-level cases are also in <c>Smtp.Server.Tests</c> and <c>Inbound/InboundSecurityTests</c>; here they run
-/// against the listener as the host configures it, with the stores that keep the mail.
-/// </summary>
 public abstract class InboundProtocolTests(LabBackend backend)
 {
-    private const string Victim = "postmaster@example.net";   // a recipient of another tenant: a command smuggled into the stream would put a message here
+    private const string OtherTenantsRecipient = "postmaster@example.net";
 
-    private static string Smuggled() => $"MAIL FROM:<evil@sender.test>\r\nRCPT TO:<{Victim}>\r\nDATA\r\nSubject: smuggled\r\n\r\nsmuggled body\r\n.\r\n";
+    private static string Smuggled() => $"MAIL FROM:<evil@sender.test>\r\nRCPT TO:<{OtherTenantsRecipient}>\r\nDATA\r\nSubject: smuggled\r\n\r\nsmuggled body\r\n.\r\n";
 
     public static IEnumerable<object[]> SmugglingPayloads()
     {
-        // The body stops in the middle of a line, so each of these is a forged terminator: none of them is CRLF "." CRLF.
         string header = "Subject: x\r\n\r\nbody";
         foreach (string terminator in new[] { "\n.\r\n", "\r\n.\n", "\n.\n", "\r.\r", "\r\n.\r", "\r.\r\n", "\r\n.\r\r\n", "\r\n.\0\r\n", "\r\n\0.\r\n", "\r\n.\n\r", "\r\n .\r\n" })
         {
@@ -50,8 +44,6 @@ public abstract class InboundProtocolTests(LabBackend backend)
         await mta.SendRawAsync(payload);
         await DrainAsync(mta);
 
-        // Whatever the server made of the bytes (a refusal of the whole message, or one message in which the bytes after a line that merely looks like a terminator are body text), the part after
-        // the forged terminator was not a command: nothing was sent from the smuggled sender, and nothing reached the other tenant.
         Assert.Empty(await lab.MessagesAsync(InboundLab.Globex));
         foreach (InboundMessage m in await lab.MessagesAsync(InboundLab.Acme))
         {
@@ -118,8 +110,8 @@ public abstract class InboundProtocolTests(LabBackend backend)
         Assert.Equal(250, (await mta.RcptAsync("support@example.org")).Code);
         Assert.Equal(354, (await mta.CommandAsync("DATA")).Code);
         string first = InboundLab.Message(subject: "first");
-        string second = InboundLab.Message(subject: "second", to: Victim);
-        await mta.SendRawAsync(first + ".\r\nMAIL FROM:<carol@sender.test>\r\nRCPT TO:<" + Victim + ">\r\nDATA\r\n");
+        string second = InboundLab.Message(subject: "second", to: OtherTenantsRecipient);
+        await mta.SendRawAsync(first + ".\r\nMAIL FROM:<carol@sender.test>\r\nRCPT TO:<" + OtherTenantsRecipient + ">\r\nDATA\r\n");
         Assert.Equal(250, (await mta.ReadReplyAsync()).Code);
         Assert.Equal(250, (await mta.ReadReplyAsync()).Code);
         Assert.Equal(250, (await mta.ReadReplyAsync()).Code);
@@ -150,7 +142,7 @@ public abstract class InboundProtocolTests(LabBackend backend)
         await using FakeMta mta = await lab.ConnectedAsync();
         Assert.Equal(250, (await mta.MailFromAsync("bob@sender.test")).Code);
         Assert.Equal(250, (await mta.RcptAsync("support@example.org")).Code);
-        string body = start + Smuggled();   // the commands are inside the chunk: BDAT's length frames them, so they are body text, whatever they look like
+        string body = start + Smuggled();
         await mta.SendRawAsync($"BDAT {Encoding.Latin1.GetByteCount(body)} LAST\r\n{body}");
         await DrainAsync(mta);
 
@@ -158,7 +150,7 @@ public abstract class InboundProtocolTests(LabBackend backend)
         IReadOnlyList<InboundMessage> acme = await lab.MessagesAsync(InboundLab.Acme);
         if (stored)
         {
-            Assert.EndsWith(body, await lab.RawAsync(Assert.Single(acme)), StringComparison.Ordinal);   // the text, whole and inert
+            Assert.EndsWith(body, await lab.RawAsync(Assert.Single(acme)), StringComparison.Ordinal);
         }
         else
         {
@@ -168,7 +160,6 @@ public abstract class InboundProtocolTests(LabBackend backend)
 
     private static async Task DrainAsync(FakeMta mta)
     {
-        // Read whatever the server says until it closes the connection or stops talking (it answers the junk after a refusal with errors, or closes).
         try
         {
             await mta.SendRawAsync("QUIT\r\n");
@@ -190,12 +181,12 @@ public abstract class InboundProtocolTests(LabBackend backend)
     [InlineData("SIZE=abc", 501)]
     [InlineData("SIZE=-1", 501)]
     [InlineData("SIZE=", 501)]
-    [InlineData("SIZE=99999999999999999999999", 501)]   // a number that does not fit is a syntax error, not "too big"
+    [InlineData("SIZE=99999999999999999999999", 501)]
     [InlineData("SIZE=1 SIZE=2", 501)]
     [InlineData("BODY=BINARYMIME", 501)]
     [InlineData("BODY=9BIT", 501)]
     [InlineData("SMTPUTF8=1", 501)]
-    [InlineData("RET=FULL", 250)]                      // the DSN parameters are tolerated and ignored (the server never sends a notification for received mail)
+    [InlineData("RET=FULL", 250)]
     [InlineData("ENVID=x", 250)]
     [InlineData("AUTH=<>", 250)]
     [InlineData("X-UNKNOWN=1", 501)]
@@ -212,18 +203,17 @@ public abstract class InboundProtocolTests(LabBackend backend)
         FakeMta.Reply reply = await mta.MailFromAsync("bob@sender.test", parameters);
 
         Assert.True(reply.Code == expected || (expected == 501 && reply.Code is 500 or 501 or 504 or 555), $"{parameters}: {reply}");
-        // Whatever it said, the session is intact: a new transaction works.
         await mta.CommandAsync("RSET");
         Assert.Equal(250, (await mta.SendAsync("bob@sender.test", "support@example.org", InboundLab.Message())).Code);
         Assert.Single(await lab.MessagesAsync(InboundLab.Acme));
     }
 
     [Theory]
-    [InlineData("")]                                    // no byte at all between DATA and the dot
-    [InlineData("\r\n")]                                // only the empty line that ends a header block
+    [InlineData("")]
+    [InlineData("\r\n")]
     [InlineData("\r\n\r\n\r\n")]
-    [InlineData("X")]                                   // one byte that is not a header
-    [InlineData("Subject: only a subject\r\n")]        // no empty line, no body, no From
+    [InlineData("X")]
+    [InlineData("Subject: only a subject\r\n")]
     public async Task A_message_with_next_to_nothing_in_it_is_stored_or_refused_cleanly_and_can_be_read_back(string body)
     {
         await using InboundLab? lab = await InboundLab.StartAsync(backend, new LabOptions { WithApi = true });
@@ -249,13 +239,11 @@ public abstract class InboundProtocolTests(LabBackend backend)
         InboundMessage stored = Assert.Single(await lab.MessagesAsync(InboundLab.Acme));
         string raw = await lab.RawAsync(stored);
         Assert.StartsWith("Received: ", raw, StringComparison.Ordinal);
-        Assert.Equal(InboundVerdict.PermError, stored.Auth.Dmarc);   // no usable From
+        Assert.Equal(InboundVerdict.PermError, stored.Auth.Dmarc);
         ApiClient alice = await lab.Api!.SignedInAsync("alice");
         Assert.Equal(System.Net.HttpStatusCode.OK, (await alice.GetAsync("/api/v1/inbound/messages/" + Mta.Host.Api.ApiJson.Id(stored.Id))).Status);
         lab.AssertNoErrorsLogged();
     }
-
-    // ------------------------------------------------------------------ STARTTLS
 
     [Fact]
     public async Task Starttls_is_offered_with_the_real_certificate_never_required_and_never_comes_with_auth()
@@ -275,12 +263,11 @@ public abstract class InboundProtocolTests(LabBackend backend)
             Assert.True(await tls.StartTlsAsync());
             ehlo = await tls.EhloAsync("mail.sender.test");
             Assert.DoesNotContain(ehlo.Lines, l => l.Contains("STARTTLS", StringComparison.OrdinalIgnoreCase));
-            Assert.DoesNotContain(ehlo.Lines, l => l.Contains("AUTH", StringComparison.OrdinalIgnoreCase));   // inbound sessions have no AUTH, not even over TLS
+            Assert.DoesNotContain(ehlo.Lines, l => l.Contains("AUTH", StringComparison.OrdinalIgnoreCase));
             Assert.Equal(502, (await tls.CommandAsync("AUTH PLAIN AGJvYgBwYXNz")).Code);
             Assert.Equal(250, (await tls.SendAsync("bob@sender.test", "support@example.org", InboundLab.Message(subject: "encrypted"))).Code);
         }
 
-        // Plaintext is accepted as well: a public MX that refuses it loses mail.
         await using (FakeMta plain = await lab.ConnectedAsync())
         {
             Assert.Equal(250, (await plain.SendAsync("bob@sender.test", "support@example.org", InboundLab.Message(subject: "clear"))).Code);
@@ -304,8 +291,7 @@ public abstract class InboundProtocolTests(LabBackend backend)
         }
 
         await using FakeMta mta = await lab.ConnectedAsync();
-        // CVE-2011-0411 family: commands behind STARTTLS in the same TCP segment. The server must not run them in plaintext, and must not run them after the upgrade either.
-        await mta.SendRawAsync($"STARTTLS\r\nMAIL FROM:<evil@sender.test>\r\nRCPT TO:<{Victim}>\r\nDATA\r\nSubject: injected\r\n\r\ninjected\r\n.\r\n");
+        await mta.SendRawAsync($"STARTTLS\r\nMAIL FROM:<evil@sender.test>\r\nRCPT TO:<{OtherTenantsRecipient}>\r\nDATA\r\nSubject: injected\r\n\r\ninjected\r\n.\r\n");
         bool upgraded;
         try
         {
@@ -313,27 +299,23 @@ public abstract class InboundProtocolTests(LabBackend backend)
             upgraded = reply.Code == 220;
             if (upgraded)
             {
-                // The server wrote 220 and nothing else in plaintext; start the handshake.
                 var ssl = new System.Net.Security.SslStream(mta.UnderlyingStream, leaveInnerStreamOpen: false, (_, _, _, _) => true);
                 await ssl.AuthenticateAsClientAsync("localhost");
                 await ssl.WriteAsync(Encoding.ASCII.GetBytes("RSET\r\nQUIT\r\n"));
                 var buffer = new byte[2048];
                 int n = await ssl.ReadAsync(buffer);
                 string text = Encoding.ASCII.GetString(buffer, 0, n);
-                Assert.DoesNotContain("354", text, StringComparison.Ordinal);   // no DATA was started on behalf of the injected bytes
+                Assert.DoesNotContain("354", text, StringComparison.Ordinal);
             }
         }
         catch (Exception ex) when (ex is IOException or EndOfStreamException or System.Security.Authentication.AuthenticationException)
         {
-            // Closing the connection is also a correct answer to an injection attempt.
         }
 
         Assert.Empty(await lab.MessagesAsync(InboundLab.Globex));
         Assert.Empty(await lab.MessagesAsync(InboundLab.Acme));
         await lab.AssertNothingWasSentAsync();
     }
-
-    // ------------------------------------------------------------------ size
 
     private static InboundSection WithMaxMessage(long bytes) => new() { Enabled = true, CheckSpfForInternalClients = true, MaxMessageSize = bytes, MaxInFlightBytes = Math.Max(bytes * 8, 1L << 20) };
 
@@ -346,15 +328,13 @@ public abstract class InboundProtocolTests(LabBackend backend)
             return;
         }
 
-        await lab.SetSettingsAsync(lab.ExampleOrg, InboundLab.Acme, s => s with { MaxMessageBytes = 10_000 });   // example.net keeps the ceiling
+        await lab.SetSettingsAsync(lab.ExampleOrg, InboundLab.Acme, s => s with { MaxMessageBytes = 10_000 });
 
-        // MAIL FROM ... SIZE= over the ceiling of the listener: the sender is told before it sends anything.
         await using (FakeMta mta = await lab.ConnectedAsync())
         {
             FakeMta.Reply big = await mta.MailFromAsync("bob@sender.test", "SIZE=50000");
             Assert.Equal((552, "5.3.4"), (big.Code, big.Enhanced));
 
-            // Within the ceiling but over this domain's limit: refused for that recipient (at RCPT), accepted for the domain without a limit of its own.
             Assert.Equal(250, (await mta.MailFromAsync("bob@sender.test", "SIZE=20000")).Code);
             FakeMta.Reply rcpt = await mta.RcptAsync("support@example.org");
             Assert.Equal((552, "5.3.4"), (rcpt.Code, rcpt.Enhanced));
@@ -362,7 +342,6 @@ public abstract class InboundProtocolTests(LabBackend backend)
             Assert.Equal(250, (await mta.DataAsync(InboundLab.Message(to: "anyone@example.net", body: new string('x', 19_000) + "\r\n"))).Code);
         }
 
-        // No SIZE at all and a body over the domain's limit: refused at the end of DATA, the connection stays usable.
         await using (FakeMta mta = await lab.ConnectedAsync())
         {
             Assert.Equal(250, (await mta.MailFromAsync("bob@sender.test")).Code);
@@ -372,7 +351,6 @@ public abstract class InboundProtocolTests(LabBackend backend)
             Assert.Equal(250, (await mta.SendAsync("bob@sender.test", "support@example.org", InboundLab.Message(subject: "small after big"))).Code);
         }
 
-        // A client that declares less than it sends is held to the real size, too.
         await using (FakeMta liar = await lab.ConnectedAsync())
         {
             Assert.Equal(250, (await liar.MailFromAsync("bob@sender.test", "SIZE=500")).Code);

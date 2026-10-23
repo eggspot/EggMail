@@ -4,11 +4,6 @@ using Mta.Storage;
 
 namespace Mta.Host.Tests.InboundE2E;
 
-/// <summary>
-/// A seeded random walk over the dialog of the port-25 listener against the real runtime and stores: sessions made of valid and invalid commands in any order, addresses of every class (a route, a
-/// bounce token, an SRS address, an external domain, hostile spellings), bodies of every shape. The properties that must hold whatever the sequence: the server answers every command with a well-formed
-/// reply and survives, a stored message exists only for an address a route or the postmaster rule accepts, and nothing at all is queued for sending. The seeds are fixed, so a failure is reproducible.
-/// </summary>
 public abstract class InboundSessionFuzzTests(LabBackend backend)
 {
     private static readonly string[] Recipients =
@@ -106,7 +101,7 @@ public abstract class InboundSessionFuzzTests(LabBackend backend)
                 }
                 catch (Exception ex) when (ex is EndOfStreamException or IOException or System.Net.Sockets.SocketException)
                 {
-                    open = false;   // a closed connection is a legal answer to nonsense
+                    open = false;
                 }
                 catch (OperationCanceledException)
                 {
@@ -115,10 +110,8 @@ public abstract class InboundSessionFuzzTests(LabBackend backend)
             }
         }
 
-        // The server is up and serves a normal message after all that.
         Assert.Equal(250, (await lab.SendAsync("bob@sender.test", "support@example.org", InboundLab.Message(subject: "after the fuzz"))).Code);
 
-        // Properties.
         var routesOf = new Dictionary<Guid, IReadOnlyList<InboundRouteRecord>>
         {
             [lab.ExampleOrg] = await lab.Storage.Inbound.GetRoutesAsync(lab.ExampleOrg, default),
@@ -129,7 +122,7 @@ public abstract class InboundSessionFuzzTests(LabBackend backend)
             foreach (InboundMessage m in await lab.MessagesAsync(tenant, new InboundMessageQuery(tenant, Limit: 200)))
             {
                 int at = m.EnvelopeTo.LastIndexOf('@');
-                Assert.Equal(name, m.EnvelopeTo[(at + 1)..]);   // only ever for a domain of the tenant
+                Assert.Equal(name, m.EnvelopeTo[(at + 1)..]);
                 Assert.Equal(domain, m.DomainId);
                 string local = m.EnvelopeTo[..at];
                 bool handled = Mta.Storage.Logic.InboundRules.MatchRoute(routesOf[domain], local) is not null || Mta.Storage.Logic.InboundRules.IsPostmaster(local);
@@ -141,7 +134,7 @@ public abstract class InboundSessionFuzzTests(LabBackend backend)
 
         await lab.AssertNothingWasSentAsync();
         Assert.False(await lab.Storage.Config.IsSuppressedAsync(InboundLab.Acme, "evil@x.test", default));
-        lab.AssertNoErrorsLogged();   // nothing the sequences did made the receive path fail on its own
+        lab.AssertNoErrorsLogged();
     }
 }
 

@@ -8,11 +8,6 @@ using Mta.Storage;
 
 namespace Mta.Host.Tests.InboundE2E;
 
-/// <summary>
-/// The inbound meters, read off a listener on the real instruments while real mail goes through the runtime: every documented outcome of a recipient, a message and a refused transaction is counted
-/// under its name, the verdicts are counted by mechanism, the blocklist by result and the gauges report. (The meters are process wide and other tests run at the same time, so the checks are "was counted
-/// at least this much", never an exact figure.)
-/// </summary>
 public abstract class InboundMetricsTests(LabBackend backend)
 {
     private sealed class Counts : IDisposable
@@ -74,7 +69,7 @@ public abstract class InboundMetricsTests(LabBackend backend)
         }
 
         using var counts = new Counts();
-        lab.Dns.AddTxt("sender.test", "v=spf1 ip4:203.0.113.0/24 ip4:127.0.0.1 -all");   // every address the test sends from
+        lab.Dns.AddTxt("sender.test", "v=spf1 ip4:203.0.113.0/24 ip4:127.0.0.1 -all");
         lab.PublishDmarc("sender.test", "none");
         lab.PublishSpf("eve.test", authorize: false);
         lab.PublishDmarc("eve.test", "reject");
@@ -89,57 +84,53 @@ public abstract class InboundMetricsTests(LabBackend backend)
         lab.Dns.AddA("9.113.0.203.bl.test", "127.0.0.2");
         lab.Dns.Fail("10.113.0.203.bl.test", DnsRecordType.A);
 
-        // Messages and recipients that are accepted (the sender 127.0.0.1 may send four a minute to each domain).
-        lab.ClientIp = IPAddress.Parse("203.0.113.11");   // not listed: a "miss"
+        lab.ClientIp = IPAddress.Parse("203.0.113.11");
         Assert.Equal(250, (await lab.SendAsync("bob@sender.test", "support@example.org", InboundLab.Message())).Code);
         Assert.Equal(250, (await lab.SendAsync("bob@sender.test", "postmaster@example.org", InboundLab.Message())).Code);
-        // The refusals at RCPT.
         await using (FakeMta mta = await lab.ConnectedAsync())
         {
             Assert.Equal(250, (await mta.MailFromAsync("bob@sender.test")).Code);
-            Assert.Equal(550, (await mta.RcptAsync("x@gmail.test")).Code);                   // relay_denied
-            Assert.Equal(550, (await mta.RcptAsync("nobody@example.org")).Code);             // unknown_mailbox
-            Assert.Equal(450, (await mta.RcptAsync("x@pending.example")).Code);              // domain_unverified
+            Assert.Equal(550, (await mta.RcptAsync("x@gmail.test")).Code);
+            Assert.Equal(550, (await mta.RcptAsync("nobody@example.org")).Code);
+            Assert.Equal(450, (await mta.RcptAsync("x@pending.example")).Code);
             Assert.Equal(250, (await mta.RcptAsync("support@example.org")).Code);
-            Assert.Equal(452, (await mta.RcptAsync($"{lab.BounceLocalPart()}@{InboundLab.BounceDomain}")).Code);   // mixed_kinds
+            Assert.Equal(452, (await mta.RcptAsync($"{lab.BounceLocalPart()}@{InboundLab.BounceDomain}")).Code);
             Assert.Equal(250, (await mta.RcptAsync("old@example.org")).Code);
             Assert.Equal(250, (await mta.RcptAsync("billing-1@example.org")).Code);
-            Assert.Equal(452, (await mta.RcptAsync("anyone@example.net")).Code);             // too_many (3 at most)
+            Assert.Equal(452, (await mta.RcptAsync("anyone@example.net")).Code);
         }
 
-        Assert.Equal(552, (await lab.SendAsync("bob@sender.test", "support@example.org", InboundLab.Message(body: new string('x', 50_000) + "\r\n"))).Code);   // rejected_size
+        Assert.Equal(552, (await lab.SendAsync("bob@sender.test", "support@example.org", InboundLab.Message(body: new string('x', 50_000) + "\r\n"))).Code);
         await using (FakeMta big = await lab.ConnectedAsync())
         {
             Assert.Equal(250, (await big.MailFromAsync("bob@sender.test", "SIZE=5000")).Code);
-            Assert.Equal(552, (await big.RcptAsync("x@tiny.example")).Code);                                                                                  // message_too_large
+            Assert.Equal(552, (await big.RcptAsync("x@tiny.example")).Code);
         }
 
-        Assert.Equal(550, (await lab.SendAsync("eve@eve.test", "anyone@example.net", InboundLab.Message(from: "eve@eve.test"))).Code);                         // rejected_dmarc
+        Assert.Equal(550, (await lab.SendAsync("eve@eve.test", "anyone@example.net", InboundLab.Message(from: "eve@eve.test"))).Code);
 
         await using (FakeMta mixed = await lab.ConnectedAsync())
         {
             Assert.Equal(250, (await mixed.MailFromAsync("")).Code);
-            Assert.Equal(250, (await mixed.RcptAsync($"{lab.Srs.CreateLocalPart("sender.test", "bob", lab.Clock.UtcNow)}@example.org")).Code);   // srs_bounce
-            Assert.Equal(452, (await mixed.RcptAsync("support@example.org")).Code);                                                              // mixed_kinds
+            Assert.Equal(250, (await mixed.RcptAsync($"{lab.Srs.CreateLocalPart("sender.test", "bob", lab.Clock.UtcNow)}@example.org")).Code);
+            Assert.Equal(452, (await mixed.RcptAsync("support@example.org")).Code);
         }
 
         string token = lab.BounceLocalPart();
-        Assert.Equal(250, (await lab.SendAsync("", $"{token}@{InboundLab.BounceDomain}", InboundLab.Dsn($"{token}@{InboundLab.BounceDomain}", "gone@dest.example"))).Code);   // bounce
+        Assert.Equal(250, (await lab.SendAsync("", $"{token}@{InboundLab.BounceDomain}", InboundLab.Dsn($"{token}@{InboundLab.BounceDomain}", "gone@dest.example"))).Code);
 
-        // Quota: one message to a domain with a 100-byte limit, then the next recipient finds it full.
         Assert.Equal(250, (await lab.SendAsync("bob@sender.test", "x@small.example", InboundLab.Message())).Code);
         await lab.AdvanceAsync(TimeSpan.FromSeconds(6));
-        Assert.Equal(452, (await lab.SendAsync("bob@sender.test", "x@small.example", InboundLab.Message())).Code);   // mailbox_full
+        Assert.Equal(452, (await lab.SendAsync("bob@sender.test", "x@small.example", InboundLab.Message())).Code);
 
-        // The rate limit (four a minute from one address to one domain) and the blocklist.
         for (int i = 0; i < 6; i++)
         {
             await lab.SendAsync("bob@sender.test", "support@example.org", InboundLab.Message(subject: "burst " + i));
         }
 
-        lab.ClientIp = IPAddress.Parse("203.0.113.9");    // listed: a "hit" (the flag action: accepted)
+        lab.ClientIp = IPAddress.Parse("203.0.113.9");
         Assert.Equal(250, (await lab.SendAsync("bob@sender.test", "anyone@example.net", InboundLab.Message())).Code);
-        lab.ClientIp = IPAddress.Parse("203.0.113.10");   // the list fails: an "error"
+        lab.ClientIp = IPAddress.Parse("203.0.113.10");
         Assert.Equal(250, (await lab.SendAsync("bob@sender.test", "anyone@example.net", InboundLab.Message())).Code);
 
         counts.Observe();

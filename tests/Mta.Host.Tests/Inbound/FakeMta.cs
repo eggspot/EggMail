@@ -28,7 +28,6 @@ internal sealed class FakeMta : IAsyncDisposable
         return mta;
     }
 
-    /// <summary>The stream as it is now (the TLS stream after an upgrade): for a test that drives the handshake itself.</summary>
     public Stream UnderlyingStream => _stream;
 
     public sealed record Reply(int Code, string Text, IReadOnlyList<string> Lines)

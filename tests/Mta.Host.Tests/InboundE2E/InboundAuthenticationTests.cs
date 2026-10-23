@@ -12,15 +12,8 @@ using MimeKit.Cryptography;
 
 namespace Mta.Host.Tests.InboundE2E;
 
-/// <summary>
-/// SPF, DKIM, DMARC and ARC on receipt through a real runtime: what the verdicts are for each situation, that every verdict survives the database and the API unchanged, what each DMARC action does
-/// (including transactions for several tenants), a DKIM signer that is not ours (MimeKit), and the configuration keys that decide (trusted ARC sealers, verification budget). The logic is also tested
-/// with an in-memory store in <c>Inbound/InboundVerificationTests</c>; this class is about the wiring and the stores.
-/// </summary>
 public abstract class InboundAuthenticationTests(LabBackend backend)
 {
-    // ------------------------------------------------------------------ the verdicts, one per situation
-
     private sealed record SpfCase(string Domain, string? Record, DnsRcode? Failure, InboundVerdict Expected);
 
     private static readonly SpfCase[] SpfCases =
@@ -79,17 +72,13 @@ public abstract class InboundAuthenticationTests(LabBackend backend)
             Reply detail = await api.GetAsync("/api/v1/inbound/messages/" + ApiJson(stored.Id));
             Assert.Equal(System.Net.HttpStatusCode.OK, detail.Status);
             Assert.Equal(wire, detail.Json.GetProperty("auth").GetProperty("spf").GetProperty("result").GetString());
-            // The stamped header agrees with the column (the same verdict in both places).
             Assert.Contains($"spf={wire}", await lab.RawAsync(stored), StringComparison.Ordinal);
         }
 
-        // The filter on the DMARC verdict works against the real stores, too.
         Assert.Empty((await lab.MessagesAsync(InboundLab.Acme, new InboundMessageQuery(InboundLab.Acme, Dmarc: InboundVerdict.Pass))));
     }
 
     private static string ApiJson(Guid id) => id.ToString("N");
-
-    // ------------------------------------------------------------------ DKIM
 
     [Fact]
     public async Task Dkim_verdicts_pass_fail_none_and_the_signing_domain_are_stored_for_each_situation()
@@ -121,7 +110,7 @@ public abstract class InboundAuthenticationTests(LabBackend backend)
         Assert.Equal((InboundVerdict.Pass, "sender.test", InboundVerdict.Pass), (Of("good").Auth.Dkim, Of("good").Auth.DkimDomain, Of("good").Auth.Dmarc));
         Assert.Equal((InboundVerdict.Fail, InboundVerdict.Fail), (Of("tampered").Auth.Dkim, Of("tampered").Auth.Dmarc));
         Assert.Equal((InboundVerdict.None, InboundVerdict.Fail), (Of("unsigned").Auth.Dkim, Of("unsigned").Auth.Dmarc));
-        Assert.Equal((InboundVerdict.Pass, "other.test", InboundVerdict.Fail), (Of("unaligned").Auth.Dkim, Of("unaligned").Auth.DkimDomain, Of("unaligned").Auth.Dmarc));   // a valid signature of another domain carries nothing for the From domain
+        Assert.Equal((InboundVerdict.Pass, "other.test", InboundVerdict.Fail), (Of("unaligned").Auth.Dkim, Of("unaligned").Auth.DkimDomain, Of("unaligned").Auth.Dmarc));
         Assert.NotEqual(InboundVerdict.Pass, Of("nokey").Auth.Dkim);
     }
 
@@ -162,7 +151,6 @@ public abstract class InboundAuthenticationTests(LabBackend backend)
         InboundMessage ok = Assert.Single(await lab.MessagesAsync(InboundLab.Acme));
         Assert.Equal((InboundVerdict.Pass, "sender.test", InboundVerdict.Pass), (ok.Auth.Dkim, ok.Auth.DkimDomain, ok.Auth.Dmarc));
 
-        // The same message, one word of the body changed in transit, and one with the subject changed (signed header): both break the signature.
         Assert.Equal(550, (await lab.SendAsync("bob@sender.test", "support@example.org", wire.Replace("Hello,", "Hullo,", StringComparison.Ordinal))).Code);
         Assert.Equal(550, (await lab.SendAsync("bob@sender.test", "support@example.org", wire.Replace("Subject: Signed", "Subject: Resigned", StringComparison.Ordinal))).Code);
         Assert.Single(await lab.MessagesAsync(InboundLab.Acme));
@@ -176,8 +164,6 @@ public abstract class InboundAuthenticationTests(LabBackend backend)
         message.WriteTo(options, stream);
         return Encoding.UTF8.GetString(stream.ToArray());
     }
-
-    // ------------------------------------------------------------------ the DMARC action
 
     private sealed record ActionCase(string Name, string SpfRecord, string? Dmarc, InboundDmarcAction Action, int ExpectedCode, InboundVerdict ExpectedDmarc, InboundDmarcDisposition ExpectedDisposition);
 
@@ -204,13 +190,13 @@ public abstract class InboundAuthenticationTests(LabBackend backend)
             new("fail-reject-record", Fail, "p=reject", InboundDmarcAction.RecordOnly, 250, InboundVerdict.Fail, InboundDmarcDisposition.None),
             new("fail-norecord-reject", Fail, null, InboundDmarcAction.Reject, 250, InboundVerdict.None, InboundDmarcDisposition.None),
             new("softfail-reject-reject", "v=spf1 ~all", "p=reject", InboundDmarcAction.Reject, 550, InboundVerdict.Fail, InboundDmarcDisposition.None),
-            new("fail-pct0-reject", Fail, "p=reject; pct=0", InboundDmarcAction.Reject, 250, InboundVerdict.Fail, InboundDmarcDisposition.Flagged),   // pct=0: the next-lesser policy applies (RFC 7489 6.6.4), quarantine, which is flagged
+            new("fail-pct0-reject", Fail, "p=reject; pct=0", InboundDmarcAction.Reject, 250, InboundVerdict.Fail, InboundDmarcDisposition.Flagged),
             new("fail-relaxed-sub", Fail, "p=none; sp=reject", InboundDmarcAction.Reject, 550, InboundVerdict.Fail, InboundDmarcDisposition.None),
         ];
 
         foreach (ActionCase c in cases)
         {
-            string domain = c.Name == "fail-relaxed-sub" ? "relaxedsub.test" : c.Name.Replace("-", "", StringComparison.Ordinal) + ".sender.test";   // the organizational domain of the subdomain case is the domain itself
+            string domain = c.Name == "fail-relaxed-sub" ? "relaxedsub.test" : c.Name.Replace("-", "", StringComparison.Ordinal) + ".sender.test";
             string recipientDomain = c.Name.Replace("-", "", StringComparison.Ordinal) + ".example.org";
             Guid id = await lab.AddDomainAsync(InboundLab.Acme, recipientDomain, action: c.Action);
             await lab.AddRouteAsync(id, InboundLab.Acme, 10, InboundMatchKind.CatchAll, null, InboundActionKind.Store);
@@ -243,7 +229,6 @@ public abstract class InboundAuthenticationTests(LabBackend backend)
             Assert.Equal(c.ExpectedDisposition == InboundDmarcDisposition.Flagged, raw.Contains("\r\nX-EggMail-Dmarc: flagged\r\n", StringComparison.Ordinal));
         }
 
-        // Nothing that was refused was stored; the flagged ones are found by the flagged filter on the real store.
         IReadOnlyList<InboundMessage> flagged = await lab.MessagesAsync(InboundLab.Acme, new InboundMessageQuery(InboundLab.Acme, DmarcFlagged: true));
         Assert.Equal(["fail-pct0-reject", "fail-quarantine-flag", "fail-quarantine-reject", "fail-reject-flag"], flagged.Select(m => m.Subject!).Order(StringComparer.Ordinal).ToArray());
         await lab.AssertNothingWasSentAsync();
@@ -267,20 +252,17 @@ public abstract class InboundAuthenticationTests(LabBackend backend)
         await lab.SetSettingsAsync(lab.ExampleOrg, InboundLab.Acme, s => s with { DmarcAction = InboundDmarcAction.Flag });
         await lab.RefreshAsync();
 
-        // Both domains say reject: one 550 for the whole message, nothing stored for anybody.
         Assert.Equal(550, (await SendToAsync(lab, "a@rejecting.example", "b@rejecting2.example")).Code);
         Assert.Empty(await lab.MessagesAsync(InboundLab.Acme));
         Assert.Empty(await lab.MessagesAsync(InboundLab.Globex));
 
-        // One of them wants the mail (flag): everybody gets a copy; the rejecting domains' copies are stored flagged, the other's is flagged as well (it asked for flag).
         Assert.Equal(250, (await SendToAsync(lab, "a@rejecting.example", "b@rejecting2.example", "support@example.org")).Code);
         InboundMessage[] acme = [.. await lab.MessagesAsync(InboundLab.Acme)];
         Assert.Equal(2, acme.Length);
         Assert.All(acme, m => Assert.Equal(InboundDmarcDisposition.Flagged, m.Disposition));
         InboundMessage globex = Assert.Single(await lab.MessagesAsync(InboundLab.Globex));
-        Assert.Equal(InboundDmarcDisposition.Flagged, globex.Disposition);   // the reject domain's copy is stored flagged when it travels with others
+        Assert.Equal(InboundDmarcDisposition.Flagged, globex.Disposition);
 
-        // A record-only domain next to a rejecting one: the message is accepted, the record-only copy is not flagged.
         await lab.SetSettingsAsync(lab.ExampleNet, InboundLab.Globex, s => s with { DmarcAction = InboundDmarcAction.RecordOnly });
         Assert.Equal(250, (await SendToAsync(lab, "a@rejecting.example", "anyone@example.net")).Code);
         IReadOnlyList<InboundMessage> net = await lab.MessagesAsync(InboundLab.Globex, new InboundMessageQuery(InboundLab.Globex, Recipient: "anyone@example.net"));
@@ -298,8 +280,6 @@ public abstract class InboundAuthenticationTests(LabBackend backend)
 
         return await mta.DataAsync(InboundLab.Message(to: recipients[0]));
     }
-
-    // ------------------------------------------------------------------ configuration that decides
 
     [Fact]
     public async Task A_sealer_named_in_the_configuration_vouches_for_the_message_and_one_that_is_not_named_does_not()
@@ -327,7 +307,7 @@ public abstract class InboundAuthenticationTests(LabBackend backend)
 
         Assert.Equal(250, (await lab.SendAsync("bob@sender.test", "support@example.org", Sealed("forwarder.test", "forwarder.test; dmarc=pass header.from=sender.test"))).Code);
         InboundMessage m = Assert.Single(await lab.MessagesAsync(InboundLab.Acme));
-        Assert.Equal((InboundVerdict.Fail, InboundVerdict.Pass), (m.Auth.Dmarc, m.Auth.Arc));   // the verdicts stay as they were; only the decision used the chain
+        Assert.Equal((InboundVerdict.Fail, InboundVerdict.Pass), (m.Auth.Dmarc, m.Auth.Arc));
 
         Assert.Equal(550, (await lab.SendAsync("bob@sender.test", "support@example.org", Sealed("stranger.test", "stranger.test; dmarc=pass header.from=sender.test"))).Code);
         Assert.Equal(550, (await lab.SendAsync("bob@sender.test", "support@example.org", Sealed("forwarder.test", "forwarder.test; dmarc=fail header.from=sender.test"))).Code);

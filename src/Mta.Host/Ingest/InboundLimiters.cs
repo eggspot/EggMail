@@ -3,21 +3,14 @@ using System.Net.Sockets;
 
 namespace Mta.Host.Ingest;
 
-/// <summary>
-/// Messages-per-minute counters of the receive path (design sections 11.4 and 11.9): fixed one-minute windows in memory, per process. Every kind of counter lives in its own
-/// bounded dictionary with its own eviction, so a flood from many addresses can only make the per-remote limiter forget remote addresses: it can never push a domain's counter out
-/// and so never resets a domain's limit. At the maximum, expired windows go first and then the oldest.
-/// </summary>
 public sealed class BoundedWindowCounter
 {
     private readonly object _gate = new();
     private readonly Dictionary<string, (long Window, int Count)> _entries;
-    private Queue<string> _order = new();   // keys in the order they first appeared: what "oldest" means when every window is current
+    private Queue<string> _keysInArrivalOrder = new();
     private readonly int _maxEntries;
     private readonly string _kind;
 
-    /// <param name="kind">The label of the eviction metric (<c>domain</c> or <c>remote</c>).</param>
-    /// <param name="maxEntries">The most entries held (100,000 in the receive path).</param>
     public BoundedWindowCounter(string kind, int maxEntries)
     {
         if (maxEntries < 1)
@@ -41,7 +34,6 @@ public sealed class BoundedWindowCounter
         }
     }
 
-    /// <summary>Messages already counted for <paramref name="key"/> in the current minute.</summary>
     public int Peek(string key, DateTimeOffset now)
     {
         long window = Window(now);
@@ -51,7 +43,6 @@ public sealed class BoundedWindowCounter
         }
     }
 
-    /// <summary>Counts one message for <paramref name="key"/>; returns the count in the current minute including this one.</summary>
     public int Add(string key, DateTimeOffset now)
     {
         long window = Window(now);
@@ -69,19 +60,28 @@ public sealed class BoundedWindowCounter
             }
 
             _entries[key] = (window, 1);
-            _order.Enqueue(key);
-            if (_order.Count > 2 * _maxEntries)
+            _keysInArrivalOrder.Enqueue(key);
+            if (_keysInArrivalOrder.Count > 2 * _maxEntries)
             {
-                _order = new Queue<string>(_entries.Keys);   // keys swept out as expired leave stale places in the queue; start it again from what is in the table
+                DropStalePlacesFromArrivalOrder();
             }
 
             return 1;
         }
     }
 
+    private void DropStalePlacesFromArrivalOrder() => _keysInArrivalOrder = new Queue<string>(_entries.Keys);
+
     private void Evict(long window)
     {
-        // Expired windows first.
+        if (!TryEvictExpiredWindows(window))
+        {
+            EvictOldestSixteenth();
+        }
+    }
+
+    private bool TryEvictExpiredWindows(long window)
+    {
         List<string>? expired = null;
         foreach (var (key, entry) in _entries)
         {
@@ -99,15 +99,19 @@ public sealed class BoundedWindowCounter
             }
 
             InboundMetrics.LimiterEvictions.Add(expired.Count, new KeyValuePair<string, object?>("limiter", _kind));
-            return;
+            return true;
         }
 
-        // Everything is current: drop the oldest sixteenth of the table, oldest first by when the key first appeared (a batch keeps this scan rare).
+        return false;
+    }
+
+    private void EvictOldestSixteenth()
+    {
         int drop = Math.Max(1, _maxEntries / 16);
         int dropped = 0;
-        while (dropped < drop && _order.Count > 0)
+        while (dropped < drop && _keysInArrivalOrder.Count > 0)
         {
-            if (_entries.Remove(_order.Dequeue()))
+            if (_entries.Remove(_keysInArrivalOrder.Dequeue()))
             {
                 dropped++;
             }
@@ -119,7 +123,6 @@ public sealed class BoundedWindowCounter
     private static long Window(DateTimeOffset now) => now.ToUnixTimeSeconds() / 60;
 }
 
-/// <summary>The rate limits of the receive path: per domain, and per remote address for a domain (an IPv6 client by its /64).</summary>
 public sealed class InboundRateLimiter
 {
     public const int MaxEntries = 100_000;
@@ -137,11 +140,9 @@ public sealed class InboundRateLimiter
 
     public int RemoteEntries => _remotes.Count;
 
-    /// <summary>Whether one more message for the domain from this client would stay within both limits (nothing is counted).</summary>
     public bool Allows(Guid domainId, IPAddress client, int perMinuteForDomain, int perMinuteForRemote, DateTimeOffset now) =>
         _domains.Peek(DomainKey(domainId), now) < perMinuteForDomain && _remotes.Peek(RemoteKey(domainId, client), now) < perMinuteForRemote;
 
-    /// <summary>Counts one accepted recipient against both limits.</summary>
     public void Count(Guid domainId, IPAddress client, DateTimeOffset now)
     {
         _domains.Add(DomainKey(domainId), now);
@@ -150,10 +151,6 @@ public sealed class InboundRateLimiter
 
     private readonly object _gate = new();
 
-    /// <summary>
-    /// Looks at both limits and counts one message in a single step: of any number of connections that ask at the same moment, only as many pass as the limits leave room for. (<see cref="Allows"/> then
-    /// <see cref="Count"/> leaves a window between the look and the count, and a receive path that waits for DNS or storage in between lets every connection through that looked before the first counted.)
-    /// </summary>
     public bool TryCount(Guid domainId, IPAddress client, int perMinuteForDomain, int perMinuteForRemote, DateTimeOffset now)
     {
         lock (_gate)
@@ -173,13 +170,10 @@ public sealed class InboundRateLimiter
     private static string RemoteKey(Guid domainId, IPAddress client) => domainId.ToString("N") + "|" + NetworkKey.Remote(client);
 }
 
-/// <summary>How the receive path groups client addresses: the same address, with an IPv4-mapped IPv6 address normalized, and an IPv6 address by its /64 (a host with a /64 has 2^64 addresses to rotate through).</summary>
 public static class NetworkKey
 {
-    /// <summary>The address as the rest of the system sees it: <c>::ffff:a.b.c.d</c> becomes <c>a.b.c.d</c>.</summary>
     public static IPAddress Normalize(IPAddress address) => address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address;
 
-    /// <summary>Key of the per-remote limiter: the IPv4 address, or the /64 of an IPv6 address.</summary>
     public static string Remote(IPAddress address)
     {
         address = Normalize(address);
@@ -193,7 +187,6 @@ public static class NetworkKey
         return "6:" + Convert.ToHexString(bytes[..8]);
     }
 
-    /// <summary>Key of the verification slots: the IPv4 /24 or the IPv6 /64.</summary>
     public static string Slot(IPAddress address)
     {
         address = Normalize(address);
@@ -202,7 +195,6 @@ public static class NetworkKey
         return address.AddressFamily == AddressFamily.InterNetworkV6 ? "6:" + Convert.ToHexString(bytes[..8]) : "4:" + Convert.ToHexString(bytes[..3]);
     }
 
-    /// <summary>Whether the address is one a public sender cannot have: loopback, private (RFC 1918, unique local), link-local or carrier-grade NAT. Behind source NAT every sender looks like one of these.</summary>
     public static bool IsInternal(IPAddress address)
     {
         address = Normalize(address);

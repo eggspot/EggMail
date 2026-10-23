@@ -7,10 +7,6 @@ using MimeKit.Cryptography;
 
 namespace Mta.Host.Tests.InboundE2E;
 
-/// <summary>
-/// The receive path end to end through a real runtime on SQLite and on PostgreSQL: a real sending client (the project's SMTP client, the way an MTA connects), the real listener, the real store.
-/// Written once; <see cref="SqliteInboundFlowTests"/> and <see cref="PostgresInboundFlowTests"/> run it. The PostgreSQL scenarios return at once when no server is there (and none is promised).
-/// </summary>
 public abstract class InboundFlowTests(LabBackend backend)
 {
     [Fact]
@@ -38,7 +34,6 @@ public abstract class InboundFlowTests(LabBackend backend)
         Assert.Equal((InboundVerdict.Pass, InboundVerdict.None, InboundActionKind.Store, InboundActionState.Done), (stored.Auth.Spf, stored.Auth.SpfHelo, stored.ActionKind, stored.ActionState));
         Assert.Equal(lab.SupportRoute, stored.RouteId);
 
-        // Our headers on top, in this order; the sender's bytes follow exactly as sent (the dot-stuffing is undone, the body is not altered).
         string raw = await lab.RawAsync(stored);
         Assert.StartsWith("Received: from client.sender.test (", raw);
         int authentication = raw.IndexOf("\r\nAuthentication-Results: mx.egg.test;", StringComparison.Ordinal);
@@ -47,12 +42,11 @@ public abstract class InboundFlowTests(LabBackend backend)
         Assert.Equal(stored.Size, Encoding.UTF8.GetByteCount(raw));
         Assert.Contains("with ESMTPS", raw[..authentication], StringComparison.Ordinal);
 
-        // An independent reader (MimeKit) agrees with what the verdicts say.
         int start = authentication + 2;
         string header = raw[start..raw.IndexOf("\r\nFrom:", start, StringComparison.Ordinal)].Replace("\r\n", " ", StringComparison.Ordinal);
         Assert.True(AuthenticationResults.TryParse(Encoding.ASCII.GetBytes(header["Authentication-Results:".Length..]), out AuthenticationResults? parsed));
         Assert.Equal("mx.egg.test", parsed!.AuthenticationServiceIdentifier);
-        Assert.Equal(["pass", "none"], parsed.Results.Where(r => r.Method == "spf").Select(r => r.Result).ToArray());   // the MAIL FROM domain, then the HELO name (no record for it)
+        Assert.Equal(["pass", "none"], parsed.Results.Where(r => r.Method == "spf").Select(r => r.Result).ToArray());
         Assert.Contains(parsed.Results.First(r => r.Method == "spf").Properties, p => p.PropertyType == "smtp" && p.Property == "mailfrom" && p.Value == "bob@sender.test");
         Assert.Equal("none", parsed.Results.Single(r => r.Method == "dkim").Result);
         Assert.Equal("pass", parsed.Results.Single(r => r.Method == "dmarc").Result);
@@ -87,7 +81,6 @@ public abstract class InboundFlowTests(LabBackend backend)
             return;
         }
 
-        // One transaction with every kind of recipient: the server answers each one and accepts the message for the accepted ones only.
         await using SmtpClientConnection connection = await SmtpClientConnection.ConnectAsync(RealMta.Target(lab.Port), RealMta.Options());
         string[] recipients =
         [
@@ -104,7 +97,7 @@ public abstract class InboundFlowTests(LabBackend backend)
         Assert.Equal(
             ["billing-7@example.org", "old@example.org", "postmaster@example.org", "support@example.org"],
             acme.Select(m => m.EnvelopeTo).Distinct().Order(StringComparer.Ordinal).ToArray());
-        Assert.Equal(4, acme.Count);   // the mailbox named twice (in two cases) is two RCPT commands and one delivery
+        Assert.Equal(4, acme.Count);
         InboundMessage globex = Assert.Single(await lab.MessagesAsync(InboundLab.Globex));
         Assert.Equal("anyone@example.net", globex.EnvelopeTo);
     }

@@ -12,17 +12,12 @@ using Microsoft.Extensions.Logging;
 
 namespace Mta.Host.Tests.InboundE2E;
 
-/// <summary>What a webhook receiver was sent: the request exactly as it arrived.</summary>
 internal sealed record ReceivedWebhook(IReadOnlyDictionary<string, string> Headers, byte[] Body, string ContentType)
 {
     public string Id => Headers.GetValueOrDefault("webhook-id", "");
     public string Text => Encoding.UTF8.GetString(Body);
 }
 
-/// <summary>
-/// A real HTTP server on an ephemeral loopback port that plays a customer's webhook receiver: it records every request (headers and the body bytes) and answers with the status a test scripts. The
-/// runtime's own HTTP stack (the SSRF guard, signing, no redirects) talks to it over a real socket.
-/// </summary>
 internal sealed class WebhookReceiver : IAsyncDisposable
 {
     private readonly WebApplication _app;
@@ -44,10 +39,8 @@ internal sealed class WebhookReceiver : IAsyncDisposable
 
     public IReadOnlyCollection<ReceivedWebhook> Requests => _requests;
 
-    /// <summary>The most requests that were being answered at the same moment.</summary>
     public int MaxConcurrent => Volatile.Read(ref _maxActive);
 
-    /// <summary>When set, a request waits for it before it is answered (to hold an attempt in flight).</summary>
     public Func<Task>? Gate { get; set; }
 
     public static async Task<WebhookReceiver> StartAsync()
@@ -67,7 +60,6 @@ internal sealed class WebhookReceiver : IAsyncDisposable
         return receiver;
     }
 
-    /// <summary>Answers the next requests with these statuses, in order; the last one repeats.</summary>
     public void Respond(params int[] statuses)
     {
         lock (_script)
@@ -79,7 +71,6 @@ internal sealed class WebhookReceiver : IAsyncDisposable
         }
     }
 
-    /// <summary>Completes when <paramref name="count"/> requests have arrived in all.</summary>
     public async Task WaitForRequestsAsync(int count, TimeSpan? timeout = null)
     {
         DateTime deadline = DateTime.UtcNow + (timeout ?? TimeSpan.FromSeconds(30));
@@ -94,7 +85,6 @@ internal sealed class WebhookReceiver : IAsyncDisposable
         }
     }
 
-    /// <summary>Completes when <paramref name="count"/> requests have been answered in all (the response written and completed, not only the request read).</summary>
     public async Task WaitForAnswersAsync(int count, TimeSpan? timeout = null)
     {
         DateTime deadline = DateTime.UtcNow + (timeout ?? TimeSpan.FromSeconds(30));
@@ -159,10 +149,6 @@ internal sealed class WebhookReceiver : IAsyncDisposable
     }
 }
 
-/// <summary>
-/// A verifier of Standard Webhooks signatures written from the specification (https://www.standardwebhooks.com/): the signed content is <c>{webhook-id}.{webhook-timestamp}.{body}</c>, the key is the base64
-/// part of a <c>whsec_</c> secret, the signature is the base64 of HMAC-SHA256 and the header lists <c>v1,{signature}</c> entries separated by spaces. It shares no code with the signer under test.
-/// </summary>
 internal static class IndependentWebhookVerifier
 {
     public static bool Verify(ReceivedWebhook request, IEnumerable<string> secrets, DateTimeOffset now, TimeSpan tolerance, out string reason)

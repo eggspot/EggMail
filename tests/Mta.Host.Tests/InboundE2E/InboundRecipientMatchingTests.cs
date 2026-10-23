@@ -6,10 +6,6 @@ using Mta.Storage;
 
 namespace Mta.Host.Tests.InboundE2E;
 
-/// <summary>
-/// Which route handles which recipient, as the receive path decides it on the wire and as the API's route test tells a tenant it will: the two must agree for every way of writing an address (case,
-/// plus addressing, wildcards, a disabled route, <c>postmaster</c>, the trailing dot of a fully qualified name, an international domain in either form).
-/// </summary>
 public abstract class InboundRecipientMatchingTests(LabBackend backend)
 {
     [Fact]
@@ -21,7 +17,6 @@ public abstract class InboundRecipientMatchingTests(LabBackend backend)
             return;
         }
 
-        // example.org already has support (store), billing-* (forward) and old (discard). More routes of every shape:
         await lab.AddRouteAsync(lab.ExampleOrg, InboundLab.Acme, 40, InboundMatchKind.Address, "sales", InboundActionKind.Store, plus: true);
         await lab.AddRouteAsync(lab.ExampleOrg, InboundLab.Acme, 50, InboundMatchKind.Wildcard, "*-team", InboundActionKind.Store);
         await lab.AddRouteAsync(lab.ExampleOrg, InboundLab.Acme, 60, InboundMatchKind.Address, "closed", InboundActionKind.Store, enabled: false);
@@ -33,7 +28,7 @@ public abstract class InboundRecipientMatchingTests(LabBackend backend)
         (string Address, string Domain)[] cases =
         [
             ("support@example.org", "example.org"), ("SUPPORT@EXAMPLE.ORG", "example.org"), ("Support@Example.Org", "example.org"),
-            ("support+tag@example.org", "example.org"),                              // plus addressing is off for this route: no route for "support+tag"
+            ("support+tag@example.org", "example.org"),
             ("sales@example.org", "example.org"), ("sales+q4@example.org", "example.org"), ("sales+@example.org", "example.org"), ("+sales@example.org", "example.org"),
             ("billing-1@example.org", "example.org"), ("billing-@example.org", "example.org"), ("billing@example.org", "example.org"), ("BILLING-X@example.org", "example.org"),
             ("dev-team@example.org", "example.org"), ("-team@example.org", "example.org"), ("team@example.org", "example.org"), ("dev-teams@example.org", "example.org"),
@@ -51,7 +46,6 @@ public abstract class InboundRecipientMatchingTests(LabBackend backend)
             bool globex = domainName != "example.org";
             Guid domainId = globex ? idn : lab.ExampleOrg;
             Reply match = await (globex ? globexApi : api).GetAsync($"/api/v1/domains/{ApiJson.Id(domainId)}/inbound/routes/match?address={Uri.EscapeDataString(address)}");
-            // An address the API refuses to parse or that is not at the domain by name is a 400/422: the wire form may differ then (compared below).
             await using FakeMta mta = await lab.ConnectedAsync();
             Assert.Equal(250, (await mta.CommandAsync($"MAIL FROM:<bob@sender.test>{(address.Any(c => c > 127) ? " SMTPUTF8" : "")}")).Code);
             FakeMta.Reply wire = await mta.CommandAsync($"RCPT TO:<{address}>", utf8: address.Any(c => c > 127));
@@ -90,7 +84,6 @@ public abstract class InboundRecipientMatchingTests(LabBackend backend)
         }
 
         Assert.Equal(250, (await TryAsync("x@xn--bcher-kva.example")).Code);
-        // A trailing dot (the root of a fully qualified name): either a syntax error or the same domain, stored in the canonical form without the dot; never another route and never a way round the check.
         foreach (string dotted in new[] { "support@example.org.", "support@EXAMPLE.ORG.", "x@xn--bcher-kva.example." })
         {
             FakeMta.Reply reply = await TryAsync(dotted);
@@ -109,17 +102,15 @@ public abstract class InboundRecipientMatchingTests(LabBackend backend)
         Assert.Equal(250, (await TryAsync("x@bücher.example", utf8: true)).Code);
         Assert.Equal(250, (await TryAsync("x@BÜCHER.example", utf8: true)).Code);
 
-        // Look-alikes: another letter that looks the same (Cyrillic e), a different but similar A-label, the name with a label in front.
         foreach (string refused in new[] { "support@еxample.org", "x@bücher.example.evil.test", "x@sub.bücher.example", "support@example.org..", "support@.example.org", "support@example.org.evil.test" })
         {
             FakeMta.Reply reply = await TryAsync(refused, utf8: true);
             Assert.True(reply.Code is >= 500 and < 600, $"{refused}: {reply}");
         }
 
-        // The same mailbox in its two spellings is one tenant's mail: both land with the one that owns the domain.
         Assert.Equal(250, (await lab.SendAsync("bob@sender.test", "x@xn--bcher-kva.example", InboundLab.Message(subject: "a-label"))).Code);
         InboundMessage stored = Assert.Single(await lab.MessagesAsync(InboundLab.Globex));
-        Assert.Equal("x@xn--bcher-kva.example", stored.EnvelopeTo);   // stored in the canonical (A-label) form
+        Assert.Equal("x@xn--bcher-kva.example", stored.EnvelopeTo);
         Assert.Empty(await lab.MessagesAsync(InboundLab.Acme));
     }
 }

@@ -149,10 +149,6 @@ internal sealed class ApiFixtureOptions
     /// </summary>
     public ApiFixture? SharedWith { get; init; }
 
-    /// <summary>
-    /// A storage the caller opened and owns (a real runtime's, on SQLite or PostgreSQL), with the clock it was opened with: the tenants, users and domains of this fixture are seeded into it
-    /// as into a fresh one, and it is left open when the fixture is disposed.
-    /// </summary>
     public IStorage? ExistingStorage { get; init; }
 
     public TestClock? ExistingClock { get; init; }
