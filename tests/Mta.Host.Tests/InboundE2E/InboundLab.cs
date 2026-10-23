@@ -457,6 +457,7 @@ internal sealed class InboundLab : IAsyncDisposable
             ReceivedAt = now.Add(DueOnlyAfterTheLabsDeliveryWorkerCouldTakeIt),
             ExpiresAt = now.AddDays(5),
             SendingDomain = "example.org",
+            SendingDomainId = ExampleOrg,
             MessageIdHeader = messageIdHeader,
         }, default);
         await Storage.Deliveries.RecordAttemptAsync(new DeliveryAttempt { DeliveryId = deliveryId, Outcome = DeliveryOutcome.Delivered, At = now, SmtpCode = 250 }, default);

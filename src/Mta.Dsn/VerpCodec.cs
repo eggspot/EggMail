@@ -248,12 +248,7 @@ public sealed class VerpCodec
     }
 
     /// <summary>True if <paramref name="domainId"/> is the domain the token was issued for.</summary>
-    public static bool MatchesDomain(in VerpToken token, Guid domainId)
-    {
-        Span<byte> b = stackalloc byte[16];
-        domainId.TryWriteBytes(b, bigEndian: true, out _);
-        return System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(b) == token.DomainIdPrefix;
-    }
+    public static bool MatchesDomain(in VerpToken token, Guid domainId) => Ids.Prefix64(domainId) == token.DomainIdPrefix;
 
     private static string Base32Encode(ReadOnlySpan<byte> data)
     {

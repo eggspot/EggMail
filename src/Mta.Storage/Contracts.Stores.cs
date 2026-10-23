@@ -265,7 +265,7 @@ public interface IHistoryStore
 
 /// <summary>The event an asynchronous bounce (<see cref="MessageEventType.Bounced"/>) or complaint (<see cref="MessageEventType.Complained"/>) adds to a message's history.</summary>
 /// <param name="AttemptedWithin">Not stored: when set, the report is attached only to a message with a delivery attempt to <paramref name="Recipient"/> recorded inside this window (decision 113).</param>
-public sealed record AsyncReport(MessageEventType Type, DateTimeOffset At, string? Recipient, int? SmtpCode, string? EnhancedCode, string? Message, AttemptWindow? AttemptedWithin = null);
+public sealed record AsyncReport(MessageEventType Type, DateTimeOffset At, string? Recipient, int? SmtpCode, string? EnhancedCode, string? Message, AttemptWindow? AttemptedWithin = null, ulong? SendingDomainIdPrefix = null);
 
 /// <summary>A time range, <see cref="From"/> inclusive and <see cref="Until"/> exclusive, in which a delivery attempt must have been recorded (<see cref="AsyncReport.AttemptedWithin"/>).</summary>
 public readonly record struct AttemptWindow(DateTimeOffset From, DateTimeOffset Until);

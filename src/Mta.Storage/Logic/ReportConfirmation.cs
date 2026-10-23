@@ -25,4 +25,7 @@ public static class ReportConfirmation
     /// </summary>
     public static bool IsRecipient(string? eventRecipient, string? recipient) =>
         recipient is null || (eventRecipient is not null && string.Equals(eventRecipient.Trim().ToLowerInvariant(), recipient, StringComparison.Ordinal));
+
+    public static bool IsSendingDomain(Guid? messageSendingDomainId, ulong? sendingDomainIdPrefix) =>
+        sendingDomainIdPrefix is null || messageSendingDomainId is null || Mta.Core.Ids.Prefix64(messageSendingDomainId.Value) == sendingDomainIdPrefix;
 }

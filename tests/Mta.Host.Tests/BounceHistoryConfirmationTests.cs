@@ -23,6 +23,9 @@ public class BounceHistoryConfirmationTests : IAsyncLifetime
     private static readonly Guid TenantId = Guid.Parse("a0000000-0000-7000-8000-000000000001");
     private const string BounceDomain = "bounces.egg.test";
 
+    private static readonly Guid ExampleOrg = Ids.New(DateTimeOffset.UtcNow.AddDays(-2));
+    private static readonly Guid ExampleNet = Ids.New(DateTimeOffset.UtcNow.AddDays(-1));
+
     private InMemoryStorage _storage = null!;
     private VerpCodec _verp = null!;
     private BounceProcessor _bounces = null!;
@@ -35,7 +38,8 @@ public class BounceHistoryConfirmationTests : IAsyncLifetime
         await _storage.InitializeAsync(default);
         var now = DateTimeOffset.UtcNow;
         await _storage.Config.UpsertTenantAsync(new Tenant(TenantId, "Acme", "acme", true, now, false), default);
-        await _storage.Config.UpsertDomainAsync(new DomainRecord(Ids.New(), TenantId, "example.org", DomainStatus.Verified, null, false, now, now, now, 0, null, false, null), default);
+        await _storage.Config.UpsertDomainAsync(new DomainRecord(ExampleOrg, TenantId, "example.org", DomainStatus.Verified, null, false, now, now, now, 0, null, false, null), default);
+        await _storage.Config.UpsertDomainAsync(new DomainRecord(ExampleNet, TenantId, "example.net", DomainStatus.Verified, null, false, now, now, now, 0, null, false, null), default);
         await _storage.Config.UpsertWebhookEndpointAsync(
             new WebhookEndpointRecord(Ids.New(), TenantId, "https://hooks.example/x", [1, 2, 3], [WebhookEventFactory.Bounced, WebhookEventFactory.Complained], true, null, null, now, null), default);
         _verp = new VerpCodec(new Dictionary<int, byte[]> { [1] = VerpCodec.GenerateKey() }, 1);
@@ -49,14 +53,16 @@ public class BounceHistoryConfirmationTests : IAsyncLifetime
     private async Task<(Guid Id, string MessageIdHeader)> SendAsync(params string[] recipients) => await SendAsync(DateTimeOffset.UtcNow, recipients);
 
     /// <summary>The same, with the deliveries recorded at <paramref name="attemptedAt"/> (null: not attempted yet).</summary>
-    private async Task<(Guid Id, string MessageIdHeader)> SendAsync(DateTimeOffset? attemptedAt, params string[] recipients)
+    private async Task<(Guid Id, string MessageIdHeader)> SendAsync(DateTimeOffset? attemptedAt, params string[] recipients) => await SendFromAsync("example.org", attemptedAt, recipients);
+
+    private async Task<(Guid Id, string MessageIdHeader)> SendFromAsync(string sendingDomain, DateTimeOffset? attemptedAt, params string[] recipients)
     {
-        string raw = $"From: Acme <news@example.org>\r\nTo: {string.Join(", ", recipients)}\r\nSubject: Hi\r\n\r\nbody\r\n";
+        string raw = $"From: Acme <news@{sendingDomain}>\r\nTo: {string.Join(", ", recipients)}\r\nSubject: Hi\r\n\r\nbody\r\n";
         SubmissionResult result = await _submission.SubmitAsync(new SubmissionRequest
         {
             Tenant = (await _storage.Config.GetTenantAsync(TenantId, default))!,
             Source = MessageSource.Api,
-            EnvelopeFrom = EmailAddress.Parse("news@example.org"),
+            EnvelopeFrom = EmailAddress.Parse($"news@{sendingDomain}"),
             Recipients = [.. recipients.Select(r => EmailAddress.Parse(r))],
             Message = Encoding.ASCII.GetBytes(raw),
         }, default);
@@ -73,7 +79,8 @@ public class BounceHistoryConfirmationTests : IAsyncLifetime
         return (result.MessageId, MimeMessage.Parse(stored).Headers.GetFirstValue("Message-ID")!);
     }
 
-    private string LocalPart(string? destinationDomain = "dest.example", DateTimeOffset? issuedAt = null) => _verp.CreateLocalPart(TenantId, Ids.New(), issuedAt ?? DateTimeOffset.UtcNow, destinationDomain);
+    private string LocalPart(string? destinationDomain = "dest.example", DateTimeOffset? issuedAt = null, Guid? sendingDomainId = null) =>
+        _verp.CreateLocalPart(TenantId, sendingDomainId ?? ExampleOrg, issuedAt ?? DateTimeOffset.UtcNow, destinationDomain);
 
     private static byte[] Dsn(string local, string finalRecipient, string? messageId, string? originalRecipient = null)
     {
@@ -143,6 +150,32 @@ public class BounceHistoryConfirmationTests : IAsyncLifetime
         Assert.False(await SuppressedAsync("victim@dest.example"));
         Assert.Equal(0, await WebhookItemsAsync());
         Assert.Equal(Sent, await EventTypesAsync(id));
+    }
+
+    [Fact]
+    public async Task A_token_of_another_sending_domain_does_not_confirm_a_report_about_a_message_whose_message_id_is_known()
+    {
+        var (id, header) = await SendAsync("victim@dest.example");
+        string local = LocalPart(sendingDomainId: ExampleNet);
+
+        await _bounces.ProcessAsync(local, Dsn(local, "victim@dest.example", header), default);
+        await _bounces.ProcessAsync(local, Complaint(local, "victim@dest.example", header), default);
+
+        Assert.False(await SuppressedAsync("victim@dest.example"));
+        Assert.Equal(0, await WebhookItemsAsync());
+        Assert.Equal(Sent, await EventTypesAsync(id));
+    }
+
+    [Fact]
+    public async Task A_token_of_the_sending_domain_of_the_quoted_message_confirms_it()
+    {
+        var (id, header) = await SendFromAsync("example.net", DateTimeOffset.UtcNow, "gone@dest.example");
+        string local = LocalPart(sendingDomainId: ExampleNet);
+
+        await _bounces.ProcessAsync(local, Dsn(local, "gone@dest.example", header), default);
+
+        Assert.True(await SuppressedAsync("gone@dest.example"));
+        Assert.Contains(MessageEventType.Bounced, await EventTypesAsync(id));
     }
 
     [Fact]

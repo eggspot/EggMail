@@ -60,8 +60,8 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore, 
     // Writes (called by PostgresQueueStore inside its transaction)
 
     private const string IndexInsert =
-        "INSERT INTO message_index (day, message_id, tenant_id, received_at, subject, envelope_from, recipient_count, final_count, delivered_count, failed_count, status, size, content_recorded, raw_retained, message_id_header, tags) " +
-        "VALUES ($1, $2, $3, $4, $5, $6, $7, 0, 0, 0, 'queued', $8, $9, false, $10, $11)";
+        "INSERT INTO message_index (day, message_id, tenant_id, received_at, subject, envelope_from, recipient_count, final_count, delivered_count, failed_count, status, size, content_recorded, raw_retained, message_id_header, tags, sending_domain_id) " +
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, 0, 0, 0, 'queued', $8, $9, false, $10, $11, $12)";
 
     private const string RecipientInsert =
         "INSERT INTO message_recipient (day, message_id, recipient) SELECT $1, $2, r FROM unnest($3) AS r ON CONFLICT DO NOTHING";
@@ -76,7 +76,7 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore, 
     // The attempt events of the candidate messages inside the window, newest message first; the recipient is compared in C# (ReportConfirmation.IsRecipient).
     // Unlocked: only the message chosen is locked afterwards (LockChosen), not every candidate a reused Message-ID returns.
     private static readonly string FindWithAttempt =
-        "SELECT m.day, m.message_id, m.recipient_count, m.status, e.recipient FROM message_index m JOIN message_event e ON e.day = m.day AND e.message_id = m.message_id " +
+        "SELECT m.day, m.message_id, m.recipient_count, m.status, e.recipient, m.sending_domain_id FROM message_index m JOIN message_event e ON e.day = m.day AND e.message_id = m.message_id " +
         "WHERE m.tenant_id = $1 AND m.message_id_header = $2 AND ($3::timestamptz IS NULL OR m.received_at > $3) AND e.delivery_id IS NOT NULL " +
         "AND e.type IN (" + ReportConfirmation.AttemptTypesSql + ") AND e.at >= $4 AND e.at < $5 ORDER BY m.day DESC, m.message_id DESC";
 
@@ -103,7 +103,7 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore, 
         NpgsqlBatchCommand index = batch.CreateBatchCommand();
         index.CommandText = IndexInsert;
         index.Parameters.Int(day).Uuid(m.MessageId).Uuid(m.TenantId).Time(m.ReceivedAt).Text(subject).Text(AddressText.Format(m.EnvelopeFrom))
-            .Int(m.Recipients.Count).Long(m.Raw.Length).Bool(content is not null).Text(MessageIdKey.Normalize(m.MessageIdHeader)).Text(StorageJson.SerializeTags(m.Tags));
+            .Int(m.Recipients.Count).Long(m.Raw.Length).Bool(content is not null).Text(MessageIdKey.Normalize(m.MessageIdHeader)).Text(StorageJson.SerializeTags(m.Tags)).Uuid(m.SendingDomainId);
         batch.BatchCommands.Add(index);
 
         NpgsqlBatchCommand recipients = batch.CreateBatchCommand();
@@ -272,7 +272,8 @@ internal sealed class PostgresHistoryStore(PostgresRuntime rt) : IHistoryStore, 
                         return null;
                     }
 
-                    if (report.AttemptedWithin is null || ReportConfirmation.IsRecipient(r.IsDBNull(4) ? null : r.GetString(4), recipient))
+                    if (report.AttemptedWithin is null
+                        || (ReportConfirmation.IsRecipient(r.IsDBNull(4) ? null : r.GetString(4), recipient) && ReportConfirmation.IsSendingDomain(r.IsDBNull(5) ? null : r.GetGuid(5), report.SendingDomainIdPrefix)))
                     {
                         break;
                     }

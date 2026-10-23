@@ -33,6 +33,8 @@ public sealed class MessageIndexEntity
 
     /// <summary>The tags of the API send as a JSON array of strings; null when there are none.</summary>
     public string? Tags { get; set; }
+
+    public Guid? SendingDomainId { get; set; }
 }
 
 public sealed class MessageRecipientEntity

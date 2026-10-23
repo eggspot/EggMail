@@ -303,6 +303,7 @@ internal sealed class MemoryIntake(MemoryState s) : IMessageIntake
             ContentRecorded = recordContent,
             MessageIdHeader = MessageIdKey.Normalize(message.MessageIdHeader),
             Tags = StorageJson.SerializeTags(message.Tags),
+            SendingDomainId = message.SendingDomainId,
         };
         var recipientTexts = new List<string>(message.Recipients.Count);
         HashSet<string>? seen = message.Recipients.Count > 8 ? new HashSet<string>(StringComparer.Ordinal) : null;
@@ -995,7 +996,7 @@ internal sealed class MemoryHistory(MemoryState s) : IHistoryStore, IMessageReci
             var m = s.Index.Values
                 .Where(x => x.TenantId == tenantId && x.MessageIdHeader == key && !IsMetadataExpired(x, now))
                 .Where(x => recipient is null || (s.Recipients.TryGetValue(x.MessageId, out var rs) && rs.Contains(recipient)))
-                .Where(x => report.AttemptedWithin is not { } window || (s.Events.TryGetValue(x.MessageId, out var es) && es.Any(e =>
+                .Where(x => report.AttemptedWithin is not { } window || (ReportConfirmation.IsSendingDomain(x.SendingDomainId, report.SendingDomainIdPrefix) && s.Events.TryGetValue(x.MessageId, out var es) && es.Any(e =>
                     ReportConfirmation.IsAttempt(e.Type, e.DeliveryId) && ReportConfirmation.InWindow(e.At, window) && ReportConfirmation.IsRecipient(e.Recipient, recipient))))
                 .OrderByDescending(x => x.Day).ThenByDescending(x => MemoryState.IdText(x.MessageId), StringComparer.Ordinal).FirstOrDefault();
             if (m is null)

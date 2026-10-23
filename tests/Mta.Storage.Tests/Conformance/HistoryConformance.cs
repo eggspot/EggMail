@@ -338,6 +338,37 @@ public abstract class HistoryConformance : StorageTestBase
         Assert.Equal(newer.MessageId, await Storage.History.AttachReportAsync(TenantA, "<reused@x>", Bounce(Clock.UtcNow, "alice@example.org", second, second.AddHours(1)), CancellationToken.None));
     }
 
+    private static AsyncReport Bounce(DateTimeOffset at, DateTimeOffset attemptedFrom, Guid issuedForSendingDomain) =>
+        Bounce(at, "alice@example.org", attemptedFrom, attemptedFrom.AddHours(1)) with { SendingDomainIdPrefix = Ids.Prefix64(issuedForSendingDomain) };
+
+    [Fact]
+    public async Task A_report_bound_to_a_sending_domain_attaches_only_to_a_message_of_that_domain()
+    {
+        Guid org = Ids.New(Start), net = Ids.New(Start.AddSeconds(1)), other = Ids.New(Start.AddSeconds(2));
+        DateTimeOffset attempted = Clock.UtcNow;
+        var fromOrg = await AcceptAsync(Msg(messageIdHeader: "<domain@x>", to: ["alice@example.org"], sendingDomainId: org));
+        await RecordAsync((await ClaimAsync()).Single(), DeliveryOutcome.Delivered);
+        Clock.Advance(TimeSpan.FromMinutes(1));
+        var fromNet = await AcceptAsync(Msg(messageIdHeader: "<domain@x>", to: ["alice@example.org"], sendingDomainId: net));
+        await RecordAsync((await ClaimAsync()).Single(), DeliveryOutcome.Delivered);
+
+        Assert.Null(await Storage.History.AttachReportAsync(TenantA, "<domain@x>", Bounce(Clock.UtcNow, attempted, other), CancellationToken.None));
+        Assert.Null(await Storage.History.AttachReportAsync(TenantA, "<domain@x>", Bounce(Clock.UtcNow, attempted, Guid.Empty), CancellationToken.None));
+        Assert.Equal(fromOrg.MessageId, await Storage.History.AttachReportAsync(TenantA, "<domain@x>", Bounce(Clock.UtcNow, attempted, org), CancellationToken.None));
+        Assert.Equal(fromNet.MessageId, await Storage.History.AttachReportAsync(TenantA, "<domain@x>", Bounce(Clock.UtcNow, attempted, net), CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task A_message_without_a_registered_sending_domain_is_confirmed_only_by_a_report_bound_to_none()
+    {
+        DateTimeOffset attempted = Clock.UtcNow;
+        var m = await AcceptAsync(Msg(messageIdHeader: "<unregistered@x>", to: ["alice@example.org"], sendingDomainId: Guid.Empty));
+        await RecordAsync((await ClaimAsync()).Single(), DeliveryOutcome.Delivered);
+
+        Assert.Null(await Storage.History.AttachReportAsync(TenantA, "<unregistered@x>", Bounce(Clock.UtcNow, attempted, Ids.New(Start)), CancellationToken.None));
+        Assert.Equal(m.MessageId, await Storage.History.AttachReportAsync(TenantA, "<unregistered@x>", Bounce(Clock.UtcNow, attempted, Guid.Empty), CancellationToken.None));
+    }
+
     // Content lifetime
 
     protected override StorageOptions BuildOptions() => new()

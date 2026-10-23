@@ -7,9 +7,9 @@ namespace Mta.Storage.Sqlite;
 internal static class HistorySql
 {
     public static readonly Stmt IndexInsert = new(
-        "INSERT INTO message_index (day, message_id, tenant_id, received_at, subject, envelope_from, recipient_count, final_count, delivered_count, failed_count, status, size, content_recorded, raw_retained, message_id_header, tags) " +
-        "VALUES (@day, @m, @t, @rcv, @subj, @from, @n, 0, 0, 0, 'queued', @size, @cr, 0, @mih, @tags)",
-        "@day", "@m", "@t", "@rcv", "@subj", "@from", "@n", "@size", "@cr", "@mih", "@tags");
+        "INSERT INTO message_index (day, message_id, tenant_id, received_at, subject, envelope_from, recipient_count, final_count, delivered_count, failed_count, status, size, content_recorded, raw_retained, message_id_header, tags, sending_domain_id) " +
+        "VALUES (@day, @m, @t, @rcv, @subj, @from, @n, 0, 0, 0, 'queued', @size, @cr, 0, @mih, @tags, @sd)",
+        "@day", "@m", "@t", "@rcv", "@subj", "@from", "@n", "@size", "@cr", "@mih", "@tags", "@sd");
 
     public static readonly Stmt RecipientInsert = new(
         "INSERT OR IGNORE INTO message_recipient (day, message_id, recipient) VALUES (@day, @m, @r)", "@day", "@m", "@r");
@@ -49,7 +49,7 @@ internal static class HistorySql
 
     // The attempt events of the candidate messages inside the window, newest message first; the recipient is compared in C# (ReportConfirmation.IsRecipient).
     public static readonly Stmt IndexFindByHeaderWithAttempt = new(
-        "SELECT m.day, m.message_id, m.recipient_count, m.status, e.recipient FROM message_index m JOIN message_event e ON e.day = m.day AND e.message_id = m.message_id " +
+        "SELECT m.day, m.message_id, m.recipient_count, m.status, e.recipient, m.sending_domain_id FROM message_index m JOIN message_event e ON e.day = m.day AND e.message_id = m.message_id " +
         "WHERE m.tenant_id = @t AND m.message_id_header = @h AND m.received_at > @floor AND e.delivery_id IS NOT NULL AND e.\"type\" IN (" + ReportConfirmation.AttemptTypesSql + ") " +
         "AND e.\"at\" >= @from AND e.\"at\" < @until ORDER BY m.day DESC, m.message_id DESC",
         "@t", "@h", "@floor", "@from", "@until");
@@ -121,7 +121,7 @@ internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore, IMes
         ctx.Command(HistorySql.IndexInsert)
             .Set(0, day).Set(1, m.MessageId).Set(2, m.TenantId).Set(3, received).Set(4, s.Subject).SetAddress(5, m.EnvelopeFrom)
             .Set(6, m.Recipients.Count).Set(7, (long)m.Raw.Length).Set(8, s.Content is null ? 0 : 1)
-            .Set(9, MessageIdKey.Normalize(m.MessageIdHeader)).Set(10, StorageJson.SerializeTags(m.Tags))
+            .Set(9, MessageIdKey.Normalize(m.MessageIdHeader)).Set(10, StorageJson.SerializeTags(m.Tags)).Set(11, m.SendingDomainId)
             .ExecuteNonQuery();
 
         PreparedCommand rcpt = ctx.Command(HistorySql.RecipientInsert).Set(0, day).Set(1, m.MessageId);
@@ -250,7 +250,7 @@ internal sealed class SqliteHistoryStore(SqliteRuntime rt) : IHistoryStore, IMes
                     return null;
                 }
 
-                if (!attempted || ReportConfirmation.IsRecipient(r.GetNullableString(4), recipient))
+                if (!attempted || (ReportConfirmation.IsRecipient(r.GetNullableString(4), recipient) && ReportConfirmation.IsSendingDomain(r.GetNullableGuid(5), s.Report.SendingDomainIdPrefix)))
                 {
                     break;
                 }

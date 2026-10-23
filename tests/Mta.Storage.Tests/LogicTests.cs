@@ -391,4 +391,19 @@ public class LogicTests
 
         Assert.Empty(AttemptPlanner.Plan(A(DeliveryOutcome.Cancelled), row).Counters);
     }
+
+    [Fact]
+    public void A_sending_domain_matches_the_token_prefix_of_its_id_and_a_row_without_one_is_not_checked()
+    {
+        Guid domain = Ids.New(new DateTimeOffset(2026, 10, 23, 9, 0, 0, TimeSpan.Zero));
+        Guid other = Ids.New(new DateTimeOffset(2026, 10, 23, 9, 0, 1, TimeSpan.Zero));
+
+        Assert.True(ReportConfirmation.IsSendingDomain(domain, Ids.Prefix64(domain)));
+        Assert.False(ReportConfirmation.IsSendingDomain(other, Ids.Prefix64(domain)));
+        Assert.False(ReportConfirmation.IsSendingDomain(Guid.Empty, Ids.Prefix64(domain)));
+        Assert.True(ReportConfirmation.IsSendingDomain(Guid.Empty, 0));
+        Assert.False(ReportConfirmation.IsSendingDomain(domain, 0));
+        Assert.True(ReportConfirmation.IsSendingDomain(null, Ids.Prefix64(domain)));
+        Assert.True(ReportConfirmation.IsSendingDomain(other, null));
+    }
 }
