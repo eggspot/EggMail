@@ -610,7 +610,7 @@ and set `Storage:Postgres:ReadOnlyConnectionString` to a connection string for i
 | `mta_delivery_group_duration_seconds` | histogram | none | One delivery group (a message's recipients at one destination domain), claim to recorded result |
 | `mta_delivery_record_duration_seconds` | histogram | none | Storing the results of one delivery transaction (queue update, history, statistics, webhook fan-out) |
 | `mta_delivery_held_total` | counter | none | Deliveries held back by a local sending limit, destination throttle or a DKIM key that cannot be read (nothing was sent) |
-| `mta_delivery_dkim_key_failures_total` | counter | none | DKIM keys that could not be read (one per failed load, at most about one per domain per minute); the domain's mail is held. Alert on any increase |
+| `mta_delivery_dkim_key_failures_total` | counter | none | DKIM keys that could not be read (one per failed load, at most about one per sending domain name per minute); the domain's mail is held. Alert on any increase |
 | `mta_delivery_bounces_generated_total` | counter | none | Bounce messages generated |
 | `mta_delivery_queue_depth` | gauge | `state` (`queued`, `deferred`, `leased`) | Deliveries in the queue: never tried, waiting for a retry, being delivered. Sampled in the background |
 | `mta_delivery_queue_oldest_due_age_seconds` | gauge | none | How long the oldest due delivery has waited; 0 when nothing is overdue. Alert when it grows |

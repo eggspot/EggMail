@@ -39,7 +39,9 @@ public class DkimKeyUnavailableDeliveryTests
     [Fact]
     public async Task A_signer_provider_that_fails_in_any_other_way_holds_the_mail_too()
     {
-        await using var f = new DeliveryFixture(dkim: _ => new ThrowingProvider());
+        var log = new RecordingLog();
+        using var capture = new MeterCapture(m => m.Name == "Mta.Delivery");
+        await using var f = new DeliveryFixture(dkim: _ => new ThrowingProvider(), log: log);
         Guid id = await f.EnqueueAsync(["rcpt@dest.example"]);
 
         await DeliveryFixture.WaitAsync(() => f.Storage.Deliveries.GetQueueStatsAsync(default).AsTask().Result is { Deferred: 1 } or { Queued: 1, Leased: 0 });
@@ -47,6 +49,8 @@ public class DkimKeyUnavailableDeliveryTests
 
         Assert.Empty(f.Remote.Messages);
         Assert.DoesNotContain(await f.EventsAsync(id), e => e.Type is MessageEventType.Delivered);
+        Assert.Equal(1, capture.Sum("mta.delivery.dkim.key.failures"));
+        Assert.IsType<InvalidOperationException>(Assert.Single(log.Entries, e => e.Level == MtaLogLevel.Error).Exception);
     }
 
     [Fact]
