@@ -44,6 +44,7 @@ public class DkimKeyUnavailableDeliveryTests
         await using var f = new DeliveryFixture(dkim: _ => new ThrowingProvider(), log: log);
         Guid id = await f.EnqueueAsync(["rcpt@dest.example"]);
 
+        await DeliveryFixture.WaitAsync(() => capture.Sum("mta.delivery.dkim.key.failures") >= 1);
         await DeliveryFixture.WaitAsync(() => f.Storage.Deliveries.GetQueueStatsAsync(default).AsTask().Result is { Deferred: 1 } or { Queued: 1, Leased: 0 });
         await Task.Delay(300);
 
