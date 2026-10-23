@@ -4,7 +4,7 @@ An open-source, self-hosted **outbound email server** from [eggspot](https://git
 
 > **Status: implemented, not yet production-ready.** The SMTP stack, delivery engine, both storage backends, the HTTP API, the dashboard and the backend switch are written and tested locally (see [docs/progress.md](docs/progress.md) for exactly what is verified and what is not). No stable release has been tagged (so there is no `latest` image and no GitHub Release yet), no publishable benchmark results exist, and no independent security audit has been done. GitHub Actions runs CI and the release workflow, which pushes the image by digest, smoke-tests that digest and only then tags it (`nightly`, `nightly-<sha>` for manual runs). Every build gets the image test (SMTP submission with AUTH, API, delivery to a sink) and the PostgreSQL compose test; tags and manual runs also test the SQLite compose file, the Unbound sidecar and the Kubernetes manifests; see [docs/release.md](docs/release.md).
 
-> **Name:** the name EggMail is kept. No formal trademark search or registration is planned (owner decision); the MIT license covers the code, not the name. A free check of the USPTO, EUIPO and WIPO databases before wide promotion is recommended but optional (see [docs/decisions.md](docs/decisions.md)).
+> **Name:** the name EggMail is kept. No formal trademark search or registration is planned (owner decision); the MIT OR Apache-2.0 license covers the code, not the name. A free check of the USPTO, EUIPO and WIPO databases before wide promotion is recommended but optional (see [docs/decisions.md](docs/decisions.md)).
 
 > **The SQLite backend's default is fast, not power-loss-safe.** The SQLite backend defaults to `PRAGMA synchronous=OFF` for its data files. A process kill or container restart is safe. If the **operating system crashes or power fails**, the SQLite docs say the database **can be corrupted** (not just lose the latest commits), which can lose all queued mail, including mail already acknowledged with `250`. EggMail does not ask you to acknowledge this; instead it warns loudly (a startup log warning, a persistent dashboard banner, and a metric and health detail). Use `Sqlite:SyncMode=Full` (or `Normal`) if you need power-loss safety, or use the PostgreSQL backend. See [docs/design.md §4.4](docs/design.md#44-sqlite-backend-microsoftdatasqlite).
 
@@ -148,10 +148,10 @@ The container healthcheck is `["CMD", "/app/mta", "--healthcheck"]`: the chisele
 
 [![Sponsor eggspot](https://img.shields.io/badge/sponsor-eggspot-ea4aaa?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/eggspot)
 
-EggMail is free and MIT-licensed, and stays that way: sponsors get no features and no priority. If it is useful to you, sponsorship helps pay for maintenance, security work (including a future external audit), benchmark hardware and documentation. Details and policy: [docs/funding.md](docs/funding.md).
+EggMail is free and licensed MIT OR Apache-2.0, and stays that way: sponsors get no features and no priority. If it is useful to you, sponsorship helps pay for maintenance, security work (including a future external audit), benchmark hardware and documentation. Details and policy: [docs/funding.md](docs/funding.md).
 
 <!-- The sponsor link works once GitHub Sponsors is enabled for the eggspot organization (see docs/funding.md). -->
 
 ## License
 
-[MIT](LICENSE), copyright eggspot. Owner-decided.
+[MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option; copyright eggspot. Owner-decided.

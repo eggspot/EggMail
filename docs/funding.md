@@ -1,6 +1,6 @@
 # Funding and sponsorship policy (draft)
 
-**Status: draft for the owner to review.** EggMail is open source under the [MIT license](../LICENSE). Sponsorship is optional and never changes that. Platform facts below are marked **verified** (checked against the platform's own documentation on 2026-10-12) or **unverified** (not confirmed, or taken from a secondary source).
+**Status: draft for the owner to review.** EggMail is open source under the [MIT](../LICENSE-MIT) or [Apache-2.0](../LICENSE-APACHE) license, at your option. Sponsorship is optional and never changes that. Platform facts below are marked **verified** (checked against the platform's own documentation on 2026-10-12) or **unverified** (not confirmed, or taken from a secondary source).
 
 ## What sponsorship funds
 

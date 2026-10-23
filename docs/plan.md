@@ -106,7 +106,7 @@ These are new author estimates (not from the earlier effort model), rounded; re-
 | Guided manual mode switch: preflight, confirmations, drain orchestration, config-only Full → Lite export, dashboard UI (replaced by the symmetric switch below) | +1.5 | 1–2.5 |
 | **Total** | **+2.5** | **+1.5 to +4.5** |
 
-The switch and drain items above are superseded by the owner correction below. No change from the other owner decisions: MIT license (docs only), unlimited-retention `0` convention (a "skip deletion" branch in retention jobs plus dashboard warnings, assumed within the existing retention-job estimates), and advisory-only indicators (the storage-pressure indicator was already in scope). Choosing `OFF` as the default does not remove the crash and writer stress tests; it adds the power-loss/OS-crash cases counted above.
+The switch and drain items above are superseded by the owner correction below. No change from the other owner decisions: MIT OR Apache-2.0 license (docs only), unlimited-retention `0` convention (a "skip deletion" branch in retention jobs plus dashboard warnings, assumed within the existing retention-job estimates), and advisory-only indicators (the storage-pressure indicator was already in scope). Choosing `OFF` as the default does not remove the crash and writer stress tests; it adds the power-loss/OS-crash cases counted above.
 
 ### Owner correction: feature-identical backends and symmetric switch (net +5.5)
 
