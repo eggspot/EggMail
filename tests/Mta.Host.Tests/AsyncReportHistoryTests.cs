@@ -136,6 +136,7 @@ public class AsyncReportHistoryTests
         await rig.Storage.Config.UpsertWebhookEndpointAsync(endpoint, default);
         var (id, header) = await rig.SubmitAsync(TenantId, "<client.chosen.id@example.org>");
         Assert.Equal("<client.chosen.id@example.org>", header);
+        await rig.DeliverAsync();
 
         await rig.SendDsnAsync(TenantId, "<CLIENT.chosen.ID@example.org>");   // servers fold case
         await rig.SendDsnAsync(TenantId, "<nobody@elsewhere.example>");        // a message this server never sent: not confirmed, no webhook (decision 112)

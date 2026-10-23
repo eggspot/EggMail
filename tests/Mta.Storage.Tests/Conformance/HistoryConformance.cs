@@ -289,6 +289,55 @@ public abstract class HistoryConformance : StorageTestBase
         Assert.Equal(newer.MessageId, await Storage.History.AttachReportAsync(TenantA, "<same@x>", Bounce(Clock.UtcNow), CancellationToken.None));
     }
 
+    private static AsyncReport Bounce(DateTimeOffset at, string recipient, DateTimeOffset attemptedFrom, DateTimeOffset attemptedUntil) =>
+        Bounce(at, recipient) with { AttemptedWithin = new AttemptWindow(attemptedFrom, attemptedUntil) };
+
+    [Fact]
+    public async Task A_report_with_an_attempt_window_attaches_only_to_a_message_attempted_to_that_recipient_inside_it()
+    {
+        var m = await AcceptAsync(Msg(messageIdHeader: "<window@x>", to: ["Alice@Example.ORG", "bob@example.org"]));
+        ClaimedDelivery alice = (await ClaimAsync()).Single(d => d.Recipient.LocalPart == "Alice");
+        Clock.Advance(TimeSpan.FromMinutes(3));
+        DateTimeOffset t = Clock.UtcNow;
+        await RecordAsync(alice, DeliveryOutcome.Deferred, next: t.AddHours(1));   // bob's delivery is claimed and never attempted
+        Clock.Advance(TimeSpan.FromMinutes(1));
+
+        // Decision 113: the window is the hour a bounce address was issued; an attempt outside it, or to another recipient, does not confirm.
+        Assert.Null(await Storage.History.AttachReportAsync(TenantA, "<window@x>", Bounce(Clock.UtcNow, "bob@example.org", t.AddHours(-1), t.AddHours(1)), CancellationToken.None));
+        Assert.Null(await Storage.History.AttachReportAsync(TenantA, "<window@x>", Bounce(Clock.UtcNow, "alice@example.org", t.AddHours(-1), t), CancellationToken.None));   // the end is exclusive
+        Assert.Null(await Storage.History.AttachReportAsync(TenantA, "<window@x>", Bounce(Clock.UtcNow, "alice@example.org", t.AddMilliseconds(1), t.AddHours(2)), CancellationToken.None));
+        Assert.Equal([MessageEventType.Queued, MessageEventType.Deferred], (await Storage.History.GetEventsAsync(TenantA, m.MessageId, CancellationToken.None)).Select(e => e.Type));
+
+        // The recipient is compared without case, as the history stores recipients; the start is inclusive.
+        Assert.Equal(m.MessageId, await Storage.History.AttachReportAsync(TenantA, "<window@x>", Bounce(Clock.UtcNow, " alice@example.org ", t, t.AddMilliseconds(1)), CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task An_attached_report_is_not_an_attempt_that_confirms_another_report()
+    {
+        var m = await AcceptAsync(Msg(messageIdHeader: "<twice@x>", to: ["alice@example.org"]));
+        DateTimeOffset reported = Clock.UtcNow.AddMinutes(10);
+        Clock.Advance(TimeSpan.FromMinutes(10));
+        Assert.Equal(m.MessageId, await Storage.History.AttachReportAsync(TenantA, "<twice@x>", Bounce(reported), CancellationToken.None));   // a Bounced event without a delivery
+
+        Assert.Null(await Storage.History.AttachReportAsync(TenantA, "<twice@x>", Bounce(Clock.UtcNow, "alice@example.org", reported.AddMinutes(-1), reported.AddMinutes(1)), CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task A_reused_message_id_header_with_an_attempt_window_attaches_to_the_newest_message_attempted_inside_it()
+    {
+        var older = await AcceptAsync(Msg(messageIdHeader: "<reused@x>", to: ["alice@example.org"], received: Start));
+        await RecordAsync((await ClaimAsync()).Single(), DeliveryOutcome.Delivered);
+        DateTimeOffset first = Clock.UtcNow;
+        Clock.Advance(TimeSpan.FromHours(3));
+        var newer = await AcceptAsync(Msg(messageIdHeader: "<reused@x>", to: ["alice@example.org"]));
+        await RecordAsync((await ClaimAsync()).Single(), DeliveryOutcome.Delivered);
+        DateTimeOffset second = Clock.UtcNow;
+
+        Assert.Equal(older.MessageId, await Storage.History.AttachReportAsync(TenantA, "<reused@x>", Bounce(Clock.UtcNow, "alice@example.org", first, first.AddHours(1)), CancellationToken.None));
+        Assert.Equal(newer.MessageId, await Storage.History.AttachReportAsync(TenantA, "<reused@x>", Bounce(Clock.UtcNow, "alice@example.org", second, second.AddHours(1)), CancellationToken.None));
+    }
+
     // Content lifetime
 
     protected override StorageOptions BuildOptions() => new()

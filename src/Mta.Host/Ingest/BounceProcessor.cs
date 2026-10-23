@@ -31,13 +31,25 @@ public enum BounceOutcome
 /// classifier attributes to the recipient suppresses it, a complaint suppresses it as a complaint, and both are published as webhooks.
 /// <para>With per-message history (<c>History:Mode=Full</c>) the bounce or complaint is also attached to the message it is about: the returned headers carry the original
 /// <c>Message-ID</c>, which is looked up among the message history of the tenant named by the verified token (<see cref="IHistoryStore.AttachReportAsync"/>). The address the
-/// report names must be a recipient of that message, or the report is ignored (decision 112). The message id found goes into the webhook payload. With <c>StatsOnly</c> no
+/// report names must be a recipient of that message, attempted in the hour its bounce address was issued, or the report is ignored (decisions 112 and 113). The message id found goes into the webhook payload. With <c>StatsOnly</c> no
 /// per-message record is stored: nothing is attached and the destination domain of the token is the only check.</para>
 /// </summary>
 public sealed class BounceProcessor
 {
     /// <summary>The longest a bounce address is accepted after it was issued; <see cref="Mta.Host.Hosting.VerpKeyRotation"/> keeps a retired key at least this long.</summary>
     public static readonly TimeSpan MaxTokenAge = TimeSpan.FromDays(14);
+
+    /// <summary>
+    /// How long before the issue hour of a bounce address an attempt still confirms a report: the token and the attempt's event take their time from the same
+    /// replica's clock, so this only covers a clock stepped back between the two.
+    /// </summary>
+    public static readonly TimeSpan AttemptSlackBefore = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// How long after the start of its issue hour an attempt still confirms a report: the token is made before the SMTP transaction and the event recorded after
+    /// it, so the hour itself plus a transaction that tried several MX hosts at their timeouts.
+    /// </summary>
+    public static readonly TimeSpan AttemptSlackAfter = TimeSpan.FromHours(2);
 
     private readonly VerpCodec _verp;
     private readonly IConfigStore _config;
@@ -115,6 +127,9 @@ public sealed class BounceProcessor
     /// closes the residual of decision 92 (a holder of a token for <c>gmail.com</c> naming another <c>gmail.com</c> address). A report that cannot be
     /// confirmed is ignored: no suppression, no webhook, no statistics (decision 112). The confirmation is the attachment of the report to the
     /// message's history, so a storage failure is not swallowed here: it fails the SMTP transaction with a temporary error and the remote retries.</para>
+    /// <para>The message must also show a delivery attempt to that address recorded in the hour the token was issued (<see cref="AttemptWindowOf"/>): a token
+    /// held for one message then confirms only reports about messages attempted to the same destination domain in the same hour, not any message whose
+    /// <c>Message-ID</c> the holder knows (decision 113).</para>
     /// </summary>
     private async ValueTask<(EmailAddress Address, Guid? MessageId)?> ChooseRecipientAsync(
         Guid tenantId, VerpToken token, string kind, string? originalMessageId, Func<string, AsyncReport> report, CancellationToken ct, params string?[] candidates)
@@ -164,16 +179,20 @@ public sealed class BounceProcessor
 
         foreach (EmailAddress address in inDomain)
         {
-            Guid? messageId = await _history.AttachReportAsync(tenantId, originalMessageId, report(Key(address)), ct).ConfigureAwait(false);
+            AsyncReport confirmed = report(Key(address)) with { AttemptedWithin = AttemptWindowOf(token.IssuedAt) };
+            Guid? messageId = await _history.AttachReportAsync(tenantId, originalMessageId, confirmed, ct).ConfigureAwait(false);
             if (messageId is not null)
             {
                 return (address, messageId);
             }
         }
 
-        Ignore(kind, "not_in_history", "the message history does not show the address it names as a recipient of the message it quotes");
+        Ignore(kind, "not_in_history", "the message history does not show the address it names as a recipient of the message it quotes, attempted when its bounce address was issued");
         return null;
     }
+
+    /// <summary>When a delivery attempt must have been recorded for a report under a token issued at <paramref name="issuedAt"/> (the start of an hour) to be confirmed.</summary>
+    public static AttemptWindow AttemptWindowOf(DateTimeOffset issuedAt) => new(issuedAt - AttemptSlackBefore, issuedAt + AttemptSlackAfter);
 
     private void Ignore(string kind, string reason, string why)
     {
