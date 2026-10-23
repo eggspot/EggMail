@@ -2,25 +2,22 @@ using System.Diagnostics.Metrics;
 
 namespace Mta.Delivery;
 
-/// <summary>Meters of the delivery engine (<c>Mta.Delivery</c>).</summary>
 public static class DeliveryMetrics
 {
     public static readonly Meter Meter = new("Mta.Delivery");
 
-    /// <summary>Recipients finished (or rescheduled) by an attempt, tagged with the outcome.</summary>
     public static readonly Counter<long> Attempts = Meter.CreateCounter<long>("mta.delivery.attempts", "{recipient}", "Delivery attempts by outcome");
 
-    /// <summary>Time from claim to recorded result of one group.</summary>
     public static readonly Histogram<double> GroupDuration = Meter.CreateHistogram<double>("mta.delivery.group.duration", "s", "Duration of one delivery group");
 
-    /// <summary>Deliveries held locally by sending limits or destination throttling (nothing was sent).</summary>
-    public static readonly Counter<long> Held = Meter.CreateCounter<long>("mta.delivery.held", "{recipient}", "Deliveries held by local limits");
+    public static readonly Counter<long> Held = Meter.CreateCounter<long>("mta.delivery.held", "{recipient}", "Deliveries held locally: sending limits, destination throttle, a DKIM key that cannot be read");
+
+    public static readonly Counter<long> DkimKeyFailures = Meter.CreateCounter<long>("mta.delivery.dkim.key.failures", "{load}", "DKIM keys that could not be read; their mail is held");
 
     public static readonly Counter<long> Claimed = Meter.CreateCounter<long>("mta.delivery.claimed", "{recipient}", "Deliveries claimed from the queue");
 
     private static readonly KeyValuePair<string, object?>[] OutcomeTags = BuildOutcomeTags();
 
-    /// <summary>The <c>outcome</c> tag of <see cref="Attempts"/> for an outcome: built once per outcome, not per measurement.</summary>
     public static KeyValuePair<string, object?> OutcomeTag(Mta.Storage.DeliveryOutcome outcome) =>
         (int)outcome < OutcomeTags.Length ? OutcomeTags[(int)outcome] : new KeyValuePair<string, object?>("outcome", outcome.ToString().ToLowerInvariant());
 
@@ -38,15 +35,12 @@ public static class DeliveryMetrics
 
     public static readonly Counter<long> Bounces = Meter.CreateCounter<long>("mta.delivery.bounces.generated", "{message}", "Bounce messages generated");
 
-    /// <summary>One claim call against the queue store, tagged <c>result=claimed|empty</c> (an empty claim is the idle poll).</summary>
     public static readonly Histogram<double> ClaimDuration = Meter.CreateHistogram<double>("mta.delivery.claim.duration", "s", "Duration of one queue claim");
 
-    /// <summary>Storing the results of one transaction's recipients (the queue update, event, statistics and webhook fan-out of each).</summary>
     public static readonly Histogram<double> RecordDuration = Meter.CreateHistogram<double>("mta.delivery.record.duration", "s", "Duration of storing the results of one delivery transaction");
 
     public static readonly Counter<long> QueueSampleFailures = Meter.CreateCounter<long>("mta.delivery.queue.sample.failures", "{sample}", "Queue samples that failed (storage unavailable)");
 
-    // The queue gauges read the last sample of QueueGauges (taken in the background every few seconds): a scrape never queries the queue tables.
     private static QueueGauges? s_queue;
 
     private static QueueSample? Sample => Volatile.Read(ref s_queue)?.Latest;
@@ -73,7 +67,6 @@ public static class DeliveryMetrics
     {
         if (Volatile.Read(ref s_queue) is { } source && source.Latest is { } sample)
         {
-            // Overdue time of the oldest unleased delivery; zero when nothing is overdue (a retry scheduled for later is not late).
             double age = sample.Stats.OldestDueAt is { } due ? Math.Max(0, (source.Clock.UtcNow - due).TotalSeconds) : 0;
             yield return new Measurement<double>(age);
         }
@@ -95,7 +88,6 @@ public static class DeliveryMetrics
         }
     }
 
-    /// <summary>Makes <paramref name="source"/> the one the queue gauges read. Dispose to detach (only if it is still the attached one).</summary>
     public static IDisposable AttachQueueGauges(QueueGauges source)
     {
         Volatile.Write(ref s_queue, source);

@@ -6,13 +6,21 @@ using StoredDkimKey = Mta.Storage.DkimKeyRecord;
 
 namespace Mta.Delivery;
 
-/// <summary>Supplies the DKIM signer for a sending domain; null when the domain has no active key (the message goes out unsigned).</summary>
 public interface IDkimSignerProvider
 {
     ValueTask<DkimSigner?> GetSignerAsync(string sendingDomain, CancellationToken cancellationToken);
 }
 
-/// <summary>A provider that never signs.</summary>
+public sealed class DkimKeyUnavailableException(string domain, Guid? keyId, bool fromCache, Exception innerException)
+    : Exception($"DKIM key {(keyId is { } id ? id.ToString("N") + " " : string.Empty)}of {domain} cannot be read: {innerException.GetType().Name}: {innerException.Message}", innerException)
+{
+    public string Domain { get; } = domain;
+
+    public Guid? KeyId { get; } = keyId;
+
+    public bool FromCache { get; } = fromCache;
+}
+
 public sealed class NoDkimSignerProvider : IDkimSignerProvider
 {
     public static readonly NoDkimSignerProvider Instance = new();
@@ -20,14 +28,9 @@ public sealed class NoDkimSignerProvider : IDkimSignerProvider
     public ValueTask<DkimSigner?> GetSignerAsync(string sendingDomain, CancellationToken cancellationToken) => ValueTask.FromResult<DkimSigner?>(null);
 }
 
-/// <summary>
-/// Looks the signing key up in the configuration store: the sending domain's own record or the nearest registered parent domain,
-/// and its newest active key. Private keys are stored as PKCS#8 DER protected with <see cref="SecretPurposes.DkimKey"/>.
-/// Results (including "no key") are cached for <see cref="DeliveryOptions.DkimCacheTtl"/>, so a rotation takes effect within that time.
-/// </summary>
 public sealed class ConfigDkimSignerProvider : IDkimSignerProvider, IDisposable
 {
-    private sealed record Entry(DkimSigner? Signer, long ExpiresAtTimestamp);
+    private sealed record Entry(DkimSigner? Signer, long ExpiresAtTimestamp, DkimKeyUnavailableException? Failure = null);
 
     private readonly IConfigStore _config;
     private readonly ISecretProtector _protector;
@@ -55,11 +58,30 @@ public sealed class ConfigDkimSignerProvider : IDkimSignerProvider, IDisposable
         long now = _clock.Timestamp;
         if (_cache.TryGetValue(name, out var cached) && now < cached.ExpiresAtTimestamp)
         {
-            return cached.Signer;
+            return cached.Failure is { } failure
+                ? throw new DkimKeyUnavailableException(failure.Domain, failure.KeyId, fromCache: true, failure.InnerException!)
+                : cached.Signer;
         }
 
-        var signer = await LoadAsync(name, cancellationToken).ConfigureAwait(false);
-        _cache[name] = new Entry(signer, now + (long)(_ttl.TotalSeconds * System.Diagnostics.Stopwatch.Frequency));
+        long expiresAt = now + (long)(_ttl.TotalSeconds * System.Diagnostics.Stopwatch.Frequency);
+        DkimSigner? signer;
+        try
+        {
+            signer = await LoadAsync(name, cancellationToken).ConfigureAwait(false);
+        }
+        catch (DkimKeyUnavailableException ex)
+        {
+            _cache[name] = new Entry(null, expiresAt, ex);
+            throw;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            var failure = new DkimKeyUnavailableException(name, null, fromCache: false, ex);
+            _cache[name] = new Entry(null, expiresAt, failure);
+            throw failure;
+        }
+
+        _cache[name] = new Entry(signer, expiresAt);
         return signer;
     }
 
@@ -88,14 +110,22 @@ public sealed class ConfigDkimSignerProvider : IDkimSignerProvider, IDisposable
 
     private DkimSigner CreateSigner(string domain, StoredDkimKey key)
     {
-        byte[] der = _protector.Unprotect(key.PrivateKeyProtected, SecretPurposes.DkimKey);
+        byte[]? der = null;
         try
         {
+            der = _protector.Unprotect(key.PrivateKeyProtected, SecretPurposes.DkimKey);
             return DkimSigner.FromDer(new DkimSignerOptions { Domain = domain, Selector = key.Selector, Clock = _clock }, der);
+        }
+        catch (Exception ex)
+        {
+            throw new DkimKeyUnavailableException(domain, key.Id, fromCache: false, ex);
         }
         finally
         {
-            System.Security.Cryptography.CryptographicOperations.ZeroMemory(der);
+            if (der is not null)
+            {
+                System.Security.Cryptography.CryptographicOperations.ZeroMemory(der);
+            }
         }
     }
 
