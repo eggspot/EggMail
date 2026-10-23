@@ -441,7 +441,7 @@ internal sealed class InboundLab : IAsyncDisposable
 
     public Mta.Dsn.SrsCodec Srs => new(Runtime.Verp);
 
-    public async Task<string> MessageIdOfAMessageDeliveredToAsync(string recipient)
+    public async Task<string> RecordAMessageDeliveredToAsync(string recipient)
     {
         DateTimeOffset now = Clock.UtcNow;
         Guid deliveryId = Ids.New(now);
